@@ -91,14 +91,15 @@ inline float2 cconj(float2 z) {
 //
 // THIS IS THE RIGHT WAY.
 //
-// IMPORTANT: The threadgroup size is a compile-time constant, not dynamic.
-// The shared_data array size MUST match the dispatch threadgroup size.
-// Using a #define for both guarantees they can never go out of sync.
-// (This was a bug in the original version — shared_data[256] was hardcoded
-// but the reduction loop used the dynamic tg_size parameter, which would
-// break if dispatched with any size other than 256.)
-
-#define REDUCE_TG_SIZE 256
+// Arguments:
+//   A, B:        input arrays of complex numbers
+//   partials:    output array — one partial sum per threadgroup
+//   count:       total number of elements
+//
+// Thread indexing:
+//   gid    = global thread index (0 to count-1)
+//   lid    = local index within this threadgroup (0 to THREADGROUP_SIZE-1)
+//   tgid   = which threadgroup this is (0, 1, 2, ...)
 
 kernel void zdotc_reduce(
     device const float2 *A         [[buffer(0)]],
@@ -108,7 +109,8 @@ kernel void zdotc_reduce(
 
     uint gid  [[thread_position_in_grid]],          // global index
     uint lid  [[thread_position_in_threadgroup]],    // local index (0..255)
-    uint tgid [[threadgroup_position_in_grid]]       // which threadgroup
+    uint tgid [[threadgroup_position_in_grid]],      // which threadgroup
+    uint tg_size [[threads_per_threadgroup]]          // threadgroup size (e.g. 256)
 ) {
     // ── Step 1: Each thread computes its element's contribution ────
     //
@@ -128,7 +130,7 @@ kernel void zdotc_reduce(
     // The size must be known at compile time (or use setThreadgroupMemoryLength
     // from the host). Here we use 256, matching our dispatch.
 
-    threadgroup float2 shared_data[REDUCE_TG_SIZE];
+    threadgroup float2 shared_data[256];
     shared_data[lid] = product;
 
     // ── Step 3: BARRIER ──────────────────────────────────────────
@@ -169,7 +171,7 @@ kernel void zdotc_reduce(
     //
     // After this, shared[0] holds the sum of all 256 elements.
 
-    for (uint stride = REDUCE_TG_SIZE / 2; stride > 0; stride >>= 1) {
+    for (uint stride = tg_size / 2; stride > 0; stride >>= 1) {
         if (lid < stride) {
             shared_data[lid] = shared_data[lid] + shared_data[lid + stride];
         }
@@ -239,18 +241,16 @@ guard let commandQueue = device.makeCommandQueue() else {
 // TEST 1: Small dot product — trace the reduction by hand
 //
 // We use N=8 so you can follow every step of the reduction.
-// We still dispatch with 256 threads (matching REDUCE_TG_SIZE in the shader)
-// — the extra 248 threads see gid >= count and contribute zero.
-// This is the correct pattern: ALWAYS dispatch with the threadgroup size
-// your kernel was compiled for. Padding threads are free.
+// With threadgroup size = 8, there's exactly 1 threadgroup,
+// so the host doesn't need to sum partials.
 // ═══════════════════════════════════════════════════════════════════════════
 
 print("── Test 1: Small ZDOTC (N=8, trace the reduction) ──────────")
 
 do {
     let N = 8
-    let threadgroupSize = 256  // MUST match REDUCE_TG_SIZE in the shader
-    let numThreadgroups = 1    // one threadgroup is enough for 8 elements
+    let threadgroupSize = 8  // intentionally small so 1 threadgroup covers all
+    let numThreadgroups = (N + threadgroupSize - 1) / threadgroupSize  // = 1
 
     let bufferSize = N * MemoryLayout<SIMD2<Float>>.stride
     let partialSize = numThreadgroups * MemoryLayout<SIMD2<Float>>.stride
@@ -561,7 +561,7 @@ do {
     let pipeline = try device.makeComputePipelineState(function: function)
     let threadgroupSize = 256
 
-    print("  \("N":>10)  \("Time (ms)":>10)  \("GFLOP/s":>10)")
+    print("           N   Time (ms)    GFLOP/s")
     print("  \(String(repeating: "─", count: 36))")
 
     for N in sizes {
