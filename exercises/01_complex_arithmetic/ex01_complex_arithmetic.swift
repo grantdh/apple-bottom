@@ -14,6 +14,13 @@
 //
 // THEN: Read the shader source below. Modify cmul(). See what breaks.
 //
+// PRODUCTION NOTE: This exercise compiles MSL from a string at runtime for
+// self-contained convenience. Production Metal code should precompile shaders
+// to .metallib using:
+//   xcrun -sdk macosx metal -c shaders.metal -o shaders.air
+//   xcrun -sdk macosx metallib shaders.air -o shaders.metallib
+// This catches compile errors at build time and eliminates ~50-200ms startup cost.
+//
 // Grant Heileman — UNM ECE — 2026
 //
 
@@ -60,9 +67,10 @@ inline float2 cconj(float2 z) {
 }
 
 // Complex magnitude squared: |z|² = a² + b²
-// (Avoids the sqrt — use this when you can, it's cheaper.)
+// Uses Metal's dot() intrinsic, which maps to a single dp2 hardware
+// instruction on Apple GPUs. Avoids the sqrt — use this when you can.
 inline float cmag2(float2 z) {
-    return z.x * z.x + z.y * z.y;
+    return dot(z, z);
 }
 
 // Complex magnitude: |z| = sqrt(a² + b²)
@@ -163,12 +171,27 @@ print("""
 guard let device = MTLCreateSystemDefaultDevice() else {
     print("❌ No Metal device found"); exit(1)
 }
+assert(device.hasUnifiedMemory, "These exercises require Apple Silicon (unified memory)")
 print("GPU: \(device.name)")
 
+// ── GPU error checker ──────────────────────────────────────────────────
+// Always check command buffer status after execution. Without this,
+// GPU OOB access or timeouts silently corrupt your output buffers.
+
+func gpuCheck(_ cb: MTLCommandBuffer, label: String) {
+    if cb.status == .error {
+        print("❌ GPU error [\(label)]: \(cb.error?.localizedDescription ?? "unknown")")
+        exit(1)
+    }
+}
+
 // Compile shaders from the string above
+let compileOptions = MTLCompileOptions()
+compileOptions.mathMode = .fast  // safe for our kernels, enables fma()
+
 let library: MTLLibrary
 do {
-    library = try device.makeLibrary(source: shaderSource, options: nil)
+    library = try device.makeLibrary(source: shaderSource, options: compileOptions)
     print("✓ Shaders compiled\n")
 } catch {
     print("❌ Shader compilation failed: \(error)"); exit(1)
@@ -224,6 +247,7 @@ do {
           let encoder = cmdBuf.makeComputeCommandEncoder() else {
         print("❌ Failed to create encoder"); exit(1)
     }
+    cmdBuf.label = "complex_multiply"
 
     // Bind the pipeline and buffers
     encoder.setComputePipelineState(pipeline)
@@ -243,7 +267,8 @@ do {
 
     encoder.endEncoding()
     cmdBuf.commit()
-    cmdBuf.waitUntilCompleted()  // Sync — fine for testing, bad for perf
+    cmdBuf.waitUntilCompleted()
+    gpuCheck(cmdBuf, label: "complex_multiply")
 
     // ── Read back and verify ────────────────────────────────────────
     let ptrC = bufC.contents().bindMemory(to: SIMD2<Float>.self, capacity: N)
@@ -313,6 +338,7 @@ do {
           let encoder = cmdBuf.makeComputeCommandEncoder() else {
         print("❌ Encoder failed"); exit(1)
     }
+    cmdBuf.label = "complex_multiply_accumulate"
 
     encoder.setComputePipelineState(pipeline)
     encoder.setBuffer(bufA, offset: 0, index: 0)
@@ -329,11 +355,10 @@ do {
     encoder.endEncoding()
     cmdBuf.commit()
     cmdBuf.waitUntilCompleted()
+    gpuCheck(cmdBuf, label: "complex_multiply_accumulate")
 
     // Verify: C[i] = (100+200i) + (2+0i) * (i+0i) * (0+ii)
-    // Inner: A*B = i * ii = i²i = -i (wait, let me be careful)
-    // A[i] = (i, 0), B[i] = (0, i)
-    // A*B = (i*0 - 0*i) + (i*i + 0*0)i = 0 + i²·i = (0, i²)
+    // A*B = (i*0 - 0*i) + (i*i + 0*0)i = (0, i²)
     // alpha * A*B = (2,0) * (0, i²) = (0, 2i²)
     // C += that: C = (100, 200 + 2i²)
 
@@ -391,6 +416,7 @@ do {
           let encoder = cmdBuf.makeComputeCommandEncoder() else {
         print("❌ Encoder failed"); exit(1)
     }
+    cmdBuf.label = "complex_conj_and_mag"
 
     encoder.setComputePipelineState(pipeline)
     encoder.setBuffer(bufA, offset: 0, index: 0)
@@ -406,6 +432,7 @@ do {
     encoder.endEncoding()
     cmdBuf.commit()
     cmdBuf.waitUntilCompleted()
+    gpuCheck(cmdBuf, label: "complex_conj_and_mag")
 
     let ptrConj = bufConj.contents().bindMemory(to: SIMD2<Float>.self, capacity: N)
     let ptrMag = bufMag.contents().bindMemory(to: Float.self, capacity: N)
@@ -457,7 +484,7 @@ print("""
     • cmul:  (a+bi)(c+di) = (ac-bd) + (ad+bc)i
     • cadd:  component-wise float2 addition
     • cconj: flip the sign of .y
-    • cmag:  sqrt(x² + y²)
+    • cmag:  sqrt(dot(z, z))  — uses hardware dp2 intrinsic
 
   These four functions are the atoms of everything else:
     ZGEMM = thousands of cmul + cadd

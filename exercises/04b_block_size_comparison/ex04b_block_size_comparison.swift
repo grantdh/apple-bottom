@@ -2,20 +2,6 @@
 //
 // Exercise 4b: Register Block Size Comparison — 4×4 vs 8×8
 //
-// WHAT YOU'LL LEARN:
-//   - How increasing TM×TN from 4×4 to 8×8 affects throughput
-//   - Where register pressure starts to matter
-//   - The shared memory budget constraint at large block sizes
-//
-// The 8×8 kernel computes 64 output elements per thread (vs 16 for 4×4).
-// Same 256 threads, 4× more work per threadgroup, same shared memory loads.
-//
-// Shared memory at 8×8:
-//   BM=BN=128, TILE_K=8:
-//   tileA: 128 × 8 × 8 bytes = 8 KB
-//   tileB: 8 × 128 × 8 bytes = 8 KB
-//   Total: 16 KB (fits in 32 KB)
-//
 // COMPILE & RUN:
 //   swiftc -O -framework Metal -framework Foundation -framework Accelerate \
 //       ex04b_block_size_comparison.swift -o ex04b
@@ -38,11 +24,7 @@ inline float2 cmul(float2 a, float2 b) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// KERNEL A: 4×4 register block (from Exercise 4)
-// BM=BN=64, TM=TN=4, TILE_K=16
-// Threads: 16×16 = 256
-// Output per threadgroup: 64×64 = 4096 complex elements
-// Shared memory: 2 × 64 × 16 × 8 = 16 KB
+// KERNEL A: 4×4 register block
 // ═══════════════════════════════════════════════════════════════════
 
 #define BM_4 64
@@ -50,6 +32,7 @@ inline float2 cmul(float2 a, float2 b) {
 #define TM_4 4
 #define TN_4 4
 #define TK_4 16
+#define NUM_THREADS_4 ((BM_4 / TM_4) * (BN_4 / TN_4))  // = 256
 
 kernel void cgemm_block4x4(
     device const float2 *A     [[buffer(0)]],
@@ -75,12 +58,12 @@ kernel void cgemm_block4x4(
     threadgroup float2 tileB[TK_4 * BN_4];
 
     for (uint kt = 0; kt < (K_dim + TK_4 - 1) / TK_4; kt++) {
-        for (uint i = flatId; i < BM_4 * TK_4; i += 256) {
+        for (uint i = flatId; i < BM_4 * TK_4; i += NUM_THREADS_4) {
             uint r = i / TK_4, c = i % TK_4;
             uint gr = blockRowStart + r, gc = kt * TK_4 + c;
             tileA[i] = (gr < M && gc < K_dim) ? A[gr * K_dim + gc] : float2(0.0);
         }
-        for (uint i = flatId; i < TK_4 * BN_4; i += 256) {
+        for (uint i = flatId; i < TK_4 * BN_4; i += NUM_THREADS_4) {
             uint r = i / BN_4, c = i % BN_4;
             uint gr = kt * TK_4 + r, gc = blockColStart + c;
             tileB[i] = (gr < K_dim && gc < N) ? B[gr * N + gc] : float2(0.0);
@@ -110,29 +93,14 @@ kernel void cgemm_block4x4(
 
 // ═══════════════════════════════════════════════════════════════════
 // KERNEL B: 8×8 register block
-// BM=BN=128, TM=TN=8, TILE_K=8
-// Threads: (128/8) × (128/8) = 16×16 = 256
-// Output per threadgroup: 128×128 = 16384 complex elements (4× more!)
-// Shared memory: 128×8×8 + 8×128×8 = 8+8 = 16 KB
-//
-// Each thread holds 64 float2 accumulators in registers.
-// At 8 bytes per float2, that's 512 bytes of registers per thread.
-// With 256 threads: 128 KB of registers. The M2 Max has ~208 KB
-// per threadgroup, so this fits with room to spare.
-//
-// Arithmetic intensity:
-//   Inner loop loads TM+TN = 16 values from shared memory
-//   and produces TM×TN = 64 cmul operations.
-//   That's 64/16 = 4 cmul per shared memory read.
-//   (The 4×4 kernel does 16/8 = 2 cmul per read.)
-//   2× better arithmetic intensity → closer to compute-bound.
 // ═══════════════════════════════════════════════════════════════════
 
 #define BM_8 128
 #define BN_8 128
 #define TM_8 8
 #define TN_8 8
-#define TK_8 8    // reduced from 16 to fit shared memory: 128×8 + 8×128 = 16 KB
+#define TK_8 8
+#define NUM_THREADS_8 ((BM_8 / TM_8) * (BN_8 / TN_8))  // = 256
 
 kernel void cgemm_block8x8(
     device const float2 *A     [[buffer(0)]],
@@ -149,25 +117,23 @@ kernel void cgemm_block8x8(
     uint blockColStart = tgid.x * BN_8;
     uint ty = lid.y, tx = lid.x;
 
-    // 64 accumulators per thread — this is the register block
     float2 acc[TM_8][TN_8];
     for (uint i = 0; i < TM_8; i++)
         for (uint j = 0; j < TN_8; j++)
             acc[i][j] = float2(0.0);
 
-    threadgroup float2 tileA[BM_8 * TK_8];    // 128×8 = 1024 float2 = 8 KB
-    threadgroup float2 tileB[TK_8 * BN_8];    // 8×128 = 1024 float2 = 8 KB
+    threadgroup float2 tileA[BM_8 * TK_8];
+    threadgroup float2 tileB[TK_8 * BN_8];
 
     uint numKTiles = (K_dim + TK_8 - 1) / TK_8;
 
     for (uint kt = 0; kt < numKTiles; kt++) {
-        // Cooperative load: 1024 elements / 256 threads = 4 loads each
-        for (uint i = flatId; i < BM_8 * TK_8; i += 256) {
+        for (uint i = flatId; i < BM_8 * TK_8; i += NUM_THREADS_8) {
             uint r = i / TK_8, c = i % TK_8;
             uint gr = blockRowStart + r, gc = kt * TK_8 + c;
             tileA[i] = (gr < M && gc < K_dim) ? A[gr * K_dim + gc] : float2(0.0);
         }
-        for (uint i = flatId; i < TK_8 * BN_8; i += 256) {
+        for (uint i = flatId; i < TK_8 * BN_8; i += NUM_THREADS_8) {
             uint r = i / BN_8, c = i % BN_8;
             uint gr = kt * TK_8 + r, gc = blockColStart + c;
             tileB[i] = (gr < K_dim && gc < N) ? B[gr * N + gc] : float2(0.0);
@@ -209,23 +175,35 @@ print("""
 """)
 
 guard let device = MTLCreateSystemDefaultDevice() else { print("❌ No Metal"); exit(1) }
+assert(device.hasUnifiedMemory, "These exercises require Apple Silicon (unified memory)")
 print("GPU: \(device.name)")
 
+func gpuCheck(_ cb: MTLCommandBuffer, label: String) {
+    if cb.status == .error { print("❌ GPU error [\(label)]: \(cb.error?.localizedDescription ?? "unknown")"); exit(1) }
+}
+
+let compileOptions = MTLCompileOptions()
+compileOptions.mathMode = .fast
+
 let library: MTLLibrary
-do { library = try device.makeLibrary(source: shaderSource, options: nil); print("✓ Shaders compiled\n") }
+do { library = try device.makeLibrary(source: shaderSource, options: compileOptions); print("✓ Shaders compiled\n") }
 catch { print("❌ \(error)"); exit(1) }
 
 guard let commandQueue = device.makeCommandQueue() else { exit(1) }
 
 func accelerateCGEMM(A: UnsafePointer<SIMD2<Float>>, B: UnsafePointer<SIMD2<Float>>,
                      C: UnsafeMutablePointer<SIMD2<Float>>, M: Int, N: Int, K: Int) {
-    var alpha: [Float] = [1.0, 0.0]
-    var beta: [Float] = [0.0, 0.0]
-    cblas_cgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                Int32(M), Int32(N), Int32(K),
-                &alpha, UnsafeRawPointer(A), Int32(K),
-                UnsafeRawPointer(B), Int32(N),
-                &beta, UnsafeMutableRawPointer(C), Int32(N))
+    var alpha = SIMD2<Float>(1.0, 0.0)
+    var beta = SIMD2<Float>(0.0, 0.0)
+    withUnsafePointer(to: &alpha) { a in
+        withUnsafePointer(to: &beta) { b in
+            cblas_cgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                        Int32(M), Int32(N), Int32(K),
+                        OpaquePointer(a), OpaquePointer(A), Int32(K),
+                        OpaquePointer(B), Int32(N),
+                        OpaquePointer(b), OpaquePointer(C), Int32(N))
+        }
+    }
 }
 
 // ── Correctness check at 256×256 ────────────────────────────────
@@ -251,39 +229,41 @@ do {
 
     var refC = [SIMD2<Float>](repeating: .zero, count: count)
     accelerateCGEMM(A: ptrA, B: ptrB, C: &refC, M: M, N: N, K: K)
-
     var norm: Float = 0
     for i in 0..<count { norm += refC[i].x * refC[i].x + refC[i].y * refC[i].y }
     norm = sqrt(norm)
 
-    // 4×4 kernel
-    guard let f4 = library.makeFunction(name: "cgemm_block4x4") else { exit(1) }
+    guard let f4 = library.makeFunction(name: "cgemm_block4x4"),
+          let f8 = library.makeFunction(name: "cgemm_block8x8") else { exit(1) }
     let p4 = try device.makeComputePipelineState(function: f4)
+    let p8 = try device.makeComputePipelineState(function: f8)
+
     memset(bufC4.contents(), 0, sizeC)
-    do {
+    autoreleasepool {
         guard let cb = commandQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { exit(1) }
+        cb.label = "cgemm_4x4_correctness"
         enc.setComputePipelineState(p4)
         enc.setBuffer(bufA, offset: 0, index: 0); enc.setBuffer(bufB, offset: 0, index: 1); enc.setBuffer(bufC4, offset: 0, index: 2)
         var m = UInt32(M), n = UInt32(N), k = UInt32(K)
         enc.setBytes(&m, length: 4, index: 3); enc.setBytes(&n, length: 4, index: 4); enc.setBytes(&k, length: 4, index: 5)
         enc.dispatchThreadgroups(MTLSize(width: (N+63)/64, height: (M+63)/64, depth: 1),
-                                 threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+                                  threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
         enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+        gpuCheck(cb, label: "cgemm_4x4_correctness")
     }
 
-    // 8×8 kernel
-    guard let f8 = library.makeFunction(name: "cgemm_block8x8") else { exit(1) }
-    let p8 = try device.makeComputePipelineState(function: f8)
     memset(bufC8.contents(), 0, sizeC)
-    do {
+    autoreleasepool {
         guard let cb = commandQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { exit(1) }
+        cb.label = "cgemm_8x8_correctness"
         enc.setComputePipelineState(p8)
         enc.setBuffer(bufA, offset: 0, index: 0); enc.setBuffer(bufB, offset: 0, index: 1); enc.setBuffer(bufC8, offset: 0, index: 2)
         var m = UInt32(M), n = UInt32(N), k = UInt32(K)
         enc.setBytes(&m, length: 4, index: 3); enc.setBytes(&n, length: 4, index: 4); enc.setBytes(&k, length: 4, index: 5)
         enc.dispatchThreadgroups(MTLSize(width: (N+127)/128, height: (M+127)/128, depth: 1),
-                                 threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+                                  threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
         enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+        gpuCheck(cb, label: "cgemm_8x8_correctness")
     }
 
     let c4 = bufC4.contents().bindMemory(to: SIMD2<Float>.self, capacity: count)
@@ -297,9 +277,9 @@ do {
     print("  8×8 block vs Accelerate: rel err = \(err8/norm)  \(err8/norm < 1e-5 ? "✓" : "✗")")
 }
 
-// ── Performance comparison ──────────────────────────────────────
+// ── Performance comparison (GPU timestamps) ────────────────────
 
-print("\n── Performance: 4×4 vs 8×8 vs Accelerate ───────────────────")
+print("\n── Performance: 4×4 vs 8×8 vs Accelerate (GPU timestamps) ──")
 
 do {
     guard let f4 = library.makeFunction(name: "cgemm_block4x4"),
@@ -329,25 +309,31 @@ do {
 
         func bench(_ pipeline: MTLComputePipelineState, gW: Int, gH: Int) -> Double {
             for _ in 0..<2 {
-                guard let cb = commandQueue.makeCommandBuffer(), let e = cb.makeComputeCommandEncoder() else { return -1 }
-                e.setComputePipelineState(pipeline)
-                e.setBuffer(bufA, offset:0, index:0); e.setBuffer(bufB, offset:0, index:1); e.setBuffer(bufC, offset:0, index:2)
-                var m=UInt32(M),n=UInt32(N),k=UInt32(K)
-                e.setBytes(&m,length:4,index:3); e.setBytes(&n,length:4,index:4); e.setBytes(&k,length:4,index:5)
-                e.dispatchThreadgroups(MTLSize(width:gW,height:gH,depth:1), threadsPerThreadgroup:MTLSize(width:16,height:16,depth:1))
-                e.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+                autoreleasepool {
+                    guard let cb = commandQueue.makeCommandBuffer(), let e = cb.makeComputeCommandEncoder() else { return }
+                    e.setComputePipelineState(pipeline)
+                    e.setBuffer(bufA, offset:0, index:0); e.setBuffer(bufB, offset:0, index:1); e.setBuffer(bufC, offset:0, index:2)
+                    var m=UInt32(M),n=UInt32(N),k=UInt32(K)
+                    e.setBytes(&m,length:4,index:3); e.setBytes(&n,length:4,index:4); e.setBytes(&k,length:4,index:5)
+                    e.dispatchThreadgroups(MTLSize(width:gW,height:gH,depth:1), threadsPerThreadgroup:MTLSize(width:16,height:16,depth:1))
+                    e.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+                }
             }
-            let t0 = CFAbsoluteTimeGetCurrent()
+            var totalGpu: Double = 0
             for _ in 0..<reps {
-                guard let cb = commandQueue.makeCommandBuffer(), let e = cb.makeComputeCommandEncoder() else { return -1 }
-                e.setComputePipelineState(pipeline)
-                e.setBuffer(bufA, offset:0, index:0); e.setBuffer(bufB, offset:0, index:1); e.setBuffer(bufC, offset:0, index:2)
-                var m=UInt32(M),n=UInt32(N),k=UInt32(K)
-                e.setBytes(&m,length:4,index:3); e.setBytes(&n,length:4,index:4); e.setBytes(&k,length:4,index:5)
-                e.dispatchThreadgroups(MTLSize(width:gW,height:gH,depth:1), threadsPerThreadgroup:MTLSize(width:16,height:16,depth:1))
-                e.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+                autoreleasepool {
+                    guard let cb = commandQueue.makeCommandBuffer(), let e = cb.makeComputeCommandEncoder() else { return }
+                    e.setComputePipelineState(pipeline)
+                    e.setBuffer(bufA, offset:0, index:0); e.setBuffer(bufB, offset:0, index:1); e.setBuffer(bufC, offset:0, index:2)
+                    var m=UInt32(M),n=UInt32(N),k=UInt32(K)
+                    e.setBytes(&m,length:4,index:3); e.setBytes(&n,length:4,index:4); e.setBytes(&k,length:4,index:5)
+                    e.dispatchThreadgroups(MTLSize(width:gW,height:gH,depth:1), threadsPerThreadgroup:MTLSize(width:16,height:16,depth:1))
+                    e.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+                    gpuCheck(cb, label: "cgemm_bench_\(M)")
+                    totalGpu += cb.gpuEndTime - cb.gpuStartTime
+                }
             }
-            return (CFAbsoluteTimeGetCurrent() - t0) * 1000.0 / Double(reps)
+            return totalGpu * 1000.0 / Double(reps)
         }
 
         let ms4 = bench(p4, gW: (N+63)/64, gH: (M+63)/64)
@@ -360,7 +346,6 @@ do {
         let msA = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0 / Double(reps)
 
         let gf4 = flops/(ms4*1e6), gf8 = flops/(ms8*1e6), gfA = flops/(msA*1e6)
-
         print(String(format: "  %8d   %10.1f  %10.1f   %10.1f      %.2fx        %.2fx",
                      size, gf4, gf8, gfA, gf8/gf4, gf8/gfA))
     }
@@ -371,19 +356,13 @@ print("""
 ═══════════════════════════════════════════════════════════════
   Exercise 4b complete.
 
+  Key improvement: cooperative load strides now use NUM_THREADS_4
+  and NUM_THREADS_8 derived from block parameters, not hardcoded 256.
+  Change BM/TM and the stride auto-adjusts.
+
   The 8×8 kernel:
     • 64 accumulators per thread (vs 16 for 4×4)
     • 4 cmul per shared memory read (vs 2 for 4×4)
     • 4× more output per threadgroup
-    • Fewer threadgroups needed → less dispatch overhead
-    • TILE_K reduced from 16 to 8 to stay within 32 KB shared memory
-
-  If 8×8 is faster, the remaining optimizations are:
-    • float4 vectorized loads (reduces load instruction count)
-    • simdgroup_matrix (Apple's hardware matrix multiply)
-    • Ping-pong shared memory (overlap load and compute)
-    These are refinements, not structural changes.
-
-  Commit and move to Exercise 5 (Stockham FFT).
 ═══════════════════════════════════════════════════════════════
 """)
