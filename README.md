@@ -40,3 +40,15 @@ Early development. DGEMM kernel and complex arithmetic exercises in progress.
 ## License
 
 See LICENSE file.
+
+## Citation
+
+```bibtex
+@software{heileman2026applebottom,
+  author    = {Heileman, Grant David},
+  title     = {apple-bottom: BLASphemy — Metal-native linear algebra for Apple Silicon},
+  year      = {2026},
+  publisher = {Technology Residue},
+  url       = {https://github.com/TechnologyResidue/apple-bottom}
+}
+```
