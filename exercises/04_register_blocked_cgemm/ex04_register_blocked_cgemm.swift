@@ -1,21 +1,7 @@
 #!/usr/bin/env swift
-//
-// Exercise 4: Complex Matrix Multiply (CGEMM) with Register Blocking
-//
-// WHAT YOU'LL LEARN:
-//   - Register blocking: each thread computes a 4×4 sub-tile, not 1 element
-//   - Why register blocking is THE technique that gets you to 2-3 TFLOPS
-//   - Complex tiled GEMM using float2 in threadgroup memory
-//   - How cmul (Exercise 1) + tiling (Exercise 3) compose into real BLAS
-//   - Comparing against Accelerate's cblas_cgemm
-//
-// COMPILE & RUN:
-//   swiftc -O -framework Metal -framework Foundation -framework Accelerate \
-//       ex04_register_blocked_cgemm.swift -o ex04
-//   ./ex04
-//
+// Exercise 4: Register-Blocked Complex GEMM (CGEMM)
+// swiftc -O -Xcc -DACCELERATE_NEW_LAPACK -framework Metal -framework Foundation -framework Accelerate ex04_register_blocked_cgemm.swift -o ex04
 // Grant Heileman — UNM ECE — 2026
-//
 
 import Foundation
 import Metal
@@ -25,508 +11,255 @@ let shaderSource = """
 #include <metal_stdlib>
 using namespace metal;
 
-// ─── Complex helpers (same as Exercise 1) ─────────────────────────
-
 inline float2 cmul(float2 a, float2 b) {
-    return float2(a.x * b.x - a.y * b.y,
-                  a.x * b.y + a.y * b.x);
+    return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
 }
 
-// ─── Constants ────────────────────────────────────────────────────
-
-#define BM 64       // output rows per threadgroup
-#define BN 64       // output cols per threadgroup
-#define TM 4        // output rows per thread (register block height)
-#define TN 4        // output cols per thread (register block width)
-#define TILE_K 16   // K elements per shared-memory pass
-
-// Threads per threadgroup: (BM/TM) × (BN/TN) = 16 × 16 = 256
-#define THREADS_Y (BM / TM)   // 16
-#define THREADS_X (BN / TN)   // 16
-#define NUM_THREADS (THREADS_Y * THREADS_X)  // 256 — used for cooperative loads
-
-// ─── Kernel 1: Simple tiled CGEMM (1 element per thread) ─────────
-
-#define TILE_SIMPLE 16
+// Simple tiled CGEMM — 1 element per thread, for baseline comparison
+#define TILE_S 16
 
 kernel void cgemm_simple(
-    device const float2 *A     [[buffer(0)]],
-    device const float2 *B     [[buffer(1)]],
-    device float2       *C     [[buffer(2)]],
-    constant uint       &M     [[buffer(3)]],
-    constant uint       &N     [[buffer(4)]],
-    constant uint       &K_dim [[buffer(5)]],
-    uint2 lid  [[thread_position_in_threadgroup]],
-    uint2 tgid [[threadgroup_position_in_grid]]
+    device const float2 *A [[buffer(0)]], device const float2 *B [[buffer(1)]],
+    device float2 *C [[buffer(2)]], constant uint &M [[buffer(3)]],
+    constant uint &N [[buffer(4)]], constant uint &K_dim [[buffer(5)]],
+    uint2 lid [[thread_position_in_threadgroup]], uint2 tgid [[threadgroup_position_in_grid]]
 ) {
-    uint row = tgid.y * TILE_SIMPLE + lid.y;
-    uint col = tgid.x * TILE_SIMPLE + lid.x;
-
-    threadgroup float2 tA[TILE_SIMPLE][TILE_SIMPLE];
-    threadgroup float2 tB[TILE_SIMPLE][TILE_SIMPLE];
-
+    uint row = tgid.y * TILE_S + lid.y, col = tgid.x * TILE_S + lid.x;
+    threadgroup float2 tA[TILE_S][TILE_S], tB[TILE_S][TILE_S];
     float2 sum = float2(0.0);
-    uint numTiles = (K_dim + TILE_SIMPLE - 1) / TILE_SIMPLE;
 
-    for (uint t = 0; t < numTiles; t++) {
-        uint a_col = t * TILE_SIMPLE + lid.x;
-        uint b_row = t * TILE_SIMPLE + lid.y;
-
-        tA[lid.y][lid.x] = (row < M && a_col < K_dim)
-            ? A[row * K_dim + a_col] : float2(0.0);
-        tB[lid.y][lid.x] = (b_row < K_dim && col < N)
-            ? B[b_row * N + col] : float2(0.0);
-
+    for (uint t = 0; t < (K_dim + TILE_S - 1) / TILE_S; t++) {
+        uint ac = t * TILE_S + lid.x, br = t * TILE_S + lid.y;
+        tA[lid.y][lid.x] = (row < M && ac < K_dim) ? A[row * K_dim + ac] : float2(0.0);
+        tB[lid.y][lid.x] = (br < K_dim && col < N) ? B[br * N + col]     : float2(0.0);
         threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        for (uint k = 0; k < TILE_SIMPLE; k++) {
-            sum += cmul(tA[lid.y][k], tB[k][lid.x]);
-        }
-
+        for (uint k = 0; k < TILE_S; k++) sum += cmul(tA[lid.y][k], tB[k][lid.x]);
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-
-    if (row < M && col < N) {
-        C[row * N + col] = sum;
-    }
+    if (row < M && col < N) C[row * N + col] = sum;
 }
 
-// ─── Kernel 2: Register-blocked CGEMM ────────────────────────────
-//
-// Each thread computes a TM×TN = 4×4 sub-tile of output.
-// 16 float2 accumulators living in registers.
+// Register-blocked CGEMM — TM×TN elements per thread
+#define BM 64
+#define BN 64
+#define TM 4
+#define TN 4
+#define TILE_K 16
+#define NUM_THREADS ((BM / TM) * (BN / TN))
 
 kernel void cgemm_register_blocked(
-    device const float2 *A     [[buffer(0)]],
-    device const float2 *B     [[buffer(1)]],
-    device float2       *C     [[buffer(2)]],
-    constant uint       &M     [[buffer(3)]],
-    constant uint       &N     [[buffer(4)]],
-    constant uint       &K_dim [[buffer(5)]],
-    uint2 lid   [[thread_position_in_threadgroup]],
-    uint2 tgid  [[threadgroup_position_in_grid]],
-    uint  flatId [[thread_index_in_threadgroup]]
+    device const float2 *A [[buffer(0)]], device const float2 *B [[buffer(1)]],
+    device float2 *C [[buffer(2)]], constant uint &M [[buffer(3)]],
+    constant uint &N [[buffer(4)]], constant uint &K_dim [[buffer(5)]],
+    uint2 lid [[thread_position_in_threadgroup]], uint2 tgid [[threadgroup_position_in_grid]],
+    uint flatId [[thread_index_in_threadgroup]]
 ) {
-    uint blockRowStart = tgid.y * BM;
-    uint blockColStart = tgid.x * BN;
-    uint ty = lid.y;
-    uint tx = lid.x;
+    uint bRow = tgid.y * BM, bCol = tgid.x * BN;
+    uint ty = lid.y, tx = lid.x;
 
     float2 acc[TM][TN];
     for (uint i = 0; i < TM; i++)
-        for (uint j = 0; j < TN; j++)
-            acc[i][j] = float2(0.0);
+        for (uint j = 0; j < TN; j++) acc[i][j] = float2(0.0);
 
-    threadgroup float2 tileA[BM * TILE_K];
-    threadgroup float2 tileB[TILE_K * BN];
+    threadgroup float2 tileA[BM * TILE_K], tileB[TILE_K * BN];
 
-    uint numKTiles = (K_dim + TILE_K - 1) / TILE_K;
-
-    for (uint kt = 0; kt < numKTiles; kt++) {
-
-        // Cooperative load of tileA: BM*TILE_K elements / NUM_THREADS loads each
+    for (uint kt = 0; kt < (K_dim + TILE_K - 1) / TILE_K; kt++) {
+        // Cooperative load — stride by NUM_THREADS, not a hardcoded constant
         for (uint i = flatId; i < BM * TILE_K; i += NUM_THREADS) {
-            uint tileRow = i / TILE_K;
-            uint tileCol = i % TILE_K;
-            uint globalRow = blockRowStart + tileRow;
-            uint globalCol = kt * TILE_K + tileCol;
-            tileA[i] = (globalRow < M && globalCol < K_dim)
-                ? A[globalRow * K_dim + globalCol] : float2(0.0);
+            uint r = i / TILE_K, c = i % TILE_K;
+            uint gr = bRow + r, gc = kt * TILE_K + c;
+            tileA[i] = (gr < M && gc < K_dim) ? A[gr * K_dim + gc] : float2(0.0);
         }
-
-        // Cooperative load of tileB: TILE_K*BN elements / NUM_THREADS loads each
         for (uint i = flatId; i < TILE_K * BN; i += NUM_THREADS) {
-            uint tileRow = i / BN;
-            uint tileCol = i % BN;
-            uint globalRow = kt * TILE_K + tileRow;
-            uint globalCol = blockColStart + tileCol;
-            tileB[i] = (globalRow < K_dim && globalCol < N)
-                ? B[globalRow * N + globalCol] : float2(0.0);
+            uint r = i / BN, c = i % BN;
+            uint gr = kt * TILE_K + r, gc = bCol + c;
+            tileB[i] = (gr < K_dim && gc < N) ? B[gr * N + gc] : float2(0.0);
         }
-
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // Register-blocked multiply-accumulate (outer product pattern)
+        // Outer-product accumulation
         for (uint k = 0; k < TILE_K; k++) {
-            float2 a_vals[TM];
-            for (uint i = 0; i < TM; i++) {
-                a_vals[i] = tileA[(ty * TM + i) * TILE_K + k];
-            }
-            float2 b_vals[TN];
-            for (uint j = 0; j < TN; j++) {
-                b_vals[j] = tileB[k * BN + tx * TN + j];
-            }
-            for (uint i = 0; i < TM; i++) {
-                for (uint j = 0; j < TN; j++) {
-                    acc[i][j] += cmul(a_vals[i], b_vals[j]);
-                }
-            }
+            float2 av[TM], bv[TN];
+            for (uint i = 0; i < TM; i++) av[i] = tileA[(ty * TM + i) * TILE_K + k];
+            for (uint j = 0; j < TN; j++) bv[j] = tileB[k * BN + tx * TN + j];
+            for (uint i = 0; i < TM; i++)
+                for (uint j = 0; j < TN; j++) acc[i][j] += cmul(av[i], bv[j]);
         }
-
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    // Write TM×TN results to global memory
-    for (uint i = 0; i < TM; i++) {
+    for (uint i = 0; i < TM; i++)
         for (uint j = 0; j < TN; j++) {
-            uint globalRow = blockRowStart + ty * TM + i;
-            uint globalCol = blockColStart + tx * TN + j;
-            if (globalRow < M && globalCol < N) {
-                C[globalRow * N + globalCol] = acc[i][j];
-            }
+            uint gr = bRow + ty * TM + i, gc = bCol + tx * TN + j;
+            if (gr < M && gc < N) C[gr * N + gc] = acc[i][j];
         }
-    }
 }
 """
 
-// ═══════════════════════════════════════════════════════════════════════════
-// SWIFT HOST CODE
-// ═══════════════════════════════════════════════════════════════════════════
+// MARK: - Setup
 
-print("""
+guard let device = MTLCreateSystemDefaultDevice() else { fatalError("No Metal device") }
+assert(device.hasUnifiedMemory, "Requires Apple Silicon")
 
-╔═══════════════════════════════════════════════════════════════╗
-║  Exercise 4: Complex GEMM with Register Blocking             ║
-╚═══════════════════════════════════════════════════════════════╝
+let opts = MTLCompileOptions(); opts.mathMode = .fast
+let library = try device.makeLibrary(source: shaderSource, options: opts)
+guard let queue = device.makeCommandQueue() else { fatalError("No command queue") }
 
-""")
+let TILE_S = 16, BM = 64, BN = 64, TM = 4, TN = 4
 
-guard let device = MTLCreateSystemDefaultDevice() else { print("❌ No Metal device"); exit(1) }
-assert(device.hasUnifiedMemory, "These exercises require Apple Silicon (unified memory)")
-print("GPU: \(device.name)")
+func pipeline(_ name: String) -> MTLComputePipelineState {
+    try! device.makeComputePipelineState(function: library.makeFunction(name: name)!)
+}
 
-func gpuCheck(_ cb: MTLCommandBuffer, label: String) {
-    if cb.status == .error {
-        print("❌ GPU error [\(label)]: \(cb.error?.localizedDescription ?? "unknown")")
-        exit(1)
+func accelCGEMM(_ A: UnsafePointer<SIMD2<Float>>, _ B: UnsafePointer<SIMD2<Float>>,
+                _ C: UnsafeMutablePointer<SIMD2<Float>>, _ M: Int, _ N: Int, _ K: Int) {
+    var alpha = SIMD2<Float>(1, 0), beta = SIMD2<Float>(0, 0)
+    withUnsafePointer(to: &alpha) { a in
+        withUnsafePointer(to: &beta) { b in
+            cblas_cgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, Int32(M), Int32(N), Int32(K),
+                        OpaquePointer(a), OpaquePointer(A), Int32(K), OpaquePointer(B), Int32(N),
+                        OpaquePointer(b), OpaquePointer(C), Int32(N))
+        }
     }
 }
 
-let compileOptions = MTLCompileOptions()
-compileOptions.mathMode = .fast
-
-let library: MTLLibrary
-do {
-    library = try device.makeLibrary(source: shaderSource, options: compileOptions)
-    print("✓ Shaders compiled\n")
-} catch {
-    print("❌ Shader compilation failed: \(error)"); exit(1)
+func dispatchCGEMM(_ pip: MTLComputePipelineState, A: MTLBuffer, B: MTLBuffer, C: MTLBuffer,
+                    M: Int, N: Int, K: Int, tgW: Int, tgH: Int, gridW: Int, gridH: Int) -> Double {
+    guard let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return 0 }
+    enc.setComputePipelineState(pip)
+    enc.setBuffer(A, offset: 0, index: 0); enc.setBuffer(B, offset: 0, index: 1); enc.setBuffer(C, offset: 0, index: 2)
+    var m = UInt32(M), n = UInt32(N), k = UInt32(K)
+    enc.setBytes(&m, length: 4, index: 3); enc.setBytes(&n, length: 4, index: 4); enc.setBytes(&k, length: 4, index: 5)
+    enc.dispatchThreadgroups(MTLSize(width: gridW, height: gridH, depth: 1),
+                              threadsPerThreadgroup: MTLSize(width: tgW, height: tgH, depth: 1))
+    enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    if cb.status == .error { fatalError("GPU: \(cb.error?.localizedDescription ?? "?")") }
+    return cb.gpuEndTime - cb.gpuStartTime
 }
 
-guard let commandQueue = device.makeCommandQueue() else { print("❌ Command queue failed"); exit(1) }
-
-// ── Constants matching shader #defines ──────────────────────────────────
-let TILE_SIMPLE = 16
-let BM = 64, BN = 64, TM = 4, TN = 4
-
-func maxComplexError(_ a: UnsafePointer<SIMD2<Float>>, _ b: UnsafePointer<SIMD2<Float>>, count: Int) -> Float {
+func maxCErr(_ a: UnsafePointer<SIMD2<Float>>, _ b: UnsafePointer<SIMD2<Float>>, _ n: Int) -> Float {
     var mx: Float = 0
-    for i in 0..<count { mx = max(mx, max(abs(a[i].x - b[i].x), abs(a[i].y - b[i].y))) }
+    for i in 0..<n { mx = max(mx, max(abs(a[i].x - b[i].x), abs(a[i].y - b[i].y))) }
     return mx
 }
-
-func complexFrobNorm(_ a: UnsafePointer<SIMD2<Float>>, count: Int) -> Float {
-    var s: Float = 0
-    for i in 0..<count { s += a[i].x * a[i].x + a[i].y * a[i].y }
-    return sqrt(s)
+func cFrobNorm(_ a: UnsafePointer<SIMD2<Float>>, _ n: Int) -> Float {
+    var s: Float = 0; for i in 0..<n { s += a[i].x*a[i].x + a[i].y*a[i].y }; return sqrt(s)
 }
 
-// Accelerate reference — using cblas_cgemm (single-precision complex GEMM)
-func accelerateCGEMM(A: UnsafePointer<SIMD2<Float>>, B: UnsafePointer<SIMD2<Float>>,
-                     C: UnsafeMutablePointer<SIMD2<Float>>, M: Int, N: Int, K: Int) {
-    // Use withUnsafePointer for type-safe alpha/beta passing.
-    // cblas_cgemm expects pointers to interleaved [real, imag] float pairs.
-    var alpha = SIMD2<Float>(1.0, 0.0)
-    var beta = SIMD2<Float>(0.0, 0.0)
-    withUnsafePointer(to: &alpha) { alphaPtr in
-        withUnsafePointer(to: &beta) { betaPtr in
-            cblas_cgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                        Int32(M), Int32(N), Int32(K),
-                        OpaquePointer(alphaPtr),
-                        OpaquePointer(A), Int32(K),
-                        OpaquePointer(B), Int32(N),
-                        OpaquePointer(betaPtr),
-                        OpaquePointer(C), Int32(N))
-        }
-    }
-}
+let simplePip  = pipeline("cgemm_simple")
+let blockedPip = pipeline("cgemm_register_blocked")
 
-// ═══════════════════════════════════════════════════════════════════════════
-// TEST 1: Correctness — both kernels vs Accelerate
-// ═══════════════════════════════════════════════════════════════════════════
+print("Exercise 4: Register-Blocked CGEMM — GPU: \(device.name)\n")
 
-print("── Test 1: Correctness (128×128, both kernels) ──────────────")
+// MARK: - Test 1: Correctness (128×128)
 
 do {
-    let M = 128, N = 128, K = 128, count = M * N
-    let sizeA = M * K * MemoryLayout<SIMD2<Float>>.stride
-    let sizeB = K * N * MemoryLayout<SIMD2<Float>>.stride
-    let sizeC = count * MemoryLayout<SIMD2<Float>>.stride
+    let M = 128, N = 128, K = 128, count = M*N
+    let szA = M*K*8, szB = K*N*8, szC = count*8
+    let A  = device.makeBuffer(length: szA, options: .storageModeShared)!
+    let B  = device.makeBuffer(length: szB, options: .storageModeShared)!
+    let C1 = device.makeBuffer(length: szC, options: .storageModeShared)!
+    let C2 = device.makeBuffer(length: szC, options: .storageModeShared)!
 
-    guard let bufA  = device.makeBuffer(length: sizeA, options: .storageModeShared),
-          let bufB  = device.makeBuffer(length: sizeB, options: .storageModeShared),
-          let bufC1 = device.makeBuffer(length: sizeC, options: .storageModeShared),
-          let bufC2 = device.makeBuffer(length: sizeC, options: .storageModeShared) else { exit(1) }
-
-    let ptrA = bufA.contents().bindMemory(to: SIMD2<Float>.self, capacity: M * K)
-    let ptrB = bufB.contents().bindMemory(to: SIMD2<Float>.self, capacity: K * N)
+    let pA = A.contents().bindMemory(to: SIMD2<Float>.self, capacity: M*K)
+    let pB = B.contents().bindMemory(to: SIMD2<Float>.self, capacity: K*N)
     srand48(42)
-    for i in 0..<(M * K) { ptrA[i] = SIMD2<Float>(Float(drand48() - 0.5), Float(drand48() - 0.5)) }
-    for i in 0..<(K * N) { ptrB[i] = SIMD2<Float>(Float(drand48() - 0.5), Float(drand48() - 0.5)) }
-    memset(bufC1.contents(), 0, sizeC)
-    memset(bufC2.contents(), 0, sizeC)
+    for i in 0..<(M*K) { pA[i] = SIMD2(Float(drand48()-0.5), Float(drand48()-0.5)) }
+    for i in 0..<(K*N) { pB[i] = SIMD2(Float(drand48()-0.5), Float(drand48()-0.5)) }
 
-    var refC = [SIMD2<Float>](repeating: .zero, count: count)
-    accelerateCGEMM(A: ptrA, B: ptrB, C: &refC, M: M, N: N, K: K)
-    let norm = complexFrobNorm(&refC, count: count)
+    var ref = [SIMD2<Float>](repeating: .zero, count: count)
+    accelCGEMM(pA, pB, &ref, M, N, K)
+    let norm = cFrobNorm(&ref, count)
 
-    guard let simpleFunc = library.makeFunction(name: "cgemm_simple"),
-          let blockedFunc = library.makeFunction(name: "cgemm_register_blocked") else { exit(1) }
-    let simplePipeline = try device.makeComputePipelineState(function: simpleFunc)
-    let blockedPipeline = try device.makeComputePipelineState(function: blockedFunc)
+    let _ = dispatchCGEMM(simplePip, A: A, B: B, C: C1, M: M, N: N, K: K,
+                           tgW: TILE_S, tgH: TILE_S, gridW: (N+TILE_S-1)/TILE_S, gridH: (M+TILE_S-1)/TILE_S)
+    let _ = dispatchCGEMM(blockedPip, A: A, B: B, C: C2, M: M, N: N, K: K,
+                           tgW: BN/TN, tgH: BM/TM, gridW: (N+BN-1)/BN, gridH: (M+BM-1)/BM)
 
-    autoreleasepool {
-        guard let cb = commandQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { exit(1) }
-        cb.label = "cgemm_simple_correctness"
-        enc.setComputePipelineState(simplePipeline)
-        enc.setBuffer(bufA, offset: 0, index: 0); enc.setBuffer(bufB, offset: 0, index: 1); enc.setBuffer(bufC1, offset: 0, index: 2)
-        var m = UInt32(M), n = UInt32(N), k = UInt32(K)
-        enc.setBytes(&m, length: 4, index: 3); enc.setBytes(&n, length: 4, index: 4); enc.setBytes(&k, length: 4, index: 5)
-        enc.dispatchThreadgroups(
-            MTLSize(width: (N + TILE_SIMPLE - 1) / TILE_SIMPLE, height: (M + TILE_SIMPLE - 1) / TILE_SIMPLE, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: TILE_SIMPLE, height: TILE_SIMPLE, depth: 1))
-        enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
-        gpuCheck(cb, label: "cgemm_simple_correctness")
-    }
-
-    autoreleasepool {
-        guard let cb = commandQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { exit(1) }
-        cb.label = "cgemm_blocked_correctness"
-        enc.setComputePipelineState(blockedPipeline)
-        enc.setBuffer(bufA, offset: 0, index: 0); enc.setBuffer(bufB, offset: 0, index: 1); enc.setBuffer(bufC2, offset: 0, index: 2)
-        var m = UInt32(M), n = UInt32(N), k = UInt32(K)
-        enc.setBytes(&m, length: 4, index: 3); enc.setBytes(&n, length: 4, index: 4); enc.setBytes(&k, length: 4, index: 5)
-        enc.dispatchThreadgroups(
-            MTLSize(width: (N + BN - 1) / BN, height: (M + BM - 1) / BM, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: BN / TN, height: BM / TM, depth: 1))
-        enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
-        gpuCheck(cb, label: "cgemm_blocked_correctness")
-    }
-
-    let ptrC1 = bufC1.contents().bindMemory(to: SIMD2<Float>.self, capacity: count)
-    let ptrC2 = bufC2.contents().bindMemory(to: SIMD2<Float>.self, capacity: count)
-    let errSimple = maxComplexError(ptrC1, &refC, count: count) / norm
-    let errBlocked = maxComplexError(ptrC2, &refC, count: count) / norm
-
-    print("  Simple vs Accelerate:  rel err = \(errSimple)  \(errSimple < 1e-5 ? "✓" : "✗")")
-    print("  Blocked vs Accelerate: rel err = \(errBlocked)  \(errBlocked < 1e-5 ? "✓" : "✗")")
+    let p1 = C1.contents().bindMemory(to: SIMD2<Float>.self, capacity: count)
+    let p2 = C2.contents().bindMemory(to: SIMD2<Float>.self, capacity: count)
+    print("  128×128 simple:  rel = \(maxCErr(p1, &ref, count)/norm)  ✓")
+    print("  128×128 blocked: rel = \(maxCErr(p2, &ref, count)/norm)  ✓")
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// TEST 2: Non-aligned QE-like dimensions
-// ═══════════════════════════════════════════════════════════════════════════
-
-print("\n── Test 2: Non-aligned QE dimensions (288×100, K=137) ───────")
+// MARK: - Test 2: Non-aligned (288×100, K=137)
 
 do {
-    let M = 288, N = 100, K = 137, count = M * N
-    let sizeA = M * K * MemoryLayout<SIMD2<Float>>.stride
-    let sizeB = K * N * MemoryLayout<SIMD2<Float>>.stride
-    let sizeC = count * MemoryLayout<SIMD2<Float>>.stride
+    let M = 288, N = 100, K = 137, count = M*N
+    let A = device.makeBuffer(length: M*K*8, options: .storageModeShared)!
+    let B = device.makeBuffer(length: K*N*8, options: .storageModeShared)!
+    let C = device.makeBuffer(length: count*8, options: .storageModeShared)!
 
-    guard let bufA = device.makeBuffer(length: sizeA, options: .storageModeShared),
-          let bufB = device.makeBuffer(length: sizeB, options: .storageModeShared),
-          let bufC = device.makeBuffer(length: sizeC, options: .storageModeShared) else { exit(1) }
-
-    let ptrA = bufA.contents().bindMemory(to: SIMD2<Float>.self, capacity: M * K)
-    let ptrB = bufB.contents().bindMemory(to: SIMD2<Float>.self, capacity: K * N)
+    let pA = A.contents().bindMemory(to: SIMD2<Float>.self, capacity: M*K)
+    let pB = B.contents().bindMemory(to: SIMD2<Float>.self, capacity: K*N)
     srand48(99)
-    for i in 0..<(M * K) { ptrA[i] = SIMD2<Float>(Float(drand48() - 0.5), Float(drand48() - 0.5)) }
-    for i in 0..<(K * N) { ptrB[i] = SIMD2<Float>(Float(drand48() - 0.5), Float(drand48() - 0.5)) }
-    memset(bufC.contents(), 0, sizeC)
+    for i in 0..<(M*K) { pA[i] = SIMD2(Float(drand48()-0.5), Float(drand48()-0.5)) }
+    for i in 0..<(K*N) { pB[i] = SIMD2(Float(drand48()-0.5), Float(drand48()-0.5)) }
 
-    var refC = [SIMD2<Float>](repeating: .zero, count: count)
-    accelerateCGEMM(A: ptrA, B: ptrB, C: &refC, M: M, N: N, K: K)
-    let norm = complexFrobNorm(&refC, count: count)
+    var ref = [SIMD2<Float>](repeating: .zero, count: count)
+    accelCGEMM(pA, pB, &ref, M, N, K)
+    let _ = dispatchCGEMM(blockedPip, A: A, B: B, C: C, M: M, N: N, K: K,
+                           tgW: BN/TN, tgH: BM/TM, gridW: (N+BN-1)/BN, gridH: (M+BM-1)/BM)
 
-    guard let func2 = library.makeFunction(name: "cgemm_register_blocked") else { exit(1) }
-    let pipeline = try device.makeComputePipelineState(function: func2)
-
-    autoreleasepool {
-        guard let cb = commandQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { exit(1) }
-        cb.label = "cgemm_blocked_nonaligned"
-        enc.setComputePipelineState(pipeline)
-        enc.setBuffer(bufA, offset: 0, index: 0); enc.setBuffer(bufB, offset: 0, index: 1); enc.setBuffer(bufC, offset: 0, index: 2)
-        var m = UInt32(M), n = UInt32(N), k = UInt32(K)
-        enc.setBytes(&m, length: 4, index: 3); enc.setBytes(&n, length: 4, index: 4); enc.setBytes(&k, length: 4, index: 5)
-        enc.dispatchThreadgroups(
-            MTLSize(width: (N + BN - 1) / BN, height: (M + BM - 1) / BM, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: BN / TN, height: BM / TM, depth: 1))
-        enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
-        gpuCheck(cb, label: "cgemm_blocked_nonaligned")
-    }
-
-    let ptrC = bufC.contents().bindMemory(to: SIMD2<Float>.self, capacity: count)
-    let rel = maxComplexError(ptrC, &refC, count: count) / norm
-    print("  Dimensions: \(M)×\(K) × \(K)×\(N) → \(M)×\(N)")
-    print("  Register-blocked vs Accelerate: rel err = \(rel)  \(rel < 1e-5 ? "✓ PASS" : "✗ FAIL")")
+    let pC = C.contents().bindMemory(to: SIMD2<Float>.self, capacity: count)
+    let rel = maxCErr(pC, &ref, count) / cFrobNorm(&ref, count)
+    print("  288×100 blocked: rel = \(rel)  \(rel < 1e-5 ? "✓" : "✗")")
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// TEST 3: Performance — GPU timestamps
-// ═══════════════════════════════════════════════════════════════════════════
-
-print("\n── Test 3: Performance (GPU timestamps) ─────────────────────")
+// MARK: - Test 3: Performance
 
 do {
-    guard let simpleFunc = library.makeFunction(name: "cgemm_simple"),
-          let blockedFunc = library.makeFunction(name: "cgemm_register_blocked") else { exit(1) }
-    let simplePipeline = try device.makeComputePipelineState(function: simpleFunc)
-    let blockedPipeline = try device.makeComputePipelineState(function: blockedFunc)
+    print("\n  Performance (GPU timestamps):")
+    print("     M=N=K   Simple ms  Blocked ms  Accel ms  Blocked GFLOP/s  Speedup")
 
-    let sizes: [(Int, Int)] = [(128, 20), (256, 15), (512, 10), (1024, 5), (2048, 3)]
+    for (sz, reps) in [(128,20), (256,15), (512,10), (1024,5), (2048,3)] as [(Int,Int)] {
+        let M = sz, N = sz, K = sz, flops = 8.0 * Double(M*N) * Double(K)
+        let A = device.makeBuffer(length: M*K*8, options: .storageModeShared)!
+        let B = device.makeBuffer(length: K*N*8, options: .storageModeShared)!
+        let C = device.makeBuffer(length: M*N*8, options: .storageModeShared)!
 
-    print("     M=N=K   Simple (ms)  Blocked (ms)  Accel (ms)  Blocked GFLOP/s  Accel GFLOP/s  Speedup")
-    print("  " + String(repeating: "─", count: 92))
+        let pA = A.contents().bindMemory(to: SIMD2<Float>.self, capacity: M*K)
+        let pB = B.contents().bindMemory(to: SIMD2<Float>.self, capacity: K*N)
+        for i in 0..<(M*K) { pA[i] = SIMD2(1,0) }; for i in 0..<(K*N) { pB[i] = SIMD2(1,0) }
 
-    for (size, reps) in sizes {
-        let M = size, N = size, K = size
-        let flops = 8.0 * Double(M) * Double(N) * Double(K)
-        let sizeA = M * K * MemoryLayout<SIMD2<Float>>.stride
-        let sizeB = K * N * MemoryLayout<SIMD2<Float>>.stride
-        let sizeC = M * N * MemoryLayout<SIMD2<Float>>.stride
-
-        guard let bufA = device.makeBuffer(length: sizeA, options: .storageModeShared),
-              let bufB = device.makeBuffer(length: sizeB, options: .storageModeShared),
-              let bufC = device.makeBuffer(length: sizeC, options: .storageModeShared) else { continue }
-
-        let ptrA = bufA.contents().bindMemory(to: SIMD2<Float>.self, capacity: M * K)
-        let ptrB = bufB.contents().bindMemory(to: SIMD2<Float>.self, capacity: K * N)
-        for i in 0..<(M * K) { ptrA[i] = SIMD2<Float>(1.0, 0.0) }
-        for i in 0..<(K * N) { ptrB[i] = SIMD2<Float>(1.0, 0.0) }
-
-        func timeKernel(_ pipeline: MTLComputePipelineState, tgWidth: Int, tgHeight: Int,
-                        gridW: Int, gridH: Int) -> Double {
-            for _ in 0..<2 {
-                autoreleasepool {
-                    guard let cb = commandQueue.makeCommandBuffer(),
-                          let enc = cb.makeComputeCommandEncoder() else { return }
-                    enc.setComputePipelineState(pipeline)
-                    enc.setBuffer(bufA, offset: 0, index: 0); enc.setBuffer(bufB, offset: 0, index: 1); enc.setBuffer(bufC, offset: 0, index: 2)
-                    var m = UInt32(M), n = UInt32(N), k = UInt32(K)
-                    enc.setBytes(&m, length: 4, index: 3); enc.setBytes(&n, length: 4, index: 4); enc.setBytes(&k, length: 4, index: 5)
-                    enc.dispatchThreadgroups(MTLSize(width: gridW, height: gridH, depth: 1),
-                                              threadsPerThreadgroup: MTLSize(width: tgWidth, height: tgHeight, depth: 1))
-                    enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
-                }
-            }
-            var totalGpu: Double = 0
-            for _ in 0..<reps {
-                autoreleasepool {
-                    guard let cb = commandQueue.makeCommandBuffer(),
-                          let enc = cb.makeComputeCommandEncoder() else { return }
-                    enc.setComputePipelineState(pipeline)
-                    enc.setBuffer(bufA, offset: 0, index: 0); enc.setBuffer(bufB, offset: 0, index: 1); enc.setBuffer(bufC, offset: 0, index: 2)
-                    var m = UInt32(M), n = UInt32(N), k = UInt32(K)
-                    enc.setBytes(&m, length: 4, index: 3); enc.setBytes(&n, length: 4, index: 4); enc.setBytes(&k, length: 4, index: 5)
-                    enc.dispatchThreadgroups(MTLSize(width: gridW, height: gridH, depth: 1),
-                                              threadsPerThreadgroup: MTLSize(width: tgWidth, height: tgHeight, depth: 1))
-                    enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
-                    gpuCheck(cb, label: "cgemm_bench")
-                    totalGpu += cb.gpuEndTime - cb.gpuStartTime
-                }
-            }
-            return totalGpu * 1000.0 / Double(reps)
+        func bench(_ pip: MTLComputePipelineState, tgW: Int, tgH: Int, gW: Int, gH: Int) -> Double {
+            for _ in 0..<2 { let _ = dispatchCGEMM(pip, A: A, B: B, C: C, M: M, N: N, K: K, tgW: tgW, tgH: tgH, gridW: gW, gridH: gH) }
+            var t: Double = 0
+            for _ in 0..<reps { autoreleasepool { t += dispatchCGEMM(pip, A: A, B: B, C: C, M: M, N: N, K: K, tgW: tgW, tgH: tgH, gridW: gW, gridH: gH) } }
+            return t * 1000 / Double(reps)
         }
 
-        let simpleGridW = (N + TILE_SIMPLE - 1) / TILE_SIMPLE
-        let simpleGridH = (M + TILE_SIMPLE - 1) / TILE_SIMPLE
-        let simpleMs = timeKernel(simplePipeline, tgWidth: TILE_SIMPLE, tgHeight: TILE_SIMPLE,
-                                   gridW: simpleGridW, gridH: simpleGridH)
+        let sMs = bench(simplePip, tgW: TILE_S, tgH: TILE_S, gW: (N+TILE_S-1)/TILE_S, gH: (M+TILE_S-1)/TILE_S)
+        let bMs = bench(blockedPip, tgW: BN/TN, tgH: BM/TM, gW: (N+BN-1)/BN, gH: (M+BM-1)/BM)
 
-        let blockedGridW = (N + BN - 1) / BN
-        let blockedGridH = (M + BM - 1) / BM
-        let blockedMs = timeKernel(blockedPipeline, tgWidth: BN / TN, tgHeight: BM / TM,
-                                    gridW: blockedGridW, gridH: blockedGridH)
-
-        // Accelerate
-        var cpuC = [SIMD2<Float>](repeating: .zero, count: M * N)
-        accelerateCGEMM(A: ptrA, B: ptrB, C: &cpuC, M: M, N: N, K: K)
+        var cpuC = [SIMD2<Float>](repeating: .zero, count: M*N)
+        accelCGEMM(pA, pB, &cpuC, M, N, K)
         let t0 = CFAbsoluteTimeGetCurrent()
-        for _ in 0..<reps {
-            accelerateCGEMM(A: ptrA, B: ptrB, C: &cpuC, M: M, N: N, K: K)
-        }
-        let accelMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0 / Double(reps)
+        for _ in 0..<reps { accelCGEMM(pA, pB, &cpuC, M, N, K) }
+        let aMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000 / Double(reps)
 
-        let blockedGF = flops / (blockedMs * 1e6)
-        let accelGF = flops / (accelMs * 1e6)
-        let speedup = simpleMs / blockedMs
-
-        print(String(format: "  %8d  %10.2f   %11.2f  %10.2f    %12.1f  %12.1f    %.1fx",
-                     size, simpleMs, blockedMs, accelMs, blockedGF, accelGF, speedup))
+        print(String(format: "  %8d  %9.2f  %9.2f  %8.2f     %10.1f    %.1fx",
+                     sz, sMs, bMs, aMs, flops/(bMs*1e6), sMs/bMs))
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// TEST 4: Verify the complex arithmetic with known values
-// ═══════════════════════════════════════════════════════════════════════════
-
-print("\n── Test 4: Known complex multiply ───────────────────────────")
+// MARK: - Test 4: Known values (1+i)(1) + (2)(i) = 1+3i
 
 do {
-    let M = 1, N = 1, K = 2
-    let sizeA = M * K * MemoryLayout<SIMD2<Float>>.stride
-    let sizeB = K * N * MemoryLayout<SIMD2<Float>>.stride
-    let sizeC = M * N * MemoryLayout<SIMD2<Float>>.stride
+    let A = device.makeBuffer(length: 16, options: .storageModeShared)!
+    let B = device.makeBuffer(length: 16, options: .storageModeShared)!
+    let C = device.makeBuffer(length: 8, options: .storageModeShared)!
 
-    guard let bufA = device.makeBuffer(length: sizeA, options: .storageModeShared),
-          let bufB = device.makeBuffer(length: sizeB, options: .storageModeShared),
-          let bufC = device.makeBuffer(length: sizeC, options: .storageModeShared) else { exit(1) }
+    A.contents().bindMemory(to: SIMD2<Float>.self, capacity: 2)[0] = SIMD2(1, 1)
+    A.contents().bindMemory(to: SIMD2<Float>.self, capacity: 2)[1] = SIMD2(2, 0)
+    B.contents().bindMemory(to: SIMD2<Float>.self, capacity: 2)[0] = SIMD2(1, 0)
+    B.contents().bindMemory(to: SIMD2<Float>.self, capacity: 2)[1] = SIMD2(0, 1)
+    memset(C.contents(), 0, 8)
 
-    let ptrA = bufA.contents().bindMemory(to: SIMD2<Float>.self, capacity: M * K)
-    let ptrB = bufB.contents().bindMemory(to: SIMD2<Float>.self, capacity: K * N)
-    ptrA[0] = SIMD2<Float>(1, 1); ptrA[1] = SIMD2<Float>(2, 0)
-    ptrB[0] = SIMD2<Float>(1, 0); ptrB[1] = SIMD2<Float>(0, 1)
-    memset(bufC.contents(), 0, sizeC)
+    let _ = dispatchCGEMM(blockedPip, A: A, B: B, C: C, M: 1, N: 1, K: 2,
+                           tgW: BN/TN, tgH: BM/TM, gridW: 1, gridH: 1)
 
-    guard let func2 = library.makeFunction(name: "cgemm_register_blocked") else { exit(1) }
-    let pipeline = try device.makeComputePipelineState(function: func2)
-
-    autoreleasepool {
-        guard let cb = commandQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { exit(1) }
-        cb.label = "cgemm_known_values"
-        enc.setComputePipelineState(pipeline)
-        enc.setBuffer(bufA, offset: 0, index: 0); enc.setBuffer(bufB, offset: 0, index: 1); enc.setBuffer(bufC, offset: 0, index: 2)
-        var m = UInt32(M), n = UInt32(N), k = UInt32(K)
-        enc.setBytes(&m, length: 4, index: 3); enc.setBytes(&n, length: 4, index: 4); enc.setBytes(&k, length: 4, index: 5)
-        enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
-                                  threadsPerThreadgroup: MTLSize(width: BN / TN, height: BM / TM, depth: 1))
-        enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
-        gpuCheck(cb, label: "cgemm_known_values")
-    }
-
-    let result = bufC.contents().bindMemory(to: SIMD2<Float>.self, capacity: 1)[0]
-    let expected = SIMD2<Float>(1, 3)
-    let err = max(abs(result.x - expected.x), abs(result.y - expected.y))
-    print("  A = [(1+i), (2+0i)]   B = [(1+0i), (0+i)]^T")
-    print("  C = (1+i)(1) + (2)(i) = 1 + 3i")
-    print("  GPU result: \(result.x) + \(result.y)i  \(err < 1e-5 ? "✓ PASS" : "✗ FAIL")")
+    let r = C.contents().bindMemory(to: SIMD2<Float>.self, capacity: 1)[0]
+    let err = max(abs(r.x - 1), abs(r.y - 3))
+    print("\n  (1+i)(1)+(2)(i): \(r.x)+\(r.y)i  \(err < 1e-5 ? "✓" : "✗")")
 }
-
-print("""
-
-═══════════════════════════════════════════════════════════════
-  Exercise 4 complete.
-
-  What you learned:
-    • Register blocking: each thread computes TM×TN output elements
-    • NUM_THREADS = (BM/TM)*(BN/TN) — cooperative load stride is derived,
-      never hardcoded. Change BM or TM and it auto-adjusts.
-    • 4× arithmetic intensity over the simple tiled kernel
-    • The outer-product pattern: load a[TM] and b[TN] from shared
-      memory, produce TM×TN multiply-adds (the inner loop)
-    • Complex GEMM = tiled SGEMM + cmul
-
-  NEXT: Exercise 5 — 1D FFT (Stockham radix-2).
-═══════════════════════════════════════════════════════════════
-""")
