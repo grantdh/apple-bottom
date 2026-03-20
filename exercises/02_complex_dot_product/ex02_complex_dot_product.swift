@@ -561,7 +561,7 @@ do {
     let pipeline = try device.makeComputePipelineState(function: function)
     let threadgroupSize = 256
 
-    print("  \("N":>10)  \("Time (ms)":>10)  \("GFLOP/s":>10)")
+    print("           N   Time (ms)    GFLOP/s")
     print("  \(String(repeating: "─", count: 36))")
 
     for N in sizes {
