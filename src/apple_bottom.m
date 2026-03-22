@@ -448,11 +448,7 @@ static dispatch_once_t g_init_once;
         
         NSError* error = nil;
         MTLCompileOptions* opts = [[MTLCompileOptions alloc] init];
-        #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 140000
-#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 140000
-        if (@available(macOS 14.0, *)) { opts.mathMode = MTLMathModeSafe; }
-#endif
-#endif  // CRITICAL: Prevents fast-math optimizations that break DD precision
+        opts.mathMode = MTLMathModeSafe;  // Requires macOS 14+ SDK
         
         id<MTLLibrary> library = [_device newLibraryWithSource:kShaderSource options:opts error:&error];
         if (!library) { NSLog(@"Shader compile failed: %@", error); return nil; }

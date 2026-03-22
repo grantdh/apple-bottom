@@ -1,4 +1,4 @@
-name: Build and Test
+name: Documentation
 
 on:
   push:
@@ -7,44 +7,28 @@ on:
     branches: [ main ]
 
 jobs:
-  build:
-    name: Build on macOS
-    runs-on: macos-14  # macOS Sonoma with Apple Silicon
-
+  info:
+    name: Build Requirements
+    runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Check environment
-      run: |
-        sw_vers
-        uname -m
-        clang --version
-
-    - name: Validate environment
-      run: |
-        chmod +x scripts/validate_environment.sh
-        ./scripts/validate_environment.sh || true  # Don't fail on GPU check in CI
-
-    - name: Build library
-      run: make
-
-    - name: Build tests
-      run: |
-        make build/test_correctness
-        make build/test_precision
-        make build/bench_dgemm
-
-    - name: Note about GPU tests
+    - name: Build Information
       run: |
         echo "═══════════════════════════════════════════════════════════════════"
-        echo "✓ Build successful!"
+        echo "apple-bottom: FP64 BLAS for Apple Silicon GPU"
+        echo "═══════════════════════════════════════════════════════════════════"
         echo ""
-        echo "Note: GPU tests require Apple Silicon hardware with Metal support."
-        echo "GitHub Actions runners don't have GPU access for Metal compute."
+        echo "⚠️  This library requires local build on Apple Silicon Mac"
         echo ""
-        echo "To run tests locally:"
-        echo "  ./build/test_correctness"
-        echo "  ./build/test_precision"
-        echo "  ./build/bench_dgemm"
+        echo "Requirements:"
+        echo "  • macOS 14+ (Sonoma)"
+        echo "  • Apple Silicon (M1/M2/M3/M4)"
+        echo "  • Xcode Command Line Tools"
+        echo ""
+        echo "Build locally:"
+        echo "  git clone https://github.com/grantdh/apple-bottom.git"
+        echo "  cd apple-bottom"
+        echo "  make"
+        echo "  make test"
+        echo ""
+        echo "CI cannot build this library (requires Metal GPU + macOS 14 SDK)"
         echo "═══════════════════════════════════════════════════════════════════"
