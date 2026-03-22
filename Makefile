@@ -90,7 +90,7 @@ $(BUILD)/bench_zgemm: benchmarks/bench_zgemm.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
 	@echo "Built: $@"
 
-bench: $(BUILD)/bench_dgemm $(BUILD)/bench_zgemm
+bench: $(BUILD)/bench_dgemm $(BUILD)/bench_zgemm $(BUILD)/bench_dsyrk $(BUILD)/bench_zherk
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "DGEMM Benchmark"
@@ -166,3 +166,11 @@ test-ubsan: clean
 	$(CC) $(CFLAGS) -fsanitize=undefined -g -I$(INCLUDE) tests/test_correctness.c -o $(BUILD)/test_correctness -L$(BUILD) -lapplebottom $(LDFLAGS)
 	@echo "Running tests with UBSan..."
 	./$(BUILD)/test_correctness
+
+$(BUILD)/bench_dsyrk: benchmarks/bench_dsyrk.c lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	@echo "Built: $@"
+
+$(BUILD)/bench_zherk: benchmarks/bench_zherk.c lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	@echo "Built: $@"

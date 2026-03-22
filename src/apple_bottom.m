@@ -857,21 +857,73 @@ ABStatus ab_dsyrk(ABMatrix A, ABMatrix C) {
 ABStatus ab_zherk(ABMatrix Ar, ABMatrix Ai, ABMatrix Cr, ABMatrix Ci) {
     if (!Ar || !Ai || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
     
+    int N = Ar->rows;
+    int K = Ar->cols;
+    
+    // Cr = Ar×Arᵀ + Ai×Aiᵀ (via DSYRK)
     ABStatus s1 = ab_dsyrk(Ar, Cr);
     if (s1 != AB_OK) return s1;
     
-    ab_matrix_zero(Ci);
-    
-    ABMatrix temp = ab_matrix_create(Ar->rows, Ar->rows);
+    ABMatrix temp = ab_matrix_create(N, N);
     if (!temp) return AB_ERROR_ALLOC_FAILED;
     
-    ab_dsyrk(Ai, temp);
+    ABStatus s2 = ab_dsyrk(Ai, temp);
+    if (s2 != AB_OK) { ab_matrix_destroy(temp); return s2; }
+    
     ab_matrix_add(Cr, temp, Cr);
+    
+    // Ci = Ai×Arᵀ - Ar×Aiᵀ
+    size_t countA = (size_t)N * K;
+    double* ArData = (double*)malloc(countA * sizeof(double));
+    double* AiData = (double*)malloc(countA * sizeof(double));
+    double* ArTData = (double*)malloc(countA * sizeof(double));
+    double* AiTData = (double*)malloc(countA * sizeof(double));
+    
+    if (!ArData || !AiData || !ArTData || !AiTData) {
+        free(ArData); free(AiData); free(ArTData); free(AiTData);
+        ab_matrix_destroy(temp);
+        return AB_ERROR_ALLOC_FAILED;
+    }
+    
+    ab_matrix_download(Ar, ArData, true);
+    ab_matrix_download(Ai, AiData, true);
+    
+    // Transpose: A[i,j] -> Aᵀ[j,i]
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < K; j++) {
+            ArTData[j * N + i] = ArData[i * K + j];
+            AiTData[j * N + i] = AiData[i * K + j];
+        }
+    }
+    
+    ABMatrix ArT = ab_matrix_create(K, N);
+    ABMatrix AiT = ab_matrix_create(K, N);
+    if (!ArT || !AiT) {
+        ab_matrix_destroy(ArT); ab_matrix_destroy(AiT);
+        free(ArData); free(AiData); free(ArTData); free(AiTData);
+        ab_matrix_destroy(temp);
+        return AB_ERROR_ALLOC_FAILED;
+    }
+    
+    ab_matrix_upload(ArT, ArTData, true);
+    ab_matrix_upload(AiT, AiTData, true);
+    
+    // Ci = Ai × Arᵀ
+    ab_dgemm(Ai, ArT, Ci);
+    
+    // temp = Ar × Aiᵀ
+    ab_dgemm(Ar, AiT, temp);
+    
+    // Ci = Ci - temp
+    ab_matrix_sub(Ci, temp, Ci);
+    
     ab_matrix_destroy(temp);
+    ab_matrix_destroy(ArT);
+    ab_matrix_destroy(AiT);
+    free(ArData); free(AiData); free(ArTData); free(AiTData);
     
     return AB_OK;
 }
-
 // =============================================================================
 // Public API: Session Management
 // =============================================================================

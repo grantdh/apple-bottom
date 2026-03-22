@@ -3,6 +3,18 @@
 // Copyright (c) 2026 Grant Heileman, UNM ECE. MIT License.
 // =============================================================================
 
+// =============================================================================
+// Thread Safety:
+//   - ab_init/ab_shutdown: Safe to call from any thread (uses dispatch_once)
+//   - Matrix operations: NOT thread-safe — Metal command queue serializes
+//   - Use separate contexts for concurrent workloads (future feature)
+//
+// Performance Notes:
+//   - DGEMM: GPU wins for N >= 2048
+//   - ZGEMM: GPU wins for N >= 1024  
+//   - DSYRK: GPU wins for N >= 3072
+//   - ZHERK: CPU (AMX) is faster — uses CPU transpose, not optimized
+// =============================================================================
 #ifndef APPLE_BOTTOM_H
 #define APPLE_BOTTOM_H
 
