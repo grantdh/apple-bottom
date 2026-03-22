@@ -782,51 +782,47 @@ ABStatus ab_zgemm(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix C
     if (!Ar || !Ai || !Br || !Bi || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
     
     int M = Ar->rows, N = Br->cols, K = Ar->cols;
+    ABStatus status = AB_OK;
     
-    // Allocate all temporaries upfront with cleanup on failure
+    // Allocate all temporaries upfront
     ABMatrix T1 = ab_matrix_create(M, N);
     ABMatrix T2 = ab_matrix_create(M, N);
     ABMatrix T3 = ab_matrix_create(M, K);
     ABMatrix T4 = ab_matrix_create(K, N);
     
-    // Check all allocations succeeded
     if (!T1 || !T2 || !T3 || !T4) {
-        // Cleanup any successful allocations (ab_matrix_destroy handles NULL safely)
-        ab_matrix_destroy(T1);
-        ab_matrix_destroy(T2);
-        ab_matrix_destroy(T3);
-        ab_matrix_destroy(T4);
-        return AB_ERROR_ALLOC_FAILED;
+        status = AB_ERROR_ALLOC_FAILED;
+        goto cleanup;
     }
     
     // T3 = Ar + Ai, T4 = Br + Bi
-    ab_matrix_add(Ar, Ai, T3);
-    ab_matrix_add(Br, Bi, T4);
+    if ((status = ab_matrix_add(Ar, Ai, T3)) != AB_OK) goto cleanup;
+    if ((status = ab_matrix_add(Br, Bi, T4)) != AB_OK) goto cleanup;
     
     // T1 = Ar * Br
-    ab_dgemm(Ar, Br, T1);
+    if ((status = ab_dgemm(Ar, Br, T1)) != AB_OK) goto cleanup;
     
     // T2 = Ai * Bi
-    ab_dgemm(Ai, Bi, T2);
+    if ((status = ab_dgemm(Ai, Bi, T2)) != AB_OK) goto cleanup;
     
     // Ci = (Ar+Ai) * (Br+Bi)
-    ab_dgemm(T3, T4, Ci);
+    if ((status = ab_dgemm(T3, T4, Ci)) != AB_OK) goto cleanup;
     
     // Ci = Ci - T1 - T2 = imaginary part
-    ab_matrix_sub(Ci, T1, Ci);
-    ab_matrix_sub(Ci, T2, Ci);
+    if ((status = ab_matrix_sub(Ci, T1, Ci)) != AB_OK) goto cleanup;
+    if ((status = ab_matrix_sub(Ci, T2, Ci)) != AB_OK) goto cleanup;
     
     // Cr = T1 - T2 = real part
-    ab_matrix_sub(T1, T2, Cr);
+    if ((status = ab_matrix_sub(T1, T2, Cr)) != AB_OK) goto cleanup;
     
-    // Cleanup
+    stats_add_zgemm();
+
+cleanup:
     ab_matrix_destroy(T1);
     ab_matrix_destroy(T2);
     ab_matrix_destroy(T3);
     ab_matrix_destroy(T4);
-    
-    stats_add_zgemm();
-    return AB_OK;
+    return status;
 }
 
 ABStatus ab_dsyrk(ABMatrix A, ABMatrix C) {
