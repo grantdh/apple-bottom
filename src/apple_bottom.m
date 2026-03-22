@@ -103,7 +103,7 @@ static void stats_add_zgemm(void) {
 // DD operations build on these primitives to maintain full precision.
 // =============================================================================
 
-static NSString* const kShaderSource = @R"(
+static NSString* const kShaderSource = @(R"(
 #include <metal_stdlib>
 using namespace metal;
 
@@ -407,7 +407,7 @@ kernel void dd_matrix_scale(device DD* A [[buffer(0)]], constant float& alpha [[
 kernel void dd_matrix_copy(device const DD* src [[buffer(0)]], device DD* dst [[buffer(1)]], constant uint& count [[buffer(2)]], uint gid [[thread_position_in_grid]]) {
     if (gid < count) dst[gid] = src[gid];
 }
-)";
+)");
 
 // =============================================================================
 // Metal Context (Singleton)
