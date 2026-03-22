@@ -14,7 +14,7 @@ CC = clang
 OBJC = clang
 
 CFLAGS = -Wall -Wextra -O3 -std=c11 -DACCELERATE_NEW_LAPACK
-OBJCFLAGS = -Wall -Wextra -O3 -fobjc-arc -DACCELERATE_NEW_LAPACK
+OBJCFLAGS = -std=c++11 -Wall -Wextra -O3 -fobjc-arc -DACCELERATE_NEW_LAPACK
 LDFLAGS = -lc++ -framework Metal -framework Foundation -framework Accelerate
 
 BUILD = build
