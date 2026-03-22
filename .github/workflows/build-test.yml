@@ -1,4 +1,4 @@
-name: Build Check
+name: Build and Test
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
 jobs:
   build:
     name: Build on macOS
-    runs-on: macos-14
+    runs-on: macos-14  # macOS Sonoma with Apple Silicon
 
     steps:
     - name: Checkout code
@@ -21,13 +21,30 @@ jobs:
         uname -m
         clang --version
 
+    - name: Validate environment
+      run: |
+        chmod +x scripts/validate_environment.sh
+        ./scripts/validate_environment.sh || true  # Don't fail on GPU check in CI
+
     - name: Build library
       run: make
 
-    - name: Note about testing
+    - name: Build tests
       run: |
-        echo "✓ Build successful"
+        make build/test_correctness
+        make build/test_precision
+        make build/bench_dgemm
+
+    - name: Note about GPU tests
+      run: |
+        echo "═══════════════════════════════════════════════════════════════════"
+        echo "✓ Build successful!"
         echo ""
-        echo "Note: Tests require Apple Silicon with Metal GPU."
-        echo "GitHub Actions runners don't have GPU access."
-        echo "Run tests locally: ./build/test_correctness && ./build/test_precision"
+        echo "Note: GPU tests require Apple Silicon hardware with Metal support."
+        echo "GitHub Actions runners don't have GPU access for Metal compute."
+        echo ""
+        echo "To run tests locally:"
+        echo "  ./build/test_correctness"
+        echo "  ./build/test_precision"
+        echo "  ./build/bench_dgemm"
+        echo "═══════════════════════════════════════════════════════════════════"
