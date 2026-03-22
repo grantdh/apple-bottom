@@ -1,49 +1,42 @@
-# Description
+## Description
 
-Please include a summary of the change and which issue is fixed.
+Brief description of changes.
 
-Fixes # (issue)
+## Type of Change
 
-## Type of change
-
-- [ ] Bug fix (non-breaking change which fixes an issue)
-- [ ] New feature (non-breaking change which adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
-- [ ] Documentation update
+- [ ] Bug fix
+- [ ] New feature
 - [ ] Performance improvement
+- [ ] Documentation update
 
-## Testing
+## Testing Checklist
 
-- [ ] All exercises build successfully
-- [ ] Correctness tests pass (relative error < 10⁻¹⁴ vs Accelerate DGEMM)
-- [ ] Performance validated (GFLOP/s measurements included below)
+⚠️ **CI cannot run GPU tests. You MUST test locally on Apple Silicon.**
 
-### Performance Results (if applicable)
+- [ ] Ran `make clean && make` — builds without warnings
+- [ ] Ran `make test` — all tests pass
+- [ ] Ran `make bench` — performance within 5% of baseline
 
-| Matrix Size | Before | After | Change |
-|-------------|--------|-------|--------|
-| 1024×1024   |        |       |        |
-| 2048×2048   |        |       |        |
-| 4096×4096   |        |       |        |
+### Test Output
 
-**Hardware:** [e.g., M2 Max, 30-core GPU]
+```
+(Paste output of ./build/test_correctness here)
+```
 
-## Checklist
+### Benchmark Results (if performance-related)
 
-- [ ] My code follows the style of this project
-- [ ] I have commented my code, particularly in hard-to-understand areas
-- [ ] I have updated the documentation accordingly
-- [ ] I have added tests that prove my fix is effective or that my feature works
-- [ ] New and existing tests pass locally
-- [ ] Any dependent changes have been merged and published
+```
+(Paste output of ./build/bench_dgemm here)
+```
 
-## For DD (Double-Float) Code
+## Performance Baseline (M2 Max)
 
-- [ ] Uses `mathMode = .safe` in Metal compilation options
-- [ ] Validated precision against Accelerate DGEMM
-- [ ] Documented register usage estimates
-- [ ] Included performance comparison data
+| Size | Expected GFLOP/s |
+|------|------------------|
+| 2048 | 620-640 |
+| 3072 | 630-650 |
+| 4096 | 640-660 |
 
-## Additional context
+## Additional Notes
 
-Add any other context about the PR here.
+Any additional context about the changes.

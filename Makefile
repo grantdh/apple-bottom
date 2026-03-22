@@ -144,3 +144,25 @@ install: lib
 	install -m 644 $(BUILD)/libapplebottom.a $(PREFIX)/lib/
 	install -m 644 $(INCLUDE)/apple_bottom.h $(PREFIX)/include/
 	@echo "Installed to $(PREFIX)"
+# =============================================================================
+# Add these targets to the end of your Makefile
+# =============================================================================
+
+# Sanitizer builds (for local debugging)
+.PHONY: test-asan test-ubsan
+
+test-asan: clean
+	@echo "Building with AddressSanitizer..."
+	$(OBJC) $(OBJCFLAGS) -fsanitize=address -g -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $(BUILD)/apple_bottom.o
+	ar rcs $(BUILD)/libapplebottom.a $(BUILD)/apple_bottom.o
+	$(CC) $(CFLAGS) -fsanitize=address -g -I$(INCLUDE) tests/test_correctness.c -o $(BUILD)/test_correctness -L$(BUILD) -lapplebottom $(LDFLAGS)
+	@echo "Running tests with ASan..."
+	ASAN_OPTIONS=detect_leaks=1 ./$(BUILD)/test_correctness
+
+test-ubsan: clean
+	@echo "Building with UndefinedBehaviorSanitizer..."
+	$(OBJC) $(OBJCFLAGS) -fsanitize=undefined -g -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $(BUILD)/apple_bottom.o
+	ar rcs $(BUILD)/libapplebottom.a $(BUILD)/apple_bottom.o
+	$(CC) $(CFLAGS) -fsanitize=undefined -g -I$(INCLUDE) tests/test_correctness.c -o $(BUILD)/test_correctness -L$(BUILD) -lapplebottom $(LDFLAGS)
+	@echo "Running tests with UBSan..."
+	./$(BUILD)/test_correctness

@@ -1,0 +1,35 @@
+#!/bin/bash
+# =============================================================================
+# apple-bottom pre-commit hook
+# Install: cp scripts/pre-commit .git/hooks/ && chmod +x .git/hooks/pre-commit
+# =============================================================================
+
+set -e
+
+echo "Running pre-commit checks..."
+
+# Build
+make clean > /dev/null 2>&1
+make > /dev/null 2>&1
+
+# Run tests
+echo -n "Running correctness tests... "
+if ./build/test_correctness 2>&1 | grep -q "0 failed"; then
+    echo "✓"
+else
+    echo "✗ FAILED"
+    ./build/test_correctness
+    exit 1
+fi
+
+echo -n "Running precision tests... "
+if ./build/test_precision 2>&1 | grep -q "All precision tests PASSED"; then
+    echo "✓"
+else
+    echo "✗ FAILED"
+    ./build/test_precision
+    exit 1
+fi
+
+echo ""
+echo "✓ All pre-commit checks passed"
