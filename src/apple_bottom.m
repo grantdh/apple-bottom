@@ -45,7 +45,7 @@ static inline double dd_to_fp64(DDFloat d) {
 // Statistics (Thread-Safe)
 // =============================================================================
 
-static ABStats g_stats = {0};
+static ABStats g_stats = {};
 static os_unfair_lock g_stats_lock = OS_UNFAIR_LOCK_INIT;
 static mach_timebase_info_data_t g_timebase;
 
@@ -549,7 +549,7 @@ ABMatrix ab_matrix_create(int rows, int cols) {
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return NULL;
     
-    struct ABMatrix_s* m = malloc(sizeof(struct ABMatrix_s));
+    struct ABMatrix_s* m = (struct ABMatrix_s*)malloc(sizeof(struct ABMatrix_s));
     if (!m) return NULL;
     
     m->rows = rows;
@@ -877,7 +877,7 @@ ABStatus ab_zherk(ABMatrix Ar, ABMatrix Ai, ABMatrix Cr, ABMatrix Ci) {
 // =============================================================================
 
 ABSession ab_session_create(void) {
-    return calloc(1, sizeof(struct ABSession_s));
+    return (ABSession)calloc(1, sizeof(struct ABSession_s));
 }
 
 void ab_session_destroy(ABSession s) {

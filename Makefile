@@ -15,7 +15,7 @@ OBJC = clang
 
 CFLAGS = -Wall -Wextra -O3 -std=c11 -DACCELERATE_NEW_LAPACK
 OBJCFLAGS = -Wall -Wextra -O3 -fobjc-arc -DACCELERATE_NEW_LAPACK
-LDFLAGS = -framework Metal -framework Foundation -framework Accelerate
+LDFLAGS = -lc++ -framework Metal -framework Foundation -framework Accelerate
 
 BUILD = build
 SRC = src
@@ -48,7 +48,7 @@ $(BUILD):
 # =============================================================================
 
 $(BUILD)/apple_bottom.o: $(SRC)/apple_bottom.m $(INCLUDE)/apple_bottom.h | $(BUILD)
-	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -c $(SRC)/apple_bottom.m -o $@
+	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $@
 
 $(BUILD)/libapplebottom.a: $(BUILD)/apple_bottom.o
 	ar rcs $@ $<
