@@ -20,7 +20,7 @@ A clear and concise description of what you expected to happen.
 
 **Environment:**
  - macOS version: [e.g., macOS 14.3]
- - Chip: [e.g., M2 Max, 30-core GPU]
+ - Chip: [e.g., M2 Max, 38-core GPU]
  - Swift version: [run `swift --version`]
  - Xcode version: [if applicable]
 
