@@ -822,9 +822,175 @@ ABStatus ab_matrix_scale(double alpha, ABMatrix A) {
     return AB_OK;
 }
 
+// =============================================================================
+// ZGEMM: Complex Matrix Multiply with Transpose Support
+// =============================================================================
+
+// Forward declaration of internal ZGEMM
+static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci);
+
+// Extended ZGEMM with transpose support (for QE compatibility)
+ABStatus ab_zgemm_ex(
+    ABTranspose transA, ABTranspose transB,
+    ABMatrix Ar, ABMatrix Ai,
+    ABMatrix Br, ABMatrix Bi,
+    ABMatrix Cr, ABMatrix Ci
+) {
+    if (!Ar || !Ai || !Br || !Bi || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
+
+    ABContextImpl* ctx = [ABContextImpl shared];
+    if (!ctx) return AB_ERROR_NO_DEVICE;
+
+    // Determine dimensions after transpose
+    int M = (transA == AB_NO_TRANS) ? Ar->rows : Ar->cols;
+    int K_A = (transA == AB_NO_TRANS) ? Ar->cols : Ar->rows;
+    int K_B = (transB == AB_NO_TRANS) ? Br->rows : Br->cols;
+    int N = (transB == AB_NO_TRANS) ? Br->cols : Br->rows;
+
+    // Validate dimensions
+    if (K_A != K_B) return AB_ERROR_DIMENSION_MISMATCH;
+    if (M != Cr->rows || N != Cr->cols) return AB_ERROR_DIMENSION_MISMATCH;
+
+    // Working matrices (either original or transposed)
+    ABMatrix A_work_r = Ar, A_work_i = Ai;
+    ABMatrix B_work_r = Br, B_work_i = Bi;
+    bool allocated_A = false, allocated_B = false;
+
+    ABStatus status = AB_OK;
+
+    // Transpose A if needed
+    if (transA != AB_NO_TRANS) {
+        A_work_r = ab_matrix_create(M, K_A);
+        A_work_i = ab_matrix_create(M, K_A);
+        if (!A_work_r || !A_work_i) {
+            status = AB_ERROR_ALLOC_FAILED;
+            goto cleanup;
+        }
+        allocated_A = true;
+
+        id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+
+        if (transA == AB_CONJ_TRANS) {
+            // Conjugate transpose
+            [enc setComputePipelineState:ctx.conjTransposePipeline];
+            [enc setBuffer:Ar->buffer offset:0 atIndex:0];
+            [enc setBuffer:Ai->buffer offset:0 atIndex:1];
+            [enc setBuffer:A_work_r->buffer offset:0 atIndex:2];
+            [enc setBuffer:A_work_i->buffer offset:0 atIndex:3];
+            uint32_t rows = Ar->rows, cols = Ar->cols;
+            [enc setBytes:&rows length:sizeof(rows) atIndex:4];
+            [enc setBytes:&cols length:sizeof(cols) atIndex:5];
+
+            MTLSize grid = MTLSizeMake((Ar->cols + 15) / 16, (Ar->rows + 15) / 16, 1);
+            MTLSize block = MTLSizeMake(16, 16, 1);
+            [enc dispatchThreadgroups:grid threadsPerThreadgroup:block];
+        } else {
+            // Regular transpose (AB_TRANS)
+            [enc setComputePipelineState:ctx.transposePipeline];
+
+            // Transpose real part
+            [enc setBuffer:Ar->buffer offset:0 atIndex:0];
+            [enc setBuffer:A_work_r->buffer offset:0 atIndex:1];
+            uint32_t rows = Ar->rows, cols = Ar->cols;
+            [enc setBytes:&rows length:sizeof(rows) atIndex:2];
+            [enc setBytes:&cols length:sizeof(cols) atIndex:3];
+
+            MTLSize grid = MTLSizeMake((Ar->cols + 15) / 16, (Ar->rows + 15) / 16, 1);
+            MTLSize block = MTLSizeMake(16, 16, 1);
+            [enc dispatchThreadgroups:grid threadsPerThreadgroup:block];
+
+            // Transpose imaginary part
+            [enc setBuffer:Ai->buffer offset:0 atIndex:0];
+            [enc setBuffer:A_work_i->buffer offset:0 atIndex:1];
+            [enc setBytes:&rows length:sizeof(rows) atIndex:2];
+            [enc setBytes:&cols length:sizeof(cols) atIndex:3];
+            [enc dispatchThreadgroups:grid threadsPerThreadgroup:block];
+        }
+
+        [enc endEncoding];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+
+        A_work_r->uploaded = true;
+        A_work_i->uploaded = true;
+    }
+
+    // Transpose B if needed
+    if (transB != AB_NO_TRANS) {
+        B_work_r = ab_matrix_create(K_B, N);
+        B_work_i = ab_matrix_create(K_B, N);
+        if (!B_work_r || !B_work_i) {
+            status = AB_ERROR_ALLOC_FAILED;
+            goto cleanup;
+        }
+        allocated_B = true;
+
+        id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+
+        if (transB == AB_CONJ_TRANS) {
+            [enc setComputePipelineState:ctx.conjTransposePipeline];
+            [enc setBuffer:Br->buffer offset:0 atIndex:0];
+            [enc setBuffer:Bi->buffer offset:0 atIndex:1];
+            [enc setBuffer:B_work_r->buffer offset:0 atIndex:2];
+            [enc setBuffer:B_work_i->buffer offset:0 atIndex:3];
+            uint32_t rows = Br->rows, cols = Br->cols;
+            [enc setBytes:&rows length:sizeof(rows) atIndex:4];
+            [enc setBytes:&cols length:sizeof(cols) atIndex:5];
+
+            MTLSize grid = MTLSizeMake((Br->cols + 15) / 16, (Br->rows + 15) / 16, 1);
+            MTLSize block = MTLSizeMake(16, 16, 1);
+            [enc dispatchThreadgroups:grid threadsPerThreadgroup:block];
+        } else {
+            [enc setComputePipelineState:ctx.transposePipeline];
+
+            [enc setBuffer:Br->buffer offset:0 atIndex:0];
+            [enc setBuffer:B_work_r->buffer offset:0 atIndex:1];
+            uint32_t rows = Br->rows, cols = Br->cols;
+            [enc setBytes:&rows length:sizeof(rows) atIndex:2];
+            [enc setBytes:&cols length:sizeof(cols) atIndex:3];
+
+            MTLSize grid = MTLSizeMake((Br->cols + 15) / 16, (Br->rows + 15) / 16, 1);
+            MTLSize block = MTLSizeMake(16, 16, 1);
+            [enc dispatchThreadgroups:grid threadsPerThreadgroup:block];
+
+            [enc setBuffer:Bi->buffer offset:0 atIndex:0];
+            [enc setBuffer:B_work_i->buffer offset:0 atIndex:1];
+            [enc setBytes:&rows length:sizeof(rows) atIndex:2];
+            [enc setBytes:&cols length:sizeof(cols) atIndex:3];
+            [enc dispatchThreadgroups:grid threadsPerThreadgroup:block];
+        }
+
+        [enc endEncoding];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+
+        B_work_r->uploaded = true;
+        B_work_i->uploaded = true;
+    }
+
+    // Call internal ZGEMM with (possibly transposed) matrices
+    status = ab_zgemm_internal(A_work_r, A_work_i, B_work_r, B_work_i, Cr, Ci);
+
+cleanup:
+    // Cleanup temporary transpose buffers
+    if (allocated_A) {
+        ab_matrix_destroy(A_work_r);
+        ab_matrix_destroy(A_work_i);
+    }
+    if (allocated_B) {
+        ab_matrix_destroy(B_work_r);
+        ab_matrix_destroy(B_work_i);
+    }
+
+    return status;
+}
+
 // ZGEMM using Gauss's trick: 3 real multiplications instead of 4
 // (A_r + iA_i)(B_r + iB_i) = (A_r*B_r - A_i*B_i) + i((A_r+A_i)(B_r+B_i) - A_r*B_r - A_i*B_i)
-ABStatus ab_zgemm(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci) {
+// NOTE: This is the internal implementation - ab_zgemm is now a wrapper
+static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci) {
     if (!Ar || !Ai || !Br || !Bi || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
     
     int M = Ar->rows, N = Br->cols, K = Ar->cols;
@@ -869,6 +1035,11 @@ cleanup:
     ab_matrix_destroy(T3);
     ab_matrix_destroy(T4);
     return status;
+}
+
+// Public ab_zgemm: wrapper for ab_zgemm_ex with no transpose
+ABStatus ab_zgemm(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci) {
+    return ab_zgemm_ex(AB_NO_TRANS, AB_NO_TRANS, Ar, Ai, Br, Bi, Cr, Ci);
 }
 
 ABStatus ab_dsyrk(ABMatrix A, ABMatrix C) {
