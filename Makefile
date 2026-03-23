@@ -90,7 +90,7 @@ $(BUILD)/bench_zgemm: benchmarks/bench_zgemm.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
 	@echo "Built: $@"
 
-bench: $(BUILD)/bench_dgemm $(BUILD)/bench_zgemm $(BUILD)/bench_dsyrk $(BUILD)/bench_zherk
+bench: $(BUILD)/bench_dgemm $(BUILD)/bench_pool $(BUILD)/bench_zgemm $(BUILD)/bench_dsyrk $(BUILD)/bench_zherk
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "DGEMM Benchmark"
@@ -172,5 +172,9 @@ $(BUILD)/bench_dsyrk: benchmarks/bench_dsyrk.c lib | $(BUILD)
 	@echo "Built: $@"
 
 $(BUILD)/bench_zherk: benchmarks/bench_zherk.c lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	@echo "Built: $@"
+
+$(BUILD)/bench_pool: benchmarks/bench_pool.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
 	@echo "Built: $@"

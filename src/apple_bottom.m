@@ -921,6 +921,89 @@ ABStatus ab_zherk(ABMatrix Ar, ABMatrix Ai, ABMatrix Cr, ABMatrix Ci) {
     return AB_OK;
 }
 // =============================================================================
+// =============================================================================
+// Public API: Memory Pool
+// =============================================================================
+
+#define AB_POOL_MAX_ENTRIES 128
+
+struct ABPoolEntry {
+    ABMatrix matrix;
+    bool in_use;
+};
+
+struct ABMemoryPool_s {
+    struct ABPoolEntry entries[AB_POOL_MAX_ENTRIES];
+    int count;
+    size_t total_allocated;
+};
+
+ABMemoryPool ab_pool_create(size_t size_hint) {
+    (void)size_hint;  // Reserved for future pre-allocation
+    ABMemoryPool pool = (ABMemoryPool)calloc(1, sizeof(struct ABMemoryPool_s));
+    return pool;
+}
+
+void ab_pool_destroy(ABMemoryPool pool) {
+    if (!pool) return;
+    for (int i = 0; i < pool->count; i++) {
+        ab_matrix_destroy(pool->entries[i].matrix);
+    }
+    free(pool);
+}
+
+ABMatrix ab_pool_get_matrix(ABMemoryPool pool, int rows, int cols) {
+    if (!pool) return ab_matrix_create(rows, cols);
+    size_t needed = (size_t)rows * cols;
+    
+    // Look for available matrix with matching size
+    for (int i = 0; i < pool->count; i++) {
+        if (!pool->entries[i].in_use && pool->entries[i].matrix) {
+            ABMatrix m = pool->entries[i].matrix;
+            if (m->rows == rows && m->cols == cols) {
+                pool->entries[i].in_use = true;
+                m->uploaded = false;
+                return m;
+            }
+        }
+    }
+    
+    // Look for available matrix with sufficient capacity
+    for (int i = 0; i < pool->count; i++) {
+        if (!pool->entries[i].in_use && pool->entries[i].matrix) {
+            ABMatrix m = pool->entries[i].matrix;
+            if (m->count >= needed) {
+                pool->entries[i].in_use = true;
+                m->rows = rows;
+                m->cols = cols;
+                m->uploaded = false;
+                return m;
+            }
+        }
+    }
+    
+    // Create new matrix and add to pool
+    if (pool->count >= AB_POOL_MAX_ENTRIES) {
+        return ab_matrix_create(rows, cols);  // Pool full, return unmanaged
+    }
+    
+    ABMatrix m = ab_matrix_create(rows, cols);
+    if (m) {
+        pool->entries[pool->count].matrix = m;
+        pool->entries[pool->count].in_use = true;
+        pool->count++;
+        pool->total_allocated += needed * sizeof(float) * 2;
+    }
+    return m;
+}
+
+void ab_pool_reset(ABMemoryPool pool) {
+    if (!pool) return;
+    for (int i = 0; i < pool->count; i++) {
+        pool->entries[i].in_use = false;
+    }
+}
+
 // Public API: Session Management
 // =============================================================================
 
