@@ -13,7 +13,7 @@
 //   - DGEMM: GPU wins for N >= 2048
 //   - ZGEMM: GPU wins for N >= 1024  
 //   - DSYRK: GPU wins for N >= 3072
-//   - ZHERK: CPU (AMX) is faster — uses CPU transpose, not optimized
+//   - ZHERK: Use cblas_zherk (AMX) instead — GPU decomposition is 20x slower
 // =============================================================================
 #ifndef APPLE_BOTTOM_H
 #define APPLE_BOTTOM_H
