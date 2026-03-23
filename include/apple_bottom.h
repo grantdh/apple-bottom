@@ -33,6 +33,7 @@ extern "C" {
 
 typedef struct ABMatrix_s* ABMatrix;
 typedef struct ABSession_s* ABSession;
+typedef struct ABMemoryPool_s* ABMemoryPool;
 
 typedef enum {
     AB_OK = 0,
@@ -71,6 +72,12 @@ ABStatus ab_matrix_upload(ABMatrix m, const double* data, bool parallel);
 ABStatus ab_matrix_download(ABMatrix m, double* data, bool parallel);
 ABStatus ab_matrix_zero(ABMatrix m);
 ABStatus ab_matrix_copy(ABMatrix src, ABMatrix dst);
+
+// Memory Pool API (reduces allocation overhead in iterative codes)
+ABMemoryPool ab_pool_create(size_t size_hint);
+void ab_pool_destroy(ABMemoryPool pool);
+ABMatrix ab_pool_get_matrix(ABMemoryPool pool, int rows, int cols);
+void ab_pool_reset(ABMemoryPool pool);  // Mark all matrices as available
 
 // BLAS operations
 ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C);
