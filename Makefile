@@ -178,3 +178,7 @@ $(BUILD)/bench_zherk: benchmarks/bench_zherk.c lib | $(BUILD)
 $(BUILD)/bench_pool: benchmarks/bench_pool.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
 	@echo "Built: $@"
+
+$(BUILD)/bench_async: benchmarks/bench_async.c lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	@echo "Built: $@"

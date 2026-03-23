@@ -34,6 +34,7 @@ extern "C" {
 typedef struct ABMatrix_s* ABMatrix;
 typedef struct ABSession_s* ABSession;
 typedef struct ABMemoryPool_s* ABMemoryPool;
+typedef struct ABFuture_s* ABFuture;
 
 typedef enum {
     AB_OK = 0,
@@ -78,6 +79,15 @@ ABMemoryPool ab_pool_create(size_t size_hint);
 void ab_pool_destroy(ABMemoryPool pool);
 ABMatrix ab_pool_get_matrix(ABMemoryPool pool, int rows, int cols);
 void ab_pool_reset(ABMemoryPool pool);  // Mark all matrices as available
+
+// Async API (overlap GPU compute with CPU work)
+ABFuture ab_dgemm_async(ABMatrix A, ABMatrix B, ABMatrix C);
+ABFuture ab_zgemm_async(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
+                        ABMatrix Cr, ABMatrix Ci);
+ABStatus ab_future_wait(ABFuture f);
+bool ab_future_is_ready(ABFuture f);
+ABStatus ab_future_status(ABFuture f);
+void ab_future_destroy(ABFuture f);
 
 // BLAS operations
 ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C);

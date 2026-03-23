@@ -1004,6 +1004,113 @@ void ab_pool_reset(ABMemoryPool pool) {
     }
 }
 
+// =============================================================================
+// Public API: Async Operations
+// =============================================================================
+
+struct ABFuture_s {
+    id<MTLCommandBuffer> cmdBuffer;
+    ABStatus status;
+    bool completed;
+};
+
+static ABFuture create_future_with_buffer(id<MTLCommandBuffer> cmdBuffer) {
+    ABFuture f = (ABFuture)calloc(1, sizeof(struct ABFuture_s));
+    if (!f) return NULL;
+    f->cmdBuffer = cmdBuffer;
+    f->status = AB_OK;
+    f->completed = false;
+    return f;
+}
+
+ABFuture ab_dgemm_async(ABMatrix A, ABMatrix B, ABMatrix C) {
+    if (!A || !B || !C) return NULL;
+    if (A->cols != B->rows) return NULL;
+    if (A->rows != C->rows || B->cols != C->cols) return NULL;
+    if (!A->uploaded || !B->uploaded) return NULL;
+    
+    ABContextImpl* ctx = [ABContextImpl shared];
+    if (!ctx) return NULL;
+    
+    int M = A->rows, N = B->cols, K = A->cols;
+    
+    id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+    
+    bool useAB = (M == N && N == K && (M % 64 == 0));
+    [encoder setComputePipelineState: useAB ? ctx.dgemmABPipeline : ctx.dgemmPipeline];
+    [encoder setBuffer:A->buffer offset:0 atIndex:0];
+    [encoder setBuffer:B->buffer offset:0 atIndex:1];
+    [encoder setBuffer:C->buffer offset:0 atIndex:2];
+    
+    int dims[] = {M, N, K};
+    [encoder setBytes:dims length:sizeof(dims) atIndex:3];
+    
+    MTLSize grid = MTLSizeMake((N + 63) / 64, (M + 63) / 64, 1);
+    MTLSize block = MTLSizeMake(16, 16, 1);
+    [encoder dispatchThreadgroups:grid threadsPerThreadgroup:block];
+    [encoder endEncoding];
+    
+    [cmdBuf commit];
+    C->uploaded = true;
+    
+    ABFuture f = create_future_with_buffer(cmdBuf);
+    return f;
+}
+
+ABFuture ab_zgemm_async(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
+                        ABMatrix Cr, ABMatrix Ci) {
+    // For now, run sync and wrap in future (full async requires multiple command buffers)
+    ABStatus s = ab_zgemm(Ar, Ai, Br, Bi, Cr, Ci);
+    ABFuture f = (ABFuture)calloc(1, sizeof(struct ABFuture_s));
+    if (f) {
+        f->cmdBuffer = nil;
+        f->status = s;
+        f->completed = true;
+    }
+    return f;
+}
+
+ABStatus ab_future_wait(ABFuture f) {
+    if (!f) return AB_ERROR_INVALID_ARG;
+    if (!f->completed && f->cmdBuffer) {
+        [f->cmdBuffer waitUntilCompleted];
+        if (f->cmdBuffer.status == MTLCommandBufferStatusError) {
+            f->status = AB_ERROR_KERNEL_FAILED;
+        }
+        f->completed = true;
+    }
+    return f->status;
+}
+
+bool ab_future_is_ready(ABFuture f) {
+    if (!f) return true;
+    if (f->completed) return true;
+    if (f->cmdBuffer) {
+        MTLCommandBufferStatus s = f->cmdBuffer.status;
+        if (s == MTLCommandBufferStatusCompleted || s == MTLCommandBufferStatusError) {
+            f->completed = true;
+            if (s == MTLCommandBufferStatusError) f->status = AB_ERROR_KERNEL_FAILED;
+            return true;
+        }
+    }
+    return false;
+}
+
+ABStatus ab_future_status(ABFuture f) {
+    if (!f) return AB_ERROR_INVALID_ARG;
+    return f->status;
+}
+
+void ab_future_destroy(ABFuture f) {
+    if (!f) return;
+    if (!f->completed && f->cmdBuffer) {
+        [f->cmdBuffer waitUntilCompleted];
+    }
+    free(f);
+}
+
+
 // Public API: Session Management
 // =============================================================================
 
