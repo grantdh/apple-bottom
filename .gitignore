@@ -52,7 +52,8 @@ ex[0-9][0-9][a-z]
 dd_gemm
 dd_gemm_bench
 test
-test_*
+# Test binaries (not source files)
+/test_*
 *.o
 *.a
 *.dylib
