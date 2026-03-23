@@ -47,6 +47,12 @@ typedef enum {
     AB_ERROR_SHADER_COMPILE = -7,
 } ABStatus;
 
+typedef enum {
+    AB_NO_TRANS = 0,      // Use matrix as-is
+    AB_TRANS = 1,         // Transpose (swap rows/cols)
+    AB_CONJ_TRANS = 2     // Conjugate transpose A^H (for complex)
+} ABTranspose;
+
 typedef struct {
     double upload_time_ms;
     double download_time_ms;
@@ -93,6 +99,15 @@ void ab_future_destroy(ABFuture f);
 ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C);
 ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C);
 ABStatus ab_zgemm(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci);
+
+// Extended ZGEMM with transpose support (for QE compatibility)
+ABStatus ab_zgemm_ex(
+    ABTranspose transA, ABTranspose transB,
+    ABMatrix Ar, ABMatrix Ai,
+    ABMatrix Br, ABMatrix Bi,
+    ABMatrix Cr, ABMatrix Ci
+);
+
 ABStatus ab_dsyrk(ABMatrix A, ABMatrix C);
 
 // DEPRECATED: ab_zherk is 20x slower than cblas_zherk due to CPU-side transpose overhead.
