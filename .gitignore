@@ -1,73 +1,19 @@
 # macOS
 .DS_Store
-.AppleDouble
-.LSOverride
 ._*
 
-# Thumbnails
-Thumbs.db
-
-# Files that might appear in the root of a volume
-.DocumentRevisions-V100
-.fseventsd
-.Spotlight-V100
-.TemporaryItems
-.Trashes
-.VolumeIcon.icns
-.com.apple.timemachine.donotpresent
-
-# Directories potentially created on remote AFP share
-.AppleDB
-.AppleDesktop
-Network Trash Folder
-Temporary Items
-.apdisk
-
-# Vim
+# Editors
 *.swp
 *.swo
 *~
-.*.sw[a-p]
 
-# Swift / Xcode
-.build/
-*.xcodeproj
-*.xcworkspace
-!default.xcworkspace
-xcuserdata/
-DerivedData/
-*.moved-aside
-*.pbxuser
-!default.pbxuser
-*.mode1v3
-!default.mode1v3
-*.mode2v3
-!default.mode2v3
-*.perspectivev3
-!default.perspectivev3
-
-# Compiled binaries
-ex[0-9][0-9]
-ex[0-9][0-9][a-z]
-dd_gemm
-dd_gemm_bench
-test
-# Test binaries (not source files)
-/test_*
+# Build artifacts
+build/
 *.o
 *.a
 *.dylib
 *.so
 
-# Build artifacts
-build/
-dist/
-
 # Profiling
 *.profdata
 *.profraw
-
-# Benchmarks output
-benchmark_results/
-*.csv
-perf_*.txt
