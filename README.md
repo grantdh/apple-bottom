@@ -1,6 +1,6 @@
 # apple-bottom 🍑
 
-[![Tests](https://img.shields.io/badge/tests-36%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-37%20passing-brightgreen)](tests/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-14%2B-orange)](https://www.apple.com/macos/)
 [![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1%2FM2%2FM3%2FM4-red)](https://support.apple.com/en-us/116943)
@@ -23,7 +23,7 @@ Apple Silicon GPUs only support FP32 natively. Scientific computing (DFT, quantu
 git clone https://github.com/grantdh/apple-bottom.git
 cd apple-bottom
 make
-make test        # 36 tests, all passing
+make test        # 37 tests, all passing
 make bench       # See performance on your machine
 ```
 
@@ -92,6 +92,22 @@ ab_future_destroy(f);
 // C = A × B where A, B, C are complex matrices
 // Stored as separate real/imaginary parts
 ab_zgemm(Ar, Ai, Br, Bi, Cr, Ci);
+
+// Transpose support for Quantum ESPRESSO compatibility
+// C = A^H × B (conjugate-transpose × no-transpose)
+ab_zgemm_ex(AB_CONJ_TRANS, AB_NO_TRANS, Ar, Ai, Br, Bi, Cr, Ci);
+```
+
+### Quantum ESPRESSO Integration
+```c
+// QE's calbec pattern: C = A^H × B
+// (256 × 4096) conjugate-transpose × (4096 × 32) no-transpose
+ab_zgemm_ex(AB_CONJ_TRANS, AB_NO_TRANS, psi_r, psi_i, vkb_r, vkb_i, becp_r, becp_i);
+
+// Supported transpose modes:
+// AB_NO_TRANS    - Use matrix as-is
+// AB_TRANS       - Regular transpose (swap rows/cols)
+// AB_CONJ_TRANS  - Conjugate transpose A^H (negates imaginary part)
 ```
 
 ## Performance (M2 Max)
@@ -121,9 +137,10 @@ Async Overlap:
 ```c
 ABStatus ab_dgemm(A, B, C);           // C = A × B
 ABStatus ab_dgemm_scaled(α, A, B, β, C); // C = αAB + βC
-ABStatus ab_zgemm(...);               // Complex GEMM
+ABStatus ab_zgemm(...);               // Complex GEMM (no transpose)
+ABStatus ab_zgemm_ex(transA, transB, ...); // Complex GEMM with transpose
 ABStatus ab_dsyrk(A, C);              // C = A × Aᵀ
-ABStatus ab_zherk(...);               // Complex Hermitian rank-k
+ABStatus ab_zherk(...);               // Complex Hermitian rank-k (deprecated)
 ```
 
 ### Matrix Management
