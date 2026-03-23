@@ -1021,6 +1021,7 @@ const char* ab_status_string(ABStatus status) {
         case AB_ERROR_NOT_UPLOADED: return "Matrix data not uploaded";
         case AB_ERROR_KERNEL_FAILED: return "GPU kernel execution failed";
         case AB_ERROR_INVALID_ARG: return "Invalid argument";
+        case AB_ERROR_SHADER_COMPILE: return "Shader compilation failed";
         default: return "Unknown error";
     }
 }
