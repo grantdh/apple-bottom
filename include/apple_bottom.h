@@ -94,6 +94,12 @@ ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C);
 ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C);
 ABStatus ab_zgemm(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci);
 ABStatus ab_dsyrk(ABMatrix A, ABMatrix C);
+
+// DEPRECATED: ab_zherk is 20x slower than cblas_zherk due to CPU-side transpose overhead.
+// Use cblas_zherk from Accelerate instead. This function will be removed in v2.0.
+#ifdef __GNUC__
+__attribute__((deprecated("Use cblas_zherk instead - GPU decomposition is 20x slower than AMX")))
+#endif
 ABStatus ab_zherk(ABMatrix Ar, ABMatrix Ai, ABMatrix Cr, ABMatrix Ci);
 
 // Element-wise operations
