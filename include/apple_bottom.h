@@ -42,6 +42,7 @@ typedef enum {
     AB_ERROR_NOT_UPLOADED = -4,
     AB_ERROR_KERNEL_FAILED = -5,
     AB_ERROR_INVALID_ARG = -6,
+    AB_ERROR_SHADER_COMPILE = -7,
 } ABStatus;
 
 typedef struct {
