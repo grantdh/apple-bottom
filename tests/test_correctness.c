@@ -273,7 +273,7 @@ static void test_dgemm_vs_accelerate(void) {
 }
 
 static void test_zgemm_vs_accelerate(void) {
-    TEST("ab_zgemm matches Accelerate");
+    TEST("ab_zgemm (no transpose) matches Accelerate");
     ab_init();
     int N = 64;
     size_t count = (size_t)N * N;
@@ -319,6 +319,79 @@ static void test_zgemm_vs_accelerate(void) {
     free(Ar); free(Ai); free(Br); free(Bi); free(Cr); free(Ci);
     free(A_ref); free(B_ref); free(C_ref);
     ab_shutdown();
+    if (max_err < 1e-10) PASS(); else FAIL("precision too low");
+}
+
+static void test_zgemm_conj_transpose(void) {
+    TEST("ab_zgemm_ex conjugate transpose (QE pattern)");
+    ab_init();
+
+    // QE pattern: C = A^H × B (conjugate-transpose × no-transpose)
+    int M = 64, N = 32, K = 64;
+    size_t count_A = (size_t)M * K;
+    size_t count_B = (size_t)K * N;
+    size_t count_C = (size_t)M * N;
+
+    double* Ar = (double*)malloc(count_A * sizeof(double));
+    double* Ai = (double*)malloc(count_A * sizeof(double));
+    double* Br = (double*)malloc(count_B * sizeof(double));
+    double* Bi = (double*)malloc(count_B * sizeof(double));
+    double* Cr_gpu = (double*)malloc(count_C * sizeof(double));
+    double* Ci_gpu = (double*)malloc(count_C * sizeof(double));
+
+    double complex* A_ref = (double complex*)malloc(count_A * sizeof(double complex));
+    double complex* B_ref = (double complex*)malloc(count_B * sizeof(double complex));
+    double complex* C_ref = (double complex*)malloc(count_C * sizeof(double complex));
+
+    srand48(999);
+    for (size_t i = 0; i < count_A; i++) {
+        Ar[i] = drand48(); Ai[i] = drand48();
+        A_ref[i] = Ar[i] + I * Ai[i];
+    }
+    for (size_t i = 0; i < count_B; i++) {
+        Br[i] = drand48(); Bi[i] = drand48();
+        B_ref[i] = Br[i] + I * Bi[i];
+    }
+
+    // GPU: C = A^H × B
+    ABMatrix mAr = ab_matrix_create(M, K);
+    ABMatrix mAi = ab_matrix_create(M, K);
+    ABMatrix mBr = ab_matrix_create(K, N);
+    ABMatrix mBi = ab_matrix_create(K, N);
+    ABMatrix mCr = ab_matrix_create(M, N);
+    ABMatrix mCi = ab_matrix_create(M, N);
+
+    ab_matrix_upload(mAr, Ar, false);
+    ab_matrix_upload(mAi, Ai, false);
+    ab_matrix_upload(mBr, Br, false);
+    ab_matrix_upload(mBi, Bi, false);
+
+    ab_zgemm_ex(AB_CONJ_TRANS, AB_NO_TRANS, mAr, mAi, mBr, mBi, mCr, mCi);
+
+    ab_matrix_download(mCr, Cr_gpu, false);
+    ab_matrix_download(mCi, Ci_gpu, false);
+
+    // Reference: cblas_zgemm with CblasConjTrans
+    double complex alpha = 1.0, beta = 0.0;
+    cblas_zgemm(CblasRowMajor, CblasConjTrans, CblasNoTrans,
+                M, N, K, &alpha, A_ref, K, B_ref, N, &beta, C_ref, N);
+
+    // Compare
+    double max_err = 0;
+    for (size_t i = 0; i < count_C; i++) {
+        double err_r = fabs(Cr_gpu[i] - creal(C_ref[i]));
+        double err_i = fabs(Ci_gpu[i] - cimag(C_ref[i]));
+        if (err_r > max_err) max_err = err_r;
+        if (err_i > max_err) max_err = err_i;
+    }
+
+    ab_matrix_destroy(mAr); ab_matrix_destroy(mAi);
+    ab_matrix_destroy(mBr); ab_matrix_destroy(mBi);
+    ab_matrix_destroy(mCr); ab_matrix_destroy(mCi);
+    free(Ar); free(Ai); free(Br); free(Bi); free(Cr_gpu); free(Ci_gpu);
+    free(A_ref); free(B_ref); free(C_ref);
+    ab_shutdown();
+
     if (max_err < 1e-10) PASS(); else FAIL("precision too low");
 }
 
@@ -686,6 +759,7 @@ int main(void) {
     test_dgemm_null_matrices();
     test_dgemm_vs_accelerate();
     test_zgemm_vs_accelerate();
+    test_zgemm_conj_transpose();
     
     printf("\nSession API:\n");
     test_session_basic();
