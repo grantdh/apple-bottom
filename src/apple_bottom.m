@@ -407,6 +407,48 @@ kernel void dd_matrix_scale(device DD* A [[buffer(0)]], constant float& alpha [[
 kernel void dd_matrix_copy(device const DD* src [[buffer(0)]], device DD* dst [[buffer(1)]], constant uint& count [[buffer(2)]], uint gid [[thread_position_in_grid]]) {
     if (gid < count) dst[gid] = src[gid];
 }
+
+// =============================================================================
+// Transpose Kernels (for ZGEMM transpose variants)
+// =============================================================================
+
+// Regular transpose: dst[j, i] = src[i, j]
+kernel void dd_transpose(
+    device const DD* src [[buffer(0)]],
+    device DD* dst [[buffer(1)]],
+    constant uint& rows [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x < cols && gid.y < rows) {
+        uint src_idx = gid.y * cols + gid.x;  // row-major [row, col]
+        uint dst_idx = gid.x * rows + gid.y;  // transposed [col, row]
+        dst[dst_idx] = src[src_idx];
+    }
+}
+
+// Conjugate transpose for complex: dst[j, i] = conj(src[i, j])
+// For complex number a + bi, conjugate is a - bi
+kernel void dd_conj_transpose(
+    device const DD* src_r [[buffer(0)]],
+    device const DD* src_i [[buffer(1)]],
+    device DD* dst_r [[buffer(2)]],
+    device DD* dst_i [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& cols [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x < cols && gid.y < rows) {
+        uint src_idx = gid.y * cols + gid.x;  // [row, col]
+        uint dst_idx = gid.x * rows + gid.y;  // [col, row]
+
+        // Transpose: swap (row, col) → (col, row)
+        dst_r[dst_idx] = src_r[src_idx];
+
+        // Conjugate: negate imaginary part
+        dst_i[dst_idx] = DD{-src_i[src_idx].hi, -src_i[src_idx].lo};
+    }
+}
 )");
 
 // =============================================================================
@@ -422,6 +464,8 @@ kernel void dd_matrix_copy(device const DD* src [[buffer(0)]], device DD* dst [[
 @property (nonatomic, strong) id<MTLComputePipelineState> zeroPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> addPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> subPipeline;
+@property (nonatomic, strong) id<MTLComputePipelineState> transposePipeline;
+@property (nonatomic, strong) id<MTLComputePipelineState> conjTransposePipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> scalePipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> matCopyPipeline;
 + (instancetype)shared;
@@ -461,7 +505,9 @@ static dispatch_once_t g_init_once;
         _subPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_matrix_sub"] error:&error];
         _scalePipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_matrix_scale"] error:&error];
         _matCopyPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_matrix_copy"] error:&error];
-        
+        _transposePipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_transpose"] error:&error];
+        _conjTransposePipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_conj_transpose"] error:&error];
+
         if (!_dgemmPipeline || !_zeroPipeline) { NSLog(@"Pipeline creation failed: %@", error); return nil; }
     }
     return self;
