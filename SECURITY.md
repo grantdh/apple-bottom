@@ -26,7 +26,7 @@ This library does NOT handle:
 If you discover a security vulnerability, please report it responsibly:
 
 1. **DO NOT** open a public issue
-2. Email: [security contact - add your email]
+2. Email: grantdheileman@gmail.com
 3. Include:
    - Description of the vulnerability
    - Steps to reproduce
