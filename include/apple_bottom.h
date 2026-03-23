@@ -1,6 +1,6 @@
 // =============================================================================
 // apple_bottom.h — FP64-class BLAS for Apple Silicon GPU
-// Copyright (c) 2026 Grant Heileman, UNM ECE. MIT License.
+// Copyright (c) 2026 Grant Heileman, Technology Residue. MIT License.
 // =============================================================================
 
 // =============================================================================
