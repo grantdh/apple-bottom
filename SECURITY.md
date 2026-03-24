@@ -4,6 +4,7 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
+| 1.1.x   | :white_check_mark: |
 | 1.0.x   | :white_check_mark: |
 
 ## Scope
@@ -87,7 +88,3 @@ if (status != AB_OK) {
 1. **Single-threaded initialization**: `ab_init()` should only be called from one thread
 2. **No concurrent GPU access**: Operations are serialized per command queue
 3. **Unified memory**: Large matrices compete with system RAM
-
-## Acknowledgments
-
-We thank security researchers who responsibly disclose vulnerabilities.

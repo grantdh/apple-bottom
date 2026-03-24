@@ -1,54 +1,49 @@
-# apple-bottom 🍑
+# apple-bottom
 
 [![Tests](https://img.shields.io/badge/tests-37%20passing-brightgreen)](tests/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![macOS](https://img.shields.io/badge/macOS-14%2B-orange)](https://www.apple.com/macos/)
-[![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1%2FM2%2FM3%2FM4-red)](https://support.apple.com/en-us/116943)
+[![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-orange)](https://www.apple.com/macos/)
 
-**FP64-precision BLAS for Apple Silicon GPU** — double-float emulation achieving ~10⁻¹⁵ precision with up to 1.3× speedup over AMX for large matrices.
+Double-precision BLAS library for Apple Silicon GPU using Metal compute shaders. Implements FP64-class operations through double-float emulation with ~10⁻¹⁵ precision.
 
-## Why apple-bottom?
+## Overview
 
-Apple Silicon GPUs only support FP32 natively. Scientific computing (DFT, quantum chemistry, molecular dynamics) requires FP64. This library uses **double-float arithmetic** to deliver FP64-class precision on the GPU.
+Apple Silicon GPUs lack native FP64 support. This library uses double-float (FP32×2) arithmetic to achieve scientific computing precision requirements while leveraging GPU parallelism.
 
-| Operation | vs AMX | Crossover | Precision |
-|-----------|--------|-----------|-----------|
-| **DGEMM** | +12% faster | N ≥ 2048 | ~10⁻¹⁵ |
-| **ZGEMM** | +32% faster | N ≥ 1024 | ~10⁻¹⁵ |
-| **DSYRK** | +14% faster | N ≥ 3072 | ~10⁻¹⁵ |
-| ZHERK | Use AMX | — | — |
+| Operation | Performance vs AMX | Crossover Point | Precision |
+|-----------|-------------------|-----------------|-----------|
+| DGEMM | +12% faster | N ≥ 2048 | ~10⁻¹⁵ |
+| ZGEMM | +32% faster | N ≥ 1024 | ~10⁻¹⁵ |
+| DSYRK | +14% faster | N ≥ 3072 | ~10⁻¹⁵ |
 
-## Quick Start
+## Installation
+
 ```bash
 git clone https://github.com/grantdh/apple-bottom.git
 cd apple-bottom
 make
-make test        # 37 tests, all passing
-make bench       # See performance on your machine
+make test
 ```
 
 ## Usage
+
 ```c
 #include "apple_bottom.h"
 
 int main() {
     ab_init();
-    
-    // Create matrices
+
     ABMatrix A = ab_matrix_create(2048, 2048);
     ABMatrix B = ab_matrix_create(2048, 2048);
     ABMatrix C = ab_matrix_create(2048, 2048);
-    
-    // Upload data
-    ab_matrix_upload(A, my_data_A, true);
-    ab_matrix_upload(B, my_data_B, true);
-    
-    // Compute C = A × B (FP64 precision on GPU!)
-    ab_dgemm(A, B, C);
-    
-    // Download result
+
+    ab_matrix_upload(A, data_A, true);
+    ab_matrix_upload(B, data_B, true);
+
+    ab_dgemm(A, B, C);  // C = A × B
+
     ab_matrix_download(C, result, true);
-    
+
     ab_matrix_destroy(A);
     ab_matrix_destroy(B);
     ab_matrix_destroy(C);
@@ -56,117 +51,87 @@ int main() {
 }
 ```
 
-## Features for Scientific Computing
+## Features
 
-### Memory Pool (1.4-1.8× faster SCF loops)
+### Memory Pool
+
+Reduces allocation overhead in iterative codes:
+
 ```c
 ABMemoryPool pool = ab_pool_create(0);
 
-for (int scf = 0; scf < 100; scf++) {
-    ABMatrix F = ab_pool_get_matrix(pool, N, N);  // Reuses allocation
-    ABMatrix D = ab_pool_get_matrix(pool, N, N);
-    ABMatrix FD = ab_pool_get_matrix(pool, N, N);
-    
-    // ... compute ...
-    
-    ab_pool_reset(pool);  // Mark all as available (no free!)
+for (int i = 0; i < 100; i++) {
+    ABMatrix tmp = ab_pool_get_matrix(pool, N, N);
+    // ... use matrix ...
+    ab_pool_reset(pool);  // Reuse without free
 }
 
 ab_pool_destroy(pool);
 ```
 
-### Async API (18× speedup with CPU/GPU overlap)
+### Async Operations
+
+Overlap CPU and GPU work:
+
 ```c
 ABFuture f = ab_dgemm_async(A, B, C);
-
 // Do CPU work while GPU computes
-prepare_next_iteration();
-compute_eigenvalues();
-
-ab_future_wait(f);  // Block until GPU done
+ab_future_wait(f);
 ab_future_destroy(f);
 ```
 
-### Complex Arithmetic (ZGEMM)
+### Complex Arithmetic
+
 ```c
-// C = A × B where A, B, C are complex matrices
-// Stored as separate real/imaginary parts
+// Basic ZGEMM
 ab_zgemm(Ar, Ai, Br, Bi, Cr, Ci);
 
-// Transpose support for Quantum ESPRESSO compatibility
-// C = A^H × B (conjugate-transpose × no-transpose)
+// With transpose support
 ab_zgemm_ex(AB_CONJ_TRANS, AB_NO_TRANS, Ar, Ai, Br, Bi, Cr, Ci);
 ```
 
-### Quantum ESPRESSO Integration
-```c
-// QE's calbec pattern: C = A^H × B
-// (256 × 4096) conjugate-transpose × (4096 × 32) no-transpose
-ab_zgemm_ex(AB_CONJ_TRANS, AB_NO_TRANS, psi_r, psi_i, vkb_r, vkb_i, becp_r, becp_i);
-
-// Supported transpose modes:
-// AB_NO_TRANS    - Use matrix as-is
-// AB_TRANS       - Regular transpose (swap rows/cols)
-// AB_CONJ_TRANS  - Conjugate transpose A^H (negates imaginary part)
-```
-
-## Performance (M2 Max)
-```
-DGEMM Benchmark:
-  Size    │  AMX GFLOP/s │  GPU GFLOP/s │  Speedup
-──────────┼──────────────┼──────────────┼───────────
-  1024    │       547    │       483    │   0.88x
-  2048    │       533    │       585    │   1.10x ✓
-  4096    │       543    │       611    │   1.12x ✓
-
-ZGEMM Benchmark:
-  2048    │       563    │       726    │   1.29x ✓
-  3072    │       590    │       696    │   1.18x ✓
-
-Memory Pool (100 SCF iterations):
-  256x256:  1.77x faster with pool
-  1024x1024: 1.46x faster with pool
-
-Async Overlap:
-  Sync:  110.8ms | Async: 6.0ms | 18.6× speedup
-```
-
-## API Reference
+## API
 
 ### Core Operations
+
 ```c
-ABStatus ab_dgemm(A, B, C);           // C = A × B
-ABStatus ab_dgemm_scaled(α, A, B, β, C); // C = αAB + βC
-ABStatus ab_zgemm(...);               // Complex GEMM (no transpose)
-ABStatus ab_zgemm_ex(transA, transB, ...); // Complex GEMM with transpose
-ABStatus ab_dsyrk(A, C);              // C = A × Aᵀ
-ABStatus ab_zherk(...);               // Complex Hermitian rank-k (deprecated)
+ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C);
+ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B,
+                         double beta, ABMatrix C);
+ABStatus ab_zgemm(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
+                  ABMatrix Cr, ABMatrix Ci);
+ABStatus ab_zgemm_ex(ABTranspose transA, ABTranspose transB,
+                     ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
+                     ABMatrix Cr, ABMatrix Ci);
+ABStatus ab_dsyrk(ABMatrix A, ABMatrix C);
 ```
 
 ### Matrix Management
+
 ```c
-ABMatrix ab_matrix_create(rows, cols);
-void ab_matrix_destroy(m);
-ABStatus ab_matrix_upload(m, data, parallel);
-ABStatus ab_matrix_download(m, data, parallel);
-ABStatus ab_matrix_zero(m);
-ABStatus ab_matrix_copy(src, dst);
+ABMatrix ab_matrix_create(int rows, int cols);
+void ab_matrix_destroy(ABMatrix m);
+ABStatus ab_matrix_upload(ABMatrix m, const double* data, bool parallel);
+ABStatus ab_matrix_download(ABMatrix m, double* data, bool parallel);
+ABStatus ab_matrix_zero(ABMatrix m);
+ABStatus ab_matrix_copy(ABMatrix src, ABMatrix dst);
 ```
 
-### Memory Pool
-```c
-ABMemoryPool ab_pool_create(size_hint);
-ABMatrix ab_pool_get_matrix(pool, rows, cols);
-void ab_pool_reset(pool);
-void ab_pool_destroy(pool);
-```
+## Performance
 
-### Async Operations
-```c
-ABFuture ab_dgemm_async(A, B, C);
-ABStatus ab_future_wait(f);
-bool ab_future_is_ready(f);
-void ab_future_destroy(f);
+Benchmarks on M2 Max (38-core GPU, 64 GB):
+
+```
+DGEMM:
+  Size    │  AMX GFLOP/s │  GPU GFLOP/s │  Speedup
+──────────┼──────────────┼──────────────┼───────────
+  1024    │       547    │       483    │   0.88x
+  2048    │       533    │       585    │   1.10x
+  4096    │       543    │       611    │   1.12x
+
+ZGEMM:
+  2048    │       563    │       726    │   1.29x
+  3072    │       590    │       696    │   1.18x
 ```
 
 ## Requirements
@@ -175,38 +140,13 @@ void ab_future_destroy(f);
 - Apple Silicon (M1/M2/M3/M4)
 - Xcode Command Line Tools
 
-## Thread Safety
-
-- `ab_init()`/`ab_shutdown()`: Thread-safe (uses `dispatch_once`)
-- Matrix operations: NOT thread-safe (Metal command queue serializes)
-- Use separate pools for concurrent workloads
-
 ## Limitations
 
-- **ZHERK**: Use `cblas_zherk` instead — GPU decomposition is 20× slower
-- **Small matrices**: AMX wins below crossover points
-- **Max dimension**: 46,340 × 46,340 (overflow protection)
-
-## Citation
-
-If you use apple-bottom in your research, please cite:
-```bibtex
-@software{apple_bottom,
-  author = {Heileman, Grant},
-  title = {apple-bottom: FP64 BLAS for Apple Silicon GPU},
-  year = {2026},
-  url = {https://github.com/grantdh/apple-bottom}
-}
-```
+- Small matrices (N < 2048): AMX/Accelerate is faster
+- ZHERK operation: 20× slower than AMX, use `cblas_zherk` instead
+- Thread safety: Matrix operations not thread-safe (Metal command queue serializes)
+- Max dimension: 46,340 × 46,340 (overflow protection)
 
 ## License
 
-MIT License — see [LICENSE](LICENSE)
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
----
-
-**Built for quantum chemistry on Apple Silicon** 🧪💻
+MIT License - see [LICENSE](LICENSE)

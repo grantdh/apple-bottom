@@ -1,134 +1,60 @@
-# Contributing to apple-bottom
+# Contributing
 
-Thank you for your interest in contributing! This document provides guidelines for contributing to apple-bottom.
+## Setup
 
-## Code of Conduct
-
-Be respectful, inclusive, and constructive. We're all here to make FP64 computing on Apple Silicon better.
-
-## Getting Started
-
-1. Fork the repository
-2. Clone your fork: `git clone git@github.com:YOUR_USERNAME/apple-bottom.git`
-3. Create a branch: `git checkout -b feature/your-feature`
-4. Make your changes
-5. Test locally: `make && make test`
-6. Commit with clear messages
-7. Push and open a Pull Request
-
-## Development Setup
-
-### Requirements
-- macOS 12+ (Monterey or later)
-- Apple Silicon (M1/M2/M3/M4)
-- Xcode Command Line Tools: `xcode-select --install`
-
-### Build
 ```bash
-make          # Build library and examples
-make test     # Run tests
-make bench    # Run benchmarks
-make clean    # Clean build artifacts
+git clone https://github.com/YOUR_USERNAME/apple-bottom.git
+cd apple-bottom
+make && make test
 ```
 
-## What We're Looking For
+## Requirements
 
-### High Priority
-- [ ] Additional BLAS operations (DTRSM, DPOTRF, DGETRF)
-- [ ] Python bindings (NumPy-compatible)
-- [ ] Performance tuning for M3/M4 chips
-- [ ] Async/non-blocking compute variants
-
-### Medium Priority
-- [ ] More comprehensive test coverage
-- [ ] Integration examples (Quantum ESPRESSO, PySCF)
-- [ ] Documentation improvements
-- [ ] Fortran bindings
-
-### Always Welcome
-- Bug fixes with test cases
-- Performance improvements with benchmarks
-- Documentation clarifications
-- Typo fixes
+- macOS 14+ (Sonoma)
+- Apple Silicon (M1/M2/M3/M4)
+- Xcode Command Line Tools
 
 ## Code Style
 
 ### C/Objective-C
+
 - C11 standard
 - 4-space indentation
-- `snake_case` for functions: `ab_matrix_create`
-- `PascalCase` for types: `ABMatrix`, `ABStatus`
+- `snake_case` for functions
+- `PascalCase` for types
 - Braces on same line
-- Clear, descriptive names
 
 ### Metal Shaders
+
 - Match C style
 - Document numerical algorithms
-- Explain magic numbers (tile sizes, etc.)
-
-### Example
-```c
-ABStatus ab_matrix_create(int rows, int cols) {
-    if (rows <= 0 || cols <= 0) {
-        return AB_ERROR_INVALID_ARG;
-    }
-    // ... implementation
-}
-```
+- Explain tile sizes and magic numbers
 
 ## Testing
 
 All changes must:
-1. Pass existing tests: `./build/test_correctness && ./build/test_precision`
+
+1. Pass existing tests: `make test`
 2. Include new tests for new functionality
-3. Not regress performance (run `./build/bench_dgemm`)
+3. Not regress performance: `make bench`
 
-### Adding Tests
+## Pull Requests
 
-Add tests to `tests/test_correctness.c`:
-```c
-static void test_your_feature(void) {
-    TEST("your feature description");
-    // ... test code
-    if (success) PASS(); else FAIL("reason");
-}
-```
+1. Create a feature branch
+2. Make changes with clear commit messages
+3. Run tests and benchmarks
+4. Open PR with description of changes
 
-## Pull Request Process
+### Performance Changes
 
-1. **Title**: Clear, descriptive (e.g., "Add DTRSM implementation")
-2. **Description**: What, why, and how
-3. **Tests**: Include test results
-4. **Benchmarks**: For performance changes, include before/after
+Include before/after benchmarks:
 
-### PR Checklist
-- [ ] Code compiles without warnings (`make`)
-- [ ] All tests pass (`make test`)
-- [ ] New tests added for new features
-- [ ] Documentation updated if needed
-- [ ] Commit messages are clear
-
-## Performance Contributions
-
-For performance improvements:
-1. Run benchmarks on your hardware
-2. Include before/after numbers
-3. Specify your chip (M1/M2/M3, Pro/Max/Ultra)
-4. Test multiple matrix sizes
-
-Example:
 ```
 M2 Max, 38 GPU cores:
-DGEMM 2048x2048:
+DGEMM 2048×2048:
   Before: 580 GFLOP/s
   After:  650 GFLOP/s (+12%)
 ```
-
-## Questions?
-
-- Open an issue for bugs or feature requests
-- Tag with appropriate labels
-- Be patient - this is a volunteer project
 
 ## License
 
