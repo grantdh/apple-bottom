@@ -34,7 +34,7 @@ All notable changes to this project will be documented in this file.
 - Session API for named matrix management
 - Thread-safe statistics tracking
 - 22-test correctness suite
-- Precision validation (~10⁻¹⁶ Frobenius error)
+- Precision validation (~10⁻¹⁵ Frobenius error)
 
 ### Technical Details
 - Double-float (FP32×2) emulation using Dekker/Knuth algorithms

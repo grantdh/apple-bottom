@@ -5,7 +5,7 @@
 //
 // Implementation Notes:
 // - Uses double-float (DD) format: each FP64 stored as {float hi, float lo}
-// - Achieves ~10⁻¹⁶ precision via Dekker/Knuth error-free transformations
+// - Achieves ~10⁻¹⁵ precision via Dekker/Knuth error-free transformations
 // - Tiled GEMM with BM=BN=64, TM=TN=4, TK=16 (tuned for M1/M2/M3)
 //
 // Tile Size Rationale:
