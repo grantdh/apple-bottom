@@ -5,7 +5,7 @@
 [![macOS](https://img.shields.io/badge/macOS-14%2B-orange)](https://www.apple.com/macos/)
 [![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1%2FM2%2FM3%2FM4-red)](https://support.apple.com/en-us/116943)
 
-**FP64-precision BLAS for Apple Silicon GPU** — double-float emulation achieving 10⁻¹⁶ precision with up to 1.3× speedup over AMX for large matrices.
+**FP64-precision BLAS for Apple Silicon GPU** — double-float emulation achieving ~10⁻¹⁵ precision with up to 1.3× speedup over AMX for large matrices.
 
 ## Why apple-bottom?
 
@@ -13,9 +13,9 @@ Apple Silicon GPUs only support FP32 natively. Scientific computing (DFT, quantu
 
 | Operation | vs AMX | Crossover | Precision |
 |-----------|--------|-----------|-----------|
-| **DGEMM** | +12% faster | N ≥ 2048 | 10⁻¹⁶ |
-| **ZGEMM** | +32% faster | N ≥ 1024 | 10⁻¹⁶ |
-| **DSYRK** | +14% faster | N ≥ 3072 | 10⁻¹⁶ |
+| **DGEMM** | +12% faster | N ≥ 2048 | ~10⁻¹⁵ |
+| **ZGEMM** | +32% faster | N ≥ 1024 | ~10⁻¹⁵ |
+| **DSYRK** | +14% faster | N ≥ 3072 | ~10⁻¹⁵ |
 | ZHERK | Use AMX | — | — |
 
 ## Quick Start
