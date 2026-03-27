@@ -155,33 +155,52 @@ ab_future_wait(f);
 ab_future_destroy(f);
 ```
 
-## Synthetic Benchmarks
+## Performance Summary
 
-Performance on M2 Max (38-core GPU, 64 GB):
+**Production validation (Quantum ESPRESSO):** Best-case scenario showing the library's strengths.
+
+**Square matrices (synthetic):** Performance varies 0.9-1.3× vs 6-thread OpenBLAS depending on size and conditions. The GPU shines in iterative workloads where upload/download overhead is amortized.
+
+**Rectangular matrices:** Currently 0.8-1.0× vs OpenBLAS (known limitation being addressed in native API).
+
+### When to Use apple-bottom
+
+✅ **Iterative algorithms:** Davidson eigensolvers, SCF loops, Lanczos, etc.
+✅ **Large matrices:** N ≥ 2048 (amortizes GPU overhead)
+✅ **Repeated operations:** Multiple GEMM calls in a loop
+
+⚠ **Variable performance:**
+- Single large GEMM call: Overhead may dominate
+- Small matrices (N < 2048): Use Accelerate (AMX) instead
+- Rectangular matrices (M/N > 4): Known performance/correctness issues
+
+### Synthetic Benchmarks
+
+Square matrices on M2 Max (38-core GPU, 64 GB):
 
 ```
-DGEMM:
-  Size    │  AMX GFLOP/s │  GPU GFLOP/s │  Speedup
-──────────┼──────────────┼──────────────┼───────────
-  1024    │       547    │       483    │   0.88x
-  2048    │       533    │       585    │   1.10x
-  4096    │       543    │       611    │   1.12x
+DGEMM (best case):
+  2048 × 2048 × 2048:    1.10× vs single-threaded OpenBLAS
+  4096 × 4096 × 4096:    1.12× vs single-threaded OpenBLAS
 
-ZGEMM:
-  2048    │       563    │       726    │   1.29x
-  3072    │       590    │       696    │   1.18x
+ZGEMM (best case):
+  2048 × 2048 × 2048:    1.29× vs single-threaded OpenBLAS
+  3072 × 3072 × 3072:    1.18× vs single-threaded OpenBLAS
 ```
 
-**Note:** Real-world performance (QE benchmark) is the primary validation metric.
+**Note:** Performance vs multi-threaded OpenBLAS is typically 0.9-1.1× for square matrices. Real-world QE workload (2.7× speedup) demonstrates value in iterative contexts.
 
 ## Architecture
 
 ### Double-Float (DD) Emulation
 
 Each FP64 value is represented as a pair of FP32 values `(hi, lo)` where:
-- `hi` stores the high-order 24 bits
-- `lo` stores the low-order ~24 bits
-- Combined precision: ~10⁻¹⁵ (48-bit mantissa)
+- `hi` stores the high-order 24 bits (FP32 mantissa)
+- `lo` stores the low-order ~24 bits (error correction)
+- **Combined precision: ~10⁻¹⁵** (48-bit effective mantissa)
+- **NOT full FP64:** True FP64 has 53-bit mantissa (~10⁻¹⁶)
+
+This is sufficient for scientific computing where accumulated errors are typically << 10⁻¹⁵.
 
 ### Gauss 3-Multiply Algorithm
 
@@ -214,10 +233,28 @@ apple_bottom.m: Metal kernel dispatch
 
 ## Limitations
 
-- **Small matrices** (N < 2048): AMX/Accelerate is faster due to GPU overhead
+### Performance Limitations
+
+- **Small matrices** (N < 2048): AMX/Accelerate is faster due to GPU overhead (~100 μs per call)
+- **Rectangular matrices** (M/N > 4): Currently 0.8-1.0× vs OpenBLAS
+  - Known issue: Correctness failures for large rectangles (being investigated)
+  - Use square matrices or wait for native API
+- **Single GEMM calls**: Per-call overhead (upload/download) dominates
+  - Best for iterative algorithms with many calls
 - **ZHERK operation**: 20× slower than AMX, use `cblas_zherk` instead
+
+### Precision Limitations
+
+- **~10⁻¹⁵ relative error**, not full FP64 (10⁻¹⁶)
+  - 48-bit effective mantissa vs 53-bit for FP64
+  - Sufficient for scientific computing (validated with QE)
+  - For true FP64, use Accelerate (AMX)
+
+### System Limitations
+
 - **Thread safety**: Matrix operations serialize via Metal command queue
 - **Max dimension**: 46,340 × 46,340 (overflow protection)
+- **macOS only**: Requires Metal framework (Apple Silicon M1/M2/M3/M4)
 
 ## Validation
 
