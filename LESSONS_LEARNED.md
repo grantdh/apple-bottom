@@ -6,13 +6,13 @@
 
 ## Executive Summary
 
-We attempted two optimizations for QE (threaded FFT, GPU BLAS) and encountered systematic issues due to inadequate upfront analysis. This document captures the lessons to prevent repeating mistakes.
+This document analyzes two attempted optimizations for Quantum ESPRESSO (threaded FFT, GPU BLAS) and documents the technical challenges encountered. The analysis provides guidance for future integration efforts.
 
 ---
 
 ## Issue 1: Threaded FFTW Failure
 
-### What We Tried
+### Attempted Approaches
 1. OpenMP FFTW (`libfftw3_omp`) - 42× slower due to ABI mismatch with gfortran
 2. pthreads FFTW (`libfftw3_threads`) - crashed or slower on small grids
 
@@ -21,10 +21,10 @@ We attempted two optimizations for QE (threaded FFT, GPU BLAS) and encountered s
 - Small FFT grids (36³) have more threading overhead than benefit
 - Large grids (72³) showed 4.8× speedup in isolation but QE crashed
 
-### Lesson
-**Before attempting library threading changes:**
+### Analysis
+**Prerequisites for library threading changes:**
 1. Check ABI compatibility: `nm -D` both libraries, verify runtime symbols match
-2. Test threading benefit at actual problem sizes FIRST (not in isolation)
+2. Test threading benefit at actual problem sizes before integration
 3. For QE specifically: FFT is only ~30% of runtime - even 5× FFT speedup = 15% total improvement
 
 ### Correct Approach (Not Yet Implemented)
@@ -42,21 +42,21 @@ brew install fftw
 
 ## Issue 2: apple-bottom BLAS Integration Failure
 
-### Architecture We Discovered (Too Late)
+### QE Call Chain Architecture
 ```
 QE Call Chain:
   becmod.f90 → MYZGEMM() 
     → UtilXlib/device_helper.f90 
       → ZGEMM (standard BLAS)
 
-What We Needed:
+Required Integration:
   MYZGEMM() → ab_zgemm_blas() [BLAS-compatible wrapper]
     → Routing logic (size check, beta check)
       → GPU path: ab_zgemm() [split-complex ABMatrix API]
       → CPU path: cblas_zgemm() [fallback]
 ```
 
-### Critical Discovery: The Beta Bug
+### Beta Parameter Handling
 
 QE's eigensolver calls ZGEMM with `beta=1.0` to accumulate results:
 ```fortran
@@ -75,15 +75,16 @@ This works for small matrices (routed to BLAS fallback) but fails when:
 
 **Result:** Wrong eigenvalues → wrong energy (-2989 vs -2990 Ry) → "S matrix not positive definite" crash
 
-### What We Got Wrong
+### Integration Challenges
 
-1. **Two library locations** - confusion between:
-   - `~/Dev/arm/metal-algos/build/libapplebottom.a` (development)
-   - `~/apple-bottom/build/libapplebottom.a` (QE expects this)
-   
+1. **Build artifact location** - QE integration requires library path consistency:
+   - Development builds in `~/Dev/arm/metal-algos/build/`
+   - QE links against `~/apple-bottom/build/` (requires symlink or copy)
+   - Recommendation: Use symlink to maintain single source of truth
+
 2. **Symbol naming collision** - apple-bottom already has:
    - `ab_zgemm(ABMatrix...)` - split-complex matrix API
-   - We added `ab_zgemm_blas(char, char, int...)` - BLAS-compatible API
+   - Added `ab_zgemm_blas(char, char, int...)` - BLAS-compatible API
    - Fortran module tried to call wrong one
 
 3. **Module placement** - put `apple_bottom_mod.f90` in wrong directory:
@@ -150,7 +151,7 @@ ab_print_stats()  →  ab_print_stats()   →  existing
 
 2. **In QE UtilXlib** (`~/qe-test/q-e-qe-7.4.1/UtilXlib/`):
 ```bash
-   # Create minimal apple_bottom_mod.f90 (ONLY the symbols we need)
+   # Create minimal apple_bottom_mod.f90 (only the required symbols)
    # Add to Makefile BEFORE device_helper.o
    
    # Modify device_helper.f90:
@@ -193,13 +194,15 @@ grep '!' si64_ab.out  # MUST match baseline energy
 
 ## Current State (as of end of session)
 
-### What's Done
+### Implementation Status
+
+**Completed:**
 - [x] `blas_wrapper.c` created with `ab_zgemm_blas()` and `ab_dgemm_blas()`
 - [x] Wrapper routes to BLAS fallback when `beta != 0`
 - [x] `device_helper.f90` patched with `__APPLE_BOTTOM__` branch
 - [x] Minimal `apple_bottom_mod.f90` in `UtilXlib/`
 
-### What's Broken
+**Pending Resolution:**
 - [ ] Old `apple_bottom_mod.f90` still in `Modules/` - causes duplicate symbols
 - [ ] `libqemod.a` contains old module - needs rebuild
 
@@ -319,9 +322,9 @@ bool should_use_gpu(int M, int N, int K, double alpha, double beta) {
 
 ## QE Integration SUCCESS (March 26, 2026)
 
-### The Breakthrough: EXTERNAL Declaration
+### Implementation: EXTERNAL Declaration
 
-After all the failed attempts with modules and BIND(C), the solution was elegantly simple:
+The successful integration uses Fortran's EXTERNAL declaration:
 
 ```fortran
 ! In cegterg.f90, after IMPLICIT NONE:
@@ -374,13 +377,13 @@ BLAS wrapper (blas_wrapper.c):
 
 **Energy validation:** `-2990.44276157 Ry` ✓ (exact match to baseline)
 
-**What this means:**
+**Performance characteristics:**
 - 14% faster than 6-thread OpenBLAS
 - 2.7× faster than single-threaded baseline
-- Replacing CPU thread parallelism with GPU compute
+- GPU compute replaces CPU thread parallelism
 - GPU overhead is ~3s per 2-minute run
 
-### What Failed Before Success
+### Unsuccessful Approaches
 
 **1. Module Interface with BIND(C)**
 ```fortran
