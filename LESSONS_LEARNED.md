@@ -307,10 +307,253 @@ bool should_use_gpu(int M, int N, int K, double alpha, double beta) {
 
 ## Next Session Checklist
 
-- [ ] Remove old `Modules/apple_bottom_mod.f90`
-- [ ] Rebuild Modules cleanly
-- [ ] Verify `UtilXlib/apple_bottom_mod.f90` compiles first
-- [ ] Rebuild QE
-- [ ] Validate energy matches baseline
-- [ ] If working: benchmark performance
-- [ ] If faster: tag v1.2.0
+- [x] Remove old `Modules/apple_bottom_mod.f90`
+- [x] Rebuild Modules cleanly
+- [x] Verify `UtilXlib/apple_bottom_mod.f90` compiles first
+- [x] Rebuild QE
+- [x] Validate energy matches baseline
+- [x] If working: benchmark performance
+- [x] If faster: tag v1.2.0
+
+---
+
+## QE Integration SUCCESS (March 26, 2026)
+
+### The Breakthrough: EXTERNAL Declaration
+
+After all the failed attempts with modules and BIND(C), the solution was elegantly simple:
+
+```fortran
+! In cegterg.f90, after IMPLICIT NONE:
+IMPLICIT NONE
+EXTERNAL :: ab_zgemm
+
+! Then replace all CALL ZGEMM( with CALL ab_zgemm(
+! (12 replacements in lines 18-701, pcegterg untouched)
+```
+
+**Why this works:**
+- Fortran uses **sequence association** — passes addresses, not descriptors
+- No explicit interface → gfortran doesn't try to construct array descriptors
+- The C bridge receives pointers exactly as standard BLAS expects
+- QE can pass scalar elements like `hpsi(1,n_start)` without segfaulting
+
+### The Integration Architecture
+
+```
+QE cegterg.f90:
+  CALL ab_zgemm('N', 'N', m, n, k, (1.d0,0.d0), A, lda, B, ldb, ...)
+                     ↓
+Fortran bridge (fortran_bridge.c):
+  void ab_zgemm_(const char *transA, ..., const double complex *alpha, ...) {
+      uint64_t flops = (uint64_t)(*M) * (*N) * (*K) * 8;
+
+      if (flops >= 100000000ULL) {
+          ab_zgemm_blas(*transA, ..., *alpha, ...);  // Dereference → GPU
+          return;
+      }
+
+      zgemm_(transA, ..., alpha, ...);  // Pass-through to OpenBLAS
+  }
+                     ↓
+BLAS wrapper (blas_wrapper.c):
+  void ab_zgemm_blas(char transA, ..., double complex alpha, ...) {
+      // Convert to split-complex, upload to GPU, run kernel, download
+  }
+```
+
+**Key insight:** Sub-threshold calls pass pointers **directly** to `zgemm_()` with zero conversion. Only above-threshold calls dereference and convert.
+
+### Performance Results
+
+| Configuration | si64 Wall Time | vs 1-thread | c_bands | cegterg | h_psi | calbec |
+|--------------|----------------|-------------|---------|---------|-------|--------|
+| **OpenBLAS 6-thread** | 2:22 | 2.4× | 109s | 107s | 75.6s | 27.2s |
+| **OpenBLAS 1-thread** | 5:43 | 1.0× | 251s | 248s | 162s | 59.8s |
+| **apple-bottom GPU** | **2:05** | **2.7×** | **112s** | **110s** | **73.2s** | **21.9s** |
+
+**Energy validation:** `-2990.44276157 Ry` ✓ (exact match to baseline)
+
+**What this means:**
+- 14% faster than 6-thread OpenBLAS
+- 2.7× faster than single-threaded baseline
+- Replacing CPU thread parallelism with GPU compute
+- GPU overhead is ~3s per 2-minute run
+
+### What Failed Before Success
+
+**1. Module Interface with BIND(C)**
+```fortran
+! This SEGFAULTS:
+MODULE apple_bottom_mod
+  INTERFACE
+    SUBROUTINE ab_zgemm(...) BIND(C)
+      COMPLEX(8), INTENT(IN) :: A(ldA, *)  ! Rank-2 assumed-size
+    END SUBROUTINE
+  END INTERFACE
+END MODULE
+```
+**Why:** QE passes array slices like `hpsi(1,n_start)` which are scalar elements. With an explicit interface, gfortran tries to construct an array descriptor → segfault.
+
+**2. #define ZGEMM ab_zgemm Macro**
+```fortran
+! This produces WRONG RESULTS:
+#define ZGEMM ab_zgemm
+```
+**Why:** Without an explicit interface, gfortran uses default Fortran calling conventions which pass hidden character length arguments. Our C bridge doesn't expect them → stack corruption → numerical drift → "S matrix not positive definite" crash after 8 SCF iterations.
+
+**3. cblas_zgemm Fallback**
+```c
+// This produces WRONG RESULTS:
+extern void cblas_zgemm(int, int, int, ...);  // Hand-declared
+cblas_zgemm(CblasColMajor, ta, tb, M, N, K, &alpha, ...);
+```
+**Why:** The hand-declared extern resolved to OpenBLAS's cblas_zgemm but with potentially incorrect ABI. Even subtle mismatches in how `double complex` is passed cause numerical drift.
+
+**4. Buffer Pooling (First Attempt)**
+```c
+// This CRASHES:
+static id<MTLBuffer> pool_acquire(size_t needed) { ... }
+// Buffer reused while previous GPU command still in flight
+```
+**Why:** Metal command buffers execute asynchronously. Releasing a buffer back to the pool before `waitUntilCompleted` means the next user overwrites data still being read by the GPU.
+
+### Critical Recovery Steps
+
+When rebuilding from scratch, check these in order:
+
+**Step 0: Symlink**
+```bash
+ls -la ~/apple-bottom  # Must point to ~/Dev/arm/metal-algos
+```
+
+**Step 1: Library symbols**
+```bash
+nm build/libapplebottom.a | grep "ab_[dz]gemm"
+```
+Must show:
+- `_ab_dgemm_` and `_ab_zgemm_` (Fortran-callable with trailing underscore)
+- `_ab_dgemm_blas` and `_ab_zgemm_blas` (C API, no trailing underscore)
+- No duplicate `_ab_print_stats`
+
+**Step 1b: blas_wrapper.c compilation**
+The Makefile doesn't compile `blas_wrapper.c` automatically. Must manually:
+```bash
+clang -Wall -O3 -std=c11 -Iinclude -c src/blas_wrapper.c -o build/blas_wrapper.o
+ar rcs build/libapplebottom.a build/apple_bottom.o build/blas_wrapper.o build/fortran_bridge.o
+```
+
+**Step 2: QE Modules/make.depend**
+```bash
+grep apple_bottom_mod ~/qe-test/q-e-qe-7.4.1/Modules/make.depend
+```
+Must return **nothing** (no stale references)
+
+**Step 3: QE source files are clean**
+These must have **ZERO** apple-bottom references:
+- `Modules/becmod.f90`
+- `UtilXlib/device_helper.f90`
+
+**Step 3b: Clean UtilXlib/device_helper.f90**
+If integration was previously attempted via `device_helper.f90`, remove all traces:
+```bash
+cd ~/qe-test/q-e-qe-7.4.1/UtilXlib
+git checkout device_helper.f90  # Or manually remove #ifdef __APPLE_BOTTOM__ blocks
+```
+
+**Step 4: cegterg.f90 patches**
+```bash
+grep "EXTERNAL :: ab_zgemm" ~/qe-test/q-e-qe-7.4.1/KS_Solvers/Davidson/cegterg.f90
+grep -c "CALL ab_zgemm" ~/qe-test/q-e-qe-7.4.1/KS_Solvers/Davidson/cegterg.f90
+```
+Must have:
+- `EXTERNAL :: ab_zgemm` after `IMPLICIT NONE`
+- 12 `CALL ab_zgemm(` replacements (lines 18-701 only, pcegterg untouched)
+
+**Step 5: make.inc configuration**
+```bash
+grep -A5 "DFLAGS" ~/qe-test/q-e-qe-7.4.1/make.inc
+grep "BLAS_LIBS" ~/qe-test/q-e-qe-7.4.1/make.inc
+```
+Must have:
+- `DFLAGS = ... -D__APPLE_BOTTOM__`
+- `BLAS_LIBS = -L$(HOME)/apple-bottom/build -lapplebottom -framework Accelerate -framework Metal -framework Foundation`
+
+**Step 6: Rebuild and test**
+```bash
+cd ~/qe-test/q-e-qe-7.4.1
+make clean
+make pw -j8
+
+cd ~/qe-test/benchmark
+rm -rf tmp && mkdir -p tmp
+time ~/qe-test/q-e-qe-7.4.1/bin/pw.x < si64.in > si64_test.out 2>&1
+grep '!' si64_test.out
+```
+Expected: `-2990.44276157 Ry` (exact match)
+
+### Repository Structure (Final)
+
+```
+~/Dev/arm/metal-algos/          # Main repo (symlinked from ~/apple-bottom)
+├── src/
+│   ├── apple_bottom.m          # Core Metal implementation
+│   ├── blas_wrapper.c          # BLAS-compatible C API (ab_zgemm_blas, etc.)
+│   └── fortran_bridge.c        # Fortran ABI bridge (ab_zgemm_, etc.)
+├── build/
+│   └── libapplebottom.a        # Static library for QE linking
+└── tests/
+    ├── test_correctness.c
+    ├── test_precision.c
+    └── test_qe_integration.sh  # NEW: Validation script
+
+~/qe-test/q-e-qe-7.4.1/         # QE source (ONLY cegterg.f90 is modified)
+├── KS_Solvers/Davidson/
+│   └── cegterg.f90             # EXTERNAL + CALL ab_zgemm patches
+└── make.inc                    # -D__APPLE_BOTTOM__ + -lapplebottom
+```
+
+### The One File That Gets Patched
+
+**Only `cegterg.f90` is modified.** Everything else stays upstream clean.
+
+```fortran
+! Line ~40-41 (after IMPLICIT NONE):
+IMPLICIT NONE
+EXTERNAL :: ab_zgemm
+
+! Lines 18-701: Replace CALL ZGEMM( with CALL ab_zgemm(
+! (12 replacements total, pcegterg section untouched)
+```
+
+### Next Steps: Native API for GPU-Resident Matrices
+
+The current integration achieves **2.7× speedup** but has per-call overhead:
+- Upload to GPU: 18277×150 complex matrix → 44 MB
+- Download from GPU: 18277×150 complex matrix → 44 MB
+- Happens 12 times per Davidson iteration
+
+**The opportunity:** Keep matrices **resident on GPU** across Davidson iterations.
+
+From integration guide:
+```c
+// Instead of:
+for (int iter = 0; iter < n_iter; iter++) {
+    CALL ab_zgemm(...)  // Upload A, B → compute → download C
+}
+
+// Do this:
+ABZMatrixHandle hpsi_gpu = ab_zmatrix_create(kdim, nvec);
+ab_zmatrix_upload(hpsi_gpu, hpsi_host, 0, nvec);  // Once
+
+for (int iter = 0; iter < n_iter; iter++) {
+    ab_zgemm_gpu(hpsi_gpu, spsi_gpu, hc_gpu, ...);  // No upload/download
+}
+
+ab_zmatrix_download(hpsi_gpu, hpsi_host, 0, nvec);  // Once
+ab_zmatrix_destroy(hpsi_gpu);
+```
+
+**Expected improvement:** 40%+ reduction in wall time (eliminate ~50s of PCIe traffic per run).
+
+**Branch strategy:** Work in `native-api` branch with separate QE copy (`q-e-native`) to preserve working integration.
