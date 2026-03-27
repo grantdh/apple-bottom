@@ -3,8 +3,27 @@
 [![Tests](https://img.shields.io/badge/tests-37%20passing-brightgreen)](tests/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-orange)](https://www.apple.com/macos/)
+[![Metal](https://img.shields.io/badge/Metal-3.0+-red)](https://developer.apple.com/metal/)
+[![Precision](https://img.shields.io/badge/precision-10⁻¹⁵-yellow)](#architecture)
+[![QE Validated](https://img.shields.io/badge/QE-2.7×%20speedup-success)](#quantum-espresso-benchmark)
 
 High-performance BLAS library for Apple Silicon GPU using Metal compute shaders. Implements FP64-class operations through double-float emulation with ~10⁻¹⁵ precision.
+
+---
+
+## Table of Contents
+
+- [Status](#status-production-integration)
+- [Quantum ESPRESSO Benchmark](#quantum-espresso-benchmark)
+- [Quick Start](#quick-start)
+- [API Reference](#api-reference)
+- [Performance](#performance-summary)
+- [Architecture](#architecture)
+- [Limitations](#limitations)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
 
 ## Status: Production Integration
 
