@@ -78,7 +78,10 @@ The Fortran bridge automatically routes:
 - **Small calls** (< 100M FLOPs) → OpenBLAS (zero overhead)
 - **Large calls** (≥ 100M FLOPs) → GPU
 
-See [`LESSONS_LEARNED.md`](LESSONS_LEARNED.md) for integration details.
+**Integration Guides:**
+- [Quantum ESPRESSO Integration](docs/qe-integration.md) — Step-by-step QE 7.4.1 integration
+- [Fortran Integration Guide](docs/fortran-integration.md) — General Fortran BLAS integration
+- [C API Integration](docs/INTEGRATION.md) — Native C API usage
 
 ## Quantum ESPRESSO Benchmark
 
