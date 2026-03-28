@@ -29,31 +29,51 @@ Quantum ESPRESSO Si64 benchmark:
 
 ## Production Workload Performance
 
-### Quantum ESPRESSO Si64 Benchmark
+### Quantum ESPRESSO Benchmarks
+
+**Hardware:** M2 Max (38-core GPU, 64 GB RAM)
+**Date:** March 27, 2026
+**QE Version:** 7.4.1
+
+#### Multi-Size Performance
+
+| System | Baseline (OpenBLAS) | GPU (apple-bottom) | Speedup | Energy Match |
+|--------|---------------------|--------------------|---------| -------------|
+| Si16 (16 atoms) | 5m51.80s | 6m56.50s | 0.84× | ✓ EXACT |
+| Si32 (32 atoms) | 1m39.39s | 1m28.27s | 1.13× | ✓ EXACT |
+| Si64 (64 atoms) | 2m27.89s | 2m 1.49s | **1.22×** | ✓ EXACT |
+| Si64 (500 bands) | 7m25.93s | 6m20.02s | 1.17× | ✓ EXACT |
+
+**Performance characteristics:**
+- Small systems (16 atoms): GPU overhead dominates, 16% slower
+- Medium systems (32-64 atoms): GPU wins 13-22% faster
+- Large band counts (500 bands): GPU wins 17% faster
+- All results show exact energy agreement (11+ decimal places)
+
+#### Si64 Detailed Analysis
 
 **System:** 64-atom silicon crystal, DFT self-consistent field calculation
-**Hardware:** M2 Max (38-core GPU, 64 GB RAM)
+**Energy:** -2990.44276157 Ry (exact match between baseline and GPU)
 
-| Configuration | Wall Time | vs Single-Thread | Energy (Ry) |
-|--------------|-----------|------------------|-------------|
-| OpenBLAS (1 thread) | 5:43 | 1.0× | -2990.44276157 |
-| OpenBLAS (6 threads) | 2:22 | 2.4× | -2990.44276157 |
-| apple-bottom GPU | 2:05 | 2.7× | -2990.44276157 |
+| Routine | Baseline | GPU | Improvement |
+|---------|----------|-----|-------------|
+| **Total (WALL)** | 2m27.89s | 2m1.49s | **22% faster** |
+| cegterg (eigensolver) | 112.25s | 86.49s | 30% faster |
+| sum_band:cal | 6.91s | 3.17s | 118% faster |
+| cegterg:over | 4.88s | 2.21s | 121% faster |
+| cegterg:upda | 4.85s | 1.35s | 259% faster |
+| cegterg:last | 8.42s | 1.93s | 336% faster |
 
-**Performance breakdown by routine:**
+**CPU usage analysis:**
+- Baseline CPU/WALL ratio: 5.27× (multi-threaded OpenBLAS)
+- GPU CPU/WALL ratio: 3.40× (GPU offload reduces CPU load)
+- **Result:** 22% faster wall time + 47% less CPU usage
 
-| Routine | OpenBLAS 1T | OpenBLAS 6T | GPU | Speedup vs 1T |
-|---------|-------------|-------------|-----|---------------|
-| c_bands | 251s | 109s | 112s | 2.2× |
-| cegterg | 248s | 107s | 110s | 2.3× |
-| h_psi | 162s | 75.6s | 73.2s | 2.2× |
-| calbec | 59.8s | 27.2s | 21.9s | 2.7× |
-
-**Key characteristics:**
-- GPU outperforms single-threaded CPU by 2.7×
-- GPU outperforms 6-thread CPU by 1.14×
-- Per-call overhead amortized across iterative Davidson eigensolver
-- Correctness validated: energy matches reference to 11 decimal places
+**Key findings:**
+- GPU excels at BLAS-heavy Davidson eigensolver routines
+- Update operations show 2.6-3.4× speedup
+- Per-call overhead amortized across iterative algorithm
+- Routing logic successfully balances GPU vs CPU execution
 
 ---
 
