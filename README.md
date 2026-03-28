@@ -5,7 +5,7 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-orange)](https://www.apple.com/macos/)
 [![Metal](https://img.shields.io/badge/Metal-3.0+-red)](https://developer.apple.com/metal/)
 [![Precision](https://img.shields.io/badge/precision-10⁻¹⁵-yellow)](#architecture)
-[![QE Validated](https://img.shields.io/badge/QE-2.7×%20speedup-success)](#quantum-espresso-benchmark)
+[![QE Validated](https://img.shields.io/badge/QE-1.22×%20speedup-success)](#quantum-espresso-benchmark)
 
 High-performance BLAS library for Apple Silicon GPU using Metal compute shaders. Implements FP64-class operations through double-float emulation with ~10⁻¹⁵ precision.
 
@@ -27,15 +27,20 @@ High-performance BLAS library for Apple Silicon GPU using Metal compute shaders.
 
 ## Status: Production Integration
 
-**Quantum ESPRESSO integration working** — 2.7× speedup over single-threaded OpenBLAS, 14% faster than 6-thread OpenBLAS on si64 benchmark.
+**Quantum ESPRESSO integration validated** — 22% faster than OpenBLAS on si64 benchmark with exact numerical correctness.
 
 ```
-Configuration          Wall Time    vs 1-thread    Energy
+Configuration          Wall Time    Speedup        Energy
 ────────────────────────────────────────────────────────────
-OpenBLAS (6 threads)      2:22         2.4×       -2990.44276157 Ry
-OpenBLAS (1 thread)       5:43         1.0×       -2990.44276157 Ry
-apple-bottom GPU          2:05         2.7×       -2990.44276157 Ry ✓
+OpenBLAS (baseline)       2:28         1.0×       -2990.44276157 Ry
+apple-bottom GPU          2:01         1.22×      -2990.44276157 Ry ✓
 ```
+
+**Performance scales with problem size:**
+- Si16 (16 atoms): 0.84× — GPU overhead dominates small systems
+- Si32 (32 atoms): 1.13× — GPU breaks even at medium sizes
+- Si64 (64 atoms): 1.22× — GPU wins for production workloads
+- Si64 (500 bands): 1.17× — Consistent gains for large problems
 
 Integration via Fortran bridge with EXTERNAL declaration — minimal code changes, no module dependencies.
 
@@ -110,15 +115,17 @@ The Fortran bridge automatically routes:
 
 ### Performance Breakdown
 
-| Routine | OpenBLAS 6T | OpenBLAS 1T | GPU | Speedup |
-|---------|-------------|-------------|-----|---------|
-| **Total** | 2:22 | 5:43 | **2:05** | **2.7×** |
-| c_bands | 109s | 251s | 112s | 2.2× |
-| cegterg | 107s | 248s | 110s | 2.3× |
-| h_psi | 75.6s | 162s | 73.2s | 2.2× |
-| calbec | 27.2s | 59.8s | 21.9s | 2.7× |
+| Routine | Baseline | GPU | Improvement |
+|---------|----------|-----|-------------|
+| **Total (WALL)** | 2:28 | **2:01** | **22% faster** |
+| cegterg (eigensolver) | 112.3s | 86.5s | 30% faster |
+| sum_band:cal | 6.9s | 3.2s | 118% faster |
+| cegterg:upda | 4.9s | 1.4s | 259% faster |
+| cegterg:last | 8.4s | 1.9s | 336% faster |
 
-The GPU achieves single-threaded CPU performance with 14% less wall time than 6-thread OpenBLAS.
+**CPU usage:** Baseline uses 5.3× CPU vs wall time (multi-threaded), GPU uses 3.4× (offloading work to GPU).
+
+**Result:** 22% faster execution + 47% less CPU usage.
 
 ## API Reference
 
