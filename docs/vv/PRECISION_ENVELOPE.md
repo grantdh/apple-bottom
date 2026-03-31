@@ -298,9 +298,9 @@ FLOP_count ≥ 100M  (approximately N³ ≥ 100M for DGEMM)
 
 ## 7. Usage Guidance for Production
 
-### 7.1 Sceye-Specific Recommendations
+### 7.1 Production Deployment Recommendations
 
-For aerospace multi-physics on Apple Silicon:
+For scientific computing on Apple Silicon:
 
 **✓ USE apple-bottom for**:
 - DFT, molecular dynamics, FEM iterative solvers (norm-averaged quantities)
@@ -314,7 +314,7 @@ For aerospace multi-physics on Apple Silicon:
 - Matrices `N < 512` (CPU faster due to overhead)
 - Thread-unsafe contexts (add external locking)
 
-**Validation requirement**: For flight-critical calculations, perform cross-verification:
+**Validation requirement**: For mission-critical calculations, perform cross-verification:
 1. Run apple-bottom simulation
 2. Run CPU FP64 reference (`cblas_dgemm`) on 10% of cases
 3. Verify agreement to `< 10⁻¹³` Frobenius error
@@ -381,6 +381,6 @@ If precision is insufficient:
 
 **Maintainer**: Grant Heileman
 **Repository**: https://github.com/grantdh/apple-bottom
-**Issues**: File at GitHub Issues or contact Sceye engineering liaison
+**Issues**: File at GitHub Issues for production support
 
 **For production validation support**: Provide (1) test case description, (2) measured error, (3) expected error from this document, (4) git SHA of your apple-bottom build.
