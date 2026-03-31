@@ -114,6 +114,10 @@ $(BUILD)/test_correctness: tests/test_correctness.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
 	@echo "Built: $@"
 
+$(BUILD)/test_convergence: tests/verification/test_convergence.c lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	@echo "Built: $@"
+
 test: $(BUILD)/test_precision $(BUILD)/test_correctness
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
@@ -123,6 +127,14 @@ test: $(BUILD)/test_precision $(BUILD)/test_correctness
 	./$(BUILD)/test_correctness
 	@echo ""
 	@echo "✓ All tests passed!"
+
+test-verification: $(BUILD)/test_convergence
+	@echo ""
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "Running Verification Tests (V&V)"
+	@echo "═══════════════════════════════════════════════════════════════════"
+	./$(BUILD)/test_convergence
+	@echo ""
 
 # =============================================================================
 # Clean
