@@ -726,6 +726,191 @@ static void test_max_dimension_boundary(void) {
 }
 
 // =============================================================================
+// Regression Tests (Bug Fixes v1.0.2)
+// =============================================================================
+
+// BUG-1/BUG-2: Async DGEMM with non-square, non-64-aligned matrices
+static void test_bug1_async_dimension_packing(void) {
+    TEST("BUG-1/2: async DGEMM non-square correctness");
+    ab_init();
+
+    int M = 100, N = 50, K = 75;  // Non-square, non-64-aligned
+    ABMatrix A = ab_matrix_create(M, K);
+    ABMatrix B = ab_matrix_create(K, N);
+    ABMatrix C_async = ab_matrix_create(M, N);
+    ABMatrix C_sync = ab_matrix_create(M, N);
+
+    double* dataA = (double*)malloc(M * K * sizeof(double));
+    double* dataB = (double*)malloc(K * N * sizeof(double));
+    double* resultA = (double*)malloc(M * N * sizeof(double));
+    double* resultS = (double*)malloc(M * N * sizeof(double));
+
+    for (int i = 0; i < M * K; i++) dataA[i] = (double)(rand() % 100) / 10.0;
+    for (int i = 0; i < K * N; i++) dataB[i] = (double)(rand() % 100) / 10.0;
+
+    ab_matrix_upload(A, dataA, true);
+    ab_matrix_upload(B, dataB, true);
+
+    // Sync reference
+    ab_dgemm(A, B, C_sync);
+    ab_matrix_download(C_sync, resultS, true);
+
+    // Async test (was broken due to dimension packing bug)
+    ABFuture f = ab_dgemm_async(A, B, C_async);
+    ab_future_wait(f);
+    ab_future_destroy(f);
+    ab_matrix_download(C_async, resultA, true);
+
+    // Compare results
+    int ok = 1;
+    for (int i = 0; i < M * N && ok; i++) {
+        if (fabs(resultA[i] - resultS[i]) > 1e-12) ok = 0;
+    }
+
+    free(dataA); free(dataB); free(resultA); free(resultS);
+    ab_matrix_destroy(A); ab_matrix_destroy(B);
+    ab_matrix_destroy(C_async); ab_matrix_destroy(C_sync);
+    ab_shutdown();
+
+    if (ok) PASS(); else FAIL("async != sync for non-square matrix");
+}
+
+// BUG-3: ab_dgemm_scaled should preserve DD precision for alpha/beta
+static void test_bug3_dgemm_scaled_precision(void) {
+    TEST("BUG-3: dgemm_scaled preserves DD precision");
+    ab_init();
+
+    int N = 64;
+    ABMatrix A = ab_matrix_create(N, N);
+    ABMatrix B = ab_matrix_create(N, N);
+    ABMatrix C = ab_matrix_create(N, N);
+
+    double* dataA = (double*)malloc(N * N * sizeof(double));
+    double* dataB = (double*)malloc(N * N * sizeof(double));
+    double* dataC = (double*)malloc(N * N * sizeof(double));
+    double* result = (double*)malloc(N * N * sizeof(double));
+
+    for (int i = 0; i < N * N; i++) {
+        dataA[i] = 1.0;
+        dataB[i] = 1.0;
+        dataC[i] = 0.0;
+    }
+
+    ab_matrix_upload(A, dataA, false);
+    ab_matrix_upload(B, dataB, false);
+    ab_matrix_upload(C, dataC, false);
+
+    // Alpha with precision beyond FP32 mantissa
+    double alpha = 1.0 + 1e-15;
+    double beta = 0.0;
+
+    ab_dgemm_scaled(alpha, A, B, beta, C);
+    ab_matrix_download(C, result, false);
+
+    // Result should be N * alpha (each row sums N ones)
+    // If alpha was truncated to float, we'd lose the 1e-15 component
+    double expected = (double)N * alpha;
+    double actual = result[0];  // First element
+    double rel_error = fabs(actual - expected) / expected;
+
+    free(dataA); free(dataB); free(dataC); free(result);
+    ab_matrix_destroy(A); ab_matrix_destroy(B); ab_matrix_destroy(C);
+    ab_shutdown();
+
+    // DD precision should give < 1e-14 relative error
+    if (rel_error < 1e-12) PASS(); else FAIL("alpha truncated to float");
+}
+
+// BUG-4: ab_matrix_scale should preserve DD precision
+static void test_bug4_matrix_scale_precision(void) {
+    TEST("BUG-4: matrix_scale preserves DD precision");
+    ab_init();
+
+    int N = 64;
+    ABMatrix A = ab_matrix_create(N, N);
+    double* data = (double*)malloc(N * N * sizeof(double));
+    double* result = (double*)malloc(N * N * sizeof(double));
+
+    for (int i = 0; i < N * N; i++) data[i] = 1.0;
+    ab_matrix_upload(A, data, false);
+
+    double alpha = 1.0 + 1e-15;  // Beyond FP32 precision
+    ab_matrix_scale(alpha, A);
+    ab_matrix_download(A, result, false);
+
+    double expected = alpha;
+    double actual = result[0];
+    double error = fabs(actual - expected);
+
+    free(data); free(result);
+    ab_matrix_destroy(A);
+    ab_shutdown();
+
+    if (error < 1e-14) PASS(); else FAIL("alpha truncated to float");
+}
+
+// BUG-5: Reinit after shutdown should work correctly
+static void test_bug5_reinit_after_shutdown(void) {
+    TEST("BUG-5: reinit after shutdown works");
+    ab_init();
+    ab_shutdown();
+    ABStatus s = ab_init();
+
+    if (s != AB_OK) {
+        ab_shutdown();
+        FAIL("reinit failed");
+        return;
+    }
+
+    // Verify we can actually use the library after reinit
+    ABMatrix A = ab_matrix_create(10, 10);
+    ABMatrix B = ab_matrix_create(10, 10);
+    ABMatrix C = ab_matrix_create(10, 10);
+
+    double* data = (double*)malloc(100 * sizeof(double));
+    for (int i = 0; i < 100; i++) data[i] = 1.0;
+
+    ab_matrix_upload(A, data, false);
+    ab_matrix_upload(B, data, false);
+    ABStatus result = ab_dgemm(A, B, C);
+
+    free(data);
+    ab_matrix_destroy(A);
+    ab_matrix_destroy(B);
+    ab_matrix_destroy(C);
+    ab_shutdown();
+
+    if (result == AB_OK) PASS(); else FAIL("operations fail after reinit");
+}
+
+// BUG-6: Pool overflow should return NULL, not leak unmanaged matrices
+static void test_bug6_pool_overflow(void) {
+    TEST("BUG-6: pool overflow returns NULL");
+    ab_init();
+
+    ABMemoryPool pool = ab_pool_create(0);
+
+    // Fill pool to capacity (AB_POOL_MAX_ENTRIES = 128 from apple_bottom.m:1177)
+    for (int i = 0; i < 128; i++) {
+        ABMatrix m = ab_pool_get_matrix(pool, 10, 10);
+        if (!m) {
+            ab_pool_destroy(pool);
+            ab_shutdown();
+            FAIL("pool failed before reaching capacity");
+            return;
+        }
+    }
+
+    // Next allocation should return NULL (pool full)
+    ABMatrix overflow = ab_pool_get_matrix(pool, 10, 10);
+
+    ab_pool_destroy(pool);
+    ab_shutdown();
+
+    if (overflow == NULL) PASS(); else FAIL("pool returned unmanaged matrix instead of NULL");
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 
@@ -790,7 +975,14 @@ int main(void) {
     test_rectangular_matrix();
     test_skinny_matrix();
     test_max_dimension_boundary();
-    
+
+    printf("\nRegression Tests (Bug Fixes v1.0.2):\n");
+    test_bug1_async_dimension_packing();
+    test_bug3_dgemm_scaled_precision();
+    test_bug4_matrix_scale_precision();
+    test_bug5_reinit_after_shutdown();
+    test_bug6_pool_overflow();
+
     printf("\n═══════════════════════════════════════════════════════════════════\n");
     printf("Results: %d passed, %d failed\n", tests_passed, tests_failed);
     if (tests_failed == 0) {
