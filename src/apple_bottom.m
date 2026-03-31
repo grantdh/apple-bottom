@@ -275,8 +275,8 @@ kernel void dd_dgemm_ab(
     constant uint& M [[buffer(3)]],
     constant uint& N [[buffer(4)]],
     constant uint& K [[buffer(5)]],
-    constant float& alpha [[buffer(6)]],
-    constant float& beta [[buffer(7)]],
+    constant DD& alpha [[buffer(6)]],
+    constant DD& beta [[buffer(7)]],
     uint2 lid [[thread_position_in_threadgroup]],
     uint2 tgid [[threadgroup_position_in_grid]],
     uint flatId [[thread_index_in_threadgroup]]
@@ -320,8 +320,8 @@ kernel void dd_dgemm_ab(
         for (uint j = 0; j < TN; j++) {
             uint gr = bRow + ty * TM + i, gc = bCol + tx * TN + j;
             if (gr < M && gc < N) {
-                DD result = dd_scale(acc[i][j], alpha);
-                if (beta != 0.0f) result = dd_add(result, dd_scale(C[gr * N + gc], beta));
+                DD result = dd_mul(acc[i][j], alpha);
+                if (beta.hi != 0.0f || beta.lo != 0.0f) result = dd_add(result, dd_mul(C[gr * N + gc], beta));
                 C[gr * N + gc] = result;
             }
         }
@@ -400,8 +400,8 @@ kernel void dd_matrix_sub(device const DD* A [[buffer(0)]], device const DD* B [
     if (gid < count) C[gid] = dd_sub(A[gid], B[gid]);
 }
 
-kernel void dd_matrix_scale(device DD* A [[buffer(0)]], constant float& alpha [[buffer(1)]], constant uint& count [[buffer(2)]], uint gid [[thread_position_in_grid]]) {
-    if (gid < count) A[gid] = dd_scale(A[gid], alpha);
+kernel void dd_matrix_scale(device DD* A [[buffer(0)]], constant DD& alpha [[buffer(1)]], constant uint& count [[buffer(2)]], uint gid [[thread_position_in_grid]]) {
+    if (gid < count) A[gid] = dd_mul(A[gid], alpha);
 }
 
 kernel void dd_matrix_copy(device const DD* src [[buffer(0)]], device DD* dst [[buffer(1)]], constant uint& count [[buffer(2)]], uint gid [[thread_position_in_grid]]) {
@@ -473,13 +473,16 @@ kernel void dd_conj_transpose(
 @end
 
 static ABContextImpl* g_context = nil;
-static dispatch_once_t g_init_once;
+static bool g_initialized = false;
+static os_unfair_lock g_init_lock = OS_UNFAIR_LOCK_INIT;
 
 @implementation ABContextImpl
 + (instancetype)shared { return g_context; }
 + (void)shutdown {
+    os_unfair_lock_lock(&g_init_lock);
     g_context = nil;
-    g_init_once = 0;  // Reset for potential re-init (testing scenarios)
+    g_initialized = false;
+    os_unfair_lock_unlock(&g_init_lock);
 }
 
 - (instancetype)init {
@@ -498,17 +501,34 @@ static dispatch_once_t g_init_once;
         if (!library) { NSLog(@"Shader compile failed: %@", error); return nil; }
         
         _dgemmPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_dgemm"] error:&error];
-        _dgemmABPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_dgemm_ab"] error:&error];
-        _dsyrkPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_dsyrk"] error:&error];
-        _zeroPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_matrix_zero"] error:&error];
-        _addPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_matrix_add"] error:&error];
-        _subPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_matrix_sub"] error:&error];
-        _scalePipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_matrix_scale"] error:&error];
-        _matCopyPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_matrix_copy"] error:&error];
-        _transposePipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_transpose"] error:&error];
-        _conjTransposePipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_conj_transpose"] error:&error];
+        if (!_dgemmPipeline) { NSLog(@"Pipeline creation failed (dd_dgemm): %@", error); return nil; }
 
-        if (!_dgemmPipeline || !_zeroPipeline) { NSLog(@"Pipeline creation failed: %@", error); return nil; }
+        _dgemmABPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_dgemm_ab"] error:&error];
+        if (!_dgemmABPipeline) { NSLog(@"Pipeline creation failed (dd_dgemm_ab): %@", error); return nil; }
+
+        _dsyrkPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_dsyrk"] error:&error];
+        if (!_dsyrkPipeline) { NSLog(@"Pipeline creation failed (dd_dsyrk): %@", error); return nil; }
+
+        _zeroPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_matrix_zero"] error:&error];
+        if (!_zeroPipeline) { NSLog(@"Pipeline creation failed (dd_matrix_zero): %@", error); return nil; }
+
+        _addPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_matrix_add"] error:&error];
+        if (!_addPipeline) { NSLog(@"Pipeline creation failed (dd_matrix_add): %@", error); return nil; }
+
+        _subPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_matrix_sub"] error:&error];
+        if (!_subPipeline) { NSLog(@"Pipeline creation failed (dd_matrix_sub): %@", error); return nil; }
+
+        _scalePipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_matrix_scale"] error:&error];
+        if (!_scalePipeline) { NSLog(@"Pipeline creation failed (dd_matrix_scale): %@", error); return nil; }
+
+        _matCopyPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_matrix_copy"] error:&error];
+        if (!_matCopyPipeline) { NSLog(@"Pipeline creation failed (dd_matrix_copy): %@", error); return nil; }
+
+        _transposePipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_transpose"] error:&error];
+        if (!_transposePipeline) { NSLog(@"Pipeline creation failed (dd_transpose): %@", error); return nil; }
+
+        _conjTransposePipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_conj_transpose"] error:&error];
+        if (!_conjTransposePipeline) { NSLog(@"Pipeline creation failed (dd_conj_transpose): %@", error); return nil; }
     }
     return self;
 }
@@ -553,15 +573,25 @@ struct ABSession_s {
 // Public API: Initialization
 // =============================================================================
 
-// Thread-safe initialization using dispatch_once
+// Thread-safe initialization with support for shutdown/reinit
 ABStatus ab_init(void) {
-    __block ABStatus status = AB_OK;
-    dispatch_once(&g_init_once, ^{
-        init_timing();
-        g_context = [[ABContextImpl alloc] init];
-        if (!g_context) status = AB_ERROR_NO_DEVICE;
-    });
-    return g_context ? AB_OK : status;
+    os_unfair_lock_lock(&g_init_lock);
+
+    if (g_initialized) {
+        os_unfair_lock_unlock(&g_init_lock);
+        return g_context ? AB_OK : AB_ERROR_NO_DEVICE;
+    }
+
+    init_timing();
+    g_context = [[ABContextImpl alloc] init];
+    ABStatus status = g_context ? AB_OK : AB_ERROR_NO_DEVICE;
+
+    if (status == AB_OK) {
+        g_initialized = true;
+    }
+
+    os_unfair_lock_unlock(&g_init_lock);
+    return status;
 }
 
 void ab_shutdown(void) {
@@ -734,11 +764,12 @@ ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMa
     if (A->cols != B->rows || A->rows != C->rows || B->cols != C->cols) return AB_ERROR_DIMENSION_MISMATCH;
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return AB_ERROR_NO_DEVICE;
-    
+
     uint32_t M = A->rows, N = B->cols, K = A->cols;
-    float alpha_f = (float)alpha, beta_f = (float)beta;
+    DDFloat alpha_dd = fp64_to_dd(alpha);
+    DDFloat beta_dd = fp64_to_dd(beta);
     double t0 = get_time_ms();
-    
+
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
     [encoder setComputePipelineState:ctx.dgemmABPipeline];
@@ -748,13 +779,13 @@ ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMa
     [encoder setBytes:&M length:sizeof(M) atIndex:3];
     [encoder setBytes:&N length:sizeof(N) atIndex:4];
     [encoder setBytes:&K length:sizeof(K) atIndex:5];
-    [encoder setBytes:&alpha_f length:sizeof(alpha_f) atIndex:6];
-    [encoder setBytes:&beta_f length:sizeof(beta_f) atIndex:7];
+    [encoder setBytes:&alpha_dd length:sizeof(alpha_dd) atIndex:6];
+    [encoder setBytes:&beta_dd length:sizeof(beta_dd) atIndex:7];
     [encoder dispatchThreadgroups:MTLSizeMake((N + 63) / 64, (M + 63) / 64, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     [encoder endEncoding];
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
-    
+
     stats_add_kernel(get_time_ms() - t0);
     stats_add_dgemm();
     return AB_OK;
@@ -806,13 +837,13 @@ ABStatus ab_matrix_scale(double alpha, ABMatrix A) {
     if (!A) return AB_ERROR_INVALID_ARG;
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return AB_ERROR_NO_DEVICE;
-    
-    float alpha_f = (float)alpha;
+
+    DDFloat alpha_dd = fp64_to_dd(alpha);
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
     [encoder setComputePipelineState:ctx.scalePipeline];
     [encoder setBuffer:A->buffer offset:0 atIndex:0];
-    [encoder setBytes:&alpha_f length:sizeof(alpha_f) atIndex:1];
+    [encoder setBytes:&alpha_dd length:sizeof(alpha_dd) atIndex:1];
     uint32_t count = (uint32_t)A->count;
     [encoder setBytes:&count length:sizeof(count) atIndex:2];
     [encoder dispatchThreads:MTLSizeMake(A->count, 1, 1) threadsPerThreadgroup:MTLSizeMake(MIN((size_t)256, A->count), 1, 1)];
@@ -1201,9 +1232,10 @@ ABMatrix ab_pool_get_matrix(ABMemoryPool pool, int rows, int cols) {
     
     // Create new matrix and add to pool
     if (pool->count >= AB_POOL_MAX_ENTRIES) {
-        return ab_matrix_create(rows, cols);  // Pool full, return unmanaged
+        // Pool full - return NULL to signal error
+        return NULL;
     }
-    
+
     ABMatrix m = ab_matrix_create(rows, cols);
     if (m) {
         pool->entries[pool->count].matrix = m;
@@ -1245,32 +1277,31 @@ ABFuture ab_dgemm_async(ABMatrix A, ABMatrix B, ABMatrix C) {
     if (A->cols != B->rows) return NULL;
     if (A->rows != C->rows || B->cols != C->cols) return NULL;
     if (!A->uploaded || !B->uploaded) return NULL;
-    
+
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return NULL;
-    
-    int M = A->rows, N = B->cols, K = A->cols;
-    
+
+    uint32_t M = A->rows, N = B->cols, K = A->cols;
+
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
-    
-    bool useAB = (M == N && N == K && (M % 64 == 0));
-    [encoder setComputePipelineState: useAB ? ctx.dgemmABPipeline : ctx.dgemmPipeline];
+
+    [encoder setComputePipelineState:ctx.dgemmPipeline];
     [encoder setBuffer:A->buffer offset:0 atIndex:0];
     [encoder setBuffer:B->buffer offset:0 atIndex:1];
     [encoder setBuffer:C->buffer offset:0 atIndex:2];
-    
-    int dims[] = {M, N, K};
-    [encoder setBytes:dims length:sizeof(dims) atIndex:3];
-    
+    [encoder setBytes:&M length:sizeof(M) atIndex:3];
+    [encoder setBytes:&N length:sizeof(N) atIndex:4];
+    [encoder setBytes:&K length:sizeof(K) atIndex:5];
+
     MTLSize grid = MTLSizeMake((N + 63) / 64, (M + 63) / 64, 1);
     MTLSize block = MTLSizeMake(16, 16, 1);
     [encoder dispatchThreadgroups:grid threadsPerThreadgroup:block];
     [encoder endEncoding];
-    
+
     [cmdBuf commit];
     C->uploaded = true;
-    
+
     ABFuture f = create_future_with_buffer(cmdBuf);
     return f;
 }
