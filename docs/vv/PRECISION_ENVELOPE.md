@@ -107,6 +107,8 @@ log(error) = 0.493 · log(N) - 31.7
 R² = 1.0000
 ```
 
+The observed `~√N` scaling (slope ≈ 0.5) is **expected for random matrices** due to statistical error cancellation—positive and negative rounding errors partially cancel in the Frobenius norm. Structured matrices (e.g., all-positive entries) will exhibit the theoretical **O(N)** worst-case growth. **Users should rely on the stated `N·2⁻⁴⁸` bound, not the empirically observed `√N` scaling.**
+
 **Data source**: `tests/verification/test_convergence.c` → `build/convergence_data.csv`
 
 ### 2.2 Interpretation and Caveats
@@ -168,9 +170,9 @@ This `~N²·⁵` scaling means max element error grows **faster than the Frobeni
 | Square matrices | `64 ≤ N ≤ 4096` | Optimal for N ≥ 2048 |
 | Rectangular matrices | `aspect_ratio ≤ 2:1`, `N ≤ 2048` | Ratios > 10:1 have known issues |
 | Small matrices | `N ≥ 64` | N < 64: CPU overhead dominates |
-| Large matrices | `N ≤ 4096` | Validated limit (N=8192 untested) |
+| Large matrices | `N ≤ 4096` | Validated upper limit |
 
-**CAUTION**: Rectangular matrices with `aspect_ratio > 10:1` fail correctness tests at large sizes (see `tests/RECTANGULAR_MATRICES.md`). Use CPU BLAS for skinny/fat matrices until resolved.
+**CAUTION**: Rectangular matrices with `aspect_ratio > 10:1` fail correctness tests at large sizes. Use CPU BLAS for skinny/fat matrices until resolved.
 
 ### 3.2 Numerical Range
 
