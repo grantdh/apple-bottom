@@ -8,6 +8,7 @@ Complete guide for integrating apple-bottom into scientific computing codes.
 
 - [Quick Decision](#quick-decision-should-you-use-apple-bottom)
 - [C Integration](#c-integration)
+- [Python Integration](#python-integration)
 - [Fortran Integration](#fortran-integration)
 - [Quantum ESPRESSO Integration](#quantum-espresso-integration)
 
