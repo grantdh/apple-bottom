@@ -365,9 +365,8 @@ If precision is insufficient:
 ### 8.3 apple-bottom Documentation
 
 - `README.md`: Quick start, performance benchmarks
-- `docs/INTEGRATION.md`: C/Fortran/Python integration patterns
-- `docs/qe-integration.md`: Quantum ESPRESSO validation details
-- `tests/RECTANGULAR_MATRICES.md`: Known limitations
+- `docs/INTEGRATION.md`: C/Fortran/Python/QE integration
+- `docs/vv/VV_REPORT.md`: Full V&V documentation
 
 ---
 
