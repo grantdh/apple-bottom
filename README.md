@@ -117,10 +117,8 @@ The Fortran bridge automatically routes:
 - **Small calls** (< 100M FLOPs) → OpenBLAS (zero overhead)
 - **Large calls** (≥ 100M FLOPs) → GPU
 
-**Integration Guides:**
-- [Quantum ESPRESSO Integration](docs/qe-integration.md) — Step-by-step QE 7.4.1 integration
-- [Fortran Integration Guide](docs/fortran-integration.md) — General Fortran BLAS integration
-- [C API Integration](docs/INTEGRATION.md) — Native C API usage
+**Integration Guide:**
+- [Complete Integration Guide](docs/INTEGRATION.md) — C, Fortran, and Quantum ESPRESSO integration
 
 ## Quantum ESPRESSO Benchmark
 
@@ -343,7 +341,9 @@ apple-bottom/
 ├── tests/
 │   ├── test_correctness.c      # Unit tests
 │   └── test_qe_integration.sh  # QE validation
+├── docs/                       # Documentation
+│   ├── INTEGRATION.md          # Integration guide
+│   └── vv/                     # V&V documentation
 ├── benchmarks/                 # Performance benchmarks
-├── research/td-dgemm/          # Research prototypes
-└── LESSONS_LEARNED.md          # Engineering insights
+└── research/                   # Research prototypes & internal docs
 ```
