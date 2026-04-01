@@ -50,11 +50,11 @@ STATUS: PASS
 
 Check that CI passed on the latest commit:
 
-- [ ] GitHub Actions: `build-check` job passed (fast compile check)
-- [ ] GitHub Actions: `test-suite` job passed (full GPU test suite)
-- [ ] Convergence data artifact uploaded successfully
+- [ ] GitHub Actions: `build-check` job passed (compile-time verification)
 
 **Check at:** `https://github.com/grantdh/apple-bottom/actions`
+
+**Note:** GitHub Actions runners don't expose Metal GPU access, so CI only verifies compile-time correctness. Full GPU validation (48 tests + convergence study) must be run locally via `make ci-local` (see step 2 above).
 
 ### 4. Documentation Review
 
