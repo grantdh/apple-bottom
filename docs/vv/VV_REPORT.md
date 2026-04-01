@@ -62,7 +62,7 @@
 | **Precision (Max Element)** | ~10⁻¹¹ to 6×10⁻⁶ for N ≤ 4096 | V-2 convergence study |
 | **Production Validation** | 11 decimal place agreement | VAL-1 (QE Si64 DFT) |
 | **Performance** | 1.22× speedup vs 6-thread CPU | VAL-1 (QE Si64 benchmark) |
-| **Correctness** | 42/42 tests passing | Regression + unit tests |
+| **Correctness** | 48/48 tests passing | Regression + unit + precision tests |
 
 **Bottom Line**: apple-bottom provides **sufficient precision for production DFT/MD** (10⁻¹⁰ convergence criteria) with **modest performance gains** (1.1-1.3× at N≥2048) and **significant energy efficiency** (47% CPU reduction).
 
@@ -271,7 +271,7 @@ The following critical bugs were fixed before V&V:
 apple-bottom correctly implements DGEMM/ZGEMM to within DD precision bounds:
 - Frobenius error: `~N·10⁻¹⁵` (matches theory)
 - Max element error: `~N^2.5·10⁻²¹` (documented for element-sensitive apps)
-- Correctness: 42/42 tests passing
+- Correctness: 48/48 tests passing
 - Critical bugs: Fixed and regression-tested
 
 **Limitations**: Rectangular matrices with `aspect_ratio > 10:1` fail correctness tests.
@@ -560,7 +560,7 @@ diff <(grep "total energy" system_gpu.out) \
 |-----------|-------|-------------|--------------|
 | `test_convergence.c` | V-2 | `src/apple_bottom.m` | DGEMM kernel (207-265) |
 | `test_correctness.c` | 42 tests | `src/apple_bottom.m` | Full API surface |
-| `test_precision.c` | 1 test | `src/apple_bottom.m` | DGEMM precision (207-265) |
+| `test_precision.c` | 6 tests | `src/apple_bottom.m` | DGEMM precision (207-265) |
 | `VAL001_QE_Si64.md` | VAL-1 | `src/apple_bottom.m`, QE `cegterg.f90` | ZGEMM (830-1043) |
 
 ### 8.4 Validation Artifacts → Git Baseline
@@ -628,7 +628,7 @@ Measured: < 10⁻¹¹ (conservative)
 **Evidence Base**:
 1. **V-2 Convergence Study**: Frobenius error `~10⁻¹⁴` to `5×10⁻¹⁴` for N ∈ {64..4096}
 2. **VAL-1 QE DFT**: 11 decimal place agreement on production workload
-3. **Correctness Suite**: 42/42 tests passing
+3. **Correctness Suite**: 48/48 tests passing
 4. **Bug Fixes**: 7 critical bugs fixed and regression-tested
 
 ### 10.2 Production Deployment Recommendations
