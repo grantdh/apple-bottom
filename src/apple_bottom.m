@@ -495,13 +495,12 @@ static os_unfair_lock g_init_lock = OS_UNFAIR_LOCK_INIT;
         
         NSError* error = nil;
         MTLCompileOptions* opts = [[MTLCompileOptions alloc] init];
-
-        // MTLMathModeSafe requires macOS 14.2+ SDK and runtime
-        #if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 140200
-        if (@available(macOS 14.2, *)) {
-            opts.mathMode = MTLMathModeSafe;
+        // MTLMathModeSafe (enum value 3) prevents FMA reordering that could
+        // break DD error-free transformations. Use KVC to avoid compile-time
+        // dependency on macOS 14.2+ SDK headers.
+        if ([opts respondsToSelector:@selector(setMathMode:)]) {
+            [opts setValue:@(3) forKey:@"mathMode"];
         }
-        #endif
 
         id<MTLLibrary> library = [_device newLibraryWithSource:kShaderSource options:opts error:&error];
         if (!library) { NSLog(@"Shader compile failed: %@", error); return nil; }
