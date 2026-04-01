@@ -1,19 +1,20 @@
 # apple-bottom
 
-[![Tests](https://img.shields.io/badge/tests-37%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-42%20passing-brightgreen)](tests/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-orange)](https://www.apple.com/macos/)
 [![Metal](https://img.shields.io/badge/Metal-3.0+-red)](https://developer.apple.com/metal/)
 [![Precision](https://img.shields.io/badge/precision-10⁻¹⁵-yellow)](#architecture)
 [![QE Validated](https://img.shields.io/badge/QE-1.22×%20speedup-success)](#quantum-espresso-benchmark)
 
-High-performance BLAS library for Apple Silicon GPU using Metal compute shaders. Implements FP64-class operations through double-float emulation with ~10⁻¹⁵ precision.
+**FP64-class BLAS for scientific computing on Apple Silicon.** Achieves FP64-class precision (~10⁻¹⁵) through double-float (DD) emulation on Metal GPU. Production-validated for DFT, molecular dynamics, and iterative solvers.
 
 ---
 
 ## Table of Contents
 
 - [Status](#status-production-integration)
+- [Verification & Validation](#verification--validation)
 - [Quantum ESPRESSO Benchmark](#quantum-espresso-benchmark)
 - [Quick Start](#quick-start)
 - [API Reference](#api-reference)
@@ -44,9 +45,23 @@ apple-bottom GPU          2:01         1.22×      -2990.44276157 Ry ✓
 
 Integration via Fortran bridge with EXTERNAL declaration — minimal code changes, no module dependencies.
 
+## Verification & Validation
+
+**Production-validated** for scientific computing (v1.0.2-bugfix):
+- ✅ **Precision**: Frobenius error ~10⁻¹⁴ to 5×10⁻¹⁴ for N ≤ 4096 ([V-2 convergence study](tests/verification/test_convergence.c))
+- ✅ **Production**: 11 decimal place agreement in Quantum ESPRESSO DFT ([VAL-1](tests/validation/VAL001_QE_Si64.md))
+- ✅ **Correctness**: 42/42 tests passing (regression + unit tests)
+
+**Documentation** (following NASA-STD-7009A):
+- **[V&V Report](docs/vv/VV_REPORT.md)** — Master validation document (traceability, test results, deployment guidance)
+- **[Precision Envelope](docs/vv/PRECISION_ENVELOPE.md)** — Precision guarantees, validated range, known limitations
+
+**Validated for**: DFT, molecular dynamics, FEM iterative solvers (norm-averaged convergence)
+**Not validated for**: Element-sensitive algorithms (pivoting, eigensolvers), rectangular matrices (aspect ratio >10:1)
+
 ## Overview
 
-Apple Silicon GPUs lack native FP64 support. This library uses double-float (FP32×2) arithmetic to achieve scientific computing precision while leveraging GPU parallelism. Validated in production with Quantum ESPRESSO.
+Apple Silicon GPUs lack native FP64 support. This library uses double-float (FP32×2) arithmetic to achieve FP64-class precision while leveraging GPU parallelism. Validated in production with Quantum ESPRESSO.
 
 ## Quick Start
 

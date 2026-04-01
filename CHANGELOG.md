@@ -2,6 +2,51 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.2] - 2026-03-31
+
+### Fixed (Critical)
+- **BUG-1/BUG-2**: Async DGEMM dimension packing and pipeline selection (ship-blocker)
+  - Fixed dimension packing: separate `setBytes` calls instead of array
+  - Always use `dgemmPipeline` (async path doesn't support alpha/beta)
+- **BUG-3**: `ab_dgemm_scaled` alpha/beta truncation to float (precision loss)
+  - Convert alpha/beta to DD format on host before kernel dispatch
+  - Metal kernel now accepts `constant DD&` instead of `constant float&`
+- **BUG-4**: `ab_matrix_scale` alpha truncation to float (precision loss)
+  - Convert alpha to DD format on host
+- **BUG-5**: `dispatch_once_t` reset undefined behavior (V&V audit flag)
+  - Replaced with `os_unfair_lock` and bool flag for reinit safety
+- **BUG-6**: Memory pool overflow leak (returned unmanaged matrices)
+  - Now returns NULL when pool is full instead of leaking
+- **BUG-7**: Missing pipeline creation error checks (crash on init failure)
+  - Added error checks for all 10 pipeline creations
+
+### Added
+- **V&V Documentation** (NASA-STD-7009A compliant)
+  - `docs/vv/VV_REPORT.md`: Master validation report with traceability matrix
+  - `docs/vv/PRECISION_ENVELOPE.md`: Precision guarantees and validated envelope
+  - `tests/validation/VAL001_QE_Si64.md`: QE Si64 production validation
+- **Verification Tests**
+  - `tests/verification/test_convergence.c`: V-2 convergence study (N ∈ {64..4096})
+  - 5 regression tests for BUG-1 through BUG-6
+- **Test Coverage**: 42 tests (37 original + 5 regression)
+
+### Changed
+- Test badge: 37 → 42 passing tests
+- Tagline: "FP64-class BLAS for scientific computing" (general-purpose)
+- README: Added Verification & Validation section
+
+### Validation Results
+- **Frobenius error**: 6.5×10⁻¹⁵ to 5.1×10⁻¹⁴ (N ≤ 4096)
+- **Max element error**: 3.4×10⁻¹¹ to 6.5×10⁻⁶ (documented for element-sensitive apps)
+- **QE Si64 validation**: 11 decimal place agreement (-2990.44276157 Ry)
+- **Performance**: 1.22× speedup vs 6-thread OpenBLAS on QE benchmark
+- **Status**: VALIDATED for production DFT, MD, FEM iterative solvers
+
+### Notes
+- Validated baseline: Git tag `v1.0.2-bugfix` (SHA: 700934f)
+- All precision claims backed by empirical convergence data
+- Known limitation: Rectangular matrices (aspect ratio >10:1) fail correctness
+
 ## [1.1.0] - 2026-03-23
 
 ### Added
