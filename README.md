@@ -1,6 +1,6 @@
 # apple-bottom
 
-[![Tests](https://img.shields.io/badge/tests-42%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-48%20passing-brightgreen)](tests/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-orange)](https://www.apple.com/macos/)
 [![Metal](https://img.shields.io/badge/Metal-3.0+-red)](https://developer.apple.com/metal/)
@@ -50,7 +50,7 @@ Integration via Fortran bridge with EXTERNAL declaration — minimal code change
 **Production-validated** for scientific computing (v1.0.2-bugfix):
 - ✅ **Precision**: Frobenius error ~10⁻¹⁴ to 5×10⁻¹⁴ for N ≤ 4096 ([V-2 convergence study](tests/verification/test_convergence.c))
 - ✅ **Production**: 11 decimal place agreement in Quantum ESPRESSO DFT ([VAL-1](tests/validation/VAL001_QE_Si64.md))
-- ✅ **Correctness**: 42/42 tests passing (regression + unit tests)
+- ✅ **Correctness**: 48/48 tests passing (regression + unit tests)
 
 **Documentation** (following NASA-STD-7009A):
 - **[V&V Report](docs/vv/VV_REPORT.md)** — Master validation document (traceability, test results, deployment guidance)
