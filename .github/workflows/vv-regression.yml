@@ -1,0 +1,54 @@
+name: V&V Regression Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-check:
+    name: Build Check (Fast)
+    runs-on: macos-14  # M1 Apple Silicon with Metal
+    timeout-minutes: 5
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Compile source files
+      run: make build-check
+
+  test-suite:
+    name: Full Test Suite (GPU)
+    needs: build-check
+    runs-on: macos-14  # M1 Apple Silicon with Metal
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build library and tests
+      run: make lib build/test_precision build/test_correctness build/test_convergence
+
+    - name: Run test_precision
+      run: ./build/test_precision
+
+    - name: Run test_correctness (42 tests)
+      run: ./build/test_correctness
+
+    - name: Run convergence study (V-2)
+      run: ./build/test_convergence
+
+    - name: Upload convergence data
+      uses: actions/upload-artifact@v4
+      with:
+        name: convergence-data
+        path: build/convergence_data.csv
+        retention-days: 30
+
+    - name: Check test outputs
+      run: |
+        echo "Convergence data generated:"
+        head -5 build/convergence_data.csv
+        echo ""
+        echo "Validation complete - all tests passed"

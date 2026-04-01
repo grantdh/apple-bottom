@@ -194,3 +194,86 @@ $(BUILD)/bench_pool: benchmarks/bench_pool.c lib | $(BUILD)
 $(BUILD)/bench_async: benchmarks/bench_async.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
 	@echo "Built: $@"
+
+# =============================================================================
+# CI Targets
+# =============================================================================
+
+.PHONY: build-check ci-local
+
+# Build check: compile all source files to .o without linking
+# Used by GitHub Actions to verify syntax and compilation (fast check)
+build-check: | $(BUILD)
+	@echo ""
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "Build Check (compile only, no linking)"
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "Compiling apple_bottom.m..."
+	@$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $(BUILD)/apple_bottom.o
+	@echo "Compiling blas_wrapper.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $(BUILD)/blas_wrapper.o
+	@echo "Compiling fortran_bridge.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/fortran_bridge.c -o $(BUILD)/fortran_bridge.o
+	@echo "Compiling test_correctness.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_correctness.c -o $(BUILD)/test_correctness.o
+	@echo "Compiling test_precision.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_precision.c -o $(BUILD)/test_precision.o
+	@echo "Compiling test_convergence.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/verification/test_convergence.c -o $(BUILD)/test_convergence.o
+	@echo ""
+	@echo "✓ All source files compile successfully"
+	@echo ""
+
+# Local CI: run full test suite + convergence study, generate CI report
+# Only writes CI_REPORT.txt if all tests pass (exits on first failure)
+ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_convergence
+	@echo ""
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "CI Local Validation"
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo ""
+	@echo "Running test suite..."
+	@./$(BUILD)/test_precision > $(BUILD)/test_precision.log 2>&1 && echo "✓ test_precision: PASS" || (echo "✗ test_precision: FAIL" && cat $(BUILD)/test_precision.log && exit 1)
+	@./$(BUILD)/test_correctness > $(BUILD)/test_correctness.log 2>&1 && echo "✓ test_correctness: PASS" || (echo "✗ test_correctness: FAIL" && cat $(BUILD)/test_correctness.log && exit 1)
+	@echo ""
+	@echo "Running convergence study (V-2)..."
+	@./$(BUILD)/test_convergence > $(BUILD)/test_convergence.log 2>&1 && echo "✓ test_convergence: PASS" || (echo "✗ test_convergence: FAIL" && cat $(BUILD)/test_convergence.log && exit 1)
+	@echo ""
+	@echo "Generating CI report..."
+	@bash -c ' \
+		PRECISION_PASS=$$(grep -c "✓ PASS" $(BUILD)/test_precision.log || echo 0); \
+		CORRECTNESS_LINE=$$(grep "Results:" $(BUILD)/test_correctness.log); \
+		CORRECTNESS_PASS=$$(echo "$$CORRECTNESS_LINE" | sed -E "s/.*Results: ([0-9]+) passed.*/\1/"); \
+		CORRECTNESS_FAIL=$$(echo "$$CORRECTNESS_LINE" | sed -E "s/.*Results: [0-9]+ passed, ([0-9]+) failed.*/\1/"); \
+		TOTAL=$$((PRECISION_PASS + CORRECTNESS_PASS)); \
+		FAILED=$$CORRECTNESS_FAIL; \
+		echo "GIT_SHA: $$(git rev-parse HEAD)" > $(BUILD)/CI_REPORT.txt; \
+		echo "GIT_BRANCH: $$(git rev-parse --abbrev-ref HEAD)" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TIMESTAMP: $$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $(BUILD)/CI_REPORT.txt; \
+		echo "HOSTNAME: $$(hostname)" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_PRECISION: PASS ($$PRECISION_PASS tests)" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_CORRECTNESS: PASS ($$CORRECTNESS_PASS tests)" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_CONVERGENCE: PASS" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_TOTAL: $$TOTAL" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_PASSED: $$TOTAL" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_FAILED: $$FAILED" >> $(BUILD)/CI_REPORT.txt; \
+		if [ -f $(BUILD)/convergence_data.csv ]; then \
+			POINTS=$$(tail -n +2 $(BUILD)/convergence_data.csv | wc -l | tr -d " "); \
+			SHA=$$(shasum -a 256 $(BUILD)/convergence_data.csv | cut -d" " -f1); \
+			echo "CONVERGENCE_POINTS: $$POINTS" >> $(BUILD)/CI_REPORT.txt; \
+			echo "CONVERGENCE_DATA_SHA256: $$SHA" >> $(BUILD)/CI_REPORT.txt; \
+		else \
+			echo "CONVERGENCE_POINTS: 0" >> $(BUILD)/CI_REPORT.txt; \
+			echo "CONVERGENCE_DATA_SHA256: missing" >> $(BUILD)/CI_REPORT.txt; \
+		fi; \
+		echo "STATUS: PASS" >> $(BUILD)/CI_REPORT.txt \
+	'
+	@echo ""
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "✓ CI Validation Complete"
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo ""
+	@cat $(BUILD)/CI_REPORT.txt
+	@echo ""
+	@echo "Report saved to: $(BUILD)/CI_REPORT.txt"
+	@echo ""
