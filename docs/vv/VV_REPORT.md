@@ -274,7 +274,7 @@ apple-bottom correctly implements DGEMM/ZGEMM to within DD precision bounds:
 - Correctness: 42/42 tests passing
 - Critical bugs: Fixed and regression-tested
 
-**Limitations**: Rectangular matrices with `aspect_ratio > 10:1` fail correctness tests (documented in `tests/RECTANGULAR_MATRICES.md`).
+**Limitations**: Rectangular matrices with `aspect_ratio > 10:1` fail correctness tests.
 
 ---
 
@@ -367,7 +367,7 @@ apple-bottom is suitable for production use in:
 | **N < 64** | ⚠ Slower than CPU | Use CPU BLAS |
 | **N > 4096** | ⚠ Untested | Validate before production use |
 
-**Example failure**: `10000×100 × 100×10000` produces incorrect results (see `tests/RECTANGULAR_MATRICES.md`).
+**Example failure**: `10000×100 × 100×10000` produces incorrect results.
 
 ### 5.2 Numerical Conditions
 
@@ -551,7 +551,7 @@ diff <(grep "total energy" system_gpu.out) \
 
 | Req ID | Requirement | Test | Result | Documented In |
 |--------|-------------|------|--------|---------------|
-| **R-15** | Rectangular `aspect_ratio > 10:1` | test_skinny_matrix (10000×10) | ✗ FAIL | `tests/RECTANGULAR_MATRICES.md` |
+| **R-15** | Rectangular `aspect_ratio > 10:1` | test_skinny_matrix (10000×10) | ✗ FAIL | Known limitation |
 | **R-16** | ZHERK performance | bench_zherk | ⚠ WARN (20× slower) | `PRECISION_ENVELOPE.md` Section 3.3 |
 
 ### 8.3 Test → Source Code Mapping
@@ -700,10 +700,8 @@ Measured: < 10⁻¹¹ (conservative)
 ### 11.4 apple-bottom Documentation
 
 7. `README.md`: Quick start, performance benchmarks
-8. `docs/INTEGRATION.md`: C/Fortran/Python integration
-9. `docs/qe-integration.md`: QE-specific integration
-10. `docs/vv/PRECISION_ENVELOPE.md`: Precision guarantees (companion to this report)
-11. `tests/RECTANGULAR_MATRICES.md`: Known limitations
+8. `docs/INTEGRATION.md`: C/Fortran/Python/QE integration
+9. `docs/vv/PRECISION_ENVELOPE.md`: Precision guarantees (companion to this report)
 
 ---
 
