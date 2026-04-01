@@ -107,18 +107,33 @@ void scf_loop(int nbasis, double* H, double* S, double* P,
     ABSession s = ab_session_create();
 
     // Allocate GPU matrices
-    ab_session_add(s, "H", nbasis, nbasis);     // Hamiltonian
-    ab_session_add(s, "S", nbasis, nbasis);     // Overlap
-    ab_session_add(s, "P", nbasis, nbasis);     // Density
-    ab_session_add(s, "F", nbasis, nbasis);     // Fock matrix
-    ab_session_add(s, "C", nbasis, nbasis);     // Coefficients
-    ab_session_add(s, "T1", nbasis, nbasis);    // Temp
-    ab_session_add(s, "T2", nbasis, nbasis);    // Temp
+    ab_session_add(s, "H", nbasis, nbasis);       // Hamiltonian
+    ab_session_add(s, "S", nbasis, nbasis);       // Overlap
+    ab_session_add(s, "P", nbasis, nbasis);       // Density
+    ab_session_add(s, "F", nbasis, nbasis);       // Fock matrix
+    ab_session_add(s, "C", nbasis, nbasis);       // Coefficients
+    ab_session_add(s, "Sinvhalf", nbasis, nbasis); // S^(-1/2) for orthogonalization
+    ab_session_add(s, "Fprime", nbasis, nbasis);  // Transformed Fock matrix
+    ab_session_add(s, "Cocc", nbasis, nbasis);    // Occupation matrix
+    ab_session_add(s, "Ctrans", nbasis, nbasis);  // C transpose for density build
+    ab_session_add(s, "T1", nbasis, nbasis);      // Temp
+    ab_session_add(s, "T2", nbasis, nbasis);      // Temp
+
+    // Compute S^(-1/2) (Löwdin orthogonalization)
+    // (In real code: diagonalize S, compute S^(-1/2) = U * s^(-1/2) * U^T)
+    double* Sinvhalf = compute_sinvhalf(S, nbasis);
 
     // Upload constant matrices ONCE
     ab_session_upload(s, "H", H);
     ab_session_upload(s, "S", S);
     ab_session_upload(s, "P", P);
+    ab_session_upload(s, "Sinvhalf", Sinvhalf);
+
+    // Initialize occupation matrix (1.0 for occupied, 0.0 for virtual)
+    double* Cocc = calloc(nbasis * nbasis, sizeof(double));
+    int nocc = get_num_occupied_orbitals(nbasis);
+    for (int i = 0; i < nocc; i++) Cocc[i * nbasis + i] = 1.0;
+    ab_session_upload(s, "Cocc", Cocc);
 
     double energy_old = 0;
 
@@ -142,6 +157,15 @@ void scf_loop(int nbasis, double* H, double* S, double* P,
         // Upload new coefficients
         ab_session_upload(s, "C", C_cpu);
 
+        // Transpose C for density build
+        double* Ctrans_cpu = malloc(nbasis * nbasis * sizeof(double));
+        for (int i = 0; i < nbasis; i++) {
+            for (int j = 0; j < nbasis; j++) {
+                Ctrans_cpu[j * nbasis + i] = C_cpu[i * nbasis + j];
+            }
+        }
+        ab_session_upload(s, "Ctrans", Ctrans_cpu);
+
         // Build new density: P = C * Cocc * C^T
         ab_session_dgemm(s, "C", "Cocc", "T1");
         ab_session_dgemm(s, "T1", "Ctrans", "P");
@@ -157,10 +181,14 @@ void scf_loop(int nbasis, double* H, double* S, double* P,
         free(F_cpu);
         free(eigenvalues);
         free(C_cpu);
+        free(Ctrans_cpu);
     }
 
     // Download final density
     ab_session_download(s, "P", P);
+
+    free(Sinvhalf);
+    free(Cocc);
 
     ab_session_destroy(s);
     ab_shutdown();
@@ -296,17 +324,23 @@ class GPUMatrix:
     def upload(self, data):
         data = np.ascontiguousarray(data, dtype=np.float64)
         ptr = data.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
-        _lib.ab_matrix_upload(self._ptr, ptr, True)
+        status = _lib.ab_matrix_upload(self._ptr, ptr, True)
+        if status != 0:
+            raise RuntimeError(f"ab_matrix_upload failed with status {status}")
 
     def download(self):
         data = np.zeros((self.rows, self.cols), dtype=np.float64)
         ptr = data.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
-        _lib.ab_matrix_download(self._ptr, ptr, True)
+        status = _lib.ab_matrix_download(self._ptr, ptr, True)
+        if status != 0:
+            raise RuntimeError(f"ab_matrix_download failed with status {status}")
         return data
 
 def gpu_matmul(A, B):
     """Matrix multiply using apple-bottom GPU"""
-    _lib.ab_init()
+    status = _lib.ab_init()
+    if status != 0:
+        raise RuntimeError(f"ab_init failed with status {status}")
 
     M, K = A.shape
     K2, N = B.shape
@@ -319,7 +353,9 @@ def gpu_matmul(A, B):
     mA.upload(A)
     mB.upload(B)
 
-    _lib.ab_dgemm(mA._ptr, mB._ptr, mC._ptr)
+    status = _lib.ab_dgemm(mA._ptr, mB._ptr, mC._ptr)
+    if status != 0:
+        raise RuntimeError(f"ab_dgemm failed with status {status}")
 
     return mC.download()
 ```
