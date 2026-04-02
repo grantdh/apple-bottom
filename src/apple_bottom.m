@@ -496,13 +496,9 @@ static os_unfair_lock g_init_lock = OS_UNFAIR_LOCK_INIT;
         NSError* error = nil;
         MTLCompileOptions* opts = [[MTLCompileOptions alloc] init];
         // MTLMathModeSafe prevents FMA reordering that could break DD error-free
-        // transformations. Use direct property when SDK has it, KVC fallback for CI.
-#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 140000
+        // transformations. Only available in macOS 15.0+ SDK
+#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
         opts.mathMode = MTLMathModeSafe;
-#else
-        if ([opts respondsToSelector:@selector(setMathMode:)]) {
-            [opts setValue:@(3) forKey:@"mathMode"];
-        }
 #endif
 
         id<MTLLibrary> library = [_device newLibraryWithSource:kShaderSource options:opts error:&error];
