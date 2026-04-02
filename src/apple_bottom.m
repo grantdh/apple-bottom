@@ -495,8 +495,10 @@ static os_unfair_lock g_init_lock = OS_UNFAIR_LOCK_INIT;
         
         NSError* error = nil;
         MTLCompileOptions* opts = [[MTLCompileOptions alloc] init];
-        // MTLMathModeSafe prevents FMA reordering that could break DD error-free
-        // transformations. Only available in macOS 15.0+ SDK
+        // MTLMathModeSafe is CRITICAL for DD precision - prevents FMA reordering
+        // that breaks error-free transformations. Without it, precision degrades
+        // from ~10⁻¹⁶ to ~10⁻⁸. KVC fallback @(3) was harmful, causing regression.
+        // Only available in macOS 15.0+ SDK, so older SDKs can't achieve full precision.
 #if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
         opts.mathMode = MTLMathModeSafe;
 #endif
