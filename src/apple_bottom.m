@@ -495,12 +495,15 @@ static os_unfair_lock g_init_lock = OS_UNFAIR_LOCK_INIT;
         
         NSError* error = nil;
         MTLCompileOptions* opts = [[MTLCompileOptions alloc] init];
-        // MTLMathModeSafe (enum value 3) prevents FMA reordering that could
-        // break DD error-free transformations. Use KVC to avoid compile-time
-        // dependency on macOS 14.2+ SDK headers.
+        // MTLMathModeSafe prevents FMA reordering that could break DD error-free
+        // transformations. Use direct property when SDK has it, KVC fallback for CI.
+#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 140000
+        opts.mathMode = MTLMathModeSafe;
+#else
         if ([opts respondsToSelector:@selector(setMathMode:)]) {
             [opts setValue:@(3) forKey:@"mathMode"];
         }
+#endif
 
         id<MTLLibrary> library = [_device newLibraryWithSource:kShaderSource options:opts error:&error];
         if (!library) { NSLog(@"Shader compile failed: %@", error); return nil; }
@@ -1105,73 +1108,85 @@ ABStatus ab_dsyrk(ABMatrix A, ABMatrix C) {
 
 ABStatus ab_zherk(ABMatrix Ar, ABMatrix Ai, ABMatrix Cr, ABMatrix Ci) {
     if (!Ar || !Ai || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
-    
+
     int N = Ar->rows;
     int K = Ar->cols;
-    
+    ABStatus status = AB_OK;
+    size_t countA;
+    int i, j;
+
+    ABMatrix temp = NULL;
+    ABMatrix ArT = NULL;
+    ABMatrix AiT = NULL;
+    double* ArData = NULL;
+    double* AiData = NULL;
+    double* ArTData = NULL;
+    double* AiTData = NULL;
+
     // Cr = Ar×Arᵀ + Ai×Aiᵀ (via DSYRK)
-    ABStatus s1 = ab_dsyrk(Ar, Cr);
-    if (s1 != AB_OK) return s1;
-    
-    ABMatrix temp = ab_matrix_create(N, N);
-    if (!temp) return AB_ERROR_ALLOC_FAILED;
-    
-    ABStatus s2 = ab_dsyrk(Ai, temp);
-    if (s2 != AB_OK) { ab_matrix_destroy(temp); return s2; }
-    
-    ab_matrix_add(Cr, temp, Cr);
-    
-    // Ci = Ai×Arᵀ - Ar×Aiᵀ
-    size_t countA = (size_t)N * K;
-    double* ArData = (double*)malloc(countA * sizeof(double));
-    double* AiData = (double*)malloc(countA * sizeof(double));
-    double* ArTData = (double*)malloc(countA * sizeof(double));
-    double* AiTData = (double*)malloc(countA * sizeof(double));
-    
-    if (!ArData || !AiData || !ArTData || !AiTData) {
-        free(ArData); free(AiData); free(ArTData); free(AiTData);
-        ab_matrix_destroy(temp);
-        return AB_ERROR_ALLOC_FAILED;
+    if ((status = ab_dsyrk(Ar, Cr)) != AB_OK) goto cleanup;
+
+    temp = ab_matrix_create(N, N);
+    if (!temp) {
+        status = AB_ERROR_ALLOC_FAILED;
+        goto cleanup;
     }
-    
+
+    if ((status = ab_dsyrk(Ai, temp)) != AB_OK) goto cleanup;
+    if ((status = ab_matrix_add(Cr, temp, Cr)) != AB_OK) goto cleanup;
+
+    // Ci = Ai×Arᵀ - Ar×Aiᵀ
+    countA = (size_t)N * K;
+    ArData = (double*)malloc(countA * sizeof(double));
+    AiData = (double*)malloc(countA * sizeof(double));
+    ArTData = (double*)malloc(countA * sizeof(double));
+    AiTData = (double*)malloc(countA * sizeof(double));
+
+    if (!ArData || !AiData || !ArTData || !AiTData) {
+        status = AB_ERROR_ALLOC_FAILED;
+        goto cleanup;
+    }
+
     ab_matrix_download(Ar, ArData, true);
     ab_matrix_download(Ai, AiData, true);
-    
+
     // Transpose: A[i,j] -> Aᵀ[j,i]
-    for (int i = 0; i < N; i++) {
-        for (int j = 0; j < K; j++) {
+    for (i = 0; i < N; i++) {
+        for (j = 0; j < K; j++) {
             ArTData[j * N + i] = ArData[i * K + j];
             AiTData[j * N + i] = AiData[i * K + j];
         }
     }
-    
-    ABMatrix ArT = ab_matrix_create(K, N);
-    ABMatrix AiT = ab_matrix_create(K, N);
+
+    ArT = ab_matrix_create(K, N);
+    AiT = ab_matrix_create(K, N);
     if (!ArT || !AiT) {
-        ab_matrix_destroy(ArT); ab_matrix_destroy(AiT);
-        free(ArData); free(AiData); free(ArTData); free(AiTData);
-        ab_matrix_destroy(temp);
-        return AB_ERROR_ALLOC_FAILED;
+        status = AB_ERROR_ALLOC_FAILED;
+        goto cleanup;
     }
-    
+
     ab_matrix_upload(ArT, ArTData, true);
     ab_matrix_upload(AiT, AiTData, true);
-    
+
     // Ci = Ai × Arᵀ
-    ab_dgemm(Ai, ArT, Ci);
-    
+    if ((status = ab_dgemm(Ai, ArT, Ci)) != AB_OK) goto cleanup;
+
     // temp = Ar × Aiᵀ
-    ab_dgemm(Ar, AiT, temp);
-    
+    if ((status = ab_dgemm(Ar, AiT, temp)) != AB_OK) goto cleanup;
+
     // Ci = Ci - temp
-    ab_matrix_sub(Ci, temp, Ci);
-    
+    if ((status = ab_matrix_sub(Ci, temp, Ci)) != AB_OK) goto cleanup;
+
+cleanup:
     ab_matrix_destroy(temp);
     ab_matrix_destroy(ArT);
     ab_matrix_destroy(AiT);
-    free(ArData); free(AiData); free(ArTData); free(AiTData);
-    
-    return AB_OK;
+    free(ArData);
+    free(AiData);
+    free(ArTData);
+    free(AiTData);
+
+    return status;
 }
 // =============================================================================
 // =============================================================================

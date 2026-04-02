@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2026-04-02
+
+### Added
+- **V&V Documentation Package** (NASA-STD-7009A compliant)
+  - VV_REPORT.md: Master validation document with traceability matrix
+  - PRECISION_ENVELOPE.md: Precision guarantees and validated envelope
+  - VAL-1: Quantum ESPRESSO Si64 production validation
+- **CI Pipeline** (GitHub Actions)
+  - Automated compile-only checks on push/PR
+  - Local validation script with convergence study
+- **API Documentation**
+  - Version alignment: 1.0.0 → 1.2.0 in all headers
+  - API limits: AB_MAX_DIMENSION=46340, pool capacity 128, session capacity 64
+  - Async ZGEMM implementation note (synchronous wrapper, true async planned for v2.0)
+  - Precision scaling clarification: per-element ~10⁻¹⁵, DGEMM Frobenius ~N×10⁻¹⁵
+
+### Fixed (Critical)
+- **BUG-1/BUG-2**: Async DGEMM dimension packing and pipeline selection
+- **BUG-3**: ab_dgemm_scaled alpha/beta truncation to float (precision loss)
+- **BUG-4**: ab_matrix_scale alpha truncation to float (precision loss)
+- **BUG-5**: dispatch_once_t reset undefined behavior (V&V audit flag)
+- **BUG-6**: Memory pool overflow leak (returned unmanaged matrices)
+- **BUG-7**: Missing pipeline creation error checks (crash on init failure)
+- **ab_zherk**: Added error checking for ab_dgemm/ab_matrix_add/ab_matrix_sub with goto cleanup
+
+### Changed
+- **Integration Documentation**: Fixed INTEGRATION.md examples and cleanup
+- **MTLMathModeSafe**: SDK compatibility (KVC pattern, no SDK dependency)
+- **Build System**: Removed phantom CMake targets (cg_solver, zgemm_example, eigenvalue_solver)
+- **Build System**: Commented out pkg-config section pending cmake/applebottom.pc.in creation
+- **README**: Added precision scaling clarification (Frobenius error ~N×10⁻¹⁵)
+- Test badge: 37 → 48 passing tests (6 precision + 42 correctness)
+
+### Notes
+- Validated baseline: Git tag v1.0.2-bugfix
+- Production-validated for DFT, MD, FEM iterative solvers
+- Version alignment across all components (headers, CMake, API)
+
 ## [1.0.2] - 2026-03-31
 
 ### Fixed (Critical)
