@@ -268,7 +268,8 @@ apple_bottom.m: Metal kernel dispatch
 
 - macOS 14+ (Sonoma)
 - Apple Silicon (M1/M2/M3/M4)
-- Xcode Command Line Tools
+- Xcode 16+ (macOS 15.0+ SDK) required for full precision
+  - Older SDKs compile but achieve only ~10⁻⁸ precision instead of ~10⁻¹⁵
 
 ## Limitations
 

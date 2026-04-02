@@ -501,6 +501,8 @@ static os_unfair_lock g_init_lock = OS_UNFAIR_LOCK_INIT;
         // Only available in macOS 15.0+ SDK, so older SDKs can't achieve full precision.
 #if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
         opts.mathMode = MTLMathModeSafe;
+#else
+        NSLog(@"WARNING: MTLMathModeSafe not available — DD precision degraded to ~10⁻⁸");
 #endif
 
         id<MTLLibrary> library = [_device newLibraryWithSource:kShaderSource options:opts error:&error];
