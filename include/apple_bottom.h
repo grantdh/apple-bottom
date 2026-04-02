@@ -4,6 +4,10 @@
 // =============================================================================
 
 // =============================================================================
+// Requirements:
+//   - macOS 14+ with Xcode 16+ SDK (required for MTLMathModeSafe)
+//   - Without Xcode 16+ SDK: compiles but achieves only ~10⁻⁸ precision
+//
 // Thread Safety:
 //   - ab_init/ab_shutdown: Safe to call from any thread (uses dispatch_once)
 //   - Matrix operations: NOT thread-safe — Metal command queue serializes
