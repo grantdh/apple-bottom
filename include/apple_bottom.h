@@ -11,9 +11,14 @@
 //
 // Performance Notes:
 //   - DGEMM: GPU wins for N >= 2048
-//   - ZGEMM: GPU wins for N >= 1024  
+//   - ZGEMM: GPU wins for N >= 1024
 //   - DSYRK: GPU wins for N >= 3072
 //   - ZHERK: Use cblas_zherk (AMX) instead — GPU decomposition is 20x slower
+//
+// API Limits:
+//   - AB_MAX_DIMENSION = 46340 (max matrix dimension, overflow protection)
+//   - Memory pool capacity: 128 entries (ab_pool_get_matrix returns NULL when full)
+//   - Session capacity: 64 matrices per session
 // =============================================================================
 #ifndef APPLE_BOTTOM_H
 #define APPLE_BOTTOM_H
@@ -27,9 +32,9 @@ extern "C" {
 #endif
 
 #define APPLE_BOTTOM_VERSION_MAJOR 1
-#define APPLE_BOTTOM_VERSION_MINOR 0
+#define APPLE_BOTTOM_VERSION_MINOR 2
 #define APPLE_BOTTOM_VERSION_PATCH 0
-#define APPLE_BOTTOM_VERSION_STRING "1.0.0"
+#define APPLE_BOTTOM_VERSION_STRING "1.2.0"
 
 typedef struct ABMatrix_s* ABMatrix;
 typedef struct ABSession_s* ABSession;
@@ -88,6 +93,9 @@ void ab_pool_reset(ABMemoryPool pool);  // Mark all matrices as available
 
 // Async API (overlap GPU compute with CPU work)
 ABFuture ab_dgemm_async(ABMatrix A, ABMatrix B, ABMatrix C);
+
+// Note: currently executes synchronously — wraps ab_zgemm result in a completed future.
+// True async ZGEMM requires multiple command buffers (planned for v2.0).
 ABFuture ab_zgemm_async(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
                         ABMatrix Cr, ABMatrix Ci);
 ABStatus ab_future_wait(ABFuture f);
