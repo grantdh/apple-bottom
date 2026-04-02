@@ -291,10 +291,10 @@ FLOP_count ≥ 100M  (approximately N³ ≥ 100M for DGEMM)
 |------|-------|-------|
 | **Validated version** | v1.0.2-bugfix | Git tag `v1.0.2-bugfix` (SHA: 700934f) |
 | **Compiler** | clang 15.0.0 (Apple) | `-O3 -std=c11` |
-| **Metal SDK** | macOS 14+ SDK | `MTLMathModeSafe` |
+| **Metal SDK** | macOS 15.0+ SDK (Xcode 16+) | **`MTLMathModeSafe` is CRITICAL** - without it precision degrades from ~10⁻¹⁵ to ~10⁻⁸ |
 | **Test system** | M2 Max, 64GB RAM | 12 CPU cores, 38 GPU cores |
 
-**IMPORTANT**: Do not modify validated code without re-running V&V tests. Tag validated states in Git.
+**CRITICAL**: `MTLMathModeSafe` is a hard requirement, not optional. Without it (SDK < 15.0), DD precision degrades by 8 orders of magnitude (~10⁻⁸ instead of ~10⁻¹⁵). Do not modify validated code without re-running V&V tests. Tag validated states in Git.
 
 ---
 
