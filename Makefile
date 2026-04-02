@@ -64,18 +64,6 @@ $(BUILD)/examples/basic_dgemm: $(EXAMPLES)/01_basic_dgemm/main.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
 	@echo "Built: $@"
 
-$(BUILD)/examples/cg_solver: $(EXAMPLES)/02_cg_solver/main.c lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
-	@echo "Built: $@"
-
-$(BUILD)/examples/zgemm: $(EXAMPLES)/03_zgemm/main.c lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
-	@echo "Built: $@"
-
-$(BUILD)/examples/eigenvalue_solver: $(EXAMPLES)/04_eigenvalue_solver/main.c lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
-	@echo "Built: $@"
-
 examples: $(BUILD)/examples/basic_dgemm
 
 # =============================================================================
@@ -90,7 +78,7 @@ $(BUILD)/bench_zgemm: benchmarks/bench_zgemm.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
 	@echo "Built: $@"
 
-bench: $(BUILD)/bench_dgemm $(BUILD)/bench_pool $(BUILD)/bench_zgemm $(BUILD)/bench_dsyrk $(BUILD)/bench_zherk
+bench: $(BUILD)/bench_dgemm $(BUILD)/bench_pool $(BUILD)/bench_zgemm $(BUILD)/bench_dsyrk $(BUILD)/bench_zherk $(BUILD)/bench_async
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "DGEMM Benchmark"

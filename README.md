@@ -239,7 +239,7 @@ Each FP64 value is represented as a pair of FP32 values `(hi, lo)` where:
 - **Combined precision: ~10⁻¹⁵** (48-bit effective mantissa)
 - **NOT full FP64:** True FP64 has 53-bit mantissa (~10⁻¹⁶)
 
-This is sufficient for scientific computing where accumulated errors are typically << 10⁻¹⁵.
+This is sufficient for scientific computing where accumulated errors are typically << 10⁻¹⁵. Note that per-element DD precision is ~10⁻¹⁵, but DGEMM Frobenius error scales as ~N×10⁻¹⁵ due to accumulation (e.g., N=4096 gives ~5×10⁻¹⁴).
 
 ### Gauss 3-Multiply Algorithm
 

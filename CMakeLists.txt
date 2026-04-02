@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(apple_bottom VERSION 1.0.0 LANGUAGES C OBJC)
+project(apple_bottom VERSION 1.2.0 LANGUAGES C OBJC)
 
 # Require Apple Silicon
 if(NOT APPLE)
@@ -53,15 +53,6 @@ set_source_files_properties(src/apple_bottom.m PROPERTIES
 if(BUILD_EXAMPLES)
     add_executable(basic_dgemm examples/01_basic_dgemm/main.c)
     target_link_libraries(basic_dgemm applebottom ${ACCELERATE_FRAMEWORK})
-    
-    add_executable(cg_solver examples/02_cg_solver/main.c)
-    target_link_libraries(cg_solver applebottom ${ACCELERATE_FRAMEWORK})
-    
-    add_executable(zgemm_example examples/03_zgemm/main.c)
-    target_link_libraries(zgemm_example applebottom ${ACCELERATE_FRAMEWORK})
-    
-    add_executable(eigenvalue_solver examples/04_eigenvalue_solver/main.c)
-    target_link_libraries(eigenvalue_solver applebottom ${ACCELERATE_FRAMEWORK})
 endif()
 
 # =============================================================================
@@ -118,15 +109,16 @@ install(EXPORT applebottom-targets
 # pkg-config
 # =============================================================================
 
-configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/applebottom.pc.in
-    ${CMAKE_CURRENT_BINARY_DIR}/applebottom.pc
-    @ONLY
-)
-
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/applebottom.pc
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
-)
+# TODO: Re-enable once cmake/applebottom.pc.in is created
+# configure_file(
+#     ${CMAKE_CURRENT_SOURCE_DIR}/cmake/applebottom.pc.in
+#     ${CMAKE_CURRENT_BINARY_DIR}/applebottom.pc
+#     @ONLY
+# )
+#
+# install(FILES ${CMAKE_CURRENT_BINARY_DIR}/applebottom.pc
+#     DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
+# )
 
 # =============================================================================
 # Summary
