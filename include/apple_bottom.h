@@ -36,9 +36,9 @@ extern "C" {
 #endif
 
 #define APPLE_BOTTOM_VERSION_MAJOR 1
-#define APPLE_BOTTOM_VERSION_MINOR 2
+#define APPLE_BOTTOM_VERSION_MINOR 3
 #define APPLE_BOTTOM_VERSION_PATCH 0
-#define APPLE_BOTTOM_VERSION_STRING "1.2.0"
+#define APPLE_BOTTOM_VERSION_STRING "1.3.0-dev"
 
 typedef struct ABMatrix_s* ABMatrix;
 typedef struct ABSession_s* ABSession;
@@ -61,6 +61,21 @@ typedef enum {
     AB_TRANS = 1,         // Transpose (swap rows/cols)
     AB_CONJ_TRANS = 2     // Conjugate transpose A^H (for complex)
 } ABTranspose;
+
+typedef enum {
+    AB_LEFT  = 0,         // op(A) * X = alpha * B  (solve for X from left)
+    AB_RIGHT = 1          // X * op(A) = alpha * B  (solve for X from right)
+} ABSide;
+
+typedef enum {
+    AB_UPPER = 0,         // Upper triangular
+    AB_LOWER = 1          // Lower triangular
+} ABUplo;
+
+typedef enum {
+    AB_NON_UNIT = 0,      // Diagonal is general
+    AB_UNIT_DIAG = 1      // Diagonal is implicitly 1
+} ABDiag;
 
 typedef struct {
     double upload_time_ms;
@@ -121,6 +136,23 @@ ABStatus ab_zgemm_ex(
 );
 
 ABStatus ab_dsyrk(ABMatrix A, ABMatrix C);
+
+// Triangular solve: solves op(A) * X = alpha * B  or  X * op(A) = alpha * B
+// where A is triangular. Result overwrites B.
+// Uses blocked forward/back-substitution with DGEMM for the panel updates.
+// GPU-efficient for N >= 1024 (panel solves are CPU-bound for small blocks).
+//
+// Parameters:
+//   side:   AB_LEFT  → op(A) * X = alpha * B
+//           AB_RIGHT → X * op(A) = alpha * B
+//   uplo:   AB_UPPER or AB_LOWER
+//   transA: AB_NO_TRANS, AB_TRANS, or AB_CONJ_TRANS
+//   diag:   AB_UNIT_DIAG (diagonal implicitly 1) or AB_NON_UNIT
+//   alpha:  scalar multiplier
+//   A:      triangular matrix (N × N)
+//   B:      right-hand side / solution matrix (M × N), overwritten with X
+ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
+                  double alpha, ABMatrix A, ABMatrix B);
 
 // DEPRECATED: ab_zherk is 20x slower than cblas_zherk due to CPU-side transpose overhead.
 // Use cblas_zherk from Accelerate instead. This function will be removed in v2.0.
