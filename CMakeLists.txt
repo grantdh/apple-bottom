@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(apple_bottom VERSION 1.2.0 LANGUAGES C OBJC)
+project(apple_bottom VERSION 1.3.0 LANGUAGES C OBJC)
 
 # Require Apple Silicon
 if(NOT APPLE)
@@ -109,16 +109,15 @@ install(EXPORT applebottom-targets
 # pkg-config
 # =============================================================================
 
-# TODO: Re-enable once cmake/applebottom.pc.in is created
-# configure_file(
-#     ${CMAKE_CURRENT_SOURCE_DIR}/cmake/applebottom.pc.in
-#     ${CMAKE_CURRENT_BINARY_DIR}/applebottom.pc
-#     @ONLY
-# )
-#
-# install(FILES ${CMAKE_CURRENT_BINARY_DIR}/applebottom.pc
-#     DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
-# )
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/applebottom.pc.in
+    ${CMAKE_CURRENT_BINARY_DIR}/applebottom.pc
+    @ONLY
+)
+
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/applebottom.pc
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
+)
 
 # =============================================================================
 # Summary

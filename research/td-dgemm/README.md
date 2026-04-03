@@ -80,7 +80,7 @@ TD-DGEMM is the first GPU BLAS implementation providing a proven faithful-roundi
 
 ```bash
 # Clone the repo
-git clone https://github.com/TechnologyResidue/apple-bottom.git
+git clone https://github.com/grantdh/apple-bottom.git
 cd apple-bottom
 
 # Build and run the production DD kernel (fast tier)
@@ -260,7 +260,7 @@ Apache 2.0 — see [LICENSE](LICENSE) file.
   title     = {apple-bottom: BLASphemy — Metal-native linear algebra for Apple Silicon},
   year      = {2026},
   publisher = {Technology Residue},
-  url       = {https://github.com/TechnologyResidue/apple-bottom}
+  url       = {https://github.com/grantdh/apple-bottom}
 }
 ```
 
@@ -268,7 +268,7 @@ Apache 2.0 — see [LICENSE](LICENSE) file.
 
 Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-For bug reports and feature requests, please [open an issue](https://github.com/TechnologyResidue/apple-bottom/issues).
+For bug reports and feature requests, please [open an issue](https://github.com/grantdh/apple-bottom/issues).
 
 ## Author
 

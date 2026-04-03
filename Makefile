@@ -22,7 +22,7 @@ SRC = src
 INCLUDE = include
 EXAMPLES = examples
 
-.PHONY: all lib test bench clean examples
+.PHONY: all lib test bench bench-report clean examples install uninstall
 
 # =============================================================================
 # Main targets
@@ -90,6 +90,13 @@ bench: $(BUILD)/bench_dgemm $(BUILD)/bench_pool $(BUILD)/bench_zgemm $(BUILD)/be
 	@echo "═══════════════════════════════════════════════════════════════════"
 	./$(BUILD)/bench_zgemm
 
+bench-report: bench
+	@echo ""
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "Generating Benchmark Report"
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@bash scripts/bench_report.sh
+
 # =============================================================================
 # Tests
 # =============================================================================
@@ -153,9 +160,19 @@ PREFIX ?= /usr/local
 install: lib
 	install -d $(PREFIX)/lib
 	install -d $(PREFIX)/include
+	install -d $(PREFIX)/lib/pkgconfig
 	install -m 644 $(BUILD)/libapplebottom.a $(PREFIX)/lib/
 	install -m 644 $(INCLUDE)/apple_bottom.h $(PREFIX)/include/
+	@sed -e 's|@PREFIX@|$(PREFIX)|g' \
+	     -e 's|@VERSION@|1.3.0|g' \
+	     applebottom.pc.in > $(PREFIX)/lib/pkgconfig/applebottom.pc
 	@echo "Installed to $(PREFIX)"
+
+uninstall:
+	rm -f $(PREFIX)/lib/libapplebottom.a
+	rm -f $(PREFIX)/include/apple_bottom.h
+	rm -f $(PREFIX)/lib/pkgconfig/applebottom.pc
+	@echo "Uninstalled from $(PREFIX)"
 # =============================================================================
 # Add these targets to the end of your Makefile
 # =============================================================================
