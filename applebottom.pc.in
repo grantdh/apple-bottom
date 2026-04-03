@@ -1,0 +1,9 @@
+prefix=@PREFIX@
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: applebottom
+Description: FP64-class BLAS for Apple Silicon GPU via double-float arithmetic on Metal
+Version: @VERSION@
+Libs: -L${libdir} -lapplebottom -framework Metal -framework Foundation -framework Accelerate -lc++
+Cflags: -I${includedir}

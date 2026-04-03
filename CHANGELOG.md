@@ -2,6 +2,42 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0-dev] - Unreleased
+
+### Added
+- **DTRSM**: Triangular solve (op(A) * X = alpha * B) — blocked forward/back-substitution with DGEMM panel updates
+  - New enums: `ABSide`, `ABUplo`, `ABDiag` for BLAS-standard calling convention
+  - GPU-efficient for N >= 1024
+- **Python Bindings** (`python/` directory)
+  - `ctypes` wrapper with Pythonic API: `ab.dgemm(A, B)` on numpy arrays
+  - High-level classes: `Matrix`, `Session`, `MemoryPool`
+  - Functional one-liner API: `dgemm()`, `zgemm()`, `dsyrk()`
+  - Context managers and automatic cleanup
+  - Full type hints (PEP 484 + PEP 561)
+- **Benchmark Report Script** (`scripts/bench_report.sh`)
+  - Automated benchmark suite with formatted markdown output
+  - `make bench-report` target
+  - System info collection, `--quick` mode
+- **Competitor Comparison** (`docs/COMPARISON.md`)
+  - Detailed technical comparison vs metal-float64, MLX, Accelerate, AppleNumericalComputing
+  - Decision guide for when to use each approach
+- **Blog Post Draft** (`docs/blog/fp64-on-apple-silicon.md`)
+  - HN/Reddit-ready technical writeup
+
+### Changed
+- **README.md**: Complete rewrite as high-conversion landing page
+  - One-line pitch above the fold with benchmark numbers
+  - Performance comparison table (DD-GPU vs AMX-CPU)
+  - Streamlined quickstart and API reference
+  - Prior art comparison table
+  - CI badge from GitHub Actions
+- **Citation URLs**: Fixed TechnologyResidue → grantdh/apple-bottom in research/td-dgemm/README.md
+- **Version**: Bumped to 1.3.0-dev
+
+### Notes
+- DTRSM implementation pending (API scaffolded, kernel not yet written)
+- Rectangular matrix fix in progress (fix/rectangular-gemm branch)
+
 ## [1.2.0] - 2026-04-02
 
 ### Added

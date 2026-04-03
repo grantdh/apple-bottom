@@ -18,6 +18,14 @@ build/
 # Profiling
 *.profdata
 *.profraw
+
+# Claude
 .claude/
 CLAUDE.md
-CLAUDE.md
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+*.egg
