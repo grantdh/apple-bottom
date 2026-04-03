@@ -124,6 +124,18 @@ test-verification: $(BUILD)/test_convergence
 	./$(BUILD)/test_convergence
 	@echo ""
 
+# Rectangular matrix diagnostic test
+$(BUILD)/test_rectangular_diag: tests/test_rectangular_diag.c lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	@echo "Built: $@"
+
+test-rectangular-diag: $(BUILD)/test_rectangular_diag
+	@echo ""
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "Running Rectangular Matrix Diagnostic Test"
+	@echo "═══════════════════════════════════════════════════════════════════"
+	./$(BUILD)/test_rectangular_diag
+
 # =============================================================================
 # Clean
 # =============================================================================
