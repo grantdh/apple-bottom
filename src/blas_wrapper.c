@@ -34,25 +34,18 @@ void ab_zgemm_blas(
 ) {
     uint64_t flops = 8ULL * M * N * K;
     
-    // Use BLAS fallback for:
-    // - Small matrices
-    // - Non-trivial alpha (!= 1)
-    // - Non-zero beta (not yet implemented in GPU path)
-    // - Transpose operations (handled below, but safer to verify)
-    bool needs_beta = (creal(beta) != 0.0 || cimag(beta) != 0.0);
-    bool non_unit_alpha = (creal(alpha) != 1.0 || cimag(alpha) != 0.0);
-    
-    if (flops < CROSSOVER_FLOPS || non_unit_alpha || needs_beta) {
+    // CPU fallback for small matrices only
+    if (flops < CROSSOVER_FLOPS) {
         cblas_zgemm(CblasColMajor,
-                    transA == 'N' ? CblasNoTrans : 
+                    transA == 'N' ? CblasNoTrans :
                     transA == 'T' ? CblasTrans : CblasConjTrans,
                     transB == 'N' ? CblasNoTrans :
                     transB == 'T' ? CblasTrans : CblasConjTrans,
                     M, N, K, &alpha, A, ldA, B, ldB, &beta, C, ldC);
         return;
     }
-    
-    // GPU path for large matrices with alpha=1, beta=0
+
+    // GPU path: compute A*B on GPU, apply alpha/beta in epilogue
     
     // Dimensions of A and B after transpose
     int A_rows = (transA == 'N') ? M : K;
@@ -137,17 +130,42 @@ void ab_zgemm_blas(
     // Compute C = A * B
     ab_zgemm(mAr, mAi, mBr, mBi, mCr, mCi);
     
-    // Download result
+    // Download result and apply alpha/beta epilogue
     double* Cr_data = malloc(M * N * sizeof(double));
     double* Ci_data = malloc(M * N * sizeof(double));
     ab_matrix_download(mCr, Cr_data, true);
     ab_matrix_download(mCi, Ci_data, true);
-    
-    // Convert row-major back to column-major
+
+    // Convert row-major back to column-major with alpha/beta:
+    // C = alpha * (A*B) + beta * C_old
+    double ar = creal(alpha), ai = cimag(alpha);
+    double br = creal(beta), bi = cimag(beta);
+    bool needs_beta = (br != 0.0 || bi != 0.0);
+    bool non_unit_alpha = (ar != 1.0 || ai != 0.0);
+
     for (int col = 0; col < N; col++) {
         for (int row = 0; row < M; row++) {
             size_t src = (size_t)row * N + col;
-            C[col * ldC + row] = Cr_data[src] + I * Ci_data[src];
+            double pr = Cr_data[src], pi = Ci_data[src];
+
+            // Apply alpha: alpha * (A*B)
+            double result_r, result_i;
+            if (non_unit_alpha) {
+                result_r = ar * pr - ai * pi;
+                result_i = ar * pi + ai * pr;
+            } else {
+                result_r = pr;
+                result_i = pi;
+            }
+
+            // Apply beta: + beta * C_old
+            if (needs_beta) {
+                double complex c_old = C[col * ldC + row];
+                result_r += br * creal(c_old) - bi * cimag(c_old);
+                result_i += br * cimag(c_old) + bi * creal(c_old);
+            }
+
+            C[col * ldC + row] = result_r + I * result_i;
         }
     }
     
@@ -168,21 +186,21 @@ void ab_dgemm_blas(
     double* C, int ldC
 ) {
     uint64_t flops = 2ULL * M * N * K;
-    
-    if (flops < CROSSOVER_FLOPS || alpha != 1.0 || beta != 0.0 ||
-        transA != 'N' || transB != 'N') {
+
+    // CPU fallback for: small matrices, transpose operations
+    if (flops < CROSSOVER_FLOPS || transA != 'N' || transB != 'N') {
         cblas_dgemm(CblasColMajor,
                     transA == 'T' ? CblasTrans : CblasNoTrans,
                     transB == 'T' ? CblasTrans : CblasNoTrans,
                     M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }
-    
-    // GPU path (simplified - no transpose for now)
+
+    // GPU path: supports arbitrary alpha/beta via scaled kernel
     ABMatrix mA = ab_matrix_create(M, K);
     ABMatrix mB = ab_matrix_create(K, N);
     ABMatrix mC = ab_matrix_create(M, N);
-    
+
     if (!mA || !mB || !mC) {
         if (mA) ab_matrix_destroy(mA);
         if (mB) ab_matrix_destroy(mB);
@@ -191,33 +209,42 @@ void ab_dgemm_blas(
                     M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }
-    
-    // Upload (column-major to row-major)
+
+    // Upload A (column-major to row-major)
     double* A_row = malloc(M * K * sizeof(double));
     for (int j = 0; j < K; j++)
         for (int i = 0; i < M; i++)
             A_row[i * K + j] = A[j * ldA + i];
     ab_matrix_upload(mA, A_row, true);
     free(A_row);
-    
+
+    // Upload B (column-major to row-major)
     double* B_row = malloc(K * N * sizeof(double));
     for (int j = 0; j < N; j++)
         for (int i = 0; i < K; i++)
             B_row[i * N + j] = B[j * ldB + i];
     ab_matrix_upload(mB, B_row, true);
     free(B_row);
-    
-    // Compute
-    ab_dgemm(mA, mB, mC);
-    
-    // Download
+
+    // Upload existing C when beta != 0 (needed for accumulation C = alpha*A*B + beta*C)
     double* C_row = malloc(M * N * sizeof(double));
+    if (beta != 0.0) {
+        for (int j = 0; j < N; j++)
+            for (int i = 0; i < M; i++)
+                C_row[i * N + j] = C[j * ldC + i];
+        ab_matrix_upload(mC, C_row, true);
+    }
+
+    // Compute C = alpha*A*B + beta*C on GPU
+    ab_dgemm_scaled(alpha, mA, mB, beta, mC);
+
+    // Download result (row-major to column-major)
     ab_matrix_download(mC, C_row, true);
     for (int j = 0; j < N; j++)
         for (int i = 0; i < M; i++)
             C[j * ldC + i] = C_row[i * N + j];
     free(C_row);
-    
+
     ab_matrix_destroy(mA);
     ab_matrix_destroy(mB);
     ab_matrix_destroy(mC);
