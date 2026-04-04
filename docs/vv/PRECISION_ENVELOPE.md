@@ -374,7 +374,7 @@ If precision is insufficient:
 
 | Version | Date | Changes | Author |
 |---------|------|---------|--------|
-| 1.0 | 2026-03-31 | Initial validated precision envelope | Claude + grantdh |
+| 1.0 | 2026-03-31 | Initial validated precision envelope | Grant Heileman |
 
 ---
 
