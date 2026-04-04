@@ -14,8 +14,14 @@
 #include <math.h>
 #include <string.h>
 
-// Test threshold for PASS/FAIL
-#define REL_ERROR_THRESHOLD 1e-13
+// Test threshold for PASS/FAIL: scales with K dimension
+// Theoretical bound: K * u^2 where u^2 = 2^-48 ≈ 3.55e-15
+// Use 10 * K * u^2 as practical threshold (10x safety margin)
+#define REL_ERROR_THRESHOLD_BASE 3.55e-14  // ~10 * u^2, floor for small K
+static inline double rel_error_threshold(int K) {
+    double theoretical = 10.0 * K * 3.55e-15;
+    return (theoretical > REL_ERROR_THRESHOLD_BASE) ? theoretical : REL_ERROR_THRESHOLD_BASE;
+}
 
 // Color codes for terminal output
 #define RED     "\033[0;31m"
@@ -154,12 +160,13 @@ int run_test(const TestCase* tc) {
     // Compute error
     double max_rel_err = compute_max_rel_error(C_ref, C_test, tc->m, tc->n);
 
-    // Report results
-    int passed = (max_rel_err < REL_ERROR_THRESHOLD);
+    // Report results (threshold scales with K)
+    double threshold = rel_error_threshold(tc->k);
+    int passed = (max_rel_err < threshold);
     if (passed) {
-        printf(GREEN "PASS" RESET " (max rel err: %.3e)\n", max_rel_err);
+        printf(GREEN "PASS" RESET " (max rel err: %.3e, threshold: %.1e)\n", max_rel_err, threshold);
     } else {
-        printf(RED "FAIL" RESET " (max rel err: %.3e)\n", max_rel_err);
+        printf(RED "FAIL" RESET " (max rel err: %.3e, threshold: %.1e)\n", max_rel_err, threshold);
 
         // Show a few sample errors for debugging
         printf("  Sample errors (first 5 mismatches):\n");
@@ -193,7 +200,7 @@ int main() {
     printf("================================================================================\n");
     printf("Rectangular Matrix Diagnostic Test for apple-bottom\n");
     printf("Testing 8 dimension patterns against cblas_dgemm reference\n");
-    printf("Threshold: max relative error < %.1e\n", REL_ERROR_THRESHOLD);
+    printf("Threshold: K-aware (10 * K * u^2, floor 3.55e-14)\n");
     printf("================================================================================\n\n");
 
     // Set random seed for reproducibility
