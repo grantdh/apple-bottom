@@ -155,20 +155,22 @@ inline DD dd_add(DD a, DD b) {
 inline DD dd_sub(DD a, DD b) { return dd_add(a, {-b.hi, -b.lo}); }
 
 // DD multiplication: (a.hi + a.lo) * (b.hi + b.lo)
+// Cross-terms use nested FMA: 2 roundings instead of 4 (Joldes-Muller-Popescu 2017)
 inline DD dd_mul(DD a, DD b) {
     float p1, e1;
     twoProduct(a.hi, b.hi, p1, e1);
-    e1 += a.hi * b.lo + a.lo * b.hi;
+    e1 = fma(a.hi, b.lo, fma(a.lo, b.hi, e1));
     float s, e;
     fastTwoSum(p1, e1, s, e);
     return {s, e};
 }
 
 // DD fused multiply-add: a * b + c
+// Cross-terms use nested FMA: 2 roundings instead of 4 (Joldes-Muller-Popescu 2017)
 inline DD dd_fma(DD a, DD b, DD c) {
     float p1, e1;
     twoProduct(a.hi, b.hi, p1, e1);
-    e1 += a.hi * b.lo + a.lo * b.hi;
+    e1 = fma(a.hi, b.lo, fma(a.lo, b.hi, e1));
     float s2, e2;
     twoSum(p1, c.hi, s2, e2);
     e2 += e1 + c.lo;

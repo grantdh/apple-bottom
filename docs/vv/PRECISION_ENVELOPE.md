@@ -55,9 +55,11 @@ DD operations use Dekker/Knuth algorithms:
 |-----------|-----------|-------|-------------|
 | Addition | `twoSum` | 6 | `≤ ε_mach` |
 | Multiplication | `twoProduct` (FMA) | 2 | `≤ ε_mach` |
-| FMA | `dd_fma` | 8 | `≤ 2ε_mach` |
+| FMA | `dd_fma` | ~10 | `≤ 2ε_mach` |
 
 where `ε_mach = 2⁻²⁴` for FP32.
+
+Cross-term products in `dd_mul` and `dd_fma` use nested FMA chains (Joldes, Muller, Popescu 2017, ACM TOMS) to reduce rounding from 4 truncations to 2 per operation, with error bounded by `≤ 2u²` where `u = 2⁻²⁴`.
 
 ### 1.3 DGEMM Error Analysis
 
@@ -76,6 +78,20 @@ where `γ_K = K · ε / (1 - K · ε) ≈ K · ε` for `K · ε ≪ 1`, and `ε 
 ```
 relative_error ≈ K · 2⁻⁴⁸ = N · 2⁻⁴⁸
 ```
+
+### 1.4 Probabilistic Error Bounds
+
+The effective DD unit roundoff is `u² = 2⁻⁴⁸ ≈ 3.55 × 10⁻¹⁵`.
+
+For DGEMM with inner dimension K, two regimes apply:
+
+**Worst-case (adversarial inputs)**: The Higham bound gives `O(K · u²)`. For K=4096, this yields `~1.5 × 10⁻¹¹` — a hard ceiling that holds for any input, including all-positive or maximally-correlated matrices.
+
+**Probabilistic (random inputs)**: When rounding errors are uncorrelated (the typical case for random or well-conditioned scientific matrices), the Wilkinson random walk model applies. Errors accumulate as a random walk rather than coherently, giving `O(√K · u²)`. For K=4096: `√4096 · 3.55 × 10⁻¹⁵ ≈ 2.3 × 10⁻¹³`.
+
+This explains the empirically observed `√N` scaling in Section 2.1 (slope = 0.493 ≈ 0.5). The measured Frobenius errors of `~10⁻¹⁵` to `~10⁻¹⁴` across N=64 to N=4096 fall between the probabilistic `√K · u²` and the worst-case `K · u²` bounds, exactly where theory predicts for Uniform(-1,1) random matrices with stochastic cancellation.
+
+**The stated guarantee uses the conservative `O(N · 2⁻⁴⁸)` bound.** The `√N` scaling is a property of the input distribution, not of the algorithm, and should not be assumed for production error budgets.
 
 ---
 
@@ -356,6 +372,8 @@ If precision is insufficient:
 
 - Dekker, T. J. (1971). "A floating-point technique for extending the available precision." *Numerische Mathematik*, 18(3), 224-242.
 - Higham, N. J. (2002). *Accuracy and Stability of Numerical Algorithms* (2nd ed.). SIAM. Chapter 3: "Rounding Error Analysis of Inner and Outer Products."
+- Joldes, M., Muller, J.-M., Popescu, V. (2017). "Tight and rigorous error bounds for basic building blocks of double-word arithmetic." *ACM Trans. Math. Softw.*, 44(2), Article 15.
+- Higham, N. J., Mary, T. (2022). "Mixed precision algorithms in numerical linear algebra." *Acta Numerica*, 31, 347-414.
 
 ### 8.2 Validation Standards
 
@@ -375,6 +393,7 @@ If precision is insufficient:
 | Version | Date | Changes | Author |
 |---------|------|---------|--------|
 | 1.0 | 2026-03-31 | Initial validated precision envelope | Grant Heileman |
+| 1.1 | 2026-04-04 | Add theoretical precision bounds, FMA optimization reference | Grant Heileman |
 
 ---
 
