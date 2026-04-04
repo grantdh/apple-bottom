@@ -2,13 +2,13 @@
 
 ## In Progress
 
-- **Rectangular matrix support** — full correctness for non-square M, N, K dimensions
-- **General alpha/beta** — GPU-accelerated `C = alpha*A*B + beta*C`
+- **General alpha/beta** — GPU-accelerated `C = alpha*A*B + beta*C` (routes more QE calls to GPU)
 
 ## Planned
 
-- DTRSM (triangular solve)
+- DTRSM (triangular solve via iterative refinement)
 - Batched DGEMM / ZGEMM
+- Transpose support (transA, transB != 'N')
 - Homebrew formula
 - Multi-chip validation matrix (M1 through M4 family)
 - Performance regression CI

@@ -327,7 +327,6 @@ For scientific computing on Apple Silicon:
 
 **✗ DO NOT USE for**:
 - Algorithms requiring element-wise accuracy `< 10⁻⁶` (e.g., pivoting, eigensolvers)
-- Rectangular matrices with aspect ratio > 10:1
 - Ill-conditioned systems (`κ > 10¹²`)
 - Matrices `N < 512` (CPU faster due to overhead)
 - Thread-unsafe contexts (add external locking)
