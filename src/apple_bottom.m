@@ -195,12 +195,30 @@ inline DD dd_scale(DD a, float s) {
 // TK: K-dimension tile for shared memory caching
 // NT: Threads per threadgroup = (64/4) * (64/4) = 256
 
+// Square tiling (default): 64×64 blocks, 256 threads
 #define BM 64
 #define BN 64
 #define TM 4
 #define TN 4
 #define TK 16
 #define NT ((BM/TM) * (BN/TN))
+
+// Tall-skinny tiling: 128×16 blocks, 256 threads
+// For M >> N (e.g., QE's 18277×150): boundary waste drops from ~30% to ~6%
+#define BM_TS 128
+#define BN_TS 16
+#define TM_TS 4
+#define TN_TS 2
+#define TK_TS 16
+#define NT_TS ((BM_TS/TM_TS) * (BN_TS/TN_TS))
+
+// Block-wise compensated accumulation: renormalize accumulators every
+// RENORM_INTERVAL K-tiles to prevent drift in long dot products.
+// Per Wilkinson's probabilistic analysis, Frobenius error scales as O(sqrt(K)).
+// Periodic twoSum renormalization ensures the DD representation stays
+// well-conditioned, preventing edge-case denormalization when magnitudes
+// shift during long accumulations. (Higham 2002, §4.2)
+#define RENORM_INTERVAL 8  // Every 8 tiles × TK=16 = 128 K-elements
 
 // =============================================================================
 // DGEMM Kernel: C = A × B
@@ -316,11 +334,113 @@ kernel void dd_dgemm_ab(
                     acc[i][j] = dd_fma(av[i], bv[j], acc[i][j]);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Block-wise compensated accumulation: periodic renormalization
+        // Prevents accumulator drift for large K by ensuring the DD
+        // hi/lo split stays well-conditioned after many FMA iterations.
+        if ((kt & (RENORM_INTERVAL - 1)) == (RENORM_INTERVAL - 1)) {
+            for (uint i = 0; i < TM; i++)
+                for (uint j = 0; j < TN; j++) {
+                    float s, e;
+                    twoSum(acc[i][j].hi, acc[i][j].lo, s, e);
+                    acc[i][j] = {s, e};
+                }
+        }
     }
+
+    // Final renormalization before epilogue scaling
+    for (uint i = 0; i < TM; i++)
+        for (uint j = 0; j < TN; j++) {
+            float s, e;
+            twoSum(acc[i][j].hi, acc[i][j].lo, s, e);
+            acc[i][j] = {s, e};
+        }
 
     for (uint i = 0; i < TM; i++)
         for (uint j = 0; j < TN; j++) {
             uint gr = bRow + ty * TM + i, gc = bCol + tx * TN + j;
+            if (gr < M && gc < N) {
+                DD result = dd_mul(acc[i][j], alpha);
+                if (beta.hi != 0.0f || beta.lo != 0.0f) result = dd_add(result, dd_mul(C[gr * N + gc], beta));
+                C[gr * N + gc] = result;
+            }
+        }
+}
+
+// =============================================================================
+// DGEMM Kernel (Tall-Skinny): C = α·A×B + β·C — optimized for M >> N
+// BM_TS=128, BN_TS=16, TM_TS=4, TN_TS=2, 256 threads per threadgroup
+// =============================================================================
+
+kernel void dd_dgemm_ab_ts(
+    device const DD* A [[buffer(0)]],
+    device const DD* B [[buffer(1)]],
+    device DD* C [[buffer(2)]],
+    constant uint& M [[buffer(3)]],
+    constant uint& N [[buffer(4)]],
+    constant uint& K [[buffer(5)]],
+    constant DD& alpha [[buffer(6)]],
+    constant DD& beta [[buffer(7)]],
+    uint2 lid [[thread_position_in_threadgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint flatId [[thread_index_in_threadgroup]]
+) {
+    uint bRow = tgid.y * BM_TS, bCol = tgid.x * BN_TS;
+    uint ty = lid.y, tx = lid.x;
+
+    DD acc[TM_TS][TN_TS];
+    for (uint i = 0; i < TM_TS; i++)
+        for (uint j = 0; j < TN_TS; j++)
+            acc[i][j] = {0.0f, 0.0f};
+
+    threadgroup DD tileA[BM_TS * TK_TS];
+    threadgroup DD tileB[TK_TS * BN_TS];
+
+    for (uint kt = 0; kt < (K + TK_TS - 1) / TK_TS; kt++) {
+        for (uint i = flatId; i < BM_TS * TK_TS; i += NT_TS) {
+            uint r = i / TK_TS, c = i % TK_TS;
+            uint gr = bRow + r, gc = kt * TK_TS + c;
+            tileA[i] = (gr < M && gc < K) ? A[gr * K + gc] : DD{0.0f, 0.0f};
+        }
+        for (uint i = flatId; i < TK_TS * BN_TS; i += NT_TS) {
+            uint r = i / BN_TS, c = i % BN_TS;
+            uint gr = kt * TK_TS + r, gc = bCol + c;
+            tileB[i] = (gr < K && gc < N) ? B[gr * N + gc] : DD{0.0f, 0.0f};
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint k = 0; k < TK_TS; k++) {
+            DD av[TM_TS], bv[TN_TS];
+            for (uint i = 0; i < TM_TS; i++) av[i] = tileA[(ty * TM_TS + i) * TK_TS + k];
+            for (uint j = 0; j < TN_TS; j++) bv[j] = tileB[k * BN_TS + tx * TN_TS + j];
+            for (uint i = 0; i < TM_TS; i++)
+                for (uint j = 0; j < TN_TS; j++)
+                    acc[i][j] = dd_fma(av[i], bv[j], acc[i][j]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Block-wise compensated accumulation (tall-skinny variant)
+        if ((kt & (RENORM_INTERVAL - 1)) == (RENORM_INTERVAL - 1)) {
+            for (uint i = 0; i < TM_TS; i++)
+                for (uint j = 0; j < TN_TS; j++) {
+                    float s, e;
+                    twoSum(acc[i][j].hi, acc[i][j].lo, s, e);
+                    acc[i][j] = {s, e};
+                }
+        }
+    }
+
+    // Final renormalization before epilogue scaling
+    for (uint i = 0; i < TM_TS; i++)
+        for (uint j = 0; j < TN_TS; j++) {
+            float s, e;
+            twoSum(acc[i][j].hi, acc[i][j].lo, s, e);
+            acc[i][j] = {s, e};
+        }
+
+    for (uint i = 0; i < TM_TS; i++)
+        for (uint j = 0; j < TN_TS; j++) {
+            uint gr = bRow + ty * TM_TS + i, gc = bCol + tx * TN_TS + j;
             if (gr < M && gc < N) {
                 DD result = dd_mul(acc[i][j], alpha);
                 if (beta.hi != 0.0f || beta.lo != 0.0f) result = dd_add(result, dd_mul(C[gr * N + gc], beta));
@@ -462,6 +582,7 @@ kernel void dd_conj_transpose(
 @property (nonatomic, strong) id<MTLCommandQueue> commandQueue;
 @property (nonatomic, strong) id<MTLComputePipelineState> dgemmPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> dgemmABPipeline;
+@property (nonatomic, strong) id<MTLComputePipelineState> dgemmABTSPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> dsyrkPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> zeroPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> addPipeline;
@@ -515,6 +636,9 @@ static os_unfair_lock g_init_lock = OS_UNFAIR_LOCK_INIT;
 
         _dgemmABPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_dgemm_ab"] error:&error];
         if (!_dgemmABPipeline) { NSLog(@"Pipeline creation failed (dd_dgemm_ab): %@", error); return nil; }
+
+        _dgemmABTSPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_dgemm_ab_ts"] error:&error];
+        if (!_dgemmABTSPipeline) { NSLog(@"Pipeline creation failed (dd_dgemm_ab_ts): %@", error); return nil; }
 
         _dsyrkPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_dsyrk"] error:&error];
         if (!_dsyrkPipeline) { NSLog(@"Pipeline creation failed (dd_dsyrk): %@", error); return nil; }
@@ -782,7 +906,13 @@ ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMa
 
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
-    [encoder setComputePipelineState:ctx.dgemmABPipeline];
+    // Select kernel based on aspect ratio: tall-skinny for M > 4*N
+    bool use_ts = (M > 4 * N) && (N <= 64);
+    if (use_ts) {
+        [encoder setComputePipelineState:ctx.dgemmABTSPipeline];
+    } else {
+        [encoder setComputePipelineState:ctx.dgemmABPipeline];
+    }
     [encoder setBuffer:A->buffer offset:0 atIndex:0];
     [encoder setBuffer:B->buffer offset:0 atIndex:1];
     [encoder setBuffer:C->buffer offset:0 atIndex:2];
@@ -791,7 +921,14 @@ ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMa
     [encoder setBytes:&K length:sizeof(K) atIndex:5];
     [encoder setBytes:&alpha_dd length:sizeof(alpha_dd) atIndex:6];
     [encoder setBytes:&beta_dd length:sizeof(beta_dd) atIndex:7];
-    [encoder dispatchThreadgroups:MTLSizeMake((N + 63) / 64, (M + 63) / 64, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    if (use_ts) {
+        // Tall-skinny: BM=128, BN=16, TM=4, TN=2 → threadgroup 8×32 = 256 threads
+        [encoder dispatchThreadgroups:MTLSizeMake((N + 15) / 16, (M + 127) / 128, 1)
+                 threadsPerThreadgroup:MTLSizeMake(8, 32, 1)];
+    } else {
+        [encoder dispatchThreadgroups:MTLSizeMake((N + 63) / 64, (M + 63) / 64, 1)
+                 threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    }
     [encoder endEncoding];
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];

@@ -23,6 +23,20 @@ All notable changes to this project will be documented in this file.
   - Decision guide for when to use each approach
 - **Blog Post Draft** (`docs/blog/fp64-on-apple-silicon.md`)
   - HN/Reddit-ready technical writeup
+- **Dynamic Wilkinson-scaled error thresholds** in precision tests
+  - Threshold: `C_safety × sqrt(K) × u_DD` instead of static `1e-14`
+  - Mathematically correct per Higham (2002) §3.1 probabilistic analysis
+  - Precision tests now include rectangular (K=4096) and tall-skinny shapes
+  - Test count: 6 → 8 precision tests
+- **GPU-native transpose DGEMM** in BLAS wrapper
+  - `transA='T'` and `transB='T'` now route to GPU instead of CPU fallback
+  - Upload-time reordering handles column-major transpose conversion
+  - Improves GPU call ratio in QE workloads (was ~85%, now higher)
+- **Block-wise compensated accumulation** in GEMM kernels
+  - Periodic `twoSum` renormalization every 128 K-elements (8 tiles)
+  - Final renormalization before epilogue alpha/beta scaling
+  - Prevents accumulator drift for large-K dot products
+  - Applied to both square (dd_dgemm_ab) and tall-skinny (dd_dgemm_ab_ts) kernels
 
 ### Changed
 - **README.md**: Complete rewrite as high-conversion landing page
