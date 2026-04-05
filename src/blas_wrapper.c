@@ -3,7 +3,6 @@
 // BLAS-compatible interface for Fortran interoperability
 // =============================================================================
 
-#define ACCELERATE_NEW_LAPACK
 #include "apple_bottom.h"
 #include <complex.h>
 #include <stdlib.h>
