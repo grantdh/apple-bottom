@@ -154,6 +154,16 @@ ABStatus ab_dsyrk(ABMatrix A, ABMatrix C);
 ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
                   double alpha, ABMatrix A, ABMatrix B);
 
+// Mixed-Precision Iterative Refinement: solves A * X = B
+// Uses FP32 LU factorization (Accelerate LAPACK) + DD-DGEMM residual correction.
+// Avoids explicit inversion (κ² error) and bespoke DD-DTRSM shaders.
+// Converges to DD precision (~10⁻¹⁵) in 1-3 iterations for well-conditioned A.
+//
+// Parameters:
+//   A: N×N coefficient matrix (not modified)
+//   B: N×NRHS right-hand side, overwritten with solution X on output
+ABStatus ab_dgesv_mpir(ABMatrix A, ABMatrix B);
+
 // DEPRECATED: ab_zherk is 20x slower than cblas_zherk due to CPU-side transpose overhead.
 // Use cblas_zherk from Accelerate instead. This function will be removed in v2.0.
 #ifdef __GNUC__

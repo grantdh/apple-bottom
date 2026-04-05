@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [1.3.0-dev] - Unreleased
 
+### Added (Tier 2)
+- **Mixed-Precision Iterative Refinement** (`ab_dgesv_mpir`) — solves A*X=B via MPIR
+  - FP32 LU factorization (Accelerate LAPACK sgetrf/sgetrs) for O(N³) bulk work
+  - DD-DGEMM residual computation (10⁻¹⁵ fidelity) catches cancellation errors
+  - Converges to DD precision in 1-3 iterations for well-conditioned matrices
+  - Avoids explicit inversion (κ² error) and bespoke DD-DTRSM shaders (Paper §6)
+  - 6 new correctness tests (basic, single-RHS, moderate-κ, null, dim-mismatch, non-square)
+- **Broadened tall-skinny DGEMM dispatch** for domain-science matrices
+  - Relaxed heuristic from `(M > 4*N) && (N <= 64)` to pure aspect-ratio `(M >= 4*N)`
+  - Catches QE hot-path shapes like M=18277, N=150 that previously fell through to
+    64×64 square kernel (~34% boundary waste → ~4% with 128×16 tiles) (Paper §5)
+
 ### Added
 - **DTRSM**: Triangular solve (op(A) * X = alpha * B) — blocked forward/back-substitution with DGEMM panel updates
   - New enums: `ABSide`, `ABUplo`, `ABDiag` for BLAS-standard calling convention
@@ -36,7 +48,24 @@ All notable changes to this project will be documented in this file.
   - Periodic `twoSum` renormalization every 128 K-elements (8 tiles)
   - Final renormalization before epilogue alpha/beta scaling
   - Prevents accumulator drift for large-K dot products
-  - Applied to both square (dd_dgemm_ab) and tall-skinny (dd_dgemm_ab_ts) kernels
+  - Applied to all GEMM kernels: dd_dgemm, dd_dgemm_ab, dd_dgemm_ab_ts, dd_dsyrk
+- **Morton Z-order threadgroup dispatch** for SLC cache locality
+  - Space-filling curve remaps 2D threadgroup IDs to improve L2/SLC hit rate
+  - Applied to all GPU kernels: dd_dgemm, dd_dgemm_ab, dd_dgemm_ab_ts, dd_dsyrk
+  - Inline `morton_remap` function with 16-bit deinterleave + bounds checking
+  - Fallback to identity mapping when coordinates exceed grid dimensions
+- **DTRSM implementation** (blocked forward/back-substitution)
+  - Left-side: blocked panel algorithm with NB=64
+  - CPU (AMX) solves small triangular blocks, GPU DGEMM updates remaining panels
+  - Supports upper/lower, no-trans/trans, unit/non-unit diagonal
+  - Right-side falls back to cblas_dtrsm (AMX) for now
+  - Alpha scaling support
+  - 6 new correctness tests (lower, upper, trans, alpha, large N=256, null safety)
+- **AMX heterogeneous dispatch** for small GEMMs
+  - Dimension-aware heuristic: matrices with any dim ≤ 32 always route to AMX
+  - Separate thresholds for real (50M FLOPs) vs complex (100M FLOPs) DGEMM
+  - Skinny matrix penalty: higher threshold when any dimension < 64
+  - Reduces GPU dispatch overhead for QE's many small ZGEMM calls
 
 ### Changed
 - **README.md**: Complete rewrite as high-conversion landing page
@@ -49,7 +78,8 @@ All notable changes to this project will be documented in this file.
 - **Version**: Bumped to 1.3.0-dev
 
 ### Notes
-- DTRSM implementation pending (API scaffolded, kernel not yet written)
+- Test count: 50 → 56 (8 precision + 48 correctness)
+- DTRSM right-side GPU acceleration planned for v1.4
 - Rectangular matrix fix in progress (fix/rectangular-gemm branch)
 
 ## [1.2.0] - 2026-04-02

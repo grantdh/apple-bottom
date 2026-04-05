@@ -911,6 +911,466 @@ static void test_bug6_pool_overflow(void) {
 }
 
 // =============================================================================
+// DTRSM Tests
+// =============================================================================
+
+static void test_dtrsm_lower_notrans(void) {
+    TEST("DTRSM: lower, no-trans, non-unit");
+    ab_init();
+    int N = 64;
+    // Create a lower triangular matrix A and known solution X
+    // Then compute B = A * X and verify DTRSM recovers X
+    double* A_data = (double*)malloc(N * N * sizeof(double));
+    double* X_data = (double*)malloc(N * N * sizeof(double));
+    double* B_data = (double*)malloc(N * N * sizeof(double));
+
+    srand48(42);
+    // Fill lower triangular A with random values, diagonal > 1 for stability
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < N; j++) {
+            if (j < i) A_data[i * N + j] = drand48() * 2 - 1;
+            else if (j == i) A_data[i * N + j] = 2.0 + drand48();
+            else A_data[i * N + j] = 0.0;
+        }
+    // Fill X with random values
+    for (int i = 0; i < N * N; i++)
+        X_data[i] = drand48() * 2 - 1;
+    // Compute B = A * X (row-major)
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < N; j++) {
+            double s = 0;
+            for (int k = 0; k < N; k++)
+                s += A_data[i * N + k] * X_data[k * N + j];
+            B_data[i * N + j] = s;
+        }
+
+    ABMatrix mA = ab_matrix_create(N, N);
+    ABMatrix mB = ab_matrix_create(N, N);
+    ab_matrix_upload(mA, A_data, true);
+    ab_matrix_upload(mB, B_data, true);
+
+    ABStatus s = ab_dtrsm(AB_LEFT, AB_LOWER, AB_NO_TRANS, AB_NON_UNIT, 1.0, mA, mB);
+
+    double* result = (double*)malloc(N * N * sizeof(double));
+    ab_matrix_download(mB, result, true);
+
+    double max_err = 0;
+    for (int i = 0; i < N * N; i++) {
+        double err = fabs(result[i] - X_data[i]);
+        double rel = (fabs(X_data[i]) > 1e-10) ? err / fabs(X_data[i]) : err;
+        if (rel > max_err) max_err = rel;
+    }
+
+    ab_matrix_destroy(mA); ab_matrix_destroy(mB);
+    free(A_data); free(X_data); free(B_data); free(result);
+    ab_shutdown();
+
+    if (s == AB_OK && max_err < 1e-10) PASS();
+    else { char msg[64]; snprintf(msg, sizeof(msg), "err=%.2e", max_err); FAIL(msg); }
+}
+
+static void test_dtrsm_upper_notrans(void) {
+    TEST("DTRSM: upper, no-trans, non-unit");
+    ab_init();
+    int N = 64;
+    double* A_data = (double*)malloc(N * N * sizeof(double));
+    double* X_data = (double*)malloc(N * N * sizeof(double));
+    double* B_data = (double*)malloc(N * N * sizeof(double));
+
+    srand48(99);
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < N; j++) {
+            if (j > i) A_data[i * N + j] = drand48() * 2 - 1;
+            else if (j == i) A_data[i * N + j] = 2.0 + drand48();
+            else A_data[i * N + j] = 0.0;
+        }
+    for (int i = 0; i < N * N; i++)
+        X_data[i] = drand48() * 2 - 1;
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < N; j++) {
+            double s = 0;
+            for (int k = 0; k < N; k++)
+                s += A_data[i * N + k] * X_data[k * N + j];
+            B_data[i * N + j] = s;
+        }
+
+    ABMatrix mA = ab_matrix_create(N, N);
+    ABMatrix mB = ab_matrix_create(N, N);
+    ab_matrix_upload(mA, A_data, true);
+    ab_matrix_upload(mB, B_data, true);
+
+    ABStatus s = ab_dtrsm(AB_LEFT, AB_UPPER, AB_NO_TRANS, AB_NON_UNIT, 1.0, mA, mB);
+
+    double* result = (double*)malloc(N * N * sizeof(double));
+    ab_matrix_download(mB, result, true);
+
+    double max_err = 0;
+    for (int i = 0; i < N * N; i++) {
+        double err = fabs(result[i] - X_data[i]);
+        double rel = (fabs(X_data[i]) > 1e-10) ? err / fabs(X_data[i]) : err;
+        if (rel > max_err) max_err = rel;
+    }
+
+    ab_matrix_destroy(mA); ab_matrix_destroy(mB);
+    free(A_data); free(X_data); free(B_data); free(result);
+    ab_shutdown();
+
+    if (s == AB_OK && max_err < 1e-10) PASS();
+    else { char msg[64]; snprintf(msg, sizeof(msg), "err=%.2e", max_err); FAIL(msg); }
+}
+
+static void test_dtrsm_lower_trans(void) {
+    TEST("DTRSM: lower, trans, unit-diag");
+    ab_init();
+    int N = 64;
+    double* A_data = (double*)malloc(N * N * sizeof(double));
+    double* X_data = (double*)malloc(N * N * sizeof(double));
+    double* B_data = (double*)malloc(N * N * sizeof(double));
+
+    srand48(77);
+    // Lower triangular with unit diagonal
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < N; j++) {
+            if (j < i) A_data[i * N + j] = drand48() * 0.5;
+            else if (j == i) A_data[i * N + j] = 1.0;  // unit diag
+            else A_data[i * N + j] = 0.0;
+        }
+    for (int i = 0; i < N * N; i++)
+        X_data[i] = drand48() * 2 - 1;
+    // B = A^T * X
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < N; j++) {
+            double s = 0;
+            for (int k = 0; k < N; k++)
+                s += A_data[k * N + i] * X_data[k * N + j];  // A^T[i,k] = A[k,i]
+            B_data[i * N + j] = s;
+        }
+
+    ABMatrix mA = ab_matrix_create(N, N);
+    ABMatrix mB = ab_matrix_create(N, N);
+    ab_matrix_upload(mA, A_data, true);
+    ab_matrix_upload(mB, B_data, true);
+
+    ABStatus s = ab_dtrsm(AB_LEFT, AB_LOWER, AB_TRANS, AB_UNIT_DIAG, 1.0, mA, mB);
+
+    double* result = (double*)malloc(N * N * sizeof(double));
+    ab_matrix_download(mB, result, true);
+
+    double max_err = 0;
+    for (int i = 0; i < N * N; i++) {
+        double err = fabs(result[i] - X_data[i]);
+        double rel = (fabs(X_data[i]) > 1e-10) ? err / fabs(X_data[i]) : err;
+        if (rel > max_err) max_err = rel;
+    }
+
+    ab_matrix_destroy(mA); ab_matrix_destroy(mB);
+    free(A_data); free(X_data); free(B_data); free(result);
+    ab_shutdown();
+
+    if (s == AB_OK && max_err < 1e-10) PASS();
+    else { char msg[64]; snprintf(msg, sizeof(msg), "err=%.2e", max_err); FAIL(msg); }
+}
+
+static void test_dtrsm_alpha_scaling(void) {
+    TEST("DTRSM: alpha scaling");
+    ab_init();
+    int N = 32;
+    double alpha = 3.14;
+    double* A_data = (double*)malloc(N * N * sizeof(double));
+    double* X_data = (double*)malloc(N * N * sizeof(double));
+    double* B_data = (double*)malloc(N * N * sizeof(double));
+
+    srand48(55);
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < N; j++) {
+            if (j <= i) A_data[i * N + j] = (j == i) ? 2.0 + drand48() : drand48() * 2 - 1;
+            else A_data[i * N + j] = 0.0;
+        }
+    for (int i = 0; i < N * N; i++)
+        X_data[i] = drand48() * 2 - 1;
+    // B = A * X, then DTRSM with alpha should give X_sol = alpha * X
+    // Actually: op(A)*X = alpha*B_orig → X = alpha * A^{-1} * B_orig
+    // If B_orig = A * X_true / alpha, then X_sol = X_true
+    // Simpler: just set B = A * X, call DTRSM with alpha, result = alpha * X
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < N; j++) {
+            double s = 0;
+            for (int k = 0; k < N; k++)
+                s += A_data[i * N + k] * X_data[k * N + j];
+            B_data[i * N + j] = s;
+        }
+
+    ABMatrix mA = ab_matrix_create(N, N);
+    ABMatrix mB = ab_matrix_create(N, N);
+    ab_matrix_upload(mA, A_data, true);
+    ab_matrix_upload(mB, B_data, true);
+
+    ABStatus s = ab_dtrsm(AB_LEFT, AB_LOWER, AB_NO_TRANS, AB_NON_UNIT, alpha, mA, mB);
+
+    double* result = (double*)malloc(N * N * sizeof(double));
+    ab_matrix_download(mB, result, true);
+
+    // DTRSM solves: A * X_sol = alpha * B → X_sol = alpha * A^{-1} * B = alpha * X
+    double max_err = 0;
+    for (int i = 0; i < N * N; i++) {
+        double expected = alpha * X_data[i];
+        double err = fabs(result[i] - expected);
+        double rel = (fabs(expected) > 1e-10) ? err / fabs(expected) : err;
+        if (rel > max_err) max_err = rel;
+    }
+
+    ab_matrix_destroy(mA); ab_matrix_destroy(mB);
+    free(A_data); free(X_data); free(B_data); free(result);
+    ab_shutdown();
+
+    if (s == AB_OK && max_err < 1e-10) PASS();
+    else { char msg[64]; snprintf(msg, sizeof(msg), "err=%.2e", max_err); FAIL(msg); }
+}
+
+static void test_dtrsm_large(void) {
+    TEST("DTRSM: large N=256 (multi-block)");
+    ab_init();
+    int N = 256, NRHS = 32;
+    double* A_data = (double*)malloc(N * N * sizeof(double));
+    double* X_data = (double*)malloc(N * NRHS * sizeof(double));
+    double* B_data = (double*)malloc(N * NRHS * sizeof(double));
+
+    srand48(123);
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < N; j++) {
+            if (j < i) A_data[i * N + j] = drand48() * 0.5 - 0.25;
+            else if (j == i) A_data[i * N + j] = 5.0 + drand48();
+            else A_data[i * N + j] = 0.0;
+        }
+    for (int i = 0; i < N * NRHS; i++)
+        X_data[i] = drand48() * 2 - 1;
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < NRHS; j++) {
+            double s = 0;
+            for (int k = 0; k < N; k++)
+                s += A_data[i * N + k] * X_data[k * NRHS + j];
+            B_data[i * NRHS + j] = s;
+        }
+
+    ABMatrix mA = ab_matrix_create(N, N);
+    ABMatrix mB = ab_matrix_create(N, NRHS);
+    ab_matrix_upload(mA, A_data, true);
+    ab_matrix_upload(mB, B_data, true);
+
+    ABStatus s = ab_dtrsm(AB_LEFT, AB_LOWER, AB_NO_TRANS, AB_NON_UNIT, 1.0, mA, mB);
+
+    double* result = (double*)malloc(N * NRHS * sizeof(double));
+    ab_matrix_download(mB, result, true);
+
+    double max_err = 0;
+    for (int i = 0; i < N * NRHS; i++) {
+        double err = fabs(result[i] - X_data[i]);
+        double rel = (fabs(X_data[i]) > 1e-10) ? err / fabs(X_data[i]) : err;
+        if (rel > max_err) max_err = rel;
+    }
+
+    ab_matrix_destroy(mA); ab_matrix_destroy(mB);
+    free(A_data); free(X_data); free(B_data); free(result);
+    ab_shutdown();
+
+    if (s == AB_OK && max_err < 1e-9) PASS();
+    else { char msg[64]; snprintf(msg, sizeof(msg), "err=%.2e", max_err); FAIL(msg); }
+}
+
+static void test_dtrsm_null_safety(void) {
+    TEST("DTRSM: null matrix safety");
+    ab_init();
+    ABStatus s = ab_dtrsm(AB_LEFT, AB_LOWER, AB_NO_TRANS, AB_NON_UNIT, 1.0, NULL, NULL);
+    ab_shutdown();
+    if (s == AB_ERROR_INVALID_ARG) PASS(); else FAIL("expected INVALID_ARG");
+}
+
+// =============================================================================
+// MPIR Tests (Mixed-Precision Iterative Refinement)
+// =============================================================================
+
+static void test_mpir_basic(void) {
+    TEST("MPIR: solve 64x64 well-conditioned");
+    ab_init();
+    int N = 64, NRHS = 4;
+
+    // Generate a diagonally dominant matrix (ensures well-conditioned)
+    double* A_data = malloc((size_t)N * N * sizeof(double));
+    double* X_true = malloc((size_t)N * NRHS * sizeof(double));
+    double* B_data = malloc((size_t)N * NRHS * sizeof(double));
+
+    srand48(42);
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++)
+            A_data[i * N + j] = drand48() * 2 - 1;
+        A_data[i * N + i] += 10.0 * N;  // diagonal dominance → κ ≈ O(1)
+    }
+    for (int i = 0; i < N * NRHS; i++)
+        X_true[i] = drand48() * 2 - 1;
+
+    // B = A * X_true (row-major DGEMM via cblas)
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                N, NRHS, N, 1.0, A_data, N, X_true, NRHS, 0.0, B_data, NRHS);
+
+    ABMatrix mA = ab_matrix_create(N, N);
+    ABMatrix mB = ab_matrix_create(N, NRHS);
+    ab_matrix_upload(mA, A_data, true);
+    ab_matrix_upload(mB, B_data, true);
+
+    ABStatus s = ab_dgesv_mpir(mA, mB);
+
+    double* X_sol = malloc((size_t)N * NRHS * sizeof(double));
+    ab_matrix_download(mB, X_sol, true);
+
+    // Check: ||X_sol - X_true|| / ||X_true|| < 10^-13
+    double err_sq = 0, norm_sq = 0;
+    for (int i = 0; i < N * NRHS; i++) {
+        double d = X_sol[i] - X_true[i];
+        err_sq += d * d;
+        norm_sq += X_true[i] * X_true[i];
+    }
+    double rel_err = sqrt(err_sq / norm_sq);
+
+    ab_matrix_destroy(mA);
+    ab_matrix_destroy(mB);
+    ab_shutdown();
+    free(A_data); free(X_true); free(B_data); free(X_sol);
+
+    if (s == AB_OK && rel_err < 1e-13) PASS();
+    else { char buf[64]; snprintf(buf, 64, "err=%.2e", rel_err); FAIL(buf); }
+}
+
+static void test_mpir_single_rhs(void) {
+    TEST("MPIR: single RHS (N=128, NRHS=1)");
+    ab_init();
+    int N = 128, NRHS = 1;
+
+    double* A_data = malloc((size_t)N * N * sizeof(double));
+    double* X_true = malloc((size_t)N * sizeof(double));
+    double* B_data = malloc((size_t)N * sizeof(double));
+
+    srand48(99);
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++)
+            A_data[i * N + j] = drand48() * 2 - 1;
+        A_data[i * N + i] += 8.0 * N;
+    }
+    for (int i = 0; i < N; i++)
+        X_true[i] = drand48() * 2 - 1;
+
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                N, NRHS, N, 1.0, A_data, N, X_true, NRHS, 0.0, B_data, NRHS);
+
+    ABMatrix mA = ab_matrix_create(N, N);
+    ABMatrix mB = ab_matrix_create(N, NRHS);
+    ab_matrix_upload(mA, A_data, true);
+    ab_matrix_upload(mB, B_data, true);
+
+    ABStatus s = ab_dgesv_mpir(mA, mB);
+
+    double* X_sol = malloc((size_t)N * sizeof(double));
+    ab_matrix_download(mB, X_sol, true);
+
+    double err_sq = 0, norm_sq = 0;
+    for (int i = 0; i < N; i++) {
+        double d = X_sol[i] - X_true[i];
+        err_sq += d * d;
+        norm_sq += X_true[i] * X_true[i];
+    }
+    double rel_err = sqrt(err_sq / norm_sq);
+
+    ab_matrix_destroy(mA);
+    ab_matrix_destroy(mB);
+    ab_shutdown();
+    free(A_data); free(X_true); free(B_data); free(X_sol);
+
+    if (s == AB_OK && rel_err < 1e-13) PASS();
+    else { char buf[64]; snprintf(buf, 64, "err=%.2e", rel_err); FAIL(buf); }
+}
+
+static void test_mpir_moderate_condition(void) {
+    TEST("MPIR: moderate κ ≈ 10³ (N=64)");
+    ab_init();
+    int N = 64, NRHS = 2;
+
+    double* A_data = malloc((size_t)N * N * sizeof(double));
+    double* X_true = malloc((size_t)N * NRHS * sizeof(double));
+    double* B_data = malloc((size_t)N * NRHS * sizeof(double));
+
+    srand48(77);
+    // Less dominant diagonal → moderate condition number
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++)
+            A_data[i * N + j] = drand48() * 2 - 1;
+        A_data[i * N + i] += 3.0;  // κ ≈ 10²-10³
+    }
+    for (int i = 0; i < N * NRHS; i++)
+        X_true[i] = drand48() * 2 - 1;
+
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                N, NRHS, N, 1.0, A_data, N, X_true, NRHS, 0.0, B_data, NRHS);
+
+    ABMatrix mA = ab_matrix_create(N, N);
+    ABMatrix mB = ab_matrix_create(N, NRHS);
+    ab_matrix_upload(mA, A_data, true);
+    ab_matrix_upload(mB, B_data, true);
+
+    ABStatus s = ab_dgesv_mpir(mA, mB);
+
+    double* X_sol = malloc((size_t)N * NRHS * sizeof(double));
+    ab_matrix_download(mB, X_sol, true);
+
+    double err_sq = 0, norm_sq = 0;
+    for (int i = 0; i < N * NRHS; i++) {
+        double d = X_sol[i] - X_true[i];
+        err_sq += d * d;
+        norm_sq += X_true[i] * X_true[i];
+    }
+    double rel_err = sqrt(err_sq / norm_sq);
+
+    ab_matrix_destroy(mA);
+    ab_matrix_destroy(mB);
+    ab_shutdown();
+    free(A_data); free(X_true); free(B_data); free(X_sol);
+
+    // With moderate κ, MPIR may need more iterations but should still converge
+    if (s == AB_OK && rel_err < 1e-10) PASS();
+    else { char buf[64]; snprintf(buf, 64, "err=%.2e", rel_err); FAIL(buf); }
+}
+
+static void test_mpir_null_safety(void) {
+    TEST("MPIR: null matrix safety");
+    ab_init();
+    ABStatus s = ab_dgesv_mpir(NULL, NULL);
+    ab_shutdown();
+    if (s == AB_ERROR_INVALID_ARG) PASS(); else FAIL("expected INVALID_ARG");
+}
+
+static void test_mpir_dimension_mismatch(void) {
+    TEST("MPIR: dimension mismatch");
+    ab_init();
+    ABMatrix mA = ab_matrix_create(64, 64);
+    ABMatrix mB = ab_matrix_create(32, 4);  // Wrong: B rows != A rows
+    ABStatus s = ab_dgesv_mpir(mA, mB);
+    ab_matrix_destroy(mA);
+    ab_matrix_destroy(mB);
+    ab_shutdown();
+    if (s == AB_ERROR_DIMENSION_MISMATCH) PASS(); else FAIL("expected DIMENSION_MISMATCH");
+}
+
+static void test_mpir_non_square(void) {
+    TEST("MPIR: non-square A rejected");
+    ab_init();
+    ABMatrix mA = ab_matrix_create(64, 32);  // Not square
+    ABMatrix mB = ab_matrix_create(64, 4);
+    ABStatus s = ab_dgesv_mpir(mA, mB);
+    ab_matrix_destroy(mA);
+    ab_matrix_destroy(mB);
+    ab_shutdown();
+    if (s == AB_ERROR_INVALID_ARG) PASS(); else FAIL("expected INVALID_ARG");
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 
@@ -975,6 +1435,22 @@ int main(void) {
     test_rectangular_matrix();
     test_skinny_matrix();
     test_max_dimension_boundary();
+
+    printf("\nDTRSM (Triangular Solve):\n");
+    test_dtrsm_lower_notrans();
+    test_dtrsm_upper_notrans();
+    test_dtrsm_lower_trans();
+    test_dtrsm_alpha_scaling();
+    test_dtrsm_large();
+    test_dtrsm_null_safety();
+
+    printf("\nMPIR (Mixed-Precision Iterative Refinement):\n");
+    test_mpir_basic();
+    test_mpir_single_rhs();
+    test_mpir_moderate_condition();
+    test_mpir_null_safety();
+    test_mpir_dimension_mismatch();
+    test_mpir_non_square();
 
     printf("\nRegression Tests (Bug Fixes v1.0.2):\n");
     test_bug1_async_dimension_packing();
