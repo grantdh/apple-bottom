@@ -175,7 +175,11 @@ void ab_zgemm_blas(
     ab_matrix_destroy(mCr); ab_matrix_destroy(mCi);
 }
 
-// DGEMM wrapper (similar structure)
+// =============================================================================
+// BLAS-compatible DGEMM: C = alpha * op(A) * op(B) + beta * C
+// Handles transA, transB, alpha, beta, leading dimensions.
+// GPU path supports all transpose combinations via upload-time reordering.
+// =============================================================================
 void ab_dgemm_blas(
     char transA, char transB,
     int M, int N, int K,
@@ -187,8 +191,8 @@ void ab_dgemm_blas(
 ) {
     uint64_t flops = 2ULL * M * N * K;
 
-    // CPU fallback for: small matrices, transpose operations
-    if (flops < CROSSOVER_FLOPS || transA != 'N' || transB != 'N') {
+    // CPU fallback for small matrices only
+    if (flops < CROSSOVER_FLOPS) {
         cblas_dgemm(CblasColMajor,
                     transA == 'T' ? CblasTrans : CblasNoTrans,
                     transB == 'T' ? CblasTrans : CblasNoTrans,
@@ -196,7 +200,7 @@ void ab_dgemm_blas(
         return;
     }
 
-    // GPU path: supports arbitrary alpha/beta via scaled kernel
+    // GPU path: supports arbitrary alpha/beta and transpose via scaled kernel
     ABMatrix mA = ab_matrix_create(M, K);
     ABMatrix mB = ab_matrix_create(K, N);
     ABMatrix mC = ab_matrix_create(M, N);
@@ -205,29 +209,51 @@ void ab_dgemm_blas(
         if (mA) ab_matrix_destroy(mA);
         if (mB) ab_matrix_destroy(mB);
         if (mC) ab_matrix_destroy(mC);
-        cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans,
+        cblas_dgemm(CblasColMajor,
+                    transA == 'T' ? CblasTrans : CblasNoTrans,
+                    transB == 'T' ? CblasTrans : CblasNoTrans,
                     M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }
 
-    // Upload A (column-major to row-major)
-    double* A_row = malloc(M * K * sizeof(double));
-    for (int j = 0; j < K; j++)
+    // Upload op(A) as M×K row-major (handles column-major + transpose)
+    // BLAS convention: op(A) is M×K
+    //   transA='N': A is col-major M×K, A[col*ldA+row] → row-major[row*K+col]
+    //   transA='T': A is col-major K×M, op(A)[i,j] = A[j,i] = A[i*ldA+j]
+    double* A_row = malloc((size_t)M * K * sizeof(double));
+    if (transA == 'N') {
+        for (int j = 0; j < K; j++)
+            for (int i = 0; i < M; i++)
+                A_row[i * K + j] = A[j * ldA + i];
+    } else {
+        // transA='T': A stored as col-major K×M
+        // op(A)[i,j] = A^T[i,j] = A_colmaj[j,i] = A[i*ldA+j]
         for (int i = 0; i < M; i++)
-            A_row[i * K + j] = A[j * ldA + i];
+            for (int j = 0; j < K; j++)
+                A_row[i * K + j] = A[i * ldA + j];
+    }
     ab_matrix_upload(mA, A_row, true);
     free(A_row);
 
-    // Upload B (column-major to row-major)
-    double* B_row = malloc(K * N * sizeof(double));
-    for (int j = 0; j < N; j++)
+    // Upload op(B) as K×N row-major
+    //   transB='N': B is col-major K×N → row-major[row*N+col]
+    //   transB='T': B is col-major N×K, op(B)[i,j] = B^T[i,j] = B[i*ldB+j]
+    double* B_row = malloc((size_t)K * N * sizeof(double));
+    if (transB == 'N') {
+        for (int j = 0; j < N; j++)
+            for (int i = 0; i < K; i++)
+                B_row[i * N + j] = B[j * ldB + i];
+    } else {
+        // transB='T': B stored as col-major N×K
         for (int i = 0; i < K; i++)
-            B_row[i * N + j] = B[j * ldB + i];
+            for (int j = 0; j < N; j++)
+                B_row[i * N + j] = B[i * ldB + j];
+    }
     ab_matrix_upload(mB, B_row, true);
     free(B_row);
 
     // Upload existing C when beta != 0 (needed for accumulation C = alpha*A*B + beta*C)
-    double* C_row = malloc(M * N * sizeof(double));
+    double* C_row = malloc((size_t)M * N * sizeof(double));
     if (beta != 0.0) {
         for (int j = 0; j < N; j++)
             for (int i = 0; i < M; i++)
@@ -249,4 +275,6 @@ void ab_dgemm_blas(
     ab_matrix_destroy(mB);
     ab_matrix_destroy(mC);
 }
+
+// Fortran-callable wrappers (ab_zgemm_, ab_dgemm_) are in fortran_bridge.c
 

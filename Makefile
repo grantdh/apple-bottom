@@ -50,8 +50,14 @@ $(BUILD):
 $(BUILD)/apple_bottom.o: $(SRC)/apple_bottom.m $(INCLUDE)/apple_bottom.h | $(BUILD)
 	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $@
 
-$(BUILD)/libapplebottom.a: $(BUILD)/apple_bottom.o
-	ar rcs $@ $<
+$(BUILD)/blas_wrapper.o: $(SRC)/blas_wrapper.c $(INCLUDE)/apple_bottom.h | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $@
+
+$(BUILD)/fortran_bridge.o: $(SRC)/fortran_bridge.c $(INCLUDE)/apple_bottom.h | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/fortran_bridge.c -o $@
+
+$(BUILD)/libapplebottom.a: $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o $(BUILD)/fortran_bridge.o
+	ar rcs $@ $^
 	@echo "Built: $@"
 
 lib: $(BUILD)/libapplebottom.a
@@ -183,7 +189,9 @@ uninstall:
 test-asan: clean
 	@echo "Building with AddressSanitizer..."
 	$(OBJC) $(OBJCFLAGS) -fsanitize=address -g -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $(BUILD)/apple_bottom.o
-	ar rcs $(BUILD)/libapplebottom.a $(BUILD)/apple_bottom.o
+	$(CC) $(CFLAGS) -fsanitize=address -g -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $(BUILD)/blas_wrapper.o
+	$(CC) $(CFLAGS) -fsanitize=address -g -I$(INCLUDE) -c $(SRC)/fortran_bridge.c -o $(BUILD)/fortran_bridge.o
+	ar rcs $(BUILD)/libapplebottom.a $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o $(BUILD)/fortran_bridge.o
 	$(CC) $(CFLAGS) -fsanitize=address -g -I$(INCLUDE) tests/test_correctness.c -o $(BUILD)/test_correctness -L$(BUILD) -lapplebottom $(LDFLAGS)
 	@echo "Running tests with ASan..."
 	ASAN_OPTIONS=detect_leaks=1 ./$(BUILD)/test_correctness
@@ -191,7 +199,9 @@ test-asan: clean
 test-ubsan: clean
 	@echo "Building with UndefinedBehaviorSanitizer..."
 	$(OBJC) $(OBJCFLAGS) -fsanitize=undefined -g -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $(BUILD)/apple_bottom.o
-	ar rcs $(BUILD)/libapplebottom.a $(BUILD)/apple_bottom.o
+	$(CC) $(CFLAGS) -fsanitize=undefined -g -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $(BUILD)/blas_wrapper.o
+	$(CC) $(CFLAGS) -fsanitize=undefined -g -I$(INCLUDE) -c $(SRC)/fortran_bridge.c -o $(BUILD)/fortran_bridge.o
+	ar rcs $(BUILD)/libapplebottom.a $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o $(BUILD)/fortran_bridge.o
 	$(CC) $(CFLAGS) -fsanitize=undefined -g -I$(INCLUDE) tests/test_correctness.c -o $(BUILD)/test_correctness -L$(BUILD) -lapplebottom $(LDFLAGS)
 	@echo "Running tests with UBSan..."
 	./$(BUILD)/test_correctness
