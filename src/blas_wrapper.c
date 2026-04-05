@@ -11,9 +11,39 @@
 #include <Accelerate/Accelerate.h>
 #include <stdio.h>
 
-#define CROSSOVER_FLOPS 100000000ULL
+// =============================================================================
+// AMX/GPU Heterogeneous Dispatch Heuristic
+// =============================================================================
+// GPU dispatch has ~50μs overhead (command buffer creation, encode, commit).
+// AMX (via Accelerate cblas) has near-zero dispatch overhead.
+// Crossover point: GPU wins when compute time dominates dispatch overhead.
+//
+// Rules:
+// 1. Any dimension ≤ 32: always CPU (AMX) — GPU threadgroups underutilized
+// 2. FLOP threshold: 100M FLOPs for complex (ZGEMM), 50M for real (DGEMM)
+//    Complex has 4x more arithmetic per element, so GPU wins at smaller N.
+// 3. Skinny matrices (any dim < 64): CPU unless total FLOPs are very large
+// =============================================================================
+
+#define CROSSOVER_FLOPS      100000000ULL  // For complex (ZGEMM)
+#define CROSSOVER_FLOPS_REAL  50000000ULL  // For real (DGEMM) — lower threshold
+#define MIN_GPU_DIM           32            // Minimum dimension for GPU dispatch
 
 bool ab_use_gpu(int m, int n, int k) {
+    // Small matrix fast-path: always AMX
+    if (m <= MIN_GPU_DIM || n <= MIN_GPU_DIM || k <= MIN_GPU_DIM)
+        return false;
+    // Skinny matrices: higher threshold (GPU threadgroups underutilized)
+    uint64_t flops = 2ULL * m * n * k;
+    if (m < 64 || n < 64 || k < 64)
+        return flops >= CROSSOVER_FLOPS;  // Use higher threshold for skinny
+    return flops >= CROSSOVER_FLOPS_REAL;
+}
+
+// Complex version accounts for 4x arithmetic density
+static bool ab_use_gpu_complex(int m, int n, int k) {
+    if (m <= MIN_GPU_DIM || n <= MIN_GPU_DIM || k <= MIN_GPU_DIM)
+        return false;
     uint64_t flops = 8ULL * m * n * k;
     return flops >= CROSSOVER_FLOPS;
 }
@@ -31,10 +61,8 @@ void ab_zgemm_blas(
     double complex beta,
     double complex* C, int ldC
 ) {
-    uint64_t flops = 8ULL * M * N * K;
-    
-    // CPU fallback for small matrices only
-    if (flops < CROSSOVER_FLOPS) {
+    // AMX path for small matrices (heterogeneous dispatch)
+    if (!ab_use_gpu_complex(M, N, K)) {
         cblas_zgemm(CblasColMajor,
                     transA == 'N' ? CblasNoTrans :
                     transA == 'T' ? CblasTrans : CblasConjTrans,
@@ -188,10 +216,8 @@ void ab_dgemm_blas(
     double beta,
     double* C, int ldC
 ) {
-    uint64_t flops = 2ULL * M * N * K;
-
-    // CPU fallback for small matrices only
-    if (flops < CROSSOVER_FLOPS) {
+    // AMX path for small matrices (heterogeneous dispatch)
+    if (!ab_use_gpu(M, N, K)) {
         cblas_dgemm(CblasColMajor,
                     transA == 'T' ? CblasTrans : CblasNoTrans,
                     transB == 'T' ? CblasTrans : CblasNoTrans,
