@@ -113,8 +113,8 @@ void ab_pool_reset(ABMemoryPool pool);  // Mark all matrices as available
 // Async API (overlap GPU compute with CPU work)
 ABFuture ab_dgemm_async(ABMatrix A, ABMatrix B, ABMatrix C);
 
-// Note: currently executes synchronously — wraps ab_zgemm result in a completed future.
-// True async ZGEMM requires multiple command buffers (planned for v2.0).
+// True async ZGEMM: fused single command buffer with completion handler cleanup.
+// Returns immediately; use ab_future_wait() or ab_future_is_ready() to synchronize.
 ABFuture ab_zgemm_async(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
                         ABMatrix Cr, ABMatrix Ci);
 ABStatus ab_future_wait(ABFuture f);
@@ -175,6 +175,34 @@ ABStatus ab_zherk(ABMatrix Ar, ABMatrix Ai, ABMatrix Cr, ABMatrix Ci);
 ABStatus ab_matrix_add(ABMatrix A, ABMatrix B, ABMatrix C);
 ABStatus ab_matrix_sub(ABMatrix A, ABMatrix B, ABMatrix C);
 ABStatus ab_matrix_scale(double alpha, ABMatrix A);
+
+// Batched GEMM API — amortizes Metal command buffer overhead across many GEMMs.
+// QE fires hundreds of small GEMMs per SCF iteration; batching them into a single
+// command buffer eliminates the ~50μs per-call commit+wait overhead.
+//
+// Usage:
+//   ABBatch batch = ab_batch_create();
+//   ab_batch_dgemm(batch, A1, B1, C1);
+//   ab_batch_dgemm(batch, A2, B2, C2);
+//   ab_batch_dgemm_scaled(batch, alpha, A3, B3, beta, C3);
+//   ab_batch_commit(batch);           // submits all GEMMs to GPU in one shot
+//   ab_batch_wait(batch);             // blocks until GPU finishes
+//   ab_batch_destroy(batch);
+//
+// For operations with dependencies, insert a barrier between groups:
+//   ab_batch_dgemm(batch, A, B, T);   // T = A * B
+//   ab_batch_barrier(batch);           // ensure T is written
+//   ab_batch_dgemm(batch, T, C, D);   // D = T * C
+typedef struct ABBatch_s* ABBatch;
+
+ABBatch ab_batch_create(void);
+void ab_batch_destroy(ABBatch batch);
+ABStatus ab_batch_dgemm(ABBatch batch, ABMatrix A, ABMatrix B, ABMatrix C);
+ABStatus ab_batch_dgemm_scaled(ABBatch batch, double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C);
+ABStatus ab_batch_zgemm(ABBatch batch, ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci);
+ABStatus ab_batch_barrier(ABBatch batch);
+ABStatus ab_batch_commit(ABBatch batch);
+ABStatus ab_batch_wait(ABBatch batch);
 
 // Session API
 ABSession ab_session_create(void);
