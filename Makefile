@@ -149,6 +149,15 @@ test-rectangular-diag: $(BUILD)/test_rectangular_diag
 	@echo "═══════════════════════════════════════════════════════════════════"
 	./$(BUILD)/test_rectangular_diag
 
+# Performance regression: save baseline or compare
+bench-baseline: lib
+	@echo "Saving performance baseline..."
+	./scripts/perf_regression.sh --save
+
+bench-regression: lib
+	@echo "Running performance regression check..."
+	./scripts/perf_regression.sh --ci
+
 # =============================================================================
 # Clean
 # =============================================================================

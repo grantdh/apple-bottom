@@ -1371,6 +1371,365 @@ static void test_mpir_non_square(void) {
 }
 
 // =============================================================================
+// Batch API Tests
+// =============================================================================
+
+static void test_batch_basic_dgemm(void) {
+    TEST("Batch: basic DGEMM correctness");
+    ab_init();
+    int N = 128;
+    double* A_data = malloc(N * N * sizeof(double));
+    double* B_data = malloc(N * N * sizeof(double));
+    for (int i = 0; i < N * N; i++) { A_data[i] = (i % 97) / 97.0; B_data[i] = (i % 89) / 89.0; }
+
+    ABMatrix A = ab_matrix_create(N, N);
+    ABMatrix B = ab_matrix_create(N, N);
+    ABMatrix C = ab_matrix_create(N, N);
+    ab_matrix_upload(A, A_data, true);
+    ab_matrix_upload(B, B_data, true);
+    ab_matrix_zero(C);
+
+    ABBatch batch = ab_batch_create();
+    ABStatus s = ab_batch_dgemm(batch, A, B, C);
+    ab_batch_commit(batch);
+    ab_batch_wait(batch);
+    ab_batch_destroy(batch);
+
+    // Compare with direct DGEMM
+    ABMatrix C_ref = ab_matrix_create(N, N);
+    ab_matrix_zero(C_ref);
+    ab_dgemm(A, B, C_ref);
+
+    double* c_data = malloc(N * N * sizeof(double));
+    double* c_ref = malloc(N * N * sizeof(double));
+    ab_matrix_download(C, c_data, true);
+    ab_matrix_download(C_ref, c_ref, true);
+
+    double err_sq = 0, norm_sq = 0;
+    for (int i = 0; i < N * N; i++) {
+        double d = c_data[i] - c_ref[i];
+        err_sq += d * d;
+        norm_sq += c_ref[i] * c_ref[i];
+    }
+    double rel_err = sqrt(err_sq / (norm_sq + 1e-30));
+
+    ab_matrix_destroy(A); ab_matrix_destroy(B);
+    ab_matrix_destroy(C); ab_matrix_destroy(C_ref);
+    ab_shutdown();
+    free(A_data); free(B_data); free(c_data); free(c_ref);
+
+    if (s == AB_OK && rel_err < 1e-14) PASS();
+    else { char buf[64]; snprintf(buf, 64, "err=%.2e", rel_err); FAIL(buf); }
+}
+
+static void test_batch_multiple_dgemm(void) {
+    TEST("Batch: 10 independent DGEMMs");
+    ab_init();
+    int N = 64;
+    int count = 10;
+    double* data = malloc(N * N * sizeof(double));
+    for (int i = 0; i < N * N; i++) data[i] = (i % 97) / 97.0;
+
+    ABMatrix* As = malloc(count * sizeof(ABMatrix));
+    ABMatrix* Bs = malloc(count * sizeof(ABMatrix));
+    ABMatrix* Cs = malloc(count * sizeof(ABMatrix));
+    for (int j = 0; j < count; j++) {
+        As[j] = ab_matrix_create(N, N); ab_matrix_upload(As[j], data, true);
+        Bs[j] = ab_matrix_create(N, N); ab_matrix_upload(Bs[j], data, true);
+        Cs[j] = ab_matrix_create(N, N); ab_matrix_zero(Cs[j]);
+    }
+
+    ABBatch batch = ab_batch_create();
+    for (int j = 0; j < count; j++)
+        ab_batch_dgemm(batch, As[j], Bs[j], Cs[j]);
+    ab_batch_commit(batch);
+    ABStatus s = ab_batch_wait(batch);
+    ab_batch_destroy(batch);
+
+    // Verify first and last results against direct DGEMM
+    ABMatrix C_ref = ab_matrix_create(N, N);
+    ab_matrix_zero(C_ref);
+    ab_dgemm(As[0], Bs[0], C_ref);
+
+    double* c_data = malloc(N * N * sizeof(double));
+    double* c_ref = malloc(N * N * sizeof(double));
+    ab_matrix_download(Cs[0], c_data, true);
+    ab_matrix_download(C_ref, c_ref, true);
+
+    double err_sq = 0, norm_sq = 0;
+    for (int i = 0; i < N * N; i++) {
+        double d = c_data[i] - c_ref[i];
+        err_sq += d * d;
+        norm_sq += c_ref[i] * c_ref[i];
+    }
+    double rel_err = sqrt(err_sq / (norm_sq + 1e-30));
+
+    for (int j = 0; j < count; j++) {
+        ab_matrix_destroy(As[j]); ab_matrix_destroy(Bs[j]); ab_matrix_destroy(Cs[j]);
+    }
+    ab_matrix_destroy(C_ref);
+    ab_shutdown();
+    free(data); free(As); free(Bs); free(Cs); free(c_data); free(c_ref);
+
+    if (s == AB_OK && rel_err < 1e-14) PASS();
+    else { char buf[64]; snprintf(buf, 64, "err=%.2e", rel_err); FAIL(buf); }
+}
+
+static void test_batch_barrier(void) {
+    TEST("Batch: barrier enforces dependency");
+    ab_init();
+    int N = 64;
+    double* A_data = malloc(N * N * sizeof(double));
+    double* B_data = malloc(N * N * sizeof(double));
+    for (int i = 0; i < N * N; i++) { A_data[i] = (i % 97) / 97.0; B_data[i] = (i % 89) / 89.0; }
+
+    ABMatrix A = ab_matrix_create(N, N); ab_matrix_upload(A, A_data, true);
+    ABMatrix B = ab_matrix_create(N, N); ab_matrix_upload(B, B_data, true);
+    ABMatrix T = ab_matrix_create(N, N); ab_matrix_zero(T);
+    ABMatrix D = ab_matrix_create(N, N); ab_matrix_zero(D);
+
+    // T = A * B, barrier, D = T * A (chain with dependency)
+    ABBatch batch = ab_batch_create();
+    ab_batch_dgemm(batch, A, B, T);
+    ab_batch_barrier(batch);
+    ab_batch_dgemm(batch, T, A, D);
+    ab_batch_commit(batch);
+    ab_batch_wait(batch);
+    ab_batch_destroy(batch);
+
+    // Reference: same chain via direct calls
+    ABMatrix T_ref = ab_matrix_create(N, N); ab_matrix_zero(T_ref);
+    ABMatrix D_ref = ab_matrix_create(N, N); ab_matrix_zero(D_ref);
+    ab_dgemm(A, B, T_ref);
+    ab_dgemm(T_ref, A, D_ref);
+
+    double* d_data = malloc(N * N * sizeof(double));
+    double* d_ref = malloc(N * N * sizeof(double));
+    ab_matrix_download(D, d_data, true);
+    ab_matrix_download(D_ref, d_ref, true);
+
+    double err_sq = 0, norm_sq = 0;
+    for (int i = 0; i < N * N; i++) {
+        double d = d_data[i] - d_ref[i];
+        err_sq += d * d;
+        norm_sq += d_ref[i] * d_ref[i];
+    }
+    double rel_err = sqrt(err_sq / (norm_sq + 1e-30));
+
+    ab_matrix_destroy(A); ab_matrix_destroy(B);
+    ab_matrix_destroy(T); ab_matrix_destroy(D);
+    ab_matrix_destroy(T_ref); ab_matrix_destroy(D_ref);
+    ab_shutdown();
+    free(A_data); free(B_data); free(d_data); free(d_ref);
+
+    if (rel_err < 1e-14) PASS();
+    else { char buf[64]; snprintf(buf, 64, "err=%.2e", rel_err); FAIL(buf); }
+}
+
+static void test_batch_null_safety(void) {
+    TEST("Batch: null / invalid arg safety");
+    ab_init();
+    ABStatus s1 = ab_batch_dgemm(NULL, NULL, NULL, NULL);
+    ABStatus s2 = ab_batch_commit(NULL);
+    ABStatus s3 = ab_batch_wait(NULL);
+    ABStatus s4 = ab_batch_barrier(NULL);
+    ab_batch_destroy(NULL);  // should not crash
+    ab_shutdown();
+    if (s1 == AB_ERROR_INVALID_ARG && s2 == AB_ERROR_INVALID_ARG &&
+        s3 == AB_ERROR_INVALID_ARG && s4 == AB_ERROR_INVALID_ARG) PASS();
+    else FAIL("expected INVALID_ARG for all");
+}
+
+static void test_batch_zgemm(void) {
+    TEST("Batch: ZGEMM matches direct ZGEMM");
+    ab_init();
+    int N = 128;
+    double* rdata = malloc(N * N * sizeof(double));
+    double* idata = malloc(N * N * sizeof(double));
+    for (int i = 0; i < N * N; i++) { rdata[i] = (i % 97) / 97.0; idata[i] = (i % 73) / 73.0; }
+
+    ABMatrix Ar = ab_matrix_create(N, N); ab_matrix_upload(Ar, rdata, true);
+    ABMatrix Ai = ab_matrix_create(N, N); ab_matrix_upload(Ai, idata, true);
+    ABMatrix Br = ab_matrix_create(N, N); ab_matrix_upload(Br, rdata, true);
+    ABMatrix Bi = ab_matrix_create(N, N); ab_matrix_upload(Bi, idata, true);
+    ABMatrix Cr = ab_matrix_create(N, N); ab_matrix_zero(Cr);
+    ABMatrix Ci = ab_matrix_create(N, N); ab_matrix_zero(Ci);
+
+    ABBatch batch = ab_batch_create();
+    ABStatus s = ab_batch_zgemm(batch, Ar, Ai, Br, Bi, Cr, Ci);
+    ab_batch_commit(batch);
+    ab_batch_wait(batch);
+    ab_batch_destroy(batch);
+
+    // Reference via direct ZGEMM
+    ABMatrix Cr_ref = ab_matrix_create(N, N); ab_matrix_zero(Cr_ref);
+    ABMatrix Ci_ref = ab_matrix_create(N, N); ab_matrix_zero(Ci_ref);
+    ab_zgemm(Ar, Ai, Br, Bi, Cr_ref, Ci_ref);
+
+    double* cr_data = malloc(N * N * sizeof(double));
+    double* cr_ref = malloc(N * N * sizeof(double));
+    ab_matrix_download(Cr, cr_data, true);
+    ab_matrix_download(Cr_ref, cr_ref, true);
+
+    double err_sq = 0, norm_sq = 0;
+    for (int i = 0; i < N * N; i++) {
+        double d = cr_data[i] - cr_ref[i];
+        err_sq += d * d;
+        norm_sq += cr_ref[i] * cr_ref[i];
+    }
+    double rel_err = sqrt(err_sq / (norm_sq + 1e-30));
+
+    ab_matrix_destroy(Ar); ab_matrix_destroy(Ai);
+    ab_matrix_destroy(Br); ab_matrix_destroy(Bi);
+    ab_matrix_destroy(Cr); ab_matrix_destroy(Ci);
+    ab_matrix_destroy(Cr_ref); ab_matrix_destroy(Ci_ref);
+    ab_shutdown();
+    free(rdata); free(idata); free(cr_data); free(cr_ref);
+
+    if (s == AB_OK && rel_err < 1e-14) PASS();
+    else { char buf[64]; snprintf(buf, 64, "err=%.2e", rel_err); FAIL(buf); }
+}
+
+static void test_batch_committed_reuse(void) {
+    TEST("Batch: reject ops after commit");
+    ab_init();
+    ABMatrix A = ab_matrix_create(32, 32);
+    ABMatrix B = ab_matrix_create(32, 32);
+    ABMatrix C = ab_matrix_create(32, 32);
+    ab_matrix_zero(A); ab_matrix_zero(B); ab_matrix_zero(C);
+
+    ABBatch batch = ab_batch_create();
+    ab_batch_commit(batch);
+    ABStatus s = ab_batch_dgemm(batch, A, B, C);
+    ab_batch_wait(batch);
+    ab_batch_destroy(batch);
+
+    ab_matrix_destroy(A); ab_matrix_destroy(B); ab_matrix_destroy(C);
+    ab_shutdown();
+
+    if (s == AB_ERROR_INVALID_ARG) PASS(); else FAIL("expected INVALID_ARG after commit");
+}
+
+// =============================================================================
+// Fused ZGEMM Regression Test
+// =============================================================================
+
+static void test_fused_zgemm_precision(void) {
+    TEST("Fused ZGEMM: precision vs Accelerate");
+    ab_init();
+    int N = 256;
+    size_t count = (size_t)N * N;
+    double* ar = malloc(count * sizeof(double));
+    double* ai = malloc(count * sizeof(double));
+    double* br = malloc(count * sizeof(double));
+    double* bi = malloc(count * sizeof(double));
+    for (size_t i = 0; i < count; i++) {
+        ar[i] = ((double)(i % 97)) / 97.0 - 0.5;
+        ai[i] = ((double)(i % 83)) / 83.0 - 0.5;
+        br[i] = ((double)(i % 71)) / 71.0 - 0.5;
+        bi[i] = ((double)(i % 67)) / 67.0 - 0.5;
+    }
+
+    ABMatrix Ar = ab_matrix_create(N, N); ab_matrix_upload(Ar, ar, true);
+    ABMatrix Ai = ab_matrix_create(N, N); ab_matrix_upload(Ai, ai, true);
+    ABMatrix Br = ab_matrix_create(N, N); ab_matrix_upload(Br, br, true);
+    ABMatrix Bi = ab_matrix_create(N, N); ab_matrix_upload(Bi, bi, true);
+    ABMatrix Cr = ab_matrix_create(N, N); ab_matrix_zero(Cr);
+    ABMatrix Ci = ab_matrix_create(N, N); ab_matrix_zero(Ci);
+
+    ab_zgemm(Ar, Ai, Br, Bi, Cr, Ci);
+
+    double* cr_gpu = malloc(count * sizeof(double));
+    double* ci_gpu = malloc(count * sizeof(double));
+    ab_matrix_download(Cr, cr_gpu, true);
+    ab_matrix_download(Ci, ci_gpu, true);
+
+    // Reference: Accelerate cblas_zgemm
+    double complex* A_z = malloc(count * sizeof(double complex));
+    double complex* B_z = malloc(count * sizeof(double complex));
+    double complex* C_z = calloc(count, sizeof(double complex));
+    for (size_t i = 0; i < count; i++) {
+        A_z[i] = ar[i] + ai[i] * I;
+        B_z[i] = br[i] + bi[i] * I;
+    }
+    double complex alpha = 1.0;
+    double complex beta = 0.0;
+    cblas_zgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                N, N, N, &alpha, A_z, N, B_z, N, &beta, C_z, N);
+
+    double err_sq = 0, norm_sq = 0;
+    for (size_t i = 0; i < count; i++) {
+        double dr = cr_gpu[i] - creal(C_z[i]);
+        double di = ci_gpu[i] - cimag(C_z[i]);
+        err_sq += dr * dr + di * di;
+        norm_sq += creal(C_z[i]) * creal(C_z[i]) + cimag(C_z[i]) * cimag(C_z[i]);
+    }
+    double rel_err = sqrt(err_sq / (norm_sq + 1e-30));
+
+    ab_matrix_destroy(Ar); ab_matrix_destroy(Ai);
+    ab_matrix_destroy(Br); ab_matrix_destroy(Bi);
+    ab_matrix_destroy(Cr); ab_matrix_destroy(Ci);
+    ab_shutdown();
+    free(ar); free(ai); free(br); free(bi);
+    free(cr_gpu); free(ci_gpu);
+    free(A_z); free(B_z); free(C_z);
+
+    // Wilkinson threshold: C_safety * sqrt(N) * u_DD
+    double threshold = 10.0 * sqrt((double)N) * 1e-15;
+    if (rel_err < threshold) PASS();
+    else { char buf[64]; snprintf(buf, 64, "err=%.2e (thresh=%.2e)", rel_err, threshold); FAIL(buf); }
+}
+
+static void test_async_zgemm_true(void) {
+    TEST("Async ZGEMM: true async correctness");
+    ab_init();
+    int N = 128;
+    size_t count = (size_t)N * N;
+    double* rdata = malloc(count * sizeof(double));
+    double* idata = malloc(count * sizeof(double));
+    for (size_t i = 0; i < count; i++) { rdata[i] = (i % 97) / 97.0; idata[i] = (i % 73) / 73.0; }
+
+    ABMatrix Ar = ab_matrix_create(N, N); ab_matrix_upload(Ar, rdata, true);
+    ABMatrix Ai = ab_matrix_create(N, N); ab_matrix_upload(Ai, idata, true);
+    ABMatrix Br = ab_matrix_create(N, N); ab_matrix_upload(Br, rdata, true);
+    ABMatrix Bi = ab_matrix_create(N, N); ab_matrix_upload(Bi, idata, true);
+    ABMatrix Cr = ab_matrix_create(N, N); ab_matrix_zero(Cr);
+    ABMatrix Ci = ab_matrix_create(N, N); ab_matrix_zero(Ci);
+
+    ABFuture f = ab_zgemm_async(Ar, Ai, Br, Bi, Cr, Ci);
+    ABStatus s = ab_future_wait(f);
+    ab_future_destroy(f);
+
+    // Reference via sync
+    ABMatrix Cr_ref = ab_matrix_create(N, N); ab_matrix_zero(Cr_ref);
+    ABMatrix Ci_ref = ab_matrix_create(N, N); ab_matrix_zero(Ci_ref);
+    ab_zgemm(Ar, Ai, Br, Bi, Cr_ref, Ci_ref);
+
+    double* cr_data = malloc(count * sizeof(double));
+    double* cr_ref = malloc(count * sizeof(double));
+    ab_matrix_download(Cr, cr_data, true);
+    ab_matrix_download(Cr_ref, cr_ref, true);
+
+    double err_sq = 0, norm_sq = 0;
+    for (size_t i = 0; i < count; i++) {
+        double d = cr_data[i] - cr_ref[i];
+        err_sq += d * d;
+        norm_sq += cr_ref[i] * cr_ref[i];
+    }
+    double rel_err = sqrt(err_sq / (norm_sq + 1e-30));
+
+    ab_matrix_destroy(Ar); ab_matrix_destroy(Ai);
+    ab_matrix_destroy(Br); ab_matrix_destroy(Bi);
+    ab_matrix_destroy(Cr); ab_matrix_destroy(Ci);
+    ab_matrix_destroy(Cr_ref); ab_matrix_destroy(Ci_ref);
+    ab_shutdown();
+    free(rdata); free(idata); free(cr_data); free(cr_ref);
+
+    if (s == AB_OK && rel_err < 1e-14) PASS();
+    else { char buf[64]; snprintf(buf, 64, "s=%d err=%.2e", s, rel_err); FAIL(buf); }
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 
@@ -1451,6 +1810,18 @@ int main(void) {
     test_mpir_null_safety();
     test_mpir_dimension_mismatch();
     test_mpir_non_square();
+
+    printf("\nBatch API:\n");
+    test_batch_basic_dgemm();
+    test_batch_multiple_dgemm();
+    test_batch_barrier();
+    test_batch_null_safety();
+    test_batch_zgemm();
+    test_batch_committed_reuse();
+
+    printf("\nFused ZGEMM & True Async:\n");
+    test_fused_zgemm_precision();
+    test_async_zgemm_true();
 
     printf("\nRegression Tests (Bug Fixes v1.0.2):\n");
     test_bug1_async_dimension_packing();
