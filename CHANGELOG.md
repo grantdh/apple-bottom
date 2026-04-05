@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [1.3.0-dev] - Unreleased
 
+### Added (Phase 6)
+- **Fused ZGEMM** — single command buffer with 4 encoders (was 8 separate round-trips)
+  - Encoder boundaries enforce GPU barriers for the Gauss-trick dependency DAG
+  - Eliminates ~350μs of per-call command buffer commit+wait overhead
+  - Same precision (DD ~10⁻¹⁵) with lower dispatch latency
+- **True async ZGEMM** (`ab_zgemm_async`) — non-blocking GPU execution
+  - Metal completion handler cleans up temporaries when GPU finishes
+  - Returns `ABFuture` that can be polled or waited on
+  - Replaces previous synchronous wrapper implementation
+- **Batched GEMM API** (`ABBatch`) — amortizes Metal overhead across many GEMMs
+  - `ab_batch_create/dgemm/dgemm_scaled/zgemm/barrier/commit/wait/destroy`
+  - Single command buffer for hundreds of GEMMs (QE fires 100s per SCF iteration)
+  - `ab_batch_barrier()` inserts encoder boundary for dependent operations
+  - Batched ZGEMM uses same fused 4-encoder pattern within the batch
+  - 8 new correctness tests (batch DGEMM, multi-DGEMM, barrier, null safety,
+    batch ZGEMM, committed reuse, fused ZGEMM precision, true async ZGEMM)
+- **Performance regression CI** (`scripts/perf_regression.sh`)
+  - Automated benchmark suite with baseline comparison
+  - Configurable regression threshold (default 15%)
+  - JSON baseline storage, markdown regression report
+  - `--save` to capture baseline, `--ci` for non-zero exit on regression
+  - Benchmarks: DGEMM (square + tall-skinny), ZGEMM, batched DGEMM
+
 ### Added (Tier 2)
 - **Mixed-Precision Iterative Refinement** (`ab_dgesv_mpir`) — solves A*X=B via MPIR
   - FP32 LU factorization (Accelerate LAPACK sgetrf/sgetrs) for O(N³) bulk work
@@ -78,7 +101,7 @@ All notable changes to this project will be documented in this file.
 - **Version**: Bumped to 1.3.0-dev
 
 ### Notes
-- Test count: 50 → 56 (8 precision + 48 correctness)
+- Test count: 50 → 70 (8 precision + 62 correctness)
 - DTRSM right-side GPU acceleration planned for v1.4
 - Rectangular matrix fix in progress (fix/rectangular-gemm branch)
 
