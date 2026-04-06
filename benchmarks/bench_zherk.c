@@ -219,7 +219,6 @@ int main(void) {
         int batch_sizes[] = {1, 5, 10, 20};
         int nbatch = sizeof(batch_sizes) / sizeof(batch_sizes[0]);
         size_t cA = (size_t)M_b * K_b, cB = (size_t)K_b * N_b, cC = (size_t)M_b * N_b;
-        double flops_one = 8.0 * M_b * N_b * K_b;
 
         printf("  Batch │  Sequential ms │  Batched ms │  Speedup │  AMX ms  │ vs AMX\n");
         printf("────────┼────────────────┼─────────────┼──────────┼──────────┼────────\n");
