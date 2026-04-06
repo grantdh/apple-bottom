@@ -1730,6 +1730,185 @@ static void test_async_zgemm_true(void) {
 }
 
 // =============================================================================
+// Morton Z-order Regression Tests (v1.0.3)
+// =============================================================================
+// These test non-power-of-2 dimensions that triggered the Morton remap bug:
+// bit-deinterleave only produces a valid bijection for power-of-2 grid dims.
+// Non-power-of-2 grids caused block collisions → catastrophic precision loss.
+
+static double frob_rel_err_rect(const double* X, const double* Xref, int rows, int cols) {
+    double norm_diff = 0.0, norm_ref = 0.0;
+    for (int i = 0; i < rows * cols; i++) {
+        double d = X[i] - Xref[i];
+        norm_diff += d * d;
+        norm_ref += Xref[i] * Xref[i];
+    }
+    return sqrt(norm_diff / (norm_ref > 0 ? norm_ref : 1e-300));
+}
+
+// Generic DGEMM precision test at arbitrary NxN size
+static void test_morton_dgemm_size(const char* label, int N, double tol) {
+    TEST(label);
+    ab_init();
+    size_t count = (size_t)N * N;
+    double* A = malloc(count * sizeof(double));
+    double* B = malloc(count * sizeof(double));
+    double* C_gpu = malloc(count * sizeof(double));
+    double* C_ref = malloc(count * sizeof(double));
+
+    srand48(42 + N);
+    for (size_t i = 0; i < count; i++) { A[i] = drand48() * 2.0 - 1.0; B[i] = drand48() * 2.0 - 1.0; }
+
+    // Accelerate reference
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                N, N, N, 1.0, A, N, B, N, 0.0, C_ref, N);
+
+    // GPU
+    ABMatrix mA = ab_matrix_create(N, N);
+    ABMatrix mB = ab_matrix_create(N, N);
+    ABMatrix mC = ab_matrix_create(N, N);
+    ab_matrix_upload(mA, A, true);
+    ab_matrix_upload(mB, B, true);
+    ABStatus s = ab_dgemm(mA, mB, mC);
+    ab_matrix_download(mC, C_gpu, true);
+
+    double err = frob_rel_err_rect(C_gpu, C_ref, N, N);
+
+    ab_matrix_destroy(mA); ab_matrix_destroy(mB); ab_matrix_destroy(mC);
+    free(A); free(B); free(C_gpu); free(C_ref);
+    ab_shutdown();
+
+    if (s == AB_OK && err < tol) PASS();
+    else { char buf[80]; snprintf(buf, 80, "err=%.2e (tol=%.0e)", err, tol); FAIL(buf); }
+}
+
+static void test_morton_dgemm_768(void) {
+    test_morton_dgemm_size("DGEMM N=768  (3*256, non-pow2)", 768, 1e-13);
+}
+
+static void test_morton_dgemm_1536(void) {
+    test_morton_dgemm_size("DGEMM N=1536 (3*512, non-pow2)", 1536, 1e-13);
+}
+
+// ZGEMM at non-power-of-2 size (QE-relevant)
+static void test_morton_zgemm_768(void) {
+    TEST("ZGEMM N=768  (non-pow2, QE-scale)");
+    ab_init();
+    int N = 768;
+    size_t count = (size_t)N * N;
+    double* Ar = malloc(count * sizeof(double));
+    double* Ai = malloc(count * sizeof(double));
+    double* Br = malloc(count * sizeof(double));
+    double* Bi = malloc(count * sizeof(double));
+    double* Cr_gpu = malloc(count * sizeof(double));
+    double* Ci_gpu = malloc(count * sizeof(double));
+    double* Cr_ref = malloc(count * sizeof(double));
+    double* Ci_ref = malloc(count * sizeof(double));
+
+    srand48(768);
+    for (size_t i = 0; i < count; i++) {
+        Ar[i] = drand48() * 2.0 - 1.0; Ai[i] = drand48() * 2.0 - 1.0;
+        Br[i] = drand48() * 2.0 - 1.0; Bi[i] = drand48() * 2.0 - 1.0;
+    }
+
+    // Accelerate reference (interleaved complex)
+    double _Complex* zA = malloc(count * sizeof(double _Complex));
+    double _Complex* zB = malloc(count * sizeof(double _Complex));
+    double _Complex* zC = malloc(count * sizeof(double _Complex));
+    for (size_t i = 0; i < count; i++) {
+        zA[i] = Ar[i] + Ai[i] * I;
+        zB[i] = Br[i] + Bi[i] * I;
+    }
+    double _Complex alpha = 1.0, beta = 0.0;
+    cblas_zgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                N, N, N, &alpha, zA, N, zB, N, &beta, zC, N);
+    for (size_t i = 0; i < count; i++) {
+        Cr_ref[i] = creal(zC[i]);
+        Ci_ref[i] = cimag(zC[i]);
+    }
+
+    // GPU split-complex
+    ABMatrix mAr = ab_matrix_create(N, N), mAi = ab_matrix_create(N, N);
+    ABMatrix mBr = ab_matrix_create(N, N), mBi = ab_matrix_create(N, N);
+    ABMatrix mCr = ab_matrix_create(N, N), mCi = ab_matrix_create(N, N);
+    ab_matrix_upload(mAr, Ar, true); ab_matrix_upload(mAi, Ai, true);
+    ab_matrix_upload(mBr, Br, true); ab_matrix_upload(mBi, Bi, true);
+    ABStatus s = ab_zgemm(mAr, mAi, mBr, mBi, mCr, mCi);
+    ab_matrix_download(mCr, Cr_gpu, true);
+    ab_matrix_download(mCi, Ci_gpu, true);
+
+    double err_r = frob_rel_err_rect(Cr_gpu, Cr_ref, N, N);
+    double err_i = frob_rel_err_rect(Ci_gpu, Ci_ref, N, N);
+    double err = fmax(err_r, err_i);
+
+    ab_matrix_destroy(mAr); ab_matrix_destroy(mAi);
+    ab_matrix_destroy(mBr); ab_matrix_destroy(mBi);
+    ab_matrix_destroy(mCr); ab_matrix_destroy(mCi);
+    free(Ar); free(Ai); free(Br); free(Bi);
+    free(Cr_gpu); free(Ci_gpu); free(Cr_ref); free(Ci_ref);
+    free(zA); free(zB); free(zC);
+    ab_shutdown();
+
+    if (s == AB_OK && err < 1e-13) PASS();
+    else { char buf[80]; snprintf(buf, 80, "err=%.2e", err); FAIL(buf); }
+}
+
+// QE-realistic rectangular dimensions (from actual Si64 ZGEMM profile)
+static void test_morton_qe_realistic_dims(void) {
+    TEST("DGEMM QE-realistic dims (non-square, non-pow2)");
+    ab_init();
+
+    // Representative QE shapes from Si64 profile:
+    // (M, K, N) triples that produce non-power-of-2 grids
+    struct { int M, K, N; } shapes[] = {
+        {143, 143, 10},   // cegterg: 10x143 grid
+        {150, 150, 150},  // medium non-pow2
+        {384, 384, 64},   // 384 = 3*128
+        {300, 300, 300},  // all non-pow2
+        {640, 640, 640},  // 640 = 5*128
+    };
+    int nshapes = sizeof(shapes) / sizeof(shapes[0]);
+
+    int all_ok = 1;
+    double worst_err = 0;
+
+    for (int si = 0; si < nshapes; si++) {
+        int M = shapes[si].M, K = shapes[si].K, N = shapes[si].N;
+        double* A = malloc((size_t)M * K * sizeof(double));
+        double* B = malloc((size_t)K * N * sizeof(double));
+        double* C_gpu = malloc((size_t)M * N * sizeof(double));
+        double* C_ref = malloc((size_t)M * N * sizeof(double));
+
+        srand48(42 + M + K + N);
+        for (int i = 0; i < M * K; i++) A[i] = drand48() * 2.0 - 1.0;
+        for (int i = 0; i < K * N; i++) B[i] = drand48() * 2.0 - 1.0;
+
+        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    M, N, K, 1.0, A, K, B, N, 0.0, C_ref, N);
+
+        ABMatrix mA = ab_matrix_create(M, K);
+        ABMatrix mB = ab_matrix_create(K, N);
+        ABMatrix mC = ab_matrix_create(M, N);
+        ab_matrix_upload(mA, A, true);
+        ab_matrix_upload(mB, B, true);
+        ab_dgemm(mA, mB, mC);
+        ab_matrix_download(mC, C_gpu, true);
+
+        double err = frob_rel_err_rect(C_gpu, C_ref, M, N);
+        if (err > worst_err) worst_err = err;
+        if (err > 1e-13) all_ok = 0;
+
+        ab_matrix_destroy(mA); ab_matrix_destroy(mB); ab_matrix_destroy(mC);
+        free(A); free(B); free(C_gpu); free(C_ref);
+    }
+
+    ab_shutdown();
+
+    if (all_ok) PASS();
+    else { char buf[80]; snprintf(buf, 80, "worst=%.2e across %d shapes", worst_err, nshapes); FAIL(buf); }
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 
@@ -1829,6 +2008,12 @@ int main(void) {
     test_bug4_matrix_scale_precision();
     test_bug5_reinit_after_shutdown();
     test_bug6_pool_overflow();
+
+    printf("\nRegression: Morton Z-order non-power-of-2 (v1.0.3):\n");
+    test_morton_dgemm_768();
+    test_morton_dgemm_1536();
+    test_morton_zgemm_768();
+    test_morton_qe_realistic_dims();
 
     printf("\n═══════════════════════════════════════════════════════════════════\n");
     printf("Results: %d passed, %d failed\n", tests_passed, tests_failed);
