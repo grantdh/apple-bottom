@@ -1514,7 +1514,7 @@ static ABStatus ab_zgemm_internal_async(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, A
     }
 
     // Completion handler cleans up temporaries when GPU finishes
-    [cmdBuf addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull buf) {
+    [cmdBuf addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull __unused buf) {
         ab_matrix_destroy(T1);
         ab_matrix_destroy(T2);
         ab_matrix_destroy(T3);
@@ -2533,7 +2533,7 @@ ABStatus ab_batch_zgemm(ABBatch batch, ABMatrix Ar, ABMatrix Ai, ABMatrix Br, AB
     // Don't end — leave encoder open for further batched ops
 
     // Cleanup temporaries via completion handler
-    [batch->cmdBuffer addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull buf) {
+    [batch->cmdBuffer addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull __unused buf) {
         ab_matrix_destroy(T1);
         ab_matrix_destroy(T2);
         ab_matrix_destroy(T3);

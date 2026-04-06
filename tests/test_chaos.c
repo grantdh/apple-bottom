@@ -45,15 +45,6 @@ static double frobenius_rel_error(const double* A, const double* B, int N) {
     return sqrt(norm_diff / norm_ref);
 }
 
-// Generate a diagonal matrix with specified condition number
-// sigma_i ranges geometrically from 1 to 1/kappa
-static void gen_ill_conditioned(double* A, int N, double kappa) {
-    memset(A, 0, (size_t)N * N * sizeof(double));
-    for (int i = 0; i < N; i++) {
-        double t = (double)i / (N > 1 ? (N - 1) : 1);
-        A[i * N + i] = pow(kappa, -t);  // sigma_i from 1 down to 1/kappa
-    }
-}
 
 // =============================================================================
 // 1. IEEE 754 Edge Cases
