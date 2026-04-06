@@ -243,6 +243,24 @@ $(BUILD)/bench_async: benchmarks/bench_async.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
 	@echo "Built: $@"
 
+$(BUILD)/bench_dtrsm: benchmarks/bench_dtrsm.c lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	@echo "Built: $@"
+
+$(BUILD)/bench_paper: benchmarks/bench_paper.c lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	@echo "Built: $@"
+
+bench-paper: $(BUILD)/bench_paper
+	@echo ""
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "HPEC 2026 Paper Benchmark Suite"
+	@echo "═══════════════════════════════════════════════════════════════════"
+	./$(BUILD)/bench_paper
+
+bench-paper-csv: $(BUILD)/bench_paper
+	./$(BUILD)/bench_paper --csv
+
 # =============================================================================
 # CI Targets
 # =============================================================================

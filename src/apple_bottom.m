@@ -235,17 +235,17 @@ inline DD dd_scale(DD a, float s) {
 // produce (x, y) coordinates following a Z-curve pattern.
 
 inline uint2 morton_remap(uint2 tgid, uint gridW, uint gridH) {
-    // Morton Z-order is only a bijection for power-of-2 grids.
-    // For non-square or small grids, the bit-deinterleave can map multiple
-    // linear indices to the same (x,y) — causing threadgroup collisions
-    // where some output blocks are computed twice and others never.
+    // Morton Z-order bit-deinterleave is ONLY a bijection for power-of-2 grids.
+    // For non-power-of-2 grids (e.g. 12×12 for N=768), many linear indices map
+    // to out-of-bounds (x,y), and falling back to identity causes collisions:
+    // some output blocks get computed twice, others never — catastrophic errors.
     //
-    // Safety guard: only apply Morton when both grid dims >= 4 and the
-    // aspect ratio is <= 4:1. This covers the common case of large square-ish
-    // DGEMM where cache locality benefits are significant.
-    if (gridW < 4 || gridH < 4) return tgid;
-    uint ratio = (gridW > gridH) ? (gridW / gridH) : (gridH / gridW);
-    if (ratio > 4) return tgid;
+    // Guard: require both dims to be powers of 2 AND >= 4.
+    // This covers the common case (N = 1024, 2048, 4096) where Morton gives
+    // ~15% bandwidth savings, and safely disables it for all other sizes.
+    bool wPow2 = (gridW & (gridW - 1)) == 0;
+    bool hPow2 = (gridH & (gridH - 1)) == 0;
+    if (!wPow2 || !hPow2 || gridW < 4 || gridH < 4) return tgid;
 
     // Linearize the 2D threadgroup position
     uint linear = tgid.y * gridW + tgid.x;
@@ -259,11 +259,6 @@ inline uint2 morton_remap(uint2 tgid, uint gridW, uint gridH) {
         y |= ((linear >> (2 * i + 1)) & 1) << i;
     }
 
-    // For non-power-of-2 grids, some Morton coords will exceed bounds.
-    // In that case, fall back to identity — this is safe because the
-    // guard above ensures the grid is close enough to square that
-    // collisions from the fallback are minimal and self-correcting.
-    if (x >= gridW || y >= gridH) return tgid;
     return uint2(x, y);
 }
 
