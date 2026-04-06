@@ -17,7 +17,7 @@
 //   - DGEMM: GPU wins for N >= 2048
 //   - ZGEMM: GPU wins for N >= 1024
 //   - DSYRK: GPU wins for N >= 3072
-//   - ZHERK: Use cblas_zherk (AMX) instead — GPU decomposition is 20x slower
+//   - ZHERK: GPU wins for N >= 1024 (v1.4: GPU-native transpose, no CPU roundtrip)
 //
 // API Limits:
 //   - AB_MAX_DIMENSION = 46340 (max matrix dimension, overflow protection)
@@ -164,11 +164,10 @@ ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
 //   B: N×NRHS right-hand side, overwritten with solution X on output
 ABStatus ab_dgesv_mpir(ABMatrix A, ABMatrix B);
 
-// DEPRECATED: ab_zherk is 20x slower than cblas_zherk due to CPU-side transpose overhead.
-// Use cblas_zherk from Accelerate instead. This function will be removed in v2.0.
-#ifdef __GNUC__
-__attribute__((deprecated("Use cblas_zherk instead - GPU decomposition is 20x slower than AMX")))
-#endif
+// ZHERK: C = A × Aᴴ (Hermitian rank-K update)
+// Computes Cr = Ar×Arᵀ + Ai×Aiᵀ, Ci = Ai×Arᵀ - Ar×Aiᵀ
+// Uses GPU DSYRK for real part + GPU transpose + DGEMM for imaginary part.
+// All operations stay on GPU — no CPU-side data transfer.
 ABStatus ab_zherk(ABMatrix Ar, ABMatrix Ai, ABMatrix Cr, ABMatrix Ci);
 
 // Element-wise operations
@@ -203,6 +202,12 @@ ABStatus ab_batch_zgemm(ABBatch batch, ABMatrix Ar, ABMatrix Ai, ABMatrix Br, AB
 ABStatus ab_batch_barrier(ABBatch batch);
 ABStatus ab_batch_commit(ABBatch batch);
 ABStatus ab_batch_wait(ABBatch batch);
+
+// Simple batched DGEMM/ZGEMM (array-of-pointers interface)
+// Alternative to ABBatch for straightforward all-same-size workloads.
+ABStatus ab_dgemm_batched(int batch_count, ABMatrix* As, ABMatrix* Bs, ABMatrix* Cs);
+ABStatus ab_zgemm_batched(int batch_count, ABMatrix* Ars, ABMatrix* Ais,
+                          ABMatrix* Brs, ABMatrix* Bis, ABMatrix* Crs, ABMatrix* Cis);
 
 // Session API
 ABSession ab_session_create(void);

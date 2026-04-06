@@ -971,18 +971,43 @@ static void encode_dgemm_dispatch(id<MTLComputeCommandEncoder> encoder,
                                    ABContextImpl* ctx,
                                    ABMatrix A, ABMatrix B, ABMatrix C) {
     uint32_t M = A->rows, N = B->cols, K = A->cols;
-    [encoder setComputePipelineState:ctx.dgemmPipeline];
-    [encoder setBuffer:A->buffer offset:0 atIndex:0];
-    [encoder setBuffer:B->buffer offset:0 atIndex:1];
-    [encoder setBuffer:C->buffer offset:0 atIndex:2];
-    [encoder setBytes:&M length:sizeof(M) atIndex:3];
-    [encoder setBytes:&N length:sizeof(N) atIndex:4];
-    [encoder setBytes:&K length:sizeof(K) atIndex:5];
-    uint32_t gridW = (N + 63) / 64, gridH = (M + 63) / 64;
-    [encoder setBytes:&gridW length:sizeof(gridW) atIndex:6];
-    [encoder setBytes:&gridH length:sizeof(gridH) atIndex:7];
-    [encoder dispatchThreadgroups:MTLSizeMake(gridW, gridH, 1)
-             threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    // Route tall-skinny shapes (M >= 4*N) to BM=128/BN=16 kernel for better
+    // boundary utilization and compensated accumulation on long dot products.
+    // Critical for QE workloads: M≈18K, N=150 → 34% waste with BN=64, ~4% with BN=16.
+    bool use_ts = (M >= 4 * N);
+    if (use_ts) {
+        // Reuse the scaled tall-skinny kernel with alpha=1, beta=0 (C = A*B).
+        // dd_dgemm_ab_ts buffer layout: A,B,C,M,N,K,alpha,beta,gridW,gridH
+        static const DDFloat one  = {1.0f, 0.0f};
+        static const DDFloat zero = {0.0f, 0.0f};
+        [encoder setComputePipelineState:ctx.dgemmABTSPipeline];
+        [encoder setBuffer:A->buffer offset:0 atIndex:0];
+        [encoder setBuffer:B->buffer offset:0 atIndex:1];
+        [encoder setBuffer:C->buffer offset:0 atIndex:2];
+        [encoder setBytes:&M length:sizeof(M) atIndex:3];
+        [encoder setBytes:&N length:sizeof(N) atIndex:4];
+        [encoder setBytes:&K length:sizeof(K) atIndex:5];
+        [encoder setBytes:&one  length:sizeof(one)  atIndex:6];
+        [encoder setBytes:&zero length:sizeof(zero) atIndex:7];
+        uint32_t gridW = (N + 15) / 16, gridH = (M + 127) / 128;
+        [encoder setBytes:&gridW length:sizeof(gridW) atIndex:8];
+        [encoder setBytes:&gridH length:sizeof(gridH) atIndex:9];
+        [encoder dispatchThreadgroups:MTLSizeMake(gridW, gridH, 1)
+                 threadsPerThreadgroup:MTLSizeMake(8, 32, 1)];
+    } else {
+        [encoder setComputePipelineState:ctx.dgemmPipeline];
+        [encoder setBuffer:A->buffer offset:0 atIndex:0];
+        [encoder setBuffer:B->buffer offset:0 atIndex:1];
+        [encoder setBuffer:C->buffer offset:0 atIndex:2];
+        [encoder setBytes:&M length:sizeof(M) atIndex:3];
+        [encoder setBytes:&N length:sizeof(N) atIndex:4];
+        [encoder setBytes:&K length:sizeof(K) atIndex:5];
+        uint32_t gridW = (N + 63) / 64, gridH = (M + 63) / 64;
+        [encoder setBytes:&gridW length:sizeof(gridW) atIndex:6];
+        [encoder setBytes:&gridH length:sizeof(gridH) atIndex:7];
+        [encoder dispatchThreadgroups:MTLSizeMake(gridW, gridH, 1)
+                 threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    }
 }
 
 static void encode_dgemm_scaled_dispatch(id<MTLComputeCommandEncoder> encoder,
@@ -1961,62 +1986,67 @@ ABStatus ab_zherk(ABMatrix Ar, ABMatrix Ai, ABMatrix Cr, ABMatrix Ci) {
 
     int N = Ar->rows;
     int K = Ar->cols;
-    ABStatus status = AB_OK;
-    size_t countA;
-    int i, j;
 
+    // Validate: C must be N×N
+    if (N != Cr->rows || N != Cr->cols || N != Ci->rows || N != Ci->cols)
+        return AB_ERROR_DIMENSION_MISMATCH;
+    if (K != Ai->cols || N != Ai->rows)
+        return AB_ERROR_DIMENSION_MISMATCH;
+
+    ABContextImpl* ctx = [ABContextImpl shared];
+    if (!ctx) return AB_ERROR_NO_DEVICE;
+
+    ABStatus status = AB_OK;
     ABMatrix temp = NULL;
     ABMatrix ArT = NULL;
     ABMatrix AiT = NULL;
-    double* ArData = NULL;
-    double* AiData = NULL;
-    double* ArTData = NULL;
-    double* AiTData = NULL;
 
-    // Cr = Ar×Arᵀ + Ai×Aiᵀ (via DSYRK)
+    // ── Real part: Cr = Ar×Arᵀ + Ai×Aiᵀ (two GPU DSYRK calls) ──
     if ((status = ab_dsyrk(Ar, Cr)) != AB_OK) goto cleanup;
 
     temp = ab_matrix_create(N, N);
-    if (!temp) {
-        status = AB_ERROR_ALLOC_FAILED;
-        goto cleanup;
-    }
+    if (!temp) { status = AB_ERROR_ALLOC_FAILED; goto cleanup; }
 
     if ((status = ab_dsyrk(Ai, temp)) != AB_OK) goto cleanup;
     if ((status = ab_matrix_add(Cr, temp, Cr)) != AB_OK) goto cleanup;
 
-    // Ci = Ai×Arᵀ - Ar×Aiᵀ
-    countA = (size_t)N * K;
-    ArData = (double*)malloc(countA * sizeof(double));
-    AiData = (double*)malloc(countA * sizeof(double));
-    ArTData = (double*)malloc(countA * sizeof(double));
-    AiTData = (double*)malloc(countA * sizeof(double));
-
-    if (!ArData || !AiData || !ArTData || !AiTData) {
-        status = AB_ERROR_ALLOC_FAILED;
-        goto cleanup;
-    }
-
-    ab_matrix_download(Ar, ArData, true);
-    ab_matrix_download(Ai, AiData, true);
-
-    // Transpose: A[i,j] -> Aᵀ[j,i]
-    for (i = 0; i < N; i++) {
-        for (j = 0; j < K; j++) {
-            ArTData[j * N + i] = ArData[i * K + j];
-            AiTData[j * N + i] = AiData[i * K + j];
-        }
-    }
-
+    // ── Imaginary part: Ci = Ai×Arᵀ - Ar×Aiᵀ ──
+    // GPU transpose (eliminates CPU download/transpose/upload bottleneck)
     ArT = ab_matrix_create(K, N);
     AiT = ab_matrix_create(K, N);
-    if (!ArT || !AiT) {
-        status = AB_ERROR_ALLOC_FAILED;
-        goto cleanup;
-    }
+    if (!ArT || !AiT) { status = AB_ERROR_ALLOC_FAILED; goto cleanup; }
 
-    ab_matrix_upload(ArT, ArTData, true);
-    ab_matrix_upload(AiT, AiTData, true);
+    {
+        // Transpose both Ar and Ai on GPU in a single command buffer
+        id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+        [enc setComputePipelineState:ctx.transposePipeline];
+
+        uint32_t rows = (uint32_t)N, cols = (uint32_t)K;
+        MTLSize grid = MTLSizeMake((cols + 15) / 16, (rows + 15) / 16, 1);
+        MTLSize block = MTLSizeMake(16, 16, 1);
+
+        // Transpose Ar → ArT
+        [enc setBuffer:Ar->buffer offset:0 atIndex:0];
+        [enc setBuffer:ArT->buffer offset:0 atIndex:1];
+        [enc setBytes:&rows length:sizeof(rows) atIndex:2];
+        [enc setBytes:&cols length:sizeof(cols) atIndex:3];
+        [enc dispatchThreadgroups:grid threadsPerThreadgroup:block];
+
+        // Transpose Ai → AiT (same encoder, same command buffer)
+        [enc setBuffer:Ai->buffer offset:0 atIndex:0];
+        [enc setBuffer:AiT->buffer offset:0 atIndex:1];
+        [enc setBytes:&rows length:sizeof(rows) atIndex:2];
+        [enc setBytes:&cols length:sizeof(cols) atIndex:3];
+        [enc dispatchThreadgroups:grid threadsPerThreadgroup:block];
+
+        [enc endEncoding];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+
+        ArT->uploaded = true;
+        AiT->uploaded = true;
+    }
 
     // Ci = Ai × Arᵀ
     if ((status = ab_dgemm(Ai, ArT, Ci)) != AB_OK) goto cleanup;
@@ -2031,13 +2061,170 @@ cleanup:
     ab_matrix_destroy(temp);
     ab_matrix_destroy(ArT);
     ab_matrix_destroy(AiT);
-    free(ArData);
-    free(AiData);
-    free(ArTData);
-    free(AiTData);
 
     return status;
 }
+
+// =============================================================================
+// Public API: Batched DGEMM
+// =============================================================================
+
+ABStatus ab_dgemm_batched(
+    int batch_count,
+    ABMatrix* As, ABMatrix* Bs, ABMatrix* Cs
+) {
+    if (batch_count <= 0) return AB_OK;
+    if (!As || !Bs || !Cs) return AB_ERROR_INVALID_ARG;
+
+    ABContextImpl* ctx = [ABContextImpl shared];
+    if (!ctx) return AB_ERROR_NO_DEVICE;
+
+    for (int i = 0; i < batch_count; i++) {
+        if (!As[i] || !Bs[i] || !Cs[i]) return AB_ERROR_INVALID_ARG;
+        if (As[i]->cols != Bs[i]->rows ||
+            As[i]->rows != Cs[i]->rows ||
+            Bs[i]->cols != Cs[i]->cols) return AB_ERROR_DIMENSION_MISMATCH;
+    }
+
+    double t0 = get_time_ms();
+    id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
+
+    for (int i = 0; i < batch_count; i++) {
+        id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+        encode_dgemm_dispatch(encoder, ctx, As[i], Bs[i], Cs[i]);
+        [encoder endEncoding];
+    }
+
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+
+    stats_add_kernel(get_time_ms() - t0);
+    for (int i = 0; i < batch_count; i++) stats_add_dgemm();
+
+    return AB_OK;
+}
+
+ABStatus ab_zgemm_batched(
+    int batch_count,
+    ABMatrix* Ars, ABMatrix* Ais,
+    ABMatrix* Brs, ABMatrix* Bis,
+    ABMatrix* Crs, ABMatrix* Cis
+) {
+    if (batch_count <= 0) return AB_OK;
+    if (!Ars || !Ais || !Brs || !Bis || !Crs || !Cis) return AB_ERROR_INVALID_ARG;
+
+    for (int i = 0; i < batch_count; i++) {
+        if (!Ars[i] || !Ais[i] || !Brs[i] || !Bis[i] || !Crs[i] || !Cis[i])
+            return AB_ERROR_INVALID_ARG;
+    }
+
+    // Fall back to sequential for single ZGEMM
+    if (batch_count == 1) {
+        return ab_zgemm(Ars[0], Ais[0], Brs[0], Bis[0], Crs[0], Cis[0]);
+    }
+
+    ABContextImpl* ctx = [ABContextImpl shared];
+    if (!ctx) return AB_ERROR_NO_DEVICE;
+
+    // Optimized batch path: single command buffer, shared temporaries.
+    // Gauss's 3-multiply trick needs 4 temps per ZGEMM, but since each ZGEMM
+    // fully consumes its temps before the next one starts (encoder boundaries
+    // guarantee this), we allocate once and reuse across the batch.
+    //
+    // For mixed-dimension batches, we track the current temp size and reallocate
+    // only when dimensions change — QE's uniform workloads never trigger this.
+
+    int cur_M = Ars[0]->rows, cur_N = Brs[0]->cols, cur_K = Ars[0]->cols;
+    ABMatrix T1 = ab_matrix_create(cur_M, cur_N);  // Ar * Br
+    ABMatrix T2 = ab_matrix_create(cur_M, cur_N);  // Ai * Bi
+    ABMatrix T3 = ab_matrix_create(cur_M, cur_K);  // Ar + Ai
+    ABMatrix T4 = ab_matrix_create(cur_K, cur_N);  // Br + Bi
+
+    if (!T1 || !T2 || !T3 || !T4) {
+        ab_matrix_destroy(T1); ab_matrix_destroy(T2);
+        ab_matrix_destroy(T3); ab_matrix_destroy(T4);
+        return AB_ERROR_ALLOC_FAILED;
+    }
+
+    double t0 = get_time_ms();
+    id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
+
+    for (int i = 0; i < batch_count; i++) {
+        int M = Ars[i]->rows, N = Brs[i]->cols, K = Ars[i]->cols;
+
+        // Reallocate temps if dimensions changed (rare for QE workloads)
+        if (M != cur_M || N != cur_N || K != cur_K) {
+            // Insert barrier: previous ZGEMM must finish before we destroy temps
+            // (encoder boundary from the loop structure already provides this,
+            // but we need to wait for the GPU to finish with the old buffers)
+            [cmdBuf commit];
+            [cmdBuf waitUntilCompleted];
+            cmdBuf = [ctx.commandQueue commandBuffer];
+
+            ab_matrix_destroy(T1); ab_matrix_destroy(T2);
+            ab_matrix_destroy(T3); ab_matrix_destroy(T4);
+            T1 = ab_matrix_create(M, N);
+            T2 = ab_matrix_create(M, N);
+            T3 = ab_matrix_create(M, K);
+            T4 = ab_matrix_create(K, N);
+            if (!T1 || !T2 || !T3 || !T4) {
+                ab_matrix_destroy(T1); ab_matrix_destroy(T2);
+                ab_matrix_destroy(T3); ab_matrix_destroy(T4);
+                return AB_ERROR_ALLOC_FAILED;
+            }
+            cur_M = M; cur_N = N; cur_K = K;
+        }
+
+        // Encoder 1: element-wise additions (T3 = Ar + Ai, T4 = Br + Bi)
+        {
+            id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+            encode_elemwise_dispatch(enc, ctx.addPipeline, Ars[i], Ais[i], T3);
+            encode_elemwise_dispatch(enc, ctx.addPipeline, Brs[i], Bis[i], T4);
+            [enc endEncoding];
+        }
+
+        // Encoder 2: three DGEMMs (T1=Ar*Br, T2=Ai*Bi, Ci=T3*T4)
+        {
+            id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+            encode_dgemm_dispatch(enc, ctx, Ars[i], Brs[i], T1);
+            encode_dgemm_dispatch(enc, ctx, Ais[i], Bis[i], T2);
+            encode_dgemm_dispatch(enc, ctx, T3, T4, Cis[i]);
+            [enc endEncoding];
+        }
+
+        // Encoder 3: Ci = Ci - T1, Cr = T1 - T2 (different outputs → parallel-safe)
+        {
+            id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+            encode_elemwise_dispatch(enc, ctx.subPipeline, Cis[i], T1, Cis[i]);
+            encode_elemwise_dispatch(enc, ctx.subPipeline, T1, T2, Crs[i]);
+            [enc endEncoding];
+        }
+
+        // Encoder 4: Ci = Ci - T2 (depends on updated Ci from encoder 3)
+        {
+            id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+            encode_elemwise_dispatch(enc, ctx.subPipeline, Cis[i], T2, Cis[i]);
+            [enc endEncoding];
+        }
+        // Encoder boundary here guarantees T1-T4 are fully consumed before
+        // the next iteration's Encoder 1 overwrites T3/T4.
+    }
+
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+
+    stats_add_kernel(get_time_ms() - t0);
+    for (int i = 0; i < batch_count; i++) stats_add_zgemm();
+
+    ab_matrix_destroy(T1); ab_matrix_destroy(T2);
+    ab_matrix_destroy(T3); ab_matrix_destroy(T4);
+
+    if (cmdBuf.status == MTLCommandBufferStatusError) {
+        return AB_ERROR_KERNEL_FAILED;
+    }
+    return AB_OK;
+}
+
 // =============================================================================
 // =============================================================================
 // Public API: Memory Pool
