@@ -2,8 +2,8 @@ name: Build Check
 
 # CI verifies compile-time correctness only. GPU tests require Metal device
 # access (MTLCreateSystemDefaultDevice), which GitHub Actions runners don't
-# expose. Full GPU validation (48 tests + convergence study) must be run
-# locally via `make ci-local` before release (see docs/RELEASING.md).
+# expose. Full GPU validation (tests + chaos tests + convergence study +
+# perf regression) must be run locally via `make ci-local` before release.
 
 on:
   push:

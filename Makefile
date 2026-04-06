@@ -137,6 +137,18 @@ test-verification: $(BUILD)/test_convergence
 	./$(BUILD)/test_convergence
 	@echo ""
 
+# Adversarial & system-level test suite
+$(BUILD)/test_chaos: tests/test_chaos.c lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) -lpthread
+	@echo "Built: $@"
+
+test-chaos: $(BUILD)/test_chaos
+	@echo ""
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "Running Adversarial & System-Level Tests"
+	@echo "═══════════════════════════════════════════════════════════════════"
+	./$(BUILD)/test_chaos
+
 # Rectangular matrix diagnostic test
 $(BUILD)/test_rectangular_diag: tests/test_rectangular_diag.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
@@ -254,6 +266,8 @@ build-check: | $(BUILD)
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_correctness.c -o $(BUILD)/test_correctness.o
 	@echo "Compiling test_precision.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_precision.c -o $(BUILD)/test_precision.o
+	@echo "Compiling test_chaos.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_chaos.c -o $(BUILD)/test_chaos.o
 	@echo "Compiling test_convergence.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/verification/test_convergence.c -o $(BUILD)/test_convergence.o
 	@echo ""
@@ -262,7 +276,7 @@ build-check: | $(BUILD)
 
 # Local CI: run full test suite + convergence study, generate CI report
 # Only writes CI_REPORT.txt if all tests pass (exits on first failure)
-ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_convergence
+ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_convergence
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "CI Local Validation"
@@ -271,6 +285,7 @@ ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_conver
 	@echo "Running test suite..."
 	@./$(BUILD)/test_precision > $(BUILD)/test_precision.log 2>&1 && echo "✓ test_precision: PASS" || (echo "✗ test_precision: FAIL" && cat $(BUILD)/test_precision.log && exit 1)
 	@./$(BUILD)/test_correctness > $(BUILD)/test_correctness.log 2>&1 && echo "✓ test_correctness: PASS" || (echo "✗ test_correctness: FAIL" && cat $(BUILD)/test_correctness.log && exit 1)
+	@./$(BUILD)/test_chaos > $(BUILD)/test_chaos.log 2>&1 && echo "✓ test_chaos: PASS" || (echo "✗ test_chaos: FAIL" && cat $(BUILD)/test_chaos.log && exit 1)
 	@echo ""
 	@echo "Running convergence study (V-2)..."
 	@./$(BUILD)/test_convergence > $(BUILD)/test_convergence.log 2>&1 && echo "✓ test_convergence: PASS" || (echo "✗ test_convergence: FAIL" && cat $(BUILD)/test_convergence.log && exit 1)
