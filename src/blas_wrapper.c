@@ -25,27 +25,82 @@
 // 3. Skinny matrices (any dim < 64): CPU unless total FLOPs are very large
 // =============================================================================
 
-#define CROSSOVER_FLOPS      100000000ULL  // For complex (ZGEMM)
-#define CROSSOVER_FLOPS_REAL  50000000ULL  // For real (DGEMM) — lower threshold
-#define MIN_GPU_DIM           32            // Minimum dimension for GPU dispatch
+#define DEFAULT_CROSSOVER_FLOPS      100000000ULL  // For complex (ZGEMM)
+#define DEFAULT_CROSSOVER_FLOPS_REAL  50000000ULL  // For real (DGEMM)
+#define DEFAULT_MIN_GPU_DIM           32           // Minimum dimension for GPU dispatch
+
+// Runtime-tunable thresholds (read once from env on first call, then cached).
+//   AB_MIN_GPU_DIM       — dim floor below which GPU is never used (default 32)
+//   AB_CROSSOVER_FLOPS   — FLOP threshold for complex routing (default 1e8)
+//   AB_CROSSOVER_FLOPS_REAL — FLOP threshold for real routing (default 5e7)
+// All negative/zero values are rejected and fall back to defaults.
+static int      _ab_min_dim   = -1;
+static uint64_t _ab_cross_z   = 0;  // 0 = uninitialized
+static uint64_t _ab_cross_d   = 0;
+static int ab_get_min_gpu_dim(void) {
+    if (_ab_min_dim >= 0) return _ab_min_dim;
+    const char* s = getenv("AB_MIN_GPU_DIM");
+    int v = (s && *s) ? atoi(s) : DEFAULT_MIN_GPU_DIM;
+    if (v < 0) v = DEFAULT_MIN_GPU_DIM;
+    _ab_min_dim = v;
+    return _ab_min_dim;
+}
+static uint64_t ab_get_crossover_flops(void) {
+    if (_ab_cross_z) return _ab_cross_z;
+    const char* s = getenv("AB_CROSSOVER_FLOPS");
+    unsigned long long v = (s && *s) ? strtoull(s, NULL, 10) : DEFAULT_CROSSOVER_FLOPS;
+    if (v == 0) v = DEFAULT_CROSSOVER_FLOPS;
+    _ab_cross_z = (uint64_t)v;
+    return _ab_cross_z;
+}
+static uint64_t ab_get_crossover_flops_real(void) {
+    if (_ab_cross_d) return _ab_cross_d;
+    const char* s = getenv("AB_CROSSOVER_FLOPS_REAL");
+    unsigned long long v = (s && *s) ? strtoull(s, NULL, 10) : DEFAULT_CROSSOVER_FLOPS_REAL;
+    if (v == 0) v = DEFAULT_CROSSOVER_FLOPS_REAL;
+    _ab_cross_d = (uint64_t)v;
+    return _ab_cross_d;
+}
+
+// AB_MODE runtime knob: cpu = force AMX/cblas, gpu = force GPU (above AB_MIN_GPU_DIM),
+// auto (default) = current heterogeneous heuristic.
+// Cached on first call; set AB_MODE env var before launching.
+enum { AB_MODE_AUTO = 0, AB_MODE_CPU = 1, AB_MODE_GPU = 2 };
+static int _ab_mode = -1;
+static int ab_get_mode(void) {
+    if (_ab_mode >= 0) return _ab_mode;
+    const char* s = getenv("AB_MODE");
+    if (s && (s[0] == 'c' || s[0] == 'C')) _ab_mode = AB_MODE_CPU;
+    else if (s && (s[0] == 'g' || s[0] == 'G')) _ab_mode = AB_MODE_GPU;
+    else _ab_mode = AB_MODE_AUTO;
+    return _ab_mode;
+}
 
 bool ab_use_gpu(int m, int n, int k) {
-    // Small matrix fast-path: always AMX
-    if (m <= MIN_GPU_DIM || n <= MIN_GPU_DIM || k <= MIN_GPU_DIM)
+    int mode = ab_get_mode();
+    if (mode == AB_MODE_CPU) return false;
+    int min_dim = ab_get_min_gpu_dim();
+    // Dims below GPU minimum are never profitable (threadgroups underutilized)
+    if (m <= min_dim || n <= min_dim || k <= min_dim)
         return false;
-    // Skinny matrices: higher threshold (GPU threadgroups underutilized)
+    if (mode == AB_MODE_GPU) return true;
+    // AUTO: heterogeneous heuristic
     uint64_t flops = 2ULL * m * n * k;
     if (m < 64 || n < 64 || k < 64)
-        return flops >= CROSSOVER_FLOPS;  // Use higher threshold for skinny
-    return flops >= CROSSOVER_FLOPS_REAL;
+        return flops >= ab_get_crossover_flops();        // skinny: stricter
+    return flops >= ab_get_crossover_flops_real();
 }
 
 // Complex version accounts for 4x arithmetic density
 static bool ab_use_gpu_complex(int m, int n, int k) {
-    if (m <= MIN_GPU_DIM || n <= MIN_GPU_DIM || k <= MIN_GPU_DIM)
+    int mode = ab_get_mode();
+    if (mode == AB_MODE_CPU) return false;
+    int min_dim = ab_get_min_gpu_dim();
+    if (m <= min_dim || n <= min_dim || k <= min_dim)
         return false;
+    if (mode == AB_MODE_GPU) return true;
     uint64_t flops = 8ULL * m * n * k;
-    return flops >= CROSSOVER_FLOPS;
+    return flops >= ab_get_crossover_flops();
 }
 
 // =============================================================================
