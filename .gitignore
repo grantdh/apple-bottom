@@ -29,3 +29,6 @@ __pycache__/
 *.egg-info/
 dist/
 *.egg
+CLAUDE*.md
+LESSONS_LEARNED.md
+*.skill
