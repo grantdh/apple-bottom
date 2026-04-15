@@ -16,6 +16,10 @@ OBJC = clang
 CFLAGS = -Wall -Wextra -O3 -std=c11 -DACCELERATE_NEW_LAPACK
 OBJCFLAGS = -std=c++11 -Wall -Wextra -O3 -fobjc-arc -DACCELERATE_NEW_LAPACK
 LDFLAGS = -lc++ -framework Metal -framework Foundation -framework Accelerate
+# Executables link against build/libapplebottom.dylib (install_name @rpath/…).
+# Adding @loader_path so in-tree binaries (build/test_*, build/examples/*, build/bench_*)
+# resolve the dylib sitting right next to them.
+EXE_RPATH = -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/..
 
 BUILD = build
 SRC = src
@@ -56,18 +60,31 @@ $(BUILD)/blas_wrapper.o: $(SRC)/blas_wrapper.c $(INCLUDE)/apple_bottom.h | $(BUI
 $(BUILD)/fortran_bridge.o: $(SRC)/fortran_bridge.c $(INCLUDE)/apple_bottom.h | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/fortran_bridge.c -o $@
 
-$(BUILD)/libapplebottom.a: $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o $(BUILD)/fortran_bridge.o
+$(BUILD)/device_api.o: $(SRC)/device_api.m $(INCLUDE)/apple_bottom.h $(INCLUDE)/apple_bottom_device.h | $(BUILD)
+	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/device_api.m -o $@
+
+$(BUILD)/libapplebottom.a: $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o $(BUILD)/fortran_bridge.o $(BUILD)/device_api.o
 	ar rcs $@ $^
 	@echo "Built: $@"
 
-lib: $(BUILD)/libapplebottom.a
+# Shared library for Fortran linkage (QE, Yambo, …).
+# install_name is set to @rpath so host binaries can locate us via -rpath at link time.
+$(BUILD)/libapplebottom.dylib: $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o $(BUILD)/fortran_bridge.o $(BUILD)/device_api.o
+	$(CC) -dynamiclib -install_name @rpath/libapplebottom.dylib \
+	    -current_version 1.3.0 -compatibility_version 1.0.0 \
+	    $^ -o $@ $(LDFLAGS)
+	@echo "Built: $@"
+
+dylib: $(BUILD)/libapplebottom.dylib
+
+lib: $(BUILD)/libapplebottom.a $(BUILD)/libapplebottom.dylib
 
 # =============================================================================
 # Examples
 # =============================================================================
 
 $(BUILD)/examples/basic_dgemm: $(EXAMPLES)/01_basic_dgemm/main.c lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
 examples: $(BUILD)/examples/basic_dgemm
@@ -77,11 +94,11 @@ examples: $(BUILD)/examples/basic_dgemm
 # =============================================================================
 
 $(BUILD)/bench_dgemm: benchmarks/bench_dgemm.c lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
 $(BUILD)/bench_zgemm: benchmarks/bench_zgemm.c lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
 bench: $(BUILD)/bench_dgemm $(BUILD)/bench_pool $(BUILD)/bench_zgemm $(BUILD)/bench_dsyrk $(BUILD)/bench_zherk $(BUILD)/bench_async
@@ -108,24 +125,29 @@ bench-report: bench
 # =============================================================================
 
 $(BUILD)/test_precision: tests/test_precision.c lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
 $(BUILD)/test_correctness: tests/test_correctness.c lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
+$(BUILD)/test_device_api: tests/test_device_api.c lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
 $(BUILD)/test_convergence: tests/verification/test_convergence.c lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
-test: $(BUILD)/test_precision $(BUILD)/test_correctness
+test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "Running Tests"
 	@echo "═══════════════════════════════════════════════════════════════════"
 	./$(BUILD)/test_precision
 	./$(BUILD)/test_correctness
+	./$(BUILD)/test_device_api
 	@echo ""
 	@echo "✓ All tests passed!"
 
@@ -139,7 +161,7 @@ test-verification: $(BUILD)/test_convergence
 
 # Adversarial & system-level test suite
 $(BUILD)/test_chaos: tests/test_chaos.c lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) -lpthread
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH) -lpthread
 	@echo "Built: $@"
 
 test-chaos: $(BUILD)/test_chaos
@@ -151,7 +173,7 @@ test-chaos: $(BUILD)/test_chaos
 
 # Rectangular matrix diagnostic test
 $(BUILD)/test_rectangular_diag: tests/test_rectangular_diag.c lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
 test-rectangular-diag: $(BUILD)/test_rectangular_diag
@@ -189,6 +211,7 @@ install: lib
 	install -d $(PREFIX)/include
 	install -d $(PREFIX)/lib/pkgconfig
 	install -m 644 $(BUILD)/libapplebottom.a $(PREFIX)/lib/
+	install -m 755 $(BUILD)/libapplebottom.dylib $(PREFIX)/lib/
 	install -m 644 $(INCLUDE)/apple_bottom.h $(PREFIX)/include/
 	@sed -e 's|@PREFIX@|$(PREFIX)|g' \
 	     -e 's|@VERSION@|1.3.0|g' \
@@ -213,7 +236,7 @@ test-asan: clean
 	$(CC) $(CFLAGS) -fsanitize=address -g -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $(BUILD)/blas_wrapper.o
 	$(CC) $(CFLAGS) -fsanitize=address -g -I$(INCLUDE) -c $(SRC)/fortran_bridge.c -o $(BUILD)/fortran_bridge.o
 	ar rcs $(BUILD)/libapplebottom.a $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o $(BUILD)/fortran_bridge.o
-	$(CC) $(CFLAGS) -fsanitize=address -g -I$(INCLUDE) tests/test_correctness.c -o $(BUILD)/test_correctness -L$(BUILD) -lapplebottom $(LDFLAGS)
+	$(CC) $(CFLAGS) -fsanitize=address -g -I$(INCLUDE) tests/test_correctness.c -o $(BUILD)/test_correctness -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Running tests with ASan..."
 	ASAN_OPTIONS=detect_leaks=1 ./$(BUILD)/test_correctness
 
@@ -223,32 +246,32 @@ test-ubsan: clean
 	$(CC) $(CFLAGS) -fsanitize=undefined -g -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $(BUILD)/blas_wrapper.o
 	$(CC) $(CFLAGS) -fsanitize=undefined -g -I$(INCLUDE) -c $(SRC)/fortran_bridge.c -o $(BUILD)/fortran_bridge.o
 	ar rcs $(BUILD)/libapplebottom.a $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o $(BUILD)/fortran_bridge.o
-	$(CC) $(CFLAGS) -fsanitize=undefined -g -I$(INCLUDE) tests/test_correctness.c -o $(BUILD)/test_correctness -L$(BUILD) -lapplebottom $(LDFLAGS)
+	$(CC) $(CFLAGS) -fsanitize=undefined -g -I$(INCLUDE) tests/test_correctness.c -o $(BUILD)/test_correctness -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Running tests with UBSan..."
 	./$(BUILD)/test_correctness
 
 $(BUILD)/bench_dsyrk: benchmarks/bench_dsyrk.c lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
 $(BUILD)/bench_zherk: benchmarks/bench_zherk.c lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
 $(BUILD)/bench_pool: benchmarks/bench_pool.c lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
 $(BUILD)/bench_async: benchmarks/bench_async.c lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
 $(BUILD)/bench_dtrsm: benchmarks/bench_dtrsm.c lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
 $(BUILD)/bench_paper: benchmarks/bench_paper.c lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
 bench-paper: $(BUILD)/bench_paper
