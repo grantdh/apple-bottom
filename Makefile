@@ -213,6 +213,7 @@ install: lib
 	install -m 644 $(BUILD)/libapplebottom.a $(PREFIX)/lib/
 	install -m 755 $(BUILD)/libapplebottom.dylib $(PREFIX)/lib/
 	install -m 644 $(INCLUDE)/apple_bottom.h $(PREFIX)/include/
+	install -m 644 $(INCLUDE)/apple_bottom_device.h $(PREFIX)/include/
 	@sed -e 's|@PREFIX@|$(PREFIX)|g' \
 	     -e 's|@VERSION@|1.3.0|g' \
 	     applebottom.pc.in > $(PREFIX)/lib/pkgconfig/applebottom.pc
@@ -220,7 +221,9 @@ install: lib
 
 uninstall:
 	rm -f $(PREFIX)/lib/libapplebottom.a
+	rm -f $(PREFIX)/lib/libapplebottom.dylib
 	rm -f $(PREFIX)/include/apple_bottom.h
+	rm -f $(PREFIX)/include/apple_bottom_device.h
 	rm -f $(PREFIX)/lib/pkgconfig/applebottom.pc
 	@echo "Uninstalled from $(PREFIX)"
 # =============================================================================
