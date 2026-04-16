@@ -5,7 +5,7 @@
 
 <p align="center">
   <a href="https://github.com/grantdh/apple-bottom/actions"><img src="https://github.com/grantdh/apple-bottom/actions/workflows/vv-regression.yml/badge.svg" alt="CI"></a>
-  <a href="tests/"><img src="https://img.shields.io/badge/tests-48%20passing-brightgreen" alt="Tests"></a>
+  <a href="tests/"><img src="https://img.shields.io/badge/tests-99%20passing-brightgreen" alt="Tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"></a>
   <a href="#requirements"><img src="https://img.shields.io/badge/platform-Apple%20Silicon-orange" alt="Platform"></a>
   <a href="#architecture"><img src="https://img.shields.io/badge/precision-~10⁻¹⁵-yellow" alt="Precision"></a>
@@ -18,7 +18,7 @@ Apple Silicon GPUs have no native FP64. `apple-bottom` fixes that — double-flo
 ```bash
 git clone https://github.com/grantdh/apple-bottom.git
 cd apple-bottom
-make && make test   # 48/48 tests pass
+make && make test   # 99/99 tests pass
 ```
 
 ## Performance
@@ -86,6 +86,7 @@ ab_shutdown();
 | **Async** | `ab_dgemm_async`, `ab_zgemm_async`, `ab_future_wait` |
 | **Pool** | `ab_pool_create`, `ab_pool_get_matrix`, `ab_pool_reset` (reduces allocation overhead in iterative codes) |
 | **Session** | `ab_session_create`, `ab_session_dgemm`, `ab_session_zgemm` (named matrix management) |
+| **Device** | `ab_dev_malloc`, `ab_dev_free`, `ab_dev_memcpy_h2d/d2h/d2d`, `ab_dev_dgemm`, `ab_dev_zgemm` (DevXlib-compatible buffer API) |
 
 ### Fortran Integration (Quantum ESPRESSO)
 
@@ -123,7 +124,7 @@ Production-validated following NASA-STD-7009A methodology:
 
 - **V-2 Convergence Study**: Frobenius error 6.5×10⁻¹⁵ to 5.1×10⁻¹⁴ for N ∈ {64, 128, ..., 4096}
 - **VAL-1 Production**: Quantum ESPRESSO Si64 DFT — 11 decimal place agreement (-2990.44276157 Ry)
-- **48/48 tests**: 6 precision tests + 42 correctness tests (regression coverage for 7 critical bug fixes)
+- **99/99 tests**: 8 precision + 66 correctness + 25 device-API tests (regression coverage for 7 critical bug fixes)
 
 Documentation: [V&V Report](docs/vv/VV_REPORT.md) · [Precision Envelope](docs/vv/PRECISION_ENVELOPE.md) · [QE Validation](tests/validation/VAL001_QE_Si64.md)
 
@@ -151,7 +152,6 @@ Triple-double (TD) emulation achieves faithfully-rounded FP64 (99.5% correctly r
 
 ## Limitations
 
-- **Rectangular matrices** (aspect ratio > 10:1): known correctness issues, being addressed
 - **Single GEMM calls**: ~100 μs GPU overhead dominates for one-shot operations
 - **ZHERK**: deprecated (20× slower than CPU AMX) — use `cblas_zherk` instead
 - **Thread safety**: Metal command queue serializes; use separate contexts for concurrency (planned)
@@ -162,15 +162,28 @@ Triple-double (TD) emulation achieves faithfully-rounded FP64 (99.5% correctly r
 ```
 apple-bottom/
 ├── src/apple_bottom.m          # Core Metal GPU implementation (DD kernels)
+├── src/device_api.m            # Device-buffer API for DevXlib backends
 ├── src/blas_wrapper.c          # BLAS-compatible C API
 ├── src/fortran_bridge.c        # Fortran ABI bridge for QE/VASP/CP2K
 ├── include/apple_bottom.h      # Public API header (v1.2.0)
-├── tests/                      # 48 tests (precision + correctness + V&V)
+├── include/apple_bottom_device.h  # Device-buffer API header
+├── tests/                      # 99 tests (precision + correctness + device-API)
 ├── benchmarks/                 # DGEMM, ZGEMM, DSYRK, pool, async benchmarks
 ├── examples/01_basic_dgemm/    # Runnable example
 ├── docs/                       # Integration guide + V&V documentation
 └── research/td-dgemm/          # Triple-double faithfully-rounded FP64 research
 ```
+
+## Ecosystem
+
+apple-bottom powers GPU acceleration across a family of scientific computing tools:
+
+| Project | What it does |
+|---------|-------------|
+| [Quantum-Espressivo](https://github.com/grantdh/Quantum-Espressivo) | Quantum ESPRESSO + Metal GPU acceleration (22% speedup, 11 decimal place agreement) |
+| [YAMBOrghini](https://github.com/grantdh/YAMBOrghini) | Yambo GW/BSE + Metal GPU acceleration |
+| [MEEPhistopheles](https://github.com/grantdh/MEEPhistopheles) | Metal FDTD kernels for electromagnetic simulation (3200+ Mcells/s) |
+| [rainbow-connection](https://github.com/grantdh/rainbow-connection) | Multi-physics pipeline orchestrator (QE → Yambo → MEEP) |
 
 ## Contributing
 
