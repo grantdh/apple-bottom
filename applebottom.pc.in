@@ -1,9 +1,12 @@
 prefix=@PREFIX@
-libdir=${prefix}/lib
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
 includedir=${prefix}/include
 
 Name: applebottom
 Description: FP64-class BLAS for Apple Silicon GPU via double-float arithmetic on Metal
+URL: https://github.com/grantdh/apple-bottom
 Version: @VERSION@
-Libs: -L${libdir} -lapplebottom -framework Metal -framework Foundation -framework Accelerate -lc++
+Libs: -L${libdir} -lapplebottom
+Libs.private: -lc++ -framework Metal -framework Foundation -framework Accelerate
 Cflags: -I${includedir}
