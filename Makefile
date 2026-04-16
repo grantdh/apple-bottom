@@ -16,6 +16,13 @@ OBJC = clang
 CFLAGS = -Wall -Wextra -O3 -std=c11 -DACCELERATE_NEW_LAPACK
 OBJCFLAGS = -std=c++11 -Wall -Wextra -O3 -fobjc-arc -DACCELERATE_NEW_LAPACK
 LDFLAGS = -lc++ -framework Metal -framework Foundation -framework Accelerate
+
+# Dylib link flags: re-export Accelerate so host binaries linking only
+# -lapplebottom still get the full 150+ BLAS/LAPACK symbols we don't
+# shadow ourselves. Our own dgemm_/zgemm_ win at link time via two-level
+# namespace ordering (libapplebottom appears before Accelerate).
+DYLIB_LDFLAGS = -lc++ -framework Metal -framework Foundation \
+                -Wl,-reexport_framework,Accelerate
 # Executables link against build/libapplebottom.dylib (install_name @rpath/…).
 # Adding @loader_path so in-tree binaries (build/test_*, build/examples/*, build/bench_*)
 # resolve the dylib sitting right next to them.
@@ -57,22 +64,30 @@ $(BUILD)/apple_bottom.o: $(SRC)/apple_bottom.m $(INCLUDE)/apple_bottom.h | $(BUI
 $(BUILD)/blas_wrapper.o: $(SRC)/blas_wrapper.c $(INCLUDE)/apple_bottom.h | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $@
 
-$(BUILD)/fortran_bridge.o: $(SRC)/fortran_bridge.c $(INCLUDE)/apple_bottom.h | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/fortran_bridge.c -o $@
+$(BUILD)/fortran_bridge.o: $(SRC)/fortran_bridge.c $(INCLUDE)/apple_bottom.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c $(SRC)/fortran_bridge.c -o $@
+
+$(BUILD)/blas_profiler.o: $(SRC)/profiling/blas_profiler.c $(SRC)/profiling/blas_profiler.h | $(BUILD)
+	$(CC) $(CFLAGS) -I$(SRC) -c $(SRC)/profiling/blas_profiler.c -o $@
 
 $(BUILD)/device_api.o: $(SRC)/device_api.m $(INCLUDE)/apple_bottom.h $(INCLUDE)/apple_bottom_device.h | $(BUILD)
 	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/device_api.m -o $@
 
-$(BUILD)/libapplebottom.a: $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o $(BUILD)/fortran_bridge.o $(BUILD)/device_api.o
+LIB_OBJS = $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o \
+           $(BUILD)/fortran_bridge.o $(BUILD)/blas_profiler.o \
+           $(BUILD)/device_api.o
+
+$(BUILD)/libapplebottom.a: $(LIB_OBJS)
 	ar rcs $@ $^
 	@echo "Built: $@"
 
 # Shared library for Fortran linkage (QE, Yambo, …).
 # install_name is set to @rpath so host binaries can locate us via -rpath at link time.
-$(BUILD)/libapplebottom.dylib: $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o $(BUILD)/fortran_bridge.o $(BUILD)/device_api.o
+# Accelerate is re-exported so -lapplebottom alone provides full BLAS/LAPACK.
+$(BUILD)/libapplebottom.dylib: $(LIB_OBJS)
 	$(CC) -dynamiclib -install_name @rpath/libapplebottom.dylib \
 	    -current_version 1.3.0 -compatibility_version 1.0.0 \
-	    $^ -o $@ $(LDFLAGS)
+	    $^ -o $@ $(DYLIB_LDFLAGS)
 	@echo "Built: $@"
 
 dylib: $(BUILD)/libapplebottom.dylib
@@ -291,7 +306,27 @@ bench-paper-csv: $(BUILD)/bench_paper
 # CI Targets
 # =============================================================================
 
-.PHONY: build-check ci-local
+.PHONY: build-check ci-local verify-symbols
+
+# Verify the dylib exports standard Fortran BLAS names (dgemm_, zgemm_)
+# and that Accelerate is properly re-exported. This confirms the dylib
+# is a true drop-in for Fortran host codes (QE, Yambo, …).
+verify-symbols: $(BUILD)/libapplebottom.dylib
+	@echo ""
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "Verifying libapplebottom.dylib symbol exports"
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo ""
+	@echo "Shadowed Fortran BLAS symbols (should be defined in our dylib):"
+	@nm -gU $(BUILD)/libapplebottom.dylib 2>/dev/null | grep -E " _(dgemm_|zgemm_|ab_dgemm_|ab_zgemm_)$$" \
+	    || (echo "  ✗ MISSING standard BLAS exports" && exit 1)
+	@echo ""
+	@echo "Accelerate re-export (LC_REEXPORT_DYLIB entries):"
+	@otool -l $(BUILD)/libapplebottom.dylib | grep -A 2 LC_REEXPORT_DYLIB \
+	    || (echo "  ✗ Accelerate NOT re-exported" && exit 1)
+	@echo ""
+	@echo "✓ Symbols look correct — this is a drop-in BLAS dylib"
+	@echo ""
 
 # Build check: compile all source files to .o without linking
 # Used by GitHub Actions to verify syntax and compilation (fast check)
@@ -305,7 +340,9 @@ build-check: | $(BUILD)
 	@echo "Compiling blas_wrapper.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $(BUILD)/blas_wrapper.o
 	@echo "Compiling fortran_bridge.c..."
-	@$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/fortran_bridge.c -o $(BUILD)/fortran_bridge.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c $(SRC)/fortran_bridge.c -o $(BUILD)/fortran_bridge.o
+	@echo "Compiling blas_profiler.c..."
+	@$(CC) $(CFLAGS) -I$(SRC) -c $(SRC)/profiling/blas_profiler.c -o $(BUILD)/blas_profiler.o
 	@echo "Compiling test_correctness.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_correctness.c -o $(BUILD)/test_correctness.o
 	@echo "Compiling test_precision.c..."
