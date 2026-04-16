@@ -1,9 +1,28 @@
+/* =============================================================================
+ * fortran_bridge.c — Fortran BLAS entry points for apple-bottom
+ * =============================================================================
+ *
+ * Exports the *standard* Fortran BLAS symbols (dgemm_, zgemm_) so any
+ * Fortran code linked against -lapplebottom picks us up without call-site
+ * edits. On macOS two-level namespace, these symbols shadow Accelerate's
+ * when -lapplebottom appears before -framework Accelerate.
+ *
+ * CPU fallback goes through the CBLAS interface (cblas_dgemm / cblas_zgemm)
+ * so we never self-recurse into our own dgemm_/zgemm_.
+ *
+ * The legacy ab_dgemm_ / ab_zgemm_ names are kept as weak aliases so any
+ * call-site that was already patched during the transition continues to work.
+ * =============================================================================
+ */
+#include <Accelerate/Accelerate.h>
 #include <complex.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-/* Forward declarations — these exist in blas_wrapper.c */
+#include "profiling/blas_profiler.h"
+
+/* Forward declarations — GPU-path DD kernels live in blas_wrapper.c */
 extern void ab_dgemm_blas(char transA, char transB, int M, int N, int K,
                           double alpha, const double* A, int ldA,
                           const double* B, int ldB,
@@ -13,23 +32,9 @@ extern void ab_zgemm_blas(char transA, char transB, int M, int N, int K,
                           const double complex* B, int ldB,
                           double complex beta, double complex* C, int ldC);
 
-/* Fortran BLAS symbols for sub-threshold passthrough */
-extern void dgemm_(const char*, const char*, const int*, const int*, const int*,
-                   const double*, const double*, const int*,
-                   const double*, const int*,
-                   const double*, double*, const int*);
-extern void zgemm_(const char*, const char*, const int*, const int*, const int*,
-                   const double complex*, const double complex*, const int*,
-                   const double complex*, const int*,
-                   const double complex*, double complex*, const int*);
-
 #define DEFAULT_CROSSOVER_FLOPS 100000000ULL
 
-/* AB_MODE runtime knob (cpu/gpu/auto) — cached on first call.
- * cpu  : always passthrough to system zgemm_/dgemm_ (baseline)
- * gpu  : always dispatch to ab_*_blas (which forces GPU above AB_MIN_GPU_DIM)
- * auto : FLOP-threshold routing — threshold is AB_CROSSOVER_FLOPS env (default 1e8)
- */
+/* AB_MODE runtime knob (cpu/gpu/auto) — cached on first call. */
 enum { FB_AUTO = 0, FB_CPU = 1, FB_GPU = 2 };
 static int _fb_mode = -1;
 static int fb_get_mode(void) {
@@ -41,10 +46,6 @@ static int fb_get_mode(void) {
     return _fb_mode;
 }
 
-/* Runtime-tunable FLOP threshold for auto-mode dispatch.
- * This is the knob that actually controls QE's dispatch split (72/795 on si64).
- * Lower value → more calls go to GPU; higher value → more calls stay on CPU.
- * Same default (1e8) as before, so existing behavior is preserved. */
 static uint64_t _fb_cross = 0;
 static uint64_t fb_get_crossover(void) {
     if (_fb_cross) return _fb_cross;
@@ -55,26 +56,18 @@ static uint64_t fb_get_crossover(void) {
     return _fb_cross;
 }
 
-/* Optional profiling — set AB_PROFILE_FILE env var to enable */
-static FILE* _ab_prof = NULL;
-static int _ab_prof_init = 0;
-
-static inline void ab_log(const char* fn, int M, int N, int K, int gpu) {
-    if (!_ab_prof_init) {
-        const char* path = getenv("AB_PROFILE_FILE");
-        if (path) {
-            _ab_prof = fopen(path, "w");
-            if (_ab_prof) fprintf(_ab_prof, "func M N K MNK gpu\n");
-        }
-        _ab_prof_init = 1;
-    }
-    if (_ab_prof) {
-        fprintf(_ab_prof, "%s %d %d %d %llu %d\n",
-                fn, M, N, K, (unsigned long long)M * N * K, gpu);
-    }
+/* Convert Fortran trans char to CBLAS enum. */
+static inline enum CBLAS_TRANSPOSE trans_to_cblas(char t) {
+    if (t == 'N' || t == 'n') return CblasNoTrans;
+    if (t == 'T' || t == 't') return CblasTrans;
+    return CblasConjTrans;  /* 'C'/'c' */
 }
 
-void ab_dgemm_(
+/* =============================================================================
+ * dgemm_ — shadows Accelerate's dgemm_
+ * =============================================================================
+ */
+void dgemm_(
     const char *transA, const char *transB,
     const int *M, const int *N, const int *K,
     const double *alpha, const double *A, const int *ldA,
@@ -82,20 +75,34 @@ void ab_dgemm_(
     const double *beta, double *C, const int *ldC)
 {
     int mode = fb_get_mode();
-    uint64_t flops = (uint64_t)(*M) * (*N) * (*K) * 2;
-    int dispatch = (mode == FB_CPU) ? 0
-                 : (mode == FB_GPU) ? 1
-                 : (flops >= fb_get_crossover());
-    ab_log("dgemm", *M, *N, *K, dispatch);
-    if (dispatch) {
+    uint64_t flops = (uint64_t)(*M) * (*N) * (*K) * 2ULL;
+    int gpu = (mode == FB_CPU) ? 0
+            : (mode == FB_GPU) ? 1
+            : (flops >= fb_get_crossover());
+
+    uint64_t t0 = ab_prof_enabled() ? ab_prof_now_ticks() : 0;
+
+    if (gpu) {
         ab_dgemm_blas(*transA, *transB, *M, *N, *K,
                       *alpha, A, *ldA, B, *ldB, *beta, C, *ldC);
-        return;
+    } else {
+        cblas_dgemm(CblasColMajor,
+                    trans_to_cblas(*transA), trans_to_cblas(*transB),
+                    *M, *N, *K,
+                    *alpha, A, *ldA, B, *ldB, *beta, C, *ldC);
     }
-    dgemm_(transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+
+    if (ab_prof_enabled()) {
+        uint64_t ns = ab_prof_ticks_to_ns(ab_prof_now_ticks() - t0);
+        ab_prof_record("dgemm", ns, (size_t)*M, (size_t)*N, (size_t)*K, gpu);
+    }
 }
 
-void ab_zgemm_(
+/* =============================================================================
+ * zgemm_ — shadows Accelerate's zgemm_
+ * =============================================================================
+ */
+void zgemm_(
     const char *transA, const char *transB,
     const int *M, const int *N, const int *K,
     const double complex *alpha, const double complex *A, const int *ldA,
@@ -103,15 +110,43 @@ void ab_zgemm_(
     const double complex *beta, double complex *C, const int *ldC)
 {
     int mode = fb_get_mode();
-    uint64_t flops = (uint64_t)(*M) * (*N) * (*K) * 8;
-    int dispatch = (mode == FB_CPU) ? 0
-                 : (mode == FB_GPU) ? 1
-                 : (flops >= fb_get_crossover());
-    ab_log("zgemm", *M, *N, *K, dispatch);
-    if (dispatch) {
+    uint64_t flops = (uint64_t)(*M) * (*N) * (*K) * 8ULL;
+    int gpu = (mode == FB_CPU) ? 0
+            : (mode == FB_GPU) ? 1
+            : (flops >= fb_get_crossover());
+
+    uint64_t t0 = ab_prof_enabled() ? ab_prof_now_ticks() : 0;
+
+    if (gpu) {
         ab_zgemm_blas(*transA, *transB, *M, *N, *K,
                       *alpha, A, *ldA, B, *ldB, *beta, C, *ldC);
-        return;
+    } else {
+        cblas_zgemm(CblasColMajor,
+                    trans_to_cblas(*transA), trans_to_cblas(*transB),
+                    *M, *N, *K,
+                    alpha, A, *ldA, B, *ldB, beta, C, *ldC);
     }
-    zgemm_(transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+
+    if (ab_prof_enabled()) {
+        uint64_t ns = ab_prof_ticks_to_ns(ab_prof_now_ticks() - t0);
+        ab_prof_record("zgemm", ns, (size_t)*M, (size_t)*N, (size_t)*K, gpu);
+    }
 }
+
+/* =============================================================================
+ * Weak aliases for the legacy ab_*_ prefixed names
+ * =============================================================================
+ * Any code that was patched during the transition (CALL ZGEMM → CALL ab_zgemm)
+ * continues to resolve. New builds should just use the standard names.
+ */
+__attribute__((weak, alias("dgemm_"))) void ab_dgemm_(
+    const char*, const char*, const int*, const int*, const int*,
+    const double*, const double*, const int*,
+    const double*, const int*,
+    const double*, double*, const int*);
+
+__attribute__((weak, alias("zgemm_"))) void ab_zgemm_(
+    const char*, const char*, const int*, const int*, const int*,
+    const double complex*, const double complex*, const int*,
+    const double complex*, const int*,
+    const double complex*, double complex*, const int*);
