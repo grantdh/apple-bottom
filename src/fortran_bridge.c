@@ -134,19 +134,28 @@ void zgemm_(
 }
 
 /* =============================================================================
- * Weak aliases for the legacy ab_*_ prefixed names
+ * Legacy ab_*_ prefixed names (thin wrappers)
  * =============================================================================
- * Any code that was patched during the transition (CALL ZGEMM → CALL ab_zgemm)
- * continues to resolve. New builds should just use the standard names.
+ * Darwin doesn't support __attribute__((alias)), so these are explicit
+ * forwarding functions. Any code patched during the transition
+ * (CALL ZGEMM → CALL ab_zgemm) continues to resolve.
  */
-__attribute__((weak, alias("dgemm_"))) void ab_dgemm_(
-    const char*, const char*, const int*, const int*, const int*,
-    const double*, const double*, const int*,
-    const double*, const int*,
-    const double*, double*, const int*);
+void ab_dgemm_(
+    const char *transA, const char *transB,
+    const int *M, const int *N, const int *K,
+    const double *alpha, const double *A, const int *ldA,
+    const double *B, const int *ldB,
+    const double *beta, double *C, const int *ldC)
+{
+    dgemm_(transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+}
 
-__attribute__((weak, alias("zgemm_"))) void ab_zgemm_(
-    const char*, const char*, const int*, const int*, const int*,
-    const double complex*, const double complex*, const int*,
-    const double complex*, const int*,
-    const double complex*, double complex*, const int*);
+void ab_zgemm_(
+    const char *transA, const char *transB,
+    const int *M, const int *N, const int *K,
+    const double complex *alpha, const double complex *A, const int *ldA,
+    const double complex *B, const int *ldB,
+    const double complex *beta, double complex *C, const int *ldC)
+{
+    zgemm_(transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+}
