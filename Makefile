@@ -301,6 +301,10 @@ $(BUILD)/bench_paper: benchmarks/bench_paper.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
+$(BUILD)/bench_device_residency: benchmarks/bench_device_residency.c lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
 bench-paper: $(BUILD)/bench_paper
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
