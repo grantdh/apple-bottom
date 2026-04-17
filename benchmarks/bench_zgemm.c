@@ -96,9 +96,9 @@ int main(void) {
         }
         
         double speedup = gpu_gflops / amx_gflops;
-        printf("  %4d    │    %6.0f    │    %6.0f    │  %5.2fx %s │  %s\n",
+        printf("  %4d    │    %6.0f    │    %6.0f    │  %5.2fx %s │ %.0e %s\n",
                N, amx_gflops, gpu_gflops, speedup, speedup >= 1.0 ? "✓" : " ",
-               max_err < 1e-10 ? "✓ PASS" : "✗ FAIL");
+               max_err, max_err < 1e-10 ? "✓" : "✗");
         
         ab_matrix_destroy(mAr); ab_matrix_destroy(mAi);
         ab_matrix_destroy(mBr); ab_matrix_destroy(mBi);

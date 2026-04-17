@@ -154,8 +154,47 @@ inline DD dd_add(DD a, DD b) {
 // DD subtraction
 inline DD dd_sub(DD a, DD b) { return dd_add(a, {-b.hi, -b.lo}); }
 
-// DD multiplication: (a.hi + a.lo) * (b.hi + b.lo)
-// Cross-terms use nested FMA: 2 roundings instead of 4 (Joldes-Muller-Popescu 2017)
+// DD multiplication and FMA.
+//
+// Default build: DWTimesDW2 (Joldes--Muller--Popescu 2017, Algorithm 11).
+//   Error bound: < 5u^2 / (1+u)^2 < 5u^2  (Muller--Rideau 2022, Theorem 2.7).
+//
+// Opt-in build (-DAPPLEBOTTOM_USE_DWTIMESDW3): DWTimesDW3 (JMP 2017, Algorithm 12).
+//   Error bound: < 4u^2  (Muller--Rideau 2022, Theorem 2.8).
+//   Adds one multiplication (al*bl), two FMAs, and one add vs Alg 11.
+//
+// Compile-flag gating is coordinated via MTLCompileOptions.preprocessorMacros;
+// see the init method below. Default remains DWTimesDW2.
+#ifdef APPLEBOTTOM_USE_DWTIMESDW3
+
+inline DD dd_mul(DD a, DD b) {
+    float ch, cl1;
+    twoProduct(a.hi, b.hi, ch, cl1);
+    float tl0 = a.lo * b.lo;
+    float tl1 = fma(a.hi, b.lo, tl0);
+    float cl2 = fma(a.lo, b.hi, tl1);
+    float cl3 = cl1 + cl2;
+    float s, e;
+    fastTwoSum(ch, cl3, s, e);
+    return {s, e};
+}
+
+inline DD dd_fma(DD a, DD b, DD c) {
+    float ch, cl1;
+    twoProduct(a.hi, b.hi, ch, cl1);
+    float tl0 = a.lo * b.lo;
+    float tl1 = fma(a.hi, b.lo, tl0);
+    float cl2 = fma(a.lo, b.hi, tl1);
+    float cl3 = cl1 + cl2;
+    float s2, e2;
+    twoSum(ch, c.hi, s2, e2);
+    e2 += cl3 + c.lo;
+    fastTwoSum(s2, e2, s2, e2);
+    return {s2, e2};
+}
+
+#else  // DWTimesDW2 (default)
+
 inline DD dd_mul(DD a, DD b) {
     float p1, e1;
     twoProduct(a.hi, b.hi, p1, e1);
@@ -165,8 +204,6 @@ inline DD dd_mul(DD a, DD b) {
     return {s, e};
 }
 
-// DD fused multiply-add: a * b + c
-// Cross-terms use nested FMA: 2 roundings instead of 4 (Joldes-Muller-Popescu 2017)
 inline DD dd_fma(DD a, DD b, DD c) {
     float p1, e1;
     twoProduct(a.hi, b.hi, p1, e1);
@@ -177,6 +214,8 @@ inline DD dd_fma(DD a, DD b, DD c) {
     fastTwoSum(s2, e2, s2, e2);
     return {s2, e2};
 }
+
+#endif  // APPLEBOTTOM_USE_DWTIMESDW3
 
 // DD scaling by single float
 inline DD dd_scale(DD a, float s) {
@@ -722,6 +761,15 @@ static os_unfair_lock g_init_lock = OS_UNFAIR_LOCK_INIT;
         NSLog(@"WARNING: MTLMathModeSafe not available — DD precision degraded to ~10⁻⁸");
 #endif
 
+        // Propagate the host-side DD-algorithm selector into the Metal compiler so
+        // the MSL `#ifdef APPLEBOTTOM_USE_DWTIMESDW3` branch sees the same define.
+        // Default build: DWTimesDW2 (JMP 2017 Alg 11 / MR 2022 Thm 2.7, < 5u²).
+        // Opt-in build: DWTimesDW3 (JMP 2017 Alg 12 / MR 2022 Thm 2.8, < 4u²).
+#ifdef APPLEBOTTOM_USE_DWTIMESDW3
+        opts.preprocessorMacros = @{@"APPLEBOTTOM_USE_DWTIMESDW3": @1};
+        NSLog(@"apple-bottom: MSL compiled with DWTimesDW3 (JMP 2017 Alg 12)");
+#endif
+
         id<MTLLibrary> library = [_device newLibraryWithSource:kShaderSource options:opts error:&error];
         if (!library) { NSLog(@"Shader compile failed: %@", error); return nil; }
         
@@ -761,6 +809,40 @@ static os_unfair_lock g_init_lock = OS_UNFAIR_LOCK_INIT;
     return self;
 }
 @end
+
+// =============================================================================
+// Internal Accessors for device_api.m (apple_bottom_internal.h)
+// =============================================================================
+
+id<MTLCommandQueue> ab_internal_command_queue(void) {
+    ABContextImpl* ctx = [ABContextImpl shared];
+    return ctx ? ctx.commandQueue : nil;
+}
+
+id<MTLComputePipelineState> ab_internal_dgemm_pipeline(void) {
+    ABContextImpl* ctx = [ABContextImpl shared];
+    return ctx ? ctx.dgemmPipeline : nil;
+}
+
+id<MTLComputePipelineState> ab_internal_dgemm_ab_pipeline(void) {
+    ABContextImpl* ctx = [ABContextImpl shared];
+    return ctx ? ctx.dgemmABPipeline : nil;
+}
+
+id<MTLComputePipelineState> ab_internal_dgemm_ab_ts_pipeline(void) {
+    ABContextImpl* ctx = [ABContextImpl shared];
+    return ctx ? ctx.dgemmABTSPipeline : nil;
+}
+
+id<MTLComputePipelineState> ab_internal_add_pipeline(void) {
+    ABContextImpl* ctx = [ABContextImpl shared];
+    return ctx ? ctx.addPipeline : nil;
+}
+
+id<MTLComputePipelineState> ab_internal_sub_pipeline(void) {
+    ABContextImpl* ctx = [ABContextImpl shared];
+    return ctx ? ctx.subPipeline : nil;
+}
 
 // =============================================================================
 // Parallel Conversion Helpers
@@ -853,31 +935,33 @@ ABMatrix ab_matrix_create(int rows, int cols) {
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return NULL;
     
-    struct ABMatrix_s* m = (struct ABMatrix_s*)malloc(sizeof(struct ABMatrix_s));
+    // Use C++ new so ARC-managed id<MTLBuffer> field gets a proper
+    // constructor (BUG-8: malloc+free leaked Metal objects under ARC).
+    struct ABMatrix_s* m = new struct ABMatrix_s();
     if (!m) return NULL;
-    
+
     m->rows = rows;
     m->cols = cols;
     m->count = (size_t)rows * cols;
     m->uploaded = false;
-    
+
     // Check for allocation size overflow
     size_t alloc_size = m->count * sizeof(DDFloat);
     if (alloc_size / sizeof(DDFloat) != m->count) {
-        free(m);
+        delete m;
         return NULL;
     }
-    
+
     m->buffer = [ctx.device newBufferWithLength:alloc_size options:MTLResourceStorageModeShared];
-    if (!m->buffer) { free(m); return NULL; }
+    if (!m->buffer) { delete m; return NULL; }
     
     return m;
 }
 
 void ab_matrix_destroy(ABMatrix m) {
     if (m) {
-        m->buffer = nil;
-        free(m);
+        m->buffer = nil;  // explicit nil before delete (ARC destructor would handle it, but be clear)
+        delete m;
     }
 }
 
@@ -2240,7 +2324,7 @@ struct ABMemoryPool_s {
 
 ABMemoryPool ab_pool_create(size_t size_hint) {
     (void)size_hint;  // Reserved for future pre-allocation
-    ABMemoryPool pool = (ABMemoryPool)calloc(1, sizeof(struct ABMemoryPool_s));
+    ABMemoryPool pool = new struct ABMemoryPool_s();
     return pool;
 }
 
@@ -2249,7 +2333,7 @@ void ab_pool_destroy(ABMemoryPool pool) {
     for (int i = 0; i < pool->count; i++) {
         ab_matrix_destroy(pool->entries[i].matrix);
     }
-    free(pool);
+    delete pool;
 }
 
 ABMatrix ab_pool_get_matrix(ABMemoryPool pool, int rows, int cols) {
@@ -2316,7 +2400,8 @@ struct ABFuture_s {
 };
 
 static ABFuture create_future_with_buffer(id<MTLCommandBuffer> cmdBuffer) {
-    ABFuture f = (ABFuture)calloc(1, sizeof(struct ABFuture_s));
+    // BUG-8: use new so ARC-managed id<MTLCommandBuffer> gets proper lifecycle
+    ABFuture f = new struct ABFuture_s();
     if (!f) return NULL;
     f->cmdBuffer = cmdBuffer;
     f->status = AB_OK;
@@ -2363,8 +2448,8 @@ ABFuture ab_zgemm_async(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
     id<MTLCommandBuffer> cmdBuf = nil;
     ABStatus s = ab_zgemm_internal_async(Ar, Ai, Br, Bi, Cr, Ci, &cmdBuf);
     if (s != AB_OK || !cmdBuf) {
-        // Sync fallback if async setup fails
-        ABFuture f = (ABFuture)calloc(1, sizeof(struct ABFuture_s));
+        // Sync fallback if async setup fails (BUG-8: new, not calloc)
+        ABFuture f = new struct ABFuture_s();
         if (f) {
             f->cmdBuffer = nil;
             f->status = s;
@@ -2411,7 +2496,7 @@ void ab_future_destroy(ABFuture f) {
     if (!f->completed && f->cmdBuffer) {
         [f->cmdBuffer waitUntilCompleted];
     }
-    free(f);
+    delete f;  // BUG-8: ARC destructor releases cmdBuffer
 }
 
 
@@ -2437,7 +2522,9 @@ ABBatch ab_batch_create(void) {
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return NULL;
 
-    ABBatch batch = (ABBatch)calloc(1, sizeof(struct ABBatch_s));
+    // BUG-8: use new so ARC-managed id<MTLCommandBuffer> / id<MTLComputeCommandEncoder>
+    // get proper constructors and destructors
+    ABBatch batch = new struct ABBatch_s();
     if (!batch) return NULL;
 
     batch->ctx = ctx;
@@ -2458,7 +2545,7 @@ void ab_batch_destroy(ABBatch batch) {
         [batch->cmdBuffer commit];
         [batch->cmdBuffer waitUntilCompleted];
     }
-    free(batch);
+    delete batch;  // BUG-8: ARC destructor releases cmdBuffer + encoder
 }
 
 ABStatus ab_batch_dgemm(ABBatch batch, ABMatrix A, ABMatrix B, ABMatrix C) {
@@ -2577,7 +2664,7 @@ ABStatus ab_batch_wait(ABBatch batch) {
 // =============================================================================
 
 ABSession ab_session_create(void) {
-    return (ABSession)calloc(1, sizeof(struct ABSession_s));
+    return new struct ABSession_s();
 }
 
 void ab_session_destroy(ABSession s) {
@@ -2585,7 +2672,7 @@ void ab_session_destroy(ABSession s) {
     for (int i = 0; i < s->count; i++) {
         ab_matrix_destroy(s->matrices[i]);
     }
-    free(s);
+    delete s;
 }
 
 ABStatus ab_session_add(ABSession s, const char* name, int rows, int cols) {

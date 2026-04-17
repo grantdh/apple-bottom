@@ -17,6 +17,15 @@ CFLAGS = -Wall -Wextra -O3 -std=c11 -DACCELERATE_NEW_LAPACK
 OBJCFLAGS = -std=c++11 -Wall -Wextra -O3 -fobjc-arc -DACCELERATE_NEW_LAPACK
 LDFLAGS = -lc++ -framework Metal -framework Foundation -framework Accelerate
 
+# DD multiplication algorithm selector (v1.3 A/C investigation).
+#   Default: DWTimesDW2 (JMP 2017 Alg 11, MR 2022 Thm 2.7, error bound < 5u²).
+#   Opt-in : DWTimesDW3 (JMP 2017 Alg 12, MR 2022 Thm 2.8, error bound < 4u²).
+# Invoke with `make clean && make lib DWTIMESDW3=1`. The flag is also propagated
+# into the MSL compile step via MTLCompileOptions.preprocessorMacros.
+ifdef DWTIMESDW3
+  OBJCFLAGS += -DAPPLEBOTTOM_USE_DWTIMESDW3
+endif
+
 # Dylib link flags: re-export Accelerate so host binaries linking only
 # -lapplebottom still get the full 150+ BLAS/LAPACK symbols we don't
 # shadow ourselves. Our own dgemm_/zgemm_ win at link time via two-level
