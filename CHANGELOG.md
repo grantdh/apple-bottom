@@ -90,6 +90,9 @@ All notable changes to this project will be documented in this file.
   - Skinny matrix penalty: higher threshold when any dimension < 64
   - Reduces GPU dispatch overhead for QE's many small ZGEMM calls
 
+### Fixed
+- **BUG-8: ARC leak in Metal-ref structs** — `ABMatrix_s`, `ABFuture_s`, `ABBatch_s`, and `ab_dev_buffer_s` now allocate via `new`/`delete` so ARC destructors release their `id<MTL…>` strong refs (was `calloc`/`free`, which does not run ARC destructors and leaked the buffers, command buffers, and encoders). Landed in 55bc79a.
+
 ### Changed
 - **README.md**: Complete rewrite as high-conversion landing page
   - One-line pitch above the fold with benchmark numbers
