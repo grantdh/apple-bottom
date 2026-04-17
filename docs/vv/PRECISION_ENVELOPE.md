@@ -53,13 +53,17 @@ DD operations use Dekker/Knuth algorithms:
 
 | Operation | Algorithm | FLOPs | Error Bound |
 |-----------|-----------|-------|-------------|
-| Addition | `twoSum` | 6 | `≤ ε_mach` |
-| Multiplication | `twoProduct` (FMA) | 2 | `≤ ε_mach` |
-| FMA | `dd_fma` | ~10 | `≤ 2ε_mach` |
+| FP32 addition (error-free transform) | `twoSum` | 6 | `0` (exact: `s + e = a + b`) |
+| FP32 multiplication (error-free transform) | `twoProduct` (FMA) | 2 | `0` (exact: `p + e = a × b`) |
+| DD fused multiply-add | `dd_fma` | ~10 | `< 5u²` (see §1.2 nested-FMA note) |
 
-where `ε_mach = 2⁻²⁴` for FP32.
+where `u = 2⁻²⁴` is the FP32 unit roundoff (so `ε_mach = 2⁻²³` under the ulp convention used by IEEE 754; `u²  = 2⁻⁴⁸` is the effective DD unit roundoff). The `twoSum` and `twoProduct` algorithms are *error-free transforms*: their outputs represent the exact FP32 operation result as an unevaluated sum with no rounding error, under the standard no-overflow / no-subnormal-input assumptions. The `dd_fma` bound is the per-operation DD-level bound from §1.2 and applies to both `dd_mul` and the compound multiply-add.
 
-Cross-term products in `dd_mul` and `dd_fma` use nested FMA chains (Joldes, Muller, Popescu 2017, ACM TOMS) to reduce rounding from 4 truncations to 2 per operation, with error bounded by `≤ 2u²` where `u = 2⁻²⁴`.
+Cross-term products in `dd_mul` and `dd_fma` use nested FMA chains (JMP 2017 Algorithm 11, "DWTimesDW2") to reduce rounding from 4 truncations to 2 per operation. The relative error is bounded by `5u² / (1 + u)² < 5u²` where `u = 2⁻²⁴`, per Muller-Rideau 2022 Theorem 2.7 (tightened from JMP 2017's original `< 6u²` bound via formal Coq proof).
+
+References:
+- Joldes, Muller, Popescu (2017). "Tight and Rigorous Error Bounds for Basic Building Blocks of Double-Word Arithmetic." *ACM TOMS* 44(2), Article 15. DOI: 10.1145/3121432
+- Muller, Rideau (2022). "Formalization of Double-Word Arithmetic, and Comments on 'Tight and Rigorous Error Bounds for Basic Building Blocks of Double-Word Arithmetic.'" *ACM TOMS* 48(1), Article 9. DOI: 10.1145/3484514
 
 ### 1.3 DGEMM Error Analysis
 
@@ -371,7 +375,8 @@ If precision is insufficient:
 
 - Dekker, T. J. (1971). "A floating-point technique for extending the available precision." *Numerische Mathematik*, 18(3), 224-242.
 - Higham, N. J. (2002). *Accuracy and Stability of Numerical Algorithms* (2nd ed.). SIAM. Chapter 3: "Rounding Error Analysis of Inner and Outer Products."
-- Joldes, M., Muller, J.-M., Popescu, V. (2017). "Tight and rigorous error bounds for basic building blocks of double-word arithmetic." *ACM Trans. Math. Softw.*, 44(2), Article 15.
+- Joldes, M., Muller, J.-M., Popescu, V. (2017). "Tight and rigorous error bounds for basic building blocks of double-word arithmetic." *ACM Trans. Math. Softw.*, 44(2), Article 15. DOI: 10.1145/3121432
+- Muller, J.-M., Rideau, L. (2022). "Formalization of double-word arithmetic, and comments on 'Tight and rigorous error bounds for basic building blocks of double-word arithmetic.'" *ACM Trans. Math. Softw.*, 48(1), Article 9. DOI: 10.1145/3484514
 - Higham, N. J., Mary, T. (2022). "Mixed precision algorithms in numerical linear algebra." *Acta Numerica*, 31, 347-414.
 
 ### 8.2 Validation Standards
@@ -393,6 +398,7 @@ If precision is insufficient:
 |---------|------|---------|--------|
 | 1.0 | 2026-03-31 | Initial validated precision envelope | Grant Heileman |
 | 1.1 | 2026-04-04 | Add theoretical precision bounds, FMA optimization reference | Grant Heileman |
+| 1.2 | 2026-04-16 | Correct DWTimesDW2 error bound to Muller-Rideau 2022 Thm 2.7 (`< 5u²/(1+u)² < 5u²`); fix EFT table (twoSum/twoProduct are error-free, `dd_fma` at DD level) | Grant Heileman |
 
 ---
 
