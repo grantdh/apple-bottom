@@ -19,16 +19,9 @@ build/
 *.profdata
 *.profraw
 
-# Claude
-.claude/
-CLAUDE.md
-
 # Python
 __pycache__/
 *.pyc
 *.egg-info/
 dist/
 *.egg
-CLAUDE*.md
-LESSONS_LEARNED.md
-*.skill
