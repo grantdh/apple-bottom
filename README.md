@@ -5,7 +5,7 @@
 
 <p align="center">
   <a href="https://github.com/grantdh/apple-bottom/actions"><img src="https://github.com/grantdh/apple-bottom/actions/workflows/vv-regression.yml/badge.svg" alt="CI"></a>
-  <a href="tests/"><img src="https://img.shields.io/badge/tests-99%20passing-brightgreen" alt="Tests"></a>
+  <a href="tests/"><img src="https://img.shields.io/badge/tests-115%20passing-brightgreen" alt="Tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"></a>
   <a href="#requirements"><img src="https://img.shields.io/badge/platform-Apple%20Silicon-orange" alt="Platform"></a>
   <a href="#architecture"><img src="https://img.shields.io/badge/precision-~10⁻¹⁵-yellow" alt="Precision"></a>
@@ -18,7 +18,7 @@ Apple Silicon GPUs have no native FP64. `apple-bottom` fixes that — double-flo
 ```bash
 git clone https://github.com/grantdh/apple-bottom.git
 cd apple-bottom
-make && make test   # 99/99 tests pass
+make && make test   # 115/115 tests pass
 ```
 
 ## Performance
@@ -124,7 +124,7 @@ Production-validated following NASA-STD-7009A methodology:
 
 - **V-2 Convergence Study**: Frobenius error 6.5×10⁻¹⁵ to 5.1×10⁻¹⁴ for N ∈ {64, 128, ..., 4096}
 - **VAL-1 Production**: Quantum ESPRESSO Si64 DFT — 11 decimal place agreement (-2990.44276157 Ry)
-- **99/99 tests**: 8 precision + 66 correctness + 25 device-API tests (regression coverage for 7 critical bug fixes)
+- **115/115 tests**: 9 precision + 66 correctness + 40 device-API tests (regression coverage for 7 critical bug fixes plus Week-2 device-buffer BLAS validation)
 
 Documentation: [V&V Report](docs/vv/VV_REPORT.md) · [Precision Envelope](docs/vv/PRECISION_ENVELOPE.md) · [QE Validation](tests/validation/VAL001_QE_Si64.md)
 
@@ -133,6 +133,10 @@ Documentation: [V&V Report](docs/vv/VV_REPORT.md) · [Precision Envelope](docs/v
 - **macOS 14+** (Sonoma) with **Xcode 16+** SDK (for `MTLMathModeSafe`)
 - **Apple Silicon** (M1, M2, M3, M4 — any variant)
 - Older SDKs compile but achieve only ~10⁻⁸ precision (fast-math breaks DD arithmetic)
+
+## Build Options
+
+- `make DWTIMESDW3=1` — opt in to the tighter-bound DD multiplication variant (JMP 2017 Alg 12 / MR 2022 Thm 2.8, error bound < 4u² vs the default Alg 11's < 5u²). Trades one additional multiply, one FMA, and one add per `dd_mul`/`dd_fma`. The default algorithm's bound derivation lives in [`docs/vv/PRECISION_ENVELOPE.md`](docs/vv/PRECISION_ENVELOPE.md).
 
 ## Prior Art
 
@@ -165,9 +169,9 @@ apple-bottom/
 ├── src/device_api.m            # Device-buffer API for DevXlib backends
 ├── src/blas_wrapper.c          # BLAS-compatible C API
 ├── src/fortran_bridge.c        # Fortran ABI bridge for QE/VASP/CP2K
-├── include/apple_bottom.h      # Public API header (v1.2.0)
+├── include/apple_bottom.h      # Public API header (v1.3.0-dev)
 ├── include/apple_bottom_device.h  # Device-buffer API header
-├── tests/                      # 99 tests (precision + correctness + device-API)
+├── tests/                      # 115 tests (precision + correctness + device-API)
 ├── benchmarks/                 # DGEMM, ZGEMM, DSYRK, pool, async benchmarks
 ├── examples/01_basic_dgemm/    # Runnable example
 ├── docs/                       # Integration guide + V&V documentation
@@ -197,7 +201,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md). Bug reports and feature requests welco
   title     = {apple-bottom: FP64-class BLAS for Apple Silicon GPU},
   year      = {2026},
   url       = {https://github.com/grantdh/apple-bottom},
-  version   = {1.2.0}
+  version   = {1.3.0-dev}
 }
 ```
 
