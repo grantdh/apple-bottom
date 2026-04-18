@@ -161,7 +161,9 @@ inline DD dd_sub(DD a, DD b) { return dd_add(a, {-b.hi, -b.lo}); }
 //
 // Opt-in build (-DAPPLEBOTTOM_USE_DWTIMESDW3): DWTimesDW3 (JMP 2017, Algorithm 12).
 //   Error bound: < 4u^2  (Muller--Rideau 2022, Theorem 2.8).
-//   Adds one multiplication (al*bl), two FMAs, and one add vs Alg 11.
+//   Adds one multiplication (al*bl) and one add vs Alg 11; FMA count
+//   unchanged. The tighter bound comes from including the a.lo*b.lo
+//   cross-term that Alg 11 drops, which is what costs the extra mul+add.
 //
 // Compile-flag gating is coordinated via MTLCompileOptions.preprocessorMacros;
 // see the init method below. Default remains DWTimesDW2.
