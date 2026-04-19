@@ -37,8 +37,8 @@ extern "C" {
 
 #define APPLE_BOTTOM_VERSION_MAJOR 1
 #define APPLE_BOTTOM_VERSION_MINOR 3
-#define APPLE_BOTTOM_VERSION_PATCH 0
-#define APPLE_BOTTOM_VERSION_STRING "1.3.0-dev"
+#define APPLE_BOTTOM_VERSION_PATCH 1
+#define APPLE_BOTTOM_VERSION_STRING "1.3.1-dev"
 
 typedef struct ABMatrix_s* ABMatrix;
 typedef struct ABSession_s* ABSession;
