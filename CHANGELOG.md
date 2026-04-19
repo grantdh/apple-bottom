@@ -2,7 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.3.0-dev] - Unreleased
+## [1.3.1-dev] - Unreleased
+
+_TBD following Si64 benchmark campaign._
+
+## [1.3.0] - 2026-04-18
 
 ### Added (Phase 6)
 - **Fused ZGEMM** — single command buffer with 4 encoders (was 8 separate round-trips)
