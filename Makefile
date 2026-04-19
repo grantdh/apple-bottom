@@ -95,7 +95,7 @@ $(BUILD)/libapplebottom.a: $(LIB_OBJS)
 # Accelerate is re-exported so -lapplebottom alone provides full BLAS/LAPACK.
 $(BUILD)/libapplebottom.dylib: $(LIB_OBJS)
 	$(CC) -dynamiclib -install_name @rpath/libapplebottom.dylib \
-	    -current_version 1.3.0 -compatibility_version 1.0.0 \
+	    -current_version 1.3.1 -compatibility_version 1.0.0 \
 	    $^ -o $@ $(DYLIB_LDFLAGS)
 	@echo "Built: $@"
 
@@ -239,7 +239,7 @@ install: lib
 	install -m 644 $(INCLUDE)/apple_bottom.h $(PREFIX)/include/
 	install -m 644 $(INCLUDE)/apple_bottom_device.h $(PREFIX)/include/
 	@sed -e 's|@PREFIX@|$(PREFIX)|g' \
-	     -e 's|@VERSION@|1.3.0|g' \
+	     -e 's|@VERSION@|1.3.1|g' \
 	     applebottom.pc.in > $(PREFIX)/lib/pkgconfig/applebottom.pc
 	@echo "Installed to $(PREFIX)"
 

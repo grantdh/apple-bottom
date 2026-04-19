@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(apple_bottom VERSION 1.3.0 LANGUAGES C OBJC)
+project(apple_bottom VERSION 1.3.1 LANGUAGES C OBJC)
 
 # Require Apple Silicon
 if(NOT APPLE)
