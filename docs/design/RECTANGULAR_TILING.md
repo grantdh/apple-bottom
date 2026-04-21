@@ -4,38 +4,45 @@ This note documents the rationale for apple-bottom's default tile configuration 
 
 DD precision bounds scale as O(√K)·2⁻⁴⁸ (Wilkinson) for all tested aspect ratios from 121:1 (tall-skinny) to 1:121 (short-wide). Verified in `test_rectangular.c` against QE Davidson shapes.
 
-## Overview
-
-This document describes the testing strategy for rectangular matrices in apple-bottom, particularly focusing on Quantum ESPRESSO's tall-skinny matrices.
-
 ---
 
 ## Tile-Dispatch Model
 
-**Default tiling parameters:**
+**Default tile configuration** (square and moderate-aspect shapes):
 - BM = BN = 64 (block tiles in M, N)
 - TM = TN = 4 (thread tiles)
-- Tuned for square matrices (M ≈ N ≈ K)
+- TK = 16 (K-slab width)
+- Tuned for M ≈ N ≈ K
 
 Each threadgroup computes a BM×BN tile of C by iterating TK-wide slabs across the K dimension. The grid dimension is `ceil(M/BM) × ceil(N/BN)` threadgroups; threads within a threadgroup cooperatively load A and B tiles into threadgroup memory before the TK-wide inner product.
+
+**Tall-skinny variant** (deployed; see `src/apple_bottom.m:249-250`):
+- BM = 128, BN = 16
+- TM = 4, TN = 2
+- Threadgroup layout 8×32 = 256 threads (`src/apple_bottom.m:1211`)
+- Selected on `M >= 4 * N` (`src/apple_bottom.m:1055`)
+
+The tall-skinny kernel reduces boundary waste on QE-shape workloads (M≈18K, N=150) from ~34% under BN=64 to ~4% under BN=16.
 
 **QE Davidson eigensolver shape:**
 - M = 18,277 (kdim — basis size)
 - N = 150 (nvec — number of eigenvectors)
 - K = 18,277 (kdim)
-- Aspect ratio: 121:1 (M:N)
+- Aspect ratio: 121:1 (M:N) → routes to the tall-skinny kernel
 
-**Dispatch utilization at this shape:**
+**Dispatch utilization under the default 64×64 tile (pre-variant, illustrative):**
 ```
 Threadgroups in M dimension: ceil(18277 / 64) = 286
 Threadgroups in N dimension: ceil(150 / 64) = 3
 Total threadgroups: 286 × 3 = 858
 ```
 
-Consequences of the 64×64 tile choice at 121:1 aspect:
+Consequences of the default 64×64 tile at 121:1 aspect:
 - Good parallelism in M (286 threadgroups saturate the 38-core GPU)
 - Poor parallelism in N (only 3 threadgroups; residual partial-block work)
 - Many threadgroups carry partial work (M and N not multiples of 64)
+
+These are the conditions that motivated the tall-skinny variant above.
 
 ---
 
@@ -56,7 +63,7 @@ Consequences of the 64×64 tile choice at 121:1 aspect:
 **Validation:**
 - All tests validate against reference BLAS (cblas_dgemm, cblas_zgemm)
 - Error threshold: < 1e-14 (within DD precision)
-- Tests actual QE dimensions from Davidson eigensolver
+- Tests exercise the tall-skinny dispatch path at QE Davidson dimensions
 
 ### Performance Benchmarks
 
@@ -69,10 +76,7 @@ Consequences of the 64×64 tile choice at 121:1 aspect:
 6. Wide 1:4: 1024 × 4096 × 2048
 7. Wide 1:16: 512 × 8192 × 2048
 
-**Metrics:**
-- GPU time (ms)
-- BLAS time (ms)
-- Speedup ratio
+Metrics: GPU time (ms), BLAS time (ms), speedup ratio.
 
 ---
 
@@ -95,16 +99,16 @@ Rectangular matrices meet DD precision bounds across the full aspect-ratio sweep
 2048 × 2048 × 2048: GPU = 1.1-1.2× faster than BLAS
 ```
 
-**Tall matrices (M >> N):**
+**Tall matrices (M >> N), default tile:**
 ```
 4096 × 1024 × 2048:  GPU ≈ 1.0× (neutral)
-8192 × 512 × 2048:   GPU ≈ 0.8× (slower)
-18277 × 150 × 18277: GPU ≈ 0.5-0.7× (slower)
+8192 × 512 × 2048:   GPU ≈ 0.8×
+18277 × 150 × 18277: GPU ≈ 0.5-0.7×
 ```
 
-**Why the tall-shape slowdown:**
+**Why the default-tile slowdown on tall shapes:**
 
-1. **Threadgroup underutilization.** N=150 creates only 3 threadgroups in N dimension; many threads idle in partial blocks.
+1. **Threadgroup underutilization.** Under BN=64, N=150 creates only 3 threadgroups in N; many threads idle in partial blocks.
 
 2. **Memory traffic dominates.**
    - A upload: 18277 × 18277 × 8 bytes = 2.5 GB
@@ -114,12 +118,14 @@ Rectangular matrices meet DD precision bounds across the full aspect-ratio sweep
 
 3. **Cache locality.** B (150 columns) fits in cache; A (18277 rows) does not. Tall shapes yield long stride walks.
 
-**Net QE-level speedup despite per-call slowdown.**
+The tall-skinny kernel addresses (1) directly: at BN=16, N=150 yields ceil(150/16) = 10 threadgroups in N rather than 3, and boundary waste drops from ~34% to ~4% per `src/apple_bottom.m:1056`. (2) and (3) are upload/download and stride concerns inherent to the per-call API and are the motivation for a future device-resident path.
 
-The per-call overhead for tall shapes is real, yet QE shows a net 2.7× speedup. The dispatch strategy reconciles these:
+**Net QE-level speedup.**
+
+QE shows a net 2.7× speedup end-to-end despite per-call characteristics on individual shapes:
 - QE issues 12 ZGEMM calls per Davidson iteration
 - Calls below the 100M-FLOP threshold route to OpenBLAS
-- Only the large `hpsi = H * psi` calls hit the GPU path
+- Large `hpsi = H * psi` calls hit the GPU, dispatched to the tall-skinny kernel on M ≥ 4N
 - GPU wins on the large calls; BLAS handles the small ones
 
 ---
@@ -161,169 +167,14 @@ ZGEMM Rectangular Tests:
 =============================================================================
 Summary: 6 passed, 0 failed
 =============================================================================
-
-Performance Benchmark: Aspect Ratios
-=============================================================================
-...
 ```
-
-### Run Performance Benchmarks
-```bash
-# Full benchmark (includes timing)
-./tests/test_rectangular
-
-# Compare to baseline
-cd ~/qe-test/benchmark
-time ~/qe-test/q-e-qe-7.4.1/bin/pw.x < si64.in > si64_test.out 2>&1
-```
-
----
-
-## Optimization Opportunities
-
-### Short-term (Current Per-Call API)
-
-**1. Adaptive Tiling**
-
-Aspect-ratio-dependent tile sizes:
-
-```c
-// Current: BM = BN = 64 (fixed)
-
-// Adaptive:
-if (M / N > 4) {
-    BM = 128;  // Larger M tiles for tall matrices
-    BN = 32;   // Smaller N tiles
-} else if (N / M > 4) {
-    BM = 32;   // Smaller M tiles
-    BN = 128;  // Larger N tiles for wide matrices
-} else {
-    BM = BN = 64;  // Square
-}
-```
-
-Projected improvement: 10-20% for rectangular matrices.
-
-**2. Batching Small Dimensions**
-
-For very tall matrices (M >> N), dispatch as a batch of smaller operations:
-
-```c
-// Instead of one 18277 × 150 ZGEMM
-// Do: 122 batches of 150 × 150 ZGEMM
-```
-
-Projected benefit: better cache locality, more balanced threadgroups. Projected improvement: 15-30% for QE-like dimensions.
-
-**3. Memory Layout Optimization**
-
-Transpose skinny matrices to improve memory access patterns:
-
-```c
-// If N < threshold (e.g., 256):
-//   1. Transpose B → B^T
-//   2. Compute C^T = B^T * A^T
-//   3. Transpose result → C
-// Benefit: coalesced memory access
-```
-
-Projected improvement: 5-15%.
-
-### Long-term (Native API)
-
-**GPU-Resident Matrices**
-
-Eliminate upload/download overhead by keeping matrices on GPU:
-
-```fortran
-! Current (per-call):
-do iter = 1, n_iter
-    CALL ab_zgemm(...)  ! Upload A, B → compute → download C
-end do
-! Total transfers: n_iter × (upload + download)
-
-! Native API (GPU-resident):
-CALL ab_zmatrix_upload(hpsi_gpu, hpsi_host)  ! Once
-CALL ab_zmatrix_upload(spsi_gpu, spsi_host)  ! Once
-do iter = 1, n_iter
-    CALL ab_zgemm_gpu(hpsi_gpu, spsi_gpu, vc_gpu, ...)  ! On GPU
-end do
-CALL ab_zmatrix_download(hpsi_gpu, hpsi_host)  ! Once
-! Total transfers: 1 × (upload + download)
-```
-
-Projected improvement: 40-50% for QE (eliminates ~50s of host-device traffic).
-
----
-
-## Recommendations
-
-### Immediate Actions
-
-1. **Run test_rectangular.c**
-   - Verify correctness across the aspect-ratio sweep
-   - Document GPU vs BLAS performance at each shape
-   - Identify worst aspect ratios
-
-2. **CI coverage**
-   ```bash
-   # In Makefile
-   test: test_correctness test_rectangular
-   ```
-
-3. **Document in README**
-   ```markdown
-   ## Performance Notes
-   - Square matrices (M ≈ N): 1.1-1.2× speedup
-   - Rectangular matrices (M/N > 10): 0.5-0.8× speedup
-   - Use native API for iterative codes (40%+ improvement)
-   ```
-
-### Short-term Improvements
-
-1. **Adaptive tiling** (1-2 days)
-   - Detect aspect ratio in `ab_dgemm()`
-   - Dispatch specialized kernels (BM=128,BN=32 vs BM=BN=64)
-   - Validate with `test_rectangular`
-
-2. **Update QE integration guide** (`docs/INTEGRATION.md`)
-   ```markdown
-   ## Performance Characteristics
-   - Per-call API: 2.7× speedup (measured)
-   - Native API: 3.8× projected (GPU-resident matrices)
-   ```
-
-### Long-term Strategy
-
-1. **Native API** (device-resident matrices)
-2. **Dimension-specialized kernels**
-   - M >> N: tall-skinny kernel
-   - N >> M: wide kernel
-   - M ≈ N: square kernel (current)
-
----
-
-## Status
-
-**Correctness:** verified in v1.2.0.
-- Rectangular matrices meet DD precision bounds across the tested aspect-ratio sweep
-- 15/18 test patterns pass with max error < 1e-13
-- 3 patterns with large K show marginal errors (1.09e-13 to 1.76e-13), consistent with expected DD accumulation
-- Error scaling: O(√K) · 2⁻⁴⁸ per K-loop iteration
-
-**Performance:** known aspect-ratio sensitivity.
-- Square matrices: 1.1-1.2× over BLAS
-- Rectangular matrices: 0.5-0.8× per-call, but QE sees a 2.7× net speedup via routing strategy
-
-**Action items:**
-- [x] Create test suite (`test_rectangular.c`)
-- [x] Run tests and document results
-- [ ] Implement adaptive tiling (optional — performance enhancement)
-- [ ] Implement native API (future)
 
 ---
 
 ## References
 
+- Tall-skinny kernel parameters: `src/apple_bottom.m:249-250`
+- Dispatch rule (`M >= 4 * N`): `src/apple_bottom.m:1055`
+- Tall-skinny threadgroup layout: `src/apple_bottom.m:1211`
 - QE integration: [`docs/INTEGRATION.md`](../INTEGRATION.md)
 - Main benchmarks: [`benchmarks/`](../../benchmarks/)
