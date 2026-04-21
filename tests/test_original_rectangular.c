@@ -3,7 +3,7 @@
 // Copyright (c) 2026 Grant Heileman, Technology Residue. MIT License.
 // =============================================================================
 //
-// Purpose: Test the exact dimensions documented in RECTANGULAR_MATRICES.md
+// Purpose: Test the exact dimensions documented in docs/design/RECTANGULAR_TILING.md
 // to verify if BUG-1/BUG-2 fixes have resolved the rectangular issues.
 // =============================================================================
 
@@ -180,7 +180,7 @@ int run_test(const TestCase* tc) {
 int main() {
     printf("\n");
     printf("================================================================================\n");
-    printf("Original Rectangular Matrix Test (from RECTANGULAR_MATRICES.md)\n");
+    printf("Original Rectangular Matrix Test (from docs/design/RECTANGULAR_TILING.md)\n");
     printf("Testing documented dimension patterns that reportedly failed\n");
     printf("Threshold: max relative error < 1e-13\n");
     printf("================================================================================\n\n");
@@ -193,7 +193,7 @@ int main() {
         return 1;
     }
 
-    // Test cases from RECTANGULAR_MATRICES.md (lines 41-45)
+    // Test cases from docs/design/RECTANGULAR_TILING.md
     TestCase test_cases[] = {
         // DGEMM tests from doc
         {"tall-skinny (10000×100×100)",        10000, 100,   100,   false},
@@ -219,7 +219,7 @@ int main() {
     int passed = 0;
     int skipped = 0;
 
-    printf("Running tests documented as failing in RECTANGULAR_MATRICES.md:\n\n");
+    printf("Running tests documented as failing in docs/design/RECTANGULAR_TILING.md:\n\n");
 
     for (int i = 0; i < num_tests; i++) {
         int result = run_test(&test_cases[i]);
@@ -241,7 +241,7 @@ int main() {
     if (passed == num_tests - skipped) {
         printf(GREEN "✓ All documented failing cases now PASS!\n" RESET);
         printf("The BUG-1/BUG-2 fixes appear to have resolved the rectangular issues.\n");
-        printf("Recommendation: Update RECTANGULAR_MATRICES.md and PRECISION_ENVELOPE.md\n");
+        printf("Recommendation: Update docs/design/RECTANGULAR_TILING.md and PRECISION_ENVELOPE.md\n");
     } else {
         printf(YELLOW "Some patterns still fail - further investigation needed\n" RESET);
     }
