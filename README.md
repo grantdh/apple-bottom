@@ -150,10 +150,6 @@ Documentation: [V&V Report](docs/vv/VV_REPORT.md) · [Precision Envelope](docs/v
 
 `apple-bottom` takes a fundamentally different approach from `metal-float64`: native FP32 ALU arithmetic with error-free transformations (Dekker 1971) instead of integer bit manipulation. This trades strict IEEE 754 compliance for ~25× higher throughput at the BLAS level, which is the right tradeoff for scientific iterative solvers where norm-averaged convergence dominates.
 
-## Research
-
-Triple-double (TD) emulation achieves faithfully-rounded FP64 (99.5% correctly rounded, max 1 ULP error) at 148 GFLOP/s — a new point on the precision-performance Pareto frontier. See [`research/td-dgemm/`](research/td-dgemm/).
-
 ## Limitations
 
 - **Single GEMM calls**: ~100 μs GPU overhead dominates for one-shot operations
@@ -174,8 +170,7 @@ apple-bottom/
 ├── tests/                      # 113 tests (precision + correctness + device-API)
 ├── benchmarks/                 # DGEMM, ZGEMM, DSYRK, pool, async benchmarks
 ├── examples/01_basic_dgemm/    # Runnable example
-├── docs/                       # Integration guide + V&V documentation
-└── research/td-dgemm/          # Triple-double faithfully-rounded FP64 research
+└── docs/                       # Integration guide + V&V documentation
 ```
 
 ## Ecosystem
