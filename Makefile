@@ -125,7 +125,11 @@ $(BUILD)/bench_zgemm: benchmarks/bench_zgemm.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
-bench: $(BUILD)/bench_dgemm $(BUILD)/bench_pool $(BUILD)/bench_zgemm $(BUILD)/bench_dsyrk $(BUILD)/bench_zherk $(BUILD)/bench_async
+$(BUILD)/bench_sgemm: benchmarks/bench_sgemm.c | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ $(LDFLAGS)
+	@echo "Built: $@"
+
+bench: $(BUILD)/bench_dgemm $(BUILD)/bench_sgemm $(BUILD)/bench_pool $(BUILD)/bench_zgemm $(BUILD)/bench_dsyrk $(BUILD)/bench_zherk $(BUILD)/bench_async
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "DGEMM Benchmark"
@@ -136,6 +140,11 @@ bench: $(BUILD)/bench_dgemm $(BUILD)/bench_pool $(BUILD)/bench_zgemm $(BUILD)/be
 	@echo "ZGEMM Benchmark"
 	@echo "═══════════════════════════════════════════════════════════════════"
 	./$(BUILD)/bench_zgemm
+	@echo ""
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "SGEMM Reference (AMX FP32)"
+	@echo "═══════════════════════════════════════════════════════════════════"
+	./$(BUILD)/bench_sgemm
 
 bench-report: bench
 	@echo ""
