@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Standalone derivation of the "42% FP32 utilization of theoretical peak
+Standalone derivation of the "43% FP32 utilization of theoretical peak
 at boost clock" claim. This document shows the arithmetic that connects
 the DD-DGEMM benchmark CSVs to the utilization figure anchored in
 `docs/vv/VV_REPORT.md §10`.
@@ -11,7 +11,7 @@ the DD-DGEMM benchmark CSVs to the utilization figure anchored in
 
 | Symbol    | Description                          | Value          | Source                                                      |
 |-----------|--------------------------------------|----------------|-------------------------------------------------------------|
-| G_DD      | DD-DGEMM throughput (DP GFLOP/s)     | 643–670        | `benchmarks/results/2026-04-22-b9b0641/dgemm.csv` (N≥2048)  |
+| G_DD      | DD-DGEMM throughput (DP GFLOP/s)     | 654–672        | `benchmarks/results/2026-04-22-b9b0641/dgemm.csv` (N≥2048) + `benchmarks/results/2026-04-23-5cfcd52/bench_paper.csv` (N=4096) |
 | k         | FP32 FLOPs per dd_fma call           | 18             | `src/apple_bottom.m:209-218` (DWTimesDW2, default path)     |
 | k'        | FP32 FLOPs per DP FLOP               | 9              | = k/2; each dd_fma delivers 1 DP mul + 1 DP add = 2 DP FLOPs |
 | f_boost   | GPU boost clock                      | 1.398 GHz      | Apple M2 Max GPU specification                              |
@@ -41,12 +41,12 @@ Utilization of theoretical FP32 peak:
 
 With k=18 and k'=9:
 
-    G_FP32_effective ∈ [643 × 9, 670 × 9] = [5.79, 6.03] TFLOP/s
-    utilization      ∈ [5.79 / 13.60, 6.03 / 13.60] = [42.6%, 44.3%]
+    G_FP32_effective ∈ [654 × 9, 672 × 9] = [5.89, 6.05] TFLOP/s
+    utilization      ∈ [5.89 / 13.60, 6.05 / 13.60] = [43.3%, 44.5%]
 
-Point estimate at G_DD = 643 GFLOP/s (N=2048): 42.6%.
+Point estimate at G_DD = 654 GFLOP/s (N=2048, dgemm.csv): 43.3%.
 
-The tighter 42.6–44.3% range here reflects benchmark size variation
+The tighter 43.3–44.5% range here reflects benchmark size variation
 only. The wider 35–45% band reported in VV_REPORT §10 includes
 additional uncertainty from the denominator (boost clock reachability
 — see §10 for the powermetrics-based discussion).
@@ -67,15 +67,15 @@ additional uncertainty from the denominator (boost clock reachability
    (~3% of wall time). Utilization of *sustained-boost compute* is
    correspondingly higher than this figure suggests.
 
-4. **Size range.** G_DD is stable at N≥2048 (643–670 GFLOP/s in the
-   committed CSV). Smaller N produces lower utilization due to
+4. **Size range.** G_DD is stable at N≥2048 (654–672 GFLOP/s in the
+   committed CSVs). Smaller N produces lower utilization due to
    per-kernel overhead amortization — see the dgemm.csv for the full
    size-dependent curve.
 
 5. **Negation convention.** The `-p` sign flip in `fma(a, b, -p)`
    (line 211) is counted as free, per IEEE 754 convention. Counting it
    as 1 FLOP would adjust the total to 19 per call / 9.5 per DP FLOP,
-   shifting the point estimate to 45.0%.
+   shifting the point estimate to 45.7% (654 × 9.5 / 13_600).
 
 6. **Renormalization overhead excluded.** Periodic renormalization
    (`RENORM_INTERVAL`, `src/apple_bottom.m:262`) adds approximately 1%
