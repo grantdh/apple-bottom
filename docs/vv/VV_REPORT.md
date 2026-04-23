@@ -620,9 +620,11 @@ Measured: < 10⁻¹¹ (conservative)
 
 **Headline: FP32 utilization is 35–45% of theoretical peak at boost clock.**
 On an M2 Max 38-core GPU (peak 13.60 TFLOP/s = 1.398 GHz × 38 × 128 FMA × 2),
-DD-DGEMM sustains 643–670 GFLOP/s (see `benchmarks/results/2026-04-22-b9b0641/dgemm.csv`).
-Each DD-FMA consumes 9 FP32 FLOPs, giving 5.79–6.03 TFLOP/s effective FP32.
-Point estimate: 42.6% of theoretical peak at boost clock.
+DD-DGEMM sustains 654–672 GFLOP/s (dgemm.csv min at N=2048, bench_paper.csv
+max at N=4096; see `benchmarks/results/2026-04-22-b9b0641/dgemm.csv` and
+`benchmarks/results/2026-04-23-5cfcd52/bench_paper.csv`).
+Each DD-FMA consumes 9 FP32 FLOPs, giving 5.89–6.05 TFLOP/s effective FP32.
+Point estimate: 43.3% of theoretical peak at boost clock.
 
 The 35–45% band reflects uncertainty in the denominator:
 
@@ -633,16 +635,17 @@ The 35–45% band reflects uncertainty in the denominator:
 
 - **Boost is barely sustained by bench_paper.** `docs/vv/powermetrics/2026-04-22-bench_paper.txt`
   shows only 7 of 240 samples (2.9%) sustaining ≥50% boost residency
-  during the workload that produces the 643 GFLOP/s DGEMM number.
+  during the workload that produces the 656 GFLOP/s DGEMM number at
+  N=2048 (bench_paper.csv).
   Mixed-workload structure (per-size allocation, AMX warm-up before
   each GPU run, printf between sizes) prevents sustained boost for
   ~97% of bench_paper's wall-time.
 
-- **Implication.** The 42% figure is a *floor* on utilization of
+- **Implication.** The 43% figure is a *floor* on utilization of
   sustained-boost compute, not a ceiling of theoretical peak. If the
   time-weighted effective peak during bench_paper were used as the
   denominator (rather than the 1.398 GHz spec max), the utilization
-  fraction would be materially higher. DD-DGEMM achieves at least 42%
+  fraction would be materially higher. DD-DGEMM achieves at least 43%
   of the best-case FP32 envelope the hardware can offer.
 
 Run-to-run variance in GPU GFLOP/s at N≥2048 (e.g., 726 vs 813 at N=2048
@@ -654,7 +657,7 @@ boost-clock volatility directly.
 - Benchmark CSVs (run 2): `benchmarks/results/2026-04-22-94a699d-run2/zgemm.csv`
 - Powermetrics captures: `docs/vv/powermetrics/`
 - Reproducibility: `docs/REPRODUCIBILITY.md`
-- FP32 utilization derivation: `docs/design/FP32_UTILIZATION.md` (future commit 3)
+- FP32 utilization derivation: `docs/design/FP32_UTILIZATION.md`
 
 ---
 
