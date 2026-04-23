@@ -1,0 +1,7 @@
+op,size,iters,amx_gflops
+sgemm,256,10,1310.72
+sgemm,512,10,1210.81
+sgemm,1024,10,2004.00
+sgemm,2048,5,2199.78
+sgemm,3072,5,2129.27
+sgemm,4096,5,2137.38

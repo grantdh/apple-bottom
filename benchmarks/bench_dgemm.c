@@ -2,6 +2,7 @@
 #include "apple_bottom.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
 #include <time.h>
 #include <Accelerate/Accelerate.h>
@@ -12,7 +13,15 @@ static double get_time_sec(void) {
     return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
 
-int main(void) {
+int main(int argc, char** argv) {
+    FILE* csv = NULL;
+    for (int i = 1; i < argc - 1; i++) {
+        if (strcmp(argv[i], "-o") == 0) {
+            csv = fopen(argv[i + 1], "w");
+            if (!csv) { fprintf(stderr, "cannot open %s\n", argv[i + 1]); return 1; }
+            fprintf(csv, "op,size,iters,amx_gflops,gpu_gflops,speedup,frob_rel_err,max_elem_err\n");
+        }
+    }
     printf("╔══════════════════════════════════════════════════════════════════╗\n");
     printf("║  apple-bottom DGEMM Benchmark                                    ║\n");
     printf("╚══════════════════════════════════════════════════════════════════╝\n\n");
@@ -72,7 +81,12 @@ int main(void) {
         double speedup = gpu_gflops / amx_gflops;
         printf("  %4d    │    %6.0f    │    %6.0f    │  %5.2fx %s │  %.0e %s\n",
                N, amx_gflops, gpu_gflops, speedup, speedup >= 1.0 ? "✓" : " ", frob, frob < 1e-14 ? "✓" : "✗");
-        
+        if (csv) {
+            fprintf(csv, "dgemm,%d,%d,%.2f,%.2f,%.4f,%.3e,%.3e\n",
+                    N, iters, amx_gflops, gpu_gflops, speedup, frob, max_err);
+            fflush(csv);
+        }
+
         ab_matrix_destroy(mA);
         ab_matrix_destroy(mB);
         ab_matrix_destroy(mC);
@@ -82,6 +96,7 @@ int main(void) {
     printf("\n");
     printf("Note: GPU wins for N >= 2048\n");
     
+    if (csv) fclose(csv);
     ab_shutdown();
     return 0;
 }
