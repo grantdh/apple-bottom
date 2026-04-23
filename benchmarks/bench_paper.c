@@ -526,9 +526,17 @@ static void table_precision(void) {
 }
 
 int main(int argc, char** argv) {
+    const char* out_path = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--csv") == 0) g_csv = 1;
         if (strcmp(argv[i], "--latex") == 0) g_latex = 1;
+        if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) out_path = argv[++i];
+    }
+    if (out_path) {
+        if (!freopen(out_path, "w", stdout)) {
+            fprintf(stderr, "cannot open %s\n", out_path);
+            return 1;
+        }
     }
 
     printf("╔══════════════════════════════════════════════════════════════════╗\n");
