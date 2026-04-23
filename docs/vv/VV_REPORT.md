@@ -1,10 +1,11 @@
 # Verification & Validation Report
 ## apple-bottom v1.0.2 — FP64-Class BLAS for Apple Silicon GPU
 
-**Report Version**: 1.0
-**Date**: 2026-03-31
+**Report Version**: 1.1
+**Date**: 2026-04-23
 **Status**: Validated for Production Use
 **Validated Baseline**: Git tag `v1.0.2-bugfix` (SHA: 700934f)
+**Revision 1.1**: Added §10 Clock-pin and Utilization Methodology; §10 Conclusions renumbered to §11, §11 References renumbered to §12.
 **Test System**: Apple M2 Max, macOS 14.7, Metal 3
 **Validation Standard**: NASA-STD-7009A, ASME V&V 10-2006
 
@@ -615,9 +616,51 @@ Measured: < 10⁻¹¹ (conservative)
 
 ---
 
-## 10. Conclusions and Recommendations
+## 10. Clock-pin and Utilization Methodology
 
-### 10.1 Validation Conclusions
+**Headline: FP32 utilization is 35–45% of theoretical peak at boost clock.**
+On an M2 Max 38-core GPU (peak 13.60 TFLOP/s = 1.398 GHz × 38 × 128 FMA × 2),
+DD-DGEMM sustains 643–670 GFLOP/s (see `benchmarks/results/2026-04-22-b9b0641/dgemm.csv`).
+Each DD-FMA consumes 9 FP32 FLOPs, giving 5.79–6.03 TFLOP/s effective FP32.
+Point estimate: 42.6% of theoretical peak at boost clock.
+
+The 35–45% band reflects uncertainty in the denominator:
+
+- **Boost is reachable.** `docs/vv/powermetrics/2026-04-23-dgemm-tightloop.txt`
+  shows peak GPU power at 63.6 W (matching M2 Max GPU TDP ceiling) and
+  32 of 240 samples (13.3%) at ≥50% residency at 1.398 GHz during a
+  tight bench_dgemm loop. The hardware can and does hit the boost clock.
+
+- **Boost is barely sustained by bench_paper.** `docs/vv/powermetrics/2026-04-22-bench_paper.txt`
+  shows only 7 of 240 samples (2.9%) sustaining ≥50% boost residency
+  during the workload that produces the 643 GFLOP/s DGEMM number.
+  Mixed-workload structure (per-size allocation, AMX warm-up before
+  each GPU run, printf between sizes) prevents sustained boost for
+  ~97% of bench_paper's wall-time.
+
+- **Implication.** The 42% figure is a *floor* on utilization of
+  sustained-boost compute, not a ceiling of theoretical peak. If the
+  time-weighted effective peak during bench_paper were used as the
+  denominator (rather than the 1.398 GHz spec max), the utilization
+  fraction would be materially higher. DD-DGEMM achieves at least 42%
+  of the best-case FP32 envelope the hardware can offer.
+
+Run-to-run variance in GPU GFLOP/s at N≥2048 (e.g., 726 vs 813 at N=2048
+across ZGEMM runs 94a699d and 0805de5 — a 12% spread) tracks this
+boost-clock volatility directly.
+
+### References
+- Benchmark CSVs (run 1): `benchmarks/results/2026-04-22-b9b0641/{dgemm,zgemm,sgemm}.csv`
+- Benchmark CSVs (run 2): `benchmarks/results/2026-04-22-94a699d-run2/zgemm.csv`
+- Powermetrics captures: `docs/vv/powermetrics/`
+- Reproducibility: `docs/REPRODUCIBILITY.md`
+- FP32 utilization derivation: `docs/design/FP32_UTILIZATION.md` (future commit 3)
+
+---
+
+## 11. Conclusions and Recommendations
+
+### 11.1 Validation Conclusions
 
 ✅ **apple-bottom v1.0.2-bugfix is VALIDATED for production use** in scientific computing applications requiring:
 - Frobenius relative error `< 10⁻¹³`
@@ -631,7 +674,7 @@ Measured: < 10⁻¹¹ (conservative)
 3. **Correctness Suite**: 48/48 tests passing
 4. **Bug Fixes**: 7 critical bugs fixed and regression-tested
 
-### 10.2 Production Deployment Recommendations
+### 11.2 Production Deployment Recommendations
 
 **APPROVED for**:
 - Density functional theory (Quantum ESPRESSO, VASP, CP2K)
@@ -650,7 +693,7 @@ Measured: < 10⁻¹¹ (conservative)
 - Ill-conditioned systems (`κ > 10¹²`)
 - Rectangular matrices (`aspect_ratio > 10:1`)
 
-### 10.3 Future Work
+### 11.3 Future Work
 
 **Recommended enhancements** (not blocking for current validation):
 1. **V-1 (DD primitives)**: Unit tests for `twoSum`, `twoProduct`, `dd_fma`
@@ -665,7 +708,7 @@ Measured: < 10⁻¹¹ (conservative)
 1. Rectangular matrices (`aspect_ratio > 10:1`) correctness failures
 2. ZHERK performance (20× slower than CPU)
 
-### 10.4 Approval for Production Use
+### 11.4 Approval for Production Use
 
 **Recommended Approval Workflow**:
 1. ✅ Technical review complete (this document)
@@ -680,24 +723,24 @@ Measured: < 10⁻¹¹ (conservative)
 
 ---
 
-## 11. References
+## 12. References
 
-### 11.1 Numerical Analysis
+### 12.1 Numerical Analysis
 
 1. Dekker, T. J. (1971). "A floating-point technique for extending the available precision." *Numerische Mathematik*, 18(3), 224-242.
 2. Higham, N. J. (2002). *Accuracy and Stability of Numerical Algorithms* (2nd ed.). SIAM.
 
-### 11.2 Validation Standards
+### 12.2 Validation Standards
 
 3. NASA-STD-7009A (2016). *Standard for Models and Simulations*.
 4. ASME V&V 10-2006. *Guide for Verification and Validation in Computational Solid Mechanics*.
 
-### 11.3 Application References
+### 12.3 Application References
 
 5. Giannozzi, P., et al. (2009). "QUANTUM ESPRESSO." *J. Phys.: Condens. Matter* 21, 395502.
 6. Quantum ESPRESSO Documentation: https://www.quantum-espresso.org
 
-### 11.4 apple-bottom Documentation
+### 12.4 apple-bottom Documentation
 
 7. `README.md`: Quick start, performance benchmarks
 8. `docs/INTEGRATION.md`: C/Fortran/Python/QE integration
