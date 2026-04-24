@@ -42,7 +42,7 @@ SRC = src
 INCLUDE = include
 EXAMPLES = examples
 
-.PHONY: all lib test bench bench-report clean examples install uninstall
+.PHONY: all lib test bench bench-report bench-rect clean examples install uninstall
 
 # =============================================================================
 # Main targets
@@ -313,6 +313,18 @@ $(BUILD)/bench_paper: benchmarks/bench_paper.c lib | $(BUILD)
 $(BUILD)/bench_device_residency: benchmarks/bench_device_residency.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
+
+$(BUILD)/bench_rect_dgemm: benchmarks/bench_rect_dgemm.c lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
+$(BUILD)/bench_rect_zgemm: benchmarks/bench_rect_zgemm.c lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
+bench-rect: $(BUILD)/bench_rect_dgemm $(BUILD)/bench_rect_zgemm
+	@echo ""
+	@echo "Built bench_rect_{dgemm,zgemm}. Run via benchmarks/scripts/run_rect_sweep.sh"
 
 bench-paper: $(BUILD)/bench_paper
 	@echo ""
