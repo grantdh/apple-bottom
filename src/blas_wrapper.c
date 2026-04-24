@@ -76,31 +76,42 @@ static int ab_get_mode(void) {
     return _ab_mode;
 }
 
+// Thread-local record of the last dispatch decision. Used by bench harnesses
+// to confirm AB_MODE routing without touching internals. Zero runtime cost.
+static __thread const char *_ab_last_path = "none";
+const char* ab_get_last_dispatch_path(void) { return _ab_last_path; }
+
 bool ab_use_gpu(int m, int n, int k) {
     int mode = ab_get_mode();
-    if (mode == AB_MODE_CPU) return false;
+    if (mode == AB_MODE_CPU) { _ab_last_path = "cpu"; return false; }
     int min_dim = ab_get_min_gpu_dim();
     // Dims below GPU minimum are never profitable (threadgroups underutilized)
-    if (m <= min_dim || n <= min_dim || k <= min_dim)
-        return false;
-    if (mode == AB_MODE_GPU) return true;
+    if (m <= min_dim || n <= min_dim || k <= min_dim) {
+        _ab_last_path = "cpu"; return false;
+    }
+    if (mode == AB_MODE_GPU) { _ab_last_path = "gpu"; return true; }
     // AUTO: heterogeneous heuristic
     uint64_t flops = 2ULL * m * n * k;
-    if (m < 64 || n < 64 || k < 64)
-        return flops >= ab_get_crossover_flops();        // skinny: stricter
-    return flops >= ab_get_crossover_flops_real();
+    bool use = (m < 64 || n < 64 || k < 64)
+               ? (flops >= ab_get_crossover_flops())
+               : (flops >= ab_get_crossover_flops_real());
+    _ab_last_path = use ? "gpu" : "cpu";
+    return use;
 }
 
 // Complex version accounts for 4x arithmetic density
 static bool ab_use_gpu_complex(int m, int n, int k) {
     int mode = ab_get_mode();
-    if (mode == AB_MODE_CPU) return false;
+    if (mode == AB_MODE_CPU) { _ab_last_path = "cpu"; return false; }
     int min_dim = ab_get_min_gpu_dim();
-    if (m <= min_dim || n <= min_dim || k <= min_dim)
-        return false;
-    if (mode == AB_MODE_GPU) return true;
+    if (m <= min_dim || n <= min_dim || k <= min_dim) {
+        _ab_last_path = "cpu"; return false;
+    }
+    if (mode == AB_MODE_GPU) { _ab_last_path = "gpu"; return true; }
     uint64_t flops = 8ULL * m * n * k;
-    return flops >= ab_get_crossover_flops();
+    bool use = flops >= ab_get_crossover_flops();
+    _ab_last_path = use ? "gpu" : "cpu";
+    return use;
 }
 
 // =============================================================================
