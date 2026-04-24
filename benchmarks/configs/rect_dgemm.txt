@@ -1,0 +1,31 @@
+# Shape list for bench_rect_dgemm — REVIEW_04 Tranche A.
+# DGEMM is not the R4-2 focus (square-DGEMM crossover is already studied by
+# bench_dgemm); this file exists as a dispatcher sanity check using the same
+# 5x5 synthetic dyadic grid as the ZGEMM config.
+# Format: M N K tag (whitespace-separated, one shape per line).
+
+128    128   128       synth_128
+128    128   256       synth_128_128_256
+128    128   512       synth_128_128_512
+128    128   1024      synth_128_128_1024
+128    128   2048      synth_128_128_2048
+256    256   128       synth_256_256_128
+256    256   256       synth_256
+256    256   512       synth_256_256_512
+256    256   1024      synth_256_256_1024
+256    256   2048      synth_256_256_2048
+512    512   128       synth_512_512_128
+512    512   256       synth_512_512_256
+512    512   512       synth_512
+512    512   1024      synth_512_512_1024
+512    512   2048      synth_512_512_2048
+1024   1024  128       synth_1024_1024_128
+1024   1024  256       synth_1024_1024_256
+1024   1024  512       synth_1024_1024_512
+1024   1024  1024      synth_1024
+1024   1024  2048      synth_1024_1024_2048
+2048   2048  128       synth_2048_2048_128
+2048   2048  256       synth_2048_2048_256
+2048   2048  512       synth_2048_2048_512
+2048   2048  1024      synth_2048_2048_1024
+2048   2048  2048      synth_2048

@@ -1,0 +1,47 @@
+# Shape list for bench_rect_zgemm — REVIEW_04 Tranche A.
+# Format: M N K tag (whitespace-separated, one shape per line).
+# Lines starting with '#' and blank lines are ignored.
+
+# QE Q1 strip — Davidson overlap + rotation pairs (silicon test cells)
+24     24    2969      qe_si8_ovlp
+2969   24    24        qe_si8_rot
+80     80    4573      qe_si32_ovlp
+4573   80    80        qe_si32_rot
+150    150   18277     qe_si64_ovlp
+18277  150   150       qe_si64_rot
+500    500   18277     qe_si64_500b_ovlp
+18277  500   500       qe_si64_500b_rot
+
+# Yambo Q1' strip — GW chi0 build + inversion proxy + sigma_x
+200    200   189       yambo_chi0_200
+300    300   189       yambo_chi0_300
+500    500   189       yambo_chi0_500
+200    200   200       yambo_chi0_inv_proxy
+25     25    19195     yambo_sigma_x
+
+# Q2 synthetic dyadic — 5x5 square (25 shapes)
+128    128   128       synth_128
+128    128   256       synth_128_128_256
+128    128   512       synth_128_128_512
+128    128   1024      synth_128_128_1024
+128    128   2048      synth_128_128_2048
+256    256   128       synth_256_256_128
+256    256   256       synth_256
+256    256   512       synth_256_256_512
+256    256   1024      synth_256_256_1024
+256    256   2048      synth_256_256_2048
+512    512   128       synth_512_512_128
+512    512   256       synth_512_512_256
+512    512   512       synth_512
+512    512   1024      synth_512_512_1024
+512    512   2048      synth_512_512_2048
+1024   1024  128       synth_1024_1024_128
+1024   1024  256       synth_1024_1024_256
+1024   1024  512       synth_1024_1024_512
+1024   1024  1024      synth_1024
+1024   1024  2048      synth_1024_1024_2048
+2048   2048  128       synth_2048_2048_128
+2048   2048  256       synth_2048_2048_256
+2048   2048  512       synth_2048_2048_512
+2048   2048  1024      synth_2048_2048_1024
+2048   2048  2048      synth_2048
