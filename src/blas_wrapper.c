@@ -10,6 +10,23 @@
 #include <stdbool.h>
 #include <Accelerate/Accelerate.h>
 #include <stdio.h>
+#include <time.h>
+
+// Per-stage profiling for ab_{d,z}gemm_blas, gated on AB_PROFILE=1.
+// Zero cost when disabled (single cached env read, single branch).
+// Prints stage breakdown to stderr at the end of each call.
+static int _ab_profile = -1;
+static int ab_profile_enabled(void) {
+    if (_ab_profile >= 0) return _ab_profile;
+    const char *s = getenv("AB_PROFILE");
+    _ab_profile = (s && *s && s[0] != '0') ? 1 : 0;
+    return _ab_profile;
+}
+static double ab_now_sec(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
 
 // =============================================================================
 // AMX/GPU Heterogeneous Dispatch Heuristic
@@ -139,13 +156,18 @@ void ab_zgemm_blas(
     }
 
     // GPU path: compute A*B on GPU, apply alpha/beta in epilogue
-    
+    int _prof = ab_profile_enabled();
+    double _t0 = _prof ? ab_now_sec() : 0;
+    double _t_alloc=0, _t_A_repack=0, _t_A_upload=0,
+           _t_B_repack=0, _t_B_upload=0, _t_C_upload=0,
+           _t_kernel=0, _t_download=0, _t_epilogue=0, _t_destroy=0;
+
     // Dimensions of A and B after transpose
     int A_rows = (transA == 'N') ? M : K;
     int A_cols = (transA == 'N') ? K : M;
     int B_rows = (transB == 'N') ? K : N;
     int B_cols = (transB == 'N') ? N : K;
-    
+
     // Allocate split-complex GPU matrices
     ABMatrix mAr = ab_matrix_create(A_rows, A_cols);
     ABMatrix mAi = ab_matrix_create(A_rows, A_cols);
@@ -153,6 +175,7 @@ void ab_zgemm_blas(
     ABMatrix mBi = ab_matrix_create(B_rows, B_cols);
     ABMatrix mCr = ab_matrix_create(M, N);
     ABMatrix mCi = ab_matrix_create(M, N);
+    if (_prof) { double t = ab_now_sec(); _t_alloc = t - _t0; _t0 = t; }
     
     if (!mAr || !mAi || !mBr || !mBi || !mCr || !mCi) {
         if (mAr) ab_matrix_destroy(mAr);
@@ -174,7 +197,7 @@ void ab_zgemm_blas(
     size_t A_count = (size_t)A_rows * A_cols;
     double* Ar_data = malloc(A_count * sizeof(double));
     double* Ai_data = malloc(A_count * sizeof(double));
-    
+
     for (int col = 0; col < A_cols; col++) {
         for (int row = 0; row < A_rows; row++) {
             int src_row, src_col;
@@ -185,21 +208,23 @@ void ab_zgemm_blas(
             }
             double complex val = A[src_col * ldA + src_row];
             if (transA == 'C') val = conj(val);
-            
+
             size_t dst = (size_t)row * A_cols + col;
             Ar_data[dst] = creal(val);
             Ai_data[dst] = cimag(val);
         }
     }
+    if (_prof) { double t = ab_now_sec(); _t_A_repack = t - _t0; _t0 = t; }
     ab_matrix_upload(mAr, Ar_data, true);
     ab_matrix_upload(mAi, Ai_data, true);
     free(Ar_data); free(Ai_data);
-    
+    if (_prof) { double t = ab_now_sec(); _t_A_upload = t - _t0; _t0 = t; }
+
     // Upload B with transpose handling
     size_t B_count = (size_t)B_rows * B_cols;
     double* Br_data = malloc(B_count * sizeof(double));
     double* Bi_data = malloc(B_count * sizeof(double));
-    
+
     for (int col = 0; col < B_cols; col++) {
         for (int row = 0; row < B_rows; row++) {
             int src_row, src_col;
@@ -210,24 +235,29 @@ void ab_zgemm_blas(
             }
             double complex val = B[src_col * ldB + src_row];
             if (transB == 'C') val = conj(val);
-            
+
             size_t dst = (size_t)row * B_cols + col;
             Br_data[dst] = creal(val);
             Bi_data[dst] = cimag(val);
         }
     }
+    if (_prof) { double t = ab_now_sec(); _t_B_repack = t - _t0; _t0 = t; }
     ab_matrix_upload(mBr, Br_data, true);
     ab_matrix_upload(mBi, Bi_data, true);
     free(Br_data); free(Bi_data);
-    
+    if (_prof) { double t = ab_now_sec(); _t_B_upload = t - _t0; _t0 = t; }
+    (void)_t_C_upload;  // beta != 0 path not instrumented in this pass
+
     // Compute C = A * B
     ab_zgemm(mAr, mAi, mBr, mBi, mCr, mCi);
-    
+    if (_prof) { double t = ab_now_sec(); _t_kernel = t - _t0; _t0 = t; }
+
     // Download result and apply alpha/beta epilogue
     double* Cr_data = malloc(M * N * sizeof(double));
     double* Ci_data = malloc(M * N * sizeof(double));
     ab_matrix_download(mCr, Cr_data, true);
     ab_matrix_download(mCi, Ci_data, true);
+    if (_prof) { double t = ab_now_sec(); _t_download = t - _t0; _t0 = t; }
 
     // Convert row-major back to column-major with alpha/beta:
     // C = alpha * (A*B) + beta * C_old
@@ -261,11 +291,28 @@ void ab_zgemm_blas(
             C[col * ldC + row] = result_r + I * result_i;
         }
     }
-    
     free(Cr_data); free(Ci_data);
+    if (_prof) { double t = ab_now_sec(); _t_epilogue = t - _t0; _t0 = t; }
+
     ab_matrix_destroy(mAr); ab_matrix_destroy(mAi);
     ab_matrix_destroy(mBr); ab_matrix_destroy(mBi);
     ab_matrix_destroy(mCr); ab_matrix_destroy(mCi);
+    if (_prof) {
+        double t = ab_now_sec(); _t_destroy = t - _t0;
+        double sum = _t_alloc + _t_A_repack + _t_A_upload +
+                     _t_B_repack + _t_B_upload + _t_kernel +
+                     _t_download + _t_epilogue + _t_destroy;
+        fprintf(stderr,
+            "AB_PROFILE zgemm M=%d N=%d K=%d  "
+            "alloc=%.3f A_repack=%.3f A_upload=%.3f B_repack=%.3f "
+            "B_upload=%.3f kernel=%.3f download=%.3f epilogue=%.3f "
+            "destroy=%.3f  sum=%.3f ms\n",
+            M, N, K,
+            _t_alloc*1e3, _t_A_repack*1e3, _t_A_upload*1e3,
+            _t_B_repack*1e3, _t_B_upload*1e3, _t_kernel*1e3,
+            _t_download*1e3, _t_epilogue*1e3, _t_destroy*1e3,
+            sum*1e3);
+    }
 }
 
 // =============================================================================
