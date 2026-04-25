@@ -259,3 +259,141 @@ Wall time for the 12-CSV sweep: ~8 minutes on an idle system.
 Longest stanza is `zgemm_gpu_sweep{1,2}` (N=2048 ZGEMM at ~1.7 s/call
 × 7 runs × 2 sweeps ≈ 24 s per shape, × 38 shapes ≈ 15 min aggregate
 when the 2048 shapes dominate).
+
+---
+
+## Update 2026-04-24 — R4-2b localized
+
+Same-day followup to the R4-2b investigation listed in the original
+"Out of scope / follow-up" section. Concrete next step (per-stage
+instrumentation under `AB_PROFILE=1`) was implemented in commit
+`be4c6fd` (`bench: AB_PROFILE env-gated per-stage timing in
+ab_*_blas (R4-2b)`). Probe was a single N=2048 ZGEMM call via
+`ab_zgemm_blas` with one warmup, AB_MODE=gpu, AB_PROFILE=1.
+
+### Stage breakdown (single timed call after one warmup)
+
+```
+WALL                    1735.69 ms   (39.59 GFLOP/s, 68.72 GF)
+sum-of-stages           1735.66 ms   ← matches wall to 0.04 ms
+```
+
+| Stage | ms | % of wall |
+|---|---:|---:|
+| alloc (6× ab_matrix_create) | 0.12 | 0.0% |
+| A_repack (col→row + split-complex) | 60.8 | 3.5% |
+| **A_upload (FP64→DD, Ar+Ai)** | **455.4** | **26.2%** |
+| B_repack | 59.9 | 3.5% |
+| **B_upload (FP64→DD, Br+Bi)** | **460.5** | **26.5%** |
+| **kernel (`ab_zgemm`)** | **163.4** | **9.4%** |
+| **download (Cr+Ci)** | **492.0** | **28.3%** |
+| epilogue (alpha/beta + col-major pack-back) | 43.5 | 2.5% |
+| destroy | 0.04 | 0.0% |
+| **TOTAL** | **1735.7** | 100% |
+
+### Hypothesis verdicts
+
+The five hypotheses from the original §"R4-2b — unexplained
+end-to-end overhead" subsection resolve as follows.
+
+| # | Hypothesis | Verdict |
+|---|---|---|
+| 1 | Multiple kernel launches | Yes, `kernel` stage absorbs Gauss 3-DGEMM + epilogues, but only 9.4% of wall. Not dominant. |
+| 2 | FP64→DD conversion on CPU not GPU | **Confirmed dominant.** Upload+download = 81% of wall. |
+| 3 | Per-call blocking device sync | Sum-equals-wall rules out a separate factor. The download stage's 492 ms includes the final `waitUntilCompleted`, but the kernel-vs-download asymmetry at most ~329 ms is bounded inside the conversion-path story, not a separable factor. |
+| 4 | Cold boost clock | **Ruled out.** Sum-stages == wall to 0.04 ms. |
+| 5 | Obj-C ARC / object lifecycle | **Ruled out.** alloc=0.12 ms, destroy=0.04 ms. |
+
+### Effective bandwidth on the conversion path
+
+| Stage | Bytes moved | ms | Effective BW |
+|---|---:|---:|---:|
+| A_upload (Ar+Ai, 2× 2048² × 8 B) | 64 MB | 455 | 141 MB/s |
+| B_upload (Br+Bi) | 64 MB | 460 | 139 MB/s |
+| download (Cr+Ci) | 64 MB | 492 | 130 MB/s |
+
+For comparison: UMA peak ~400 GB/s; vectorized memcpy ~40 GB/s on
+M2 Max; a vectorized FP64→DD conversion on a single CPU core should
+reach ~6 GB/s if the conversion is ~10 cycles/element. Measured
+~0.14 GB/s is **~40× slower than even the conservative single-core
+software-conversion bound**. That magnitude is not consistent with
+"scalar serial on host" alone; it points to per-element overhead
+beyond the arithmetic — Obj-C autoreleasepool churn, per-row Metal
+dispatch, or per-element selector lookups would all fit. Worth
+chasing later but not load-bearing for the recommendation.
+
+### Secondary observation — residual ~2× kernel-throughput gap
+
+Even excluding all transfer/conversion overhead, the `kernel` stage at
+163 ms = **421 GFLOP/s effective**, vs **813 GFLOP/s** in the
+2026-04-22 steady-state ZGEMM bench at the same N=2048. Three
+candidates:
+
+1. The `kernel` stage as instrumented in `ab_zgemm_blas` includes
+   command-buffer commit and `waitUntilCompleted` time, which the
+   steady-state bench (`bench_zgemm.c`) measures across a tight loop
+   so commit/sync amortizes inside the loop body.
+2. One warmup call may not be sufficient to fully warm the GPU state
+   (warmup→timed went 325 → 163 ms, which is itself a 2× drop;
+   additional warmup runs may continue to drop kernel time).
+3. There may be a real difference in the Metal kernel invocation
+   between the two paths — different command-buffer construction,
+   different threadgroup configuration, or different residency hints.
+
+Not the headline, but flagged so a future reader does not assume
+"identical kernel running identically" across the two regimes. A
+matched-shape `bench_rect_steady` variant (the option-2 followup
+listed in the original §"Out of scope") would resolve this cleanly.
+
+### What this changes for downstream tasks
+
+- **R4-2b sharpened to a single root cause: the FP64↔DD conversion
+  path on upload/download.** Two orthogonal fixes:
+  - **(a) Persistent ABMatrix handles** — cache GPU-side buffers
+    across calls. Eliminates upload/download for repeat shapes.
+    Trivial mechanical change at host call sites; bigger lift if
+    done inside `ab_*_blas` (would need a global cache keyed on
+    pointer+dims+leading-dim with eviction policy).
+  - **(b) Vectorized Metal upload/download kernels** — replace the
+    current ~140 MB/s path with one that exploits UMA bandwidth.
+    Helps even single-call paths.
+
+- **Skill rectification (commit #2)** can now ship with a sharp
+  recommendation, not a hedge. Two regimes: native `ABMatrix` API
+  with persisted handles (steady-state crossover at the documented
+  thresholds), vs BLAS-ABI `ab_*_blas` path (no crossover in
+  measured grid because of conversion-path overhead). For Fortran
+  host codes calling via `dgemm_`/`zgemm_` without handle caching,
+  `AB_MODE=cpu` is the right default. Fix is one of (a)/(b) above,
+  not threshold tuning.
+
+- **Task #6 (QE integration)** reframes: the persistent-handle path
+  becomes the positive story, not the fallback. QE Davidson reuses
+  the `(npwx)` buffers across cegterg iterations — large rotation
+  matrices uploaded once, small `(nvec, nvec)` deltas per iteration.
+  Textbook amortization. Empirical demonstration via QE-against-
+  apple-bottom benchmark using native `ABMatrix` + handle cache is
+  paper-grade material.
+
+- **Task #14 (Rainbow Connection audit)** footnote text now has
+  concrete content: "All GFLOP/s figures characterize steady-state
+  compute with persistent GPU-resident matrix handles via the native
+  `ABMatrix` API. The BLAS-ABI path (`ab_*_blas` entry points
+  reachable through Fortran `dgemm_`/`zgemm_`) incurs a per-call
+  FP64↔DD conversion overhead currently bandwidth-limited to
+  ~140 MB/s, which dominates wall-time for all single-call shapes
+  measured up to N=2048 ZGEMM (1.4 s wall vs 0.16 s kernel)."
+
+### Reproducibility of this stage breakdown
+
+```bash
+AB_MODE=gpu AB_PROFILE=1 /tmp/probe_zgemm_2048   # see /tmp/probe_zgemm_2048.c
+# Or against any ab_zgemm_blas caller:
+AB_MODE=gpu AB_PROFILE=1 <your-binary>
+```
+
+Probe source kept under `/tmp/` (single-purpose, not promoted to
+`benchmarks/` because it would duplicate `bench_rect_zgemm` for the
+N=2048-only case). To re-derive at a different N: copy the probe and
+change `int N = 2048;`. Stage labels and arithmetic stable across
+shapes.
