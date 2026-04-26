@@ -3,6 +3,7 @@
 // =============================================================================
 
 #include "apple_bottom.h"
+#include "test_registry.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1912,108 +1913,94 @@ static void test_morton_qe_realistic_dims(void) {
 // Main
 // =============================================================================
 
+static const TestCase TESTS[] = {
+    {"test_init_shutdown",                    test_init_shutdown},
+    {"test_double_init",                      test_double_init},
+    {"test_shutdown_without_init",            test_shutdown_without_init},
+    {"test_matrix_create_destroy",            test_matrix_create_destroy},
+    {"test_matrix_destroy_null",              test_matrix_destroy_null},
+    {"test_matrix_dims_null_outputs",         test_matrix_dims_null_outputs},
+    {"test_matrix_count_null",                test_matrix_count_null},
+    {"test_upload_download_roundtrip",        test_upload_download_roundtrip},
+    {"test_upload_null_data",                 test_upload_null_data},
+    {"test_download_null_data",               test_download_null_data},
+    {"test_upload_null_matrix",               test_upload_null_matrix},
+    {"test_matrix_zero",                      test_matrix_zero},
+    {"test_dgemm_identity",                   test_dgemm_identity},
+    {"test_dgemm_zero",                       test_dgemm_zero},
+    {"test_dgemm_dimension_mismatch",         test_dgemm_dimension_mismatch},
+    {"test_dgemm_null_matrices",              test_dgemm_null_matrices},
+    {"test_dgemm_vs_accelerate",              test_dgemm_vs_accelerate},
+    {"test_zgemm_vs_accelerate",              test_zgemm_vs_accelerate},
+    {"test_zgemm_conj_transpose",             test_zgemm_conj_transpose},
+    {"test_session_basic",                    test_session_basic},
+    {"test_session_destroy_null",             test_session_destroy_null},
+    {"test_session_dgemm",                    test_session_dgemm},
+    {"test_stats",                            test_stats},
+    {"test_status_strings",                   test_status_strings},
+    {"test_pool_create_destroy",              test_pool_create_destroy},
+    {"test_pool_get_matrix",                  test_pool_get_matrix},
+    {"test_pool_reset_reuse",                 test_pool_reset_reuse},
+    {"test_pool_iteration_pattern",           test_pool_iteration_pattern},
+    {"test_async_dgemm_basic",                test_async_dgemm_basic},
+    {"test_async_future_poll",                test_async_future_poll},
+    {"test_async_overlap",                    test_async_overlap},
+    {"test_async_null_safety",                test_async_null_safety},
+    {"test_small_matrix_n1",                  test_small_matrix_n1},
+    {"test_non_power_of_2",                   test_non_power_of_2},
+    {"test_rectangular_matrix",               test_rectangular_matrix},
+    {"test_skinny_matrix",                    test_skinny_matrix},
+    {"test_max_dimension_boundary",           test_max_dimension_boundary},
+    {"test_dtrsm_lower_notrans",              test_dtrsm_lower_notrans},
+    {"test_dtrsm_upper_notrans",              test_dtrsm_upper_notrans},
+    {"test_dtrsm_lower_trans",                test_dtrsm_lower_trans},
+    {"test_dtrsm_alpha_scaling",              test_dtrsm_alpha_scaling},
+    {"test_dtrsm_large",                      test_dtrsm_large},
+    {"test_dtrsm_null_safety",                test_dtrsm_null_safety},
+    {"test_mpir_basic",                       test_mpir_basic},
+    {"test_mpir_single_rhs",                  test_mpir_single_rhs},
+    {"test_mpir_moderate_condition",          test_mpir_moderate_condition},
+    {"test_mpir_null_safety",                 test_mpir_null_safety},
+    {"test_mpir_dimension_mismatch",          test_mpir_dimension_mismatch},
+    {"test_mpir_non_square",                  test_mpir_non_square},
+    {"test_batch_basic_dgemm",                test_batch_basic_dgemm},
+    {"test_batch_multiple_dgemm",             test_batch_multiple_dgemm},
+    {"test_batch_barrier",                    test_batch_barrier},
+    {"test_batch_null_safety",                test_batch_null_safety},
+    {"test_batch_zgemm",                      test_batch_zgemm},
+    {"test_batch_committed_reuse",            test_batch_committed_reuse},
+    {"test_fused_zgemm_precision",            test_fused_zgemm_precision},
+    {"test_async_zgemm_true",                 test_async_zgemm_true},
+    {"test_bug1_async_dimension_packing",     test_bug1_async_dimension_packing},
+    {"test_bug3_dgemm_scaled_precision",      test_bug3_dgemm_scaled_precision},
+    {"test_bug4_matrix_scale_precision",      test_bug4_matrix_scale_precision},
+    {"test_bug5_reinit_after_shutdown",       test_bug5_reinit_after_shutdown},
+    {"test_bug6_pool_overflow",               test_bug6_pool_overflow},
+    {"test_morton_dgemm_768",                 test_morton_dgemm_768},
+    {"test_morton_dgemm_1536",                test_morton_dgemm_1536},
+    {"test_morton_zgemm_768",                 test_morton_zgemm_768},
+    {"test_morton_qe_realistic_dims",         test_morton_qe_realistic_dims},
+};
+static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
+
 int main(void) {
     printf("╔══════════════════════════════════════════════════════════════════╗\n");
     printf("║  apple-bottom Comprehensive Test Suite                           ║\n");
     printf("╚══════════════════════════════════════════════════════════════════╝\n");
-    
-    printf("\nInitialization:\n");
-    test_init_shutdown();
-    test_double_init();
-    test_shutdown_without_init();
-    
-    printf("\nMatrix Lifecycle:\n");
-    test_matrix_create_destroy();
-    test_matrix_destroy_null();
-    test_matrix_dims_null_outputs();
-    test_matrix_count_null();
-    
-    printf("\nData Transfer:\n");
-    test_upload_download_roundtrip();
-    test_upload_null_data();
-    test_download_null_data();
-    test_upload_null_matrix();
-    test_matrix_zero();
-    
-    printf("\nDGEMM:\n");
-    test_dgemm_identity();
-    test_dgemm_zero();
-    test_dgemm_dimension_mismatch();
-    test_dgemm_null_matrices();
-    test_dgemm_vs_accelerate();
-    test_zgemm_vs_accelerate();
-    test_zgemm_conj_transpose();
-    
-    printf("\nSession API:\n");
-    test_session_basic();
-    test_session_destroy_null();
-    test_session_dgemm();
-    
-    printf("\nStatistics:\n");
-    test_stats();
-    
-    printf("\nUtility:\n");
-    test_status_strings();
-    
-    printf("\nMemory Pool:\n");
-    test_pool_create_destroy();
-    test_pool_get_matrix();
-    test_pool_reset_reuse();
-    test_pool_iteration_pattern();
-    
-    printf("\nAsync API:\n");
-    test_async_dgemm_basic();
-    test_async_future_poll();
-    test_async_overlap();
-    test_async_null_safety();
-    
-    printf("\nStress Tests:\n");
-    test_small_matrix_n1();
-    test_non_power_of_2();
-    test_rectangular_matrix();
-    test_skinny_matrix();
-    test_max_dimension_boundary();
 
-    printf("\nDTRSM (Triangular Solve):\n");
-    test_dtrsm_lower_notrans();
-    test_dtrsm_upper_notrans();
-    test_dtrsm_lower_trans();
-    test_dtrsm_alpha_scaling();
-    test_dtrsm_large();
-    test_dtrsm_null_safety();
-
-    printf("\nMPIR (Mixed-Precision Iterative Refinement):\n");
-    test_mpir_basic();
-    test_mpir_single_rhs();
-    test_mpir_moderate_condition();
-    test_mpir_null_safety();
-    test_mpir_dimension_mismatch();
-    test_mpir_non_square();
-
-    printf("\nBatch API:\n");
-    test_batch_basic_dgemm();
-    test_batch_multiple_dgemm();
-    test_batch_barrier();
-    test_batch_null_safety();
-    test_batch_zgemm();
-    test_batch_committed_reuse();
-
-    printf("\nFused ZGEMM & True Async:\n");
-    test_fused_zgemm_precision();
-    test_async_zgemm_true();
-
-    printf("\nRegression Tests (Bug Fixes v1.0.2):\n");
-    test_bug1_async_dimension_packing();
-    test_bug3_dgemm_scaled_precision();
-    test_bug4_matrix_scale_precision();
-    test_bug5_reinit_after_shutdown();
-    test_bug6_pool_overflow();
-
-    printf("\nRegression: Morton Z-order non-power-of-2 (v1.0.3):\n");
-    test_morton_dgemm_768();
-    test_morton_dgemm_1536();
-    test_morton_zgemm_768();
-    test_morton_qe_realistic_dims();
+    for (int i = 0; i < N_TESTS; i++) {
+        printf("[%d/%d] %s ... ", i + 1, N_TESTS, TESTS[i].name);
+        fflush(stdout);
+        int pre = tests_passed + tests_failed;
+        TESTS[i].fn();
+        int post = tests_passed + tests_failed;
+        if (post == pre) {
+            fprintf(stderr,
+                "\nFATAL: ghost test — '%s' reported no result\n",
+                TESTS[i].name);
+            abort();
+        }
+    }
 
     printf("\n═══════════════════════════════════════════════════════════════════\n");
     printf("Results: %d passed, %d failed\n", tests_passed, tests_failed);
