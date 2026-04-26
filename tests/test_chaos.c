@@ -14,6 +14,7 @@
 // =============================================================================
 
 #include "apple_bottom.h"
+#include "test_registry.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -840,42 +841,46 @@ static void test_zgemm_purely_imaginary(void) {
 // Main
 // =============================================================================
 
+static const TestCase TESTS[] = {
+    {"test_dgemm_nan_input",                    test_dgemm_nan_input},
+    {"test_dgemm_inf_input",                    test_dgemm_inf_input},
+    {"test_dgemm_scaled_beta_zero_suppresses_nan", test_dgemm_scaled_beta_zero_suppresses_nan},
+    {"test_dgemm_subnormal_input",              test_dgemm_subnormal_input},
+    {"test_dgemm_zero_matrix",                  test_dgemm_zero_matrix},
+    {"test_dgemm_high_condition_number",        test_dgemm_high_condition_number},
+    {"test_dgemm_large_dynamic_range",          test_dgemm_large_dynamic_range},
+    {"test_dgemm_1x1",                          test_dgemm_1x1},
+    {"test_dgemm_prime_dimensions",             test_dgemm_prime_dimensions},
+    {"test_zgemm_1x1",                          test_zgemm_1x1},
+    {"test_zherk_vs_cblas",                     test_zherk_vs_cblas},
+    {"test_zherk_rectangular",                  test_zherk_rectangular},
+    {"test_zherk_hermitian_symmetry",           test_zherk_hermitian_symmetry},
+    {"test_concurrent_dgemm_stress",            test_concurrent_dgemm_stress},
+    {"test_pool_exhaustion_recovery",           test_pool_exhaustion_recovery},
+    {"test_pool_reset_and_reuse",               test_pool_reset_and_reuse},
+    {"test_zgemm_purely_real",                  test_zgemm_purely_real},
+    {"test_zgemm_purely_imaginary",             test_zgemm_purely_imaginary},
+};
+static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
+
 int main(void) {
     printf("╔══════════════════════════════════════════════════════════════════╗\n");
     printf("║  apple-bottom Adversarial & System-Level Test Suite              ║\n");
     printf("╚══════════════════════════════════════════════════════════════════╝\n\n");
 
-    printf("IEEE 754 Edge Cases:\n");
-    test_dgemm_nan_input();
-    test_dgemm_inf_input();
-    test_dgemm_scaled_beta_zero_suppresses_nan();
-    test_dgemm_subnormal_input();
-    test_dgemm_zero_matrix();
-
-    printf("\nIll-Conditioned Matrices:\n");
-    test_dgemm_high_condition_number();
-    test_dgemm_large_dynamic_range();
-
-    printf("\nBoundary Dimensions:\n");
-    test_dgemm_1x1();
-    test_dgemm_prime_dimensions();
-    test_zgemm_1x1();
-
-    printf("\nZHERK GPU Transpose:\n");
-    test_zherk_vs_cblas();
-    test_zherk_rectangular();
-    test_zherk_hermitian_symmetry();
-
-    printf("\nConcurrency Stress:\n");
-    test_concurrent_dgemm_stress();
-
-    printf("\nMemory Pool:\n");
-    test_pool_exhaustion_recovery();
-    test_pool_reset_and_reuse();
-
-    printf("\nZGEMM Edge Cases:\n");
-    test_zgemm_purely_real();
-    test_zgemm_purely_imaginary();
+    for (int i = 0; i < N_TESTS; i++) {
+        printf("[%d/%d] %s ... ", i + 1, N_TESTS, TESTS[i].name);
+        fflush(stdout);
+        int pre = tests_passed + tests_failed;
+        TESTS[i].fn();
+        int post = tests_passed + tests_failed;
+        if (post == pre) {
+            fprintf(stderr,
+                "\nFATAL: ghost test — '%s' reported no result\n",
+                TESTS[i].name);
+            abort();
+        }
+    }
 
     printf("\n═══════════════════════════════════════════════════════════════════\n");
     printf("Results: %d passed, %d failed\n", tests_passed, tests_failed);
