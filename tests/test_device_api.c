@@ -20,13 +20,16 @@
 
 #include "apple_bottom.h"
 #include "apple_bottom_device.h"
+#include "test_registry.h"
 
 #define N_ELEMS 1024
 #define N_BYTES (N_ELEMS * sizeof(double))
 
 static int failures = 0;
+static int checks_run = 0;  /* registry counter for ghost-guard (PR-1 §2(b')) */
 
 #define CHECK(cond, msg) do {                                        \
+    checks_run++;                                                    \
     if (!(cond)) {                                                   \
         fprintf(stderr, "  ✗ FAIL: %s (%s:%d)\n", msg, __FILE__, __LINE__); \
         failures++;                                                  \
@@ -350,6 +353,30 @@ static void test_elementwise(void) {
     ab_dev_free(dx); ab_dev_free(dy);
 }
 
+/* PR-1 §2(b'') wrappers — give parameterized helpers void(void) signatures
+ * so each pre-migration invocation in main() corresponds to one TestCase
+ * registry entry. Original helper bodies are unchanged. Naming convention:
+ * append the argument value as a suffix. */
+static void test_dgemm_bit_identical_1024(void) { test_dgemm_bit_identical(1024); }
+static void test_dgemm_bit_identical_768(void)  { test_dgemm_bit_identical(768); }
+static void test_zgemm_bit_identical_1024(void) { test_zgemm_bit_identical(1024); }
+static void test_zgemm_bit_identical_768(void)  { test_zgemm_bit_identical(768); }
+
+static const TestCase TESTS[] = {
+    {"test_lifecycle",                test_lifecycle},
+    {"test_roundtrip",                test_roundtrip},
+    {"test_d2d_with_offsets",         test_d2d_with_offsets},
+    {"test_memset",                   test_memset},
+    {"test_error_paths",              test_error_paths},
+    {"test_streams",                  test_streams},
+    {"test_dgemm_bit_identical_1024", test_dgemm_bit_identical_1024},
+    {"test_dgemm_bit_identical_768",  test_dgemm_bit_identical_768},
+    {"test_zgemm_bit_identical_1024", test_zgemm_bit_identical_1024},
+    {"test_zgemm_bit_identical_768",  test_zgemm_bit_identical_768},
+    {"test_elementwise",              test_elementwise},
+};
+static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
+
 int main(void) {
     printf("═══════════════════════════════════════════════════════════\n");
     printf("apple-bottom device-API tests (Week-1 + Week-2 BLAS)\n");
@@ -360,24 +387,25 @@ int main(void) {
         return 2;
     }
 
-    // Week-1 smoke tests
-    test_lifecycle();
-    test_roundtrip();
-    test_d2d_with_offsets();
-    test_memset();
-    test_error_paths();
-    test_streams();
-
-    // Week-2 BLAS tests
-    test_dgemm_bit_identical(1024);
-    test_dgemm_bit_identical(768);   // non-power-of-2, exercises Morton padding
-    test_zgemm_bit_identical(1024);
-    test_zgemm_bit_identical(768);
-    test_elementwise();
+    for (int i = 0; i < N_TESTS; i++) {
+        printf("[%d/%d] %s ... ", i + 1, N_TESTS, TESTS[i].name);
+        fflush(stdout);
+        int pre = checks_run;
+        TESTS[i].fn();
+        int post = checks_run;
+        if (post == pre) {
+            fprintf(stderr,
+                "\nFATAL: ghost test — '%s' ran zero CHECK invocations\n",
+                TESTS[i].name);
+            abort();
+        }
+    }
 
     ab_shutdown();
 
     printf("═══════════════════════════════════════════════════════════\n");
+    printf("Summary: %d test(s) ran, %d CHECK(s), %d failure(s)\n",
+           N_TESTS, checks_run, failures);
     if (failures == 0) {
         printf("✓ All device-API tests passed\n");
         return 0;
