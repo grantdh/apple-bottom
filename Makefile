@@ -185,8 +185,9 @@ test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api
 	@echo "✓ All tests passed!"
 
 # Ghost-test detector: meta-test for the registry per-test delta guard.
-# The inner binary returns non-zero on success (ghost detected); the wrapper
-# inverts the exit code so make sees green-on-success.
+# The inner binary returns the distinguished code 42 on success (ghost
+# detected gracefully). The wrapper requires that exact code so a future
+# crash (SIGSEGV=139, SIGABRT=134, etc.) cannot masquerade as META-PASS.
 $(BUILD)/test_ghost_detection: tests/test_ghost_detection.c | $(BUILD)
 	$(CC) $(CFLAGS) -Itests $< -o $@
 	@echo "Built: $@"
@@ -195,13 +196,17 @@ $(BUILD)/test_ghost_detection: tests/test_ghost_detection.c | $(BUILD)
 test-ghost-detection: $(BUILD)/test_ghost_detection
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
-	@echo "Running ghost-test detector (expecting non-zero exit)..."
+	@echo "Running ghost-test detector (expecting exit 42)..."
 	@echo "═══════════════════════════════════════════════════════════════════"
-	@if ./$(BUILD)/test_ghost_detection; then \
+	@./$(BUILD)/test_ghost_detection; rc=$$?; \
+	if [ $$rc -eq 42 ]; then \
+		echo "META-PASS: ghost-test detector fired correctly (rc=42)"; \
+	elif [ $$rc -eq 0 ]; then \
 		echo "META-FAIL: ghost-test detector did NOT fire — registry per-test delta is broken"; \
 		exit 1; \
 	else \
-		echo "META-PASS: ghost-test detector fired correctly"; \
+		echo "META-FAIL: unexpected exit code $$rc (signal? abort?)"; \
+		exit 1; \
 	fi
 
 test-verification: $(BUILD)/test_convergence
