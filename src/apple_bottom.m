@@ -281,12 +281,18 @@ inline uint2 morton_remap(uint2 tgid, uint gridW, uint gridH) {
     // to out-of-bounds (x,y), and falling back to identity causes collisions:
     // some output blocks get computed twice, others never — catastrophic errors.
     //
-    // Guard: require both dims to be powers of 2 AND >= 4.
-    // This covers the common case (N = 1024, 2048, 4096) where Morton gives
-    // ~15% bandwidth savings, and safely disables it for all other sizes.
+    // Even with power-of-2 dims, W*H = 2^n gives x the ceil(n/2) even bits and
+    // y the floor(n/2) odd bits, so the curve covers the grid only when
+    // gridW == gridH or gridW == 2*gridH. Other shapes (e.g. the 4×8 grid of
+    // a 512×256 C) leave tiles unwritten.
+    //
+    // Guard: require both dims to be powers of 2, >= 4, and one of those two
+    // aspect ratios. This covers the common case (N = 1024, 2048, 4096) where
+    // Morton gives ~15% bandwidth savings, and disables it for all other sizes.
     bool wPow2 = (gridW & (gridW - 1)) == 0;
     bool hPow2 = (gridH & (gridH - 1)) == 0;
     if (!wPow2 || !hPow2 || gridW < 4 || gridH < 4) return tgid;
+    if (gridW != gridH && gridW != 2 * gridH) return tgid;
 
     // Linearize the 2D threadgroup position
     uint linear = tgid.y * gridW + tgid.x;
@@ -1048,6 +1054,27 @@ ABStatus ab_matrix_copy(ABMatrix src, ABMatrix dst) {
 // committing a command buffer. Used by fused ZGEMM and batch API to amortize
 // command buffer overhead across multiple operations.
 
+// dd_dgemm (64x64 tiles, C = A*B) with all of its buffers bound, including the
+// Morton grid dims at 6/7. ab_dgemm and ab_dgemm_async always use this kernel,
+// so their results are bitwise identical.
+static void encode_dgemm_square_dispatch(id<MTLComputeCommandEncoder> encoder,
+                                          ABContextImpl* ctx,
+                                          ABMatrix A, ABMatrix B, ABMatrix C) {
+    uint32_t M = A->rows, N = B->cols, K = A->cols;
+    [encoder setComputePipelineState:ctx.dgemmPipeline];
+    [encoder setBuffer:A->buffer offset:0 atIndex:0];
+    [encoder setBuffer:B->buffer offset:0 atIndex:1];
+    [encoder setBuffer:C->buffer offset:0 atIndex:2];
+    [encoder setBytes:&M length:sizeof(M) atIndex:3];
+    [encoder setBytes:&N length:sizeof(N) atIndex:4];
+    [encoder setBytes:&K length:sizeof(K) atIndex:5];
+    uint32_t gridW = (N + 63) / 64, gridH = (M + 63) / 64;
+    [encoder setBytes:&gridW length:sizeof(gridW) atIndex:6];
+    [encoder setBytes:&gridH length:sizeof(gridH) atIndex:7];
+    [encoder dispatchThreadgroups:MTLSizeMake(gridW, gridH, 1)
+             threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+}
+
 static void encode_dgemm_dispatch(id<MTLComputeCommandEncoder> encoder,
                                    ABContextImpl* ctx,
                                    ABMatrix A, ABMatrix B, ABMatrix C) {
@@ -1076,18 +1103,7 @@ static void encode_dgemm_dispatch(id<MTLComputeCommandEncoder> encoder,
         [encoder dispatchThreadgroups:MTLSizeMake(gridW, gridH, 1)
                  threadsPerThreadgroup:MTLSizeMake(8, 32, 1)];
     } else {
-        [encoder setComputePipelineState:ctx.dgemmPipeline];
-        [encoder setBuffer:A->buffer offset:0 atIndex:0];
-        [encoder setBuffer:B->buffer offset:0 atIndex:1];
-        [encoder setBuffer:C->buffer offset:0 atIndex:2];
-        [encoder setBytes:&M length:sizeof(M) atIndex:3];
-        [encoder setBytes:&N length:sizeof(N) atIndex:4];
-        [encoder setBytes:&K length:sizeof(K) atIndex:5];
-        uint32_t gridW = (N + 63) / 64, gridH = (M + 63) / 64;
-        [encoder setBytes:&gridW length:sizeof(gridW) atIndex:6];
-        [encoder setBytes:&gridH length:sizeof(gridH) atIndex:7];
-        [encoder dispatchThreadgroups:MTLSizeMake(gridW, gridH, 1)
-                 threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+        encode_dgemm_square_dispatch(encoder, ctx, A, B, C);
     }
 }
 
@@ -1151,22 +1167,11 @@ ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C) {
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return AB_ERROR_NO_DEVICE;
     
-    uint32_t M = A->rows, N = B->cols, K = A->cols;
     double t0 = get_time_ms();
     
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
-    [encoder setComputePipelineState:ctx.dgemmPipeline];
-    [encoder setBuffer:A->buffer offset:0 atIndex:0];
-    [encoder setBuffer:B->buffer offset:0 atIndex:1];
-    [encoder setBuffer:C->buffer offset:0 atIndex:2];
-    [encoder setBytes:&M length:sizeof(M) atIndex:3];
-    [encoder setBytes:&N length:sizeof(N) atIndex:4];
-    [encoder setBytes:&K length:sizeof(K) atIndex:5];
-    uint32_t gridW = (N + 63) / 64, gridH = (M + 63) / 64;
-    [encoder setBytes:&gridW length:sizeof(gridW) atIndex:6];
-    [encoder setBytes:&gridH length:sizeof(gridH) atIndex:7];
-    [encoder dispatchThreadgroups:MTLSizeMake(gridW, gridH, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    encode_dgemm_square_dispatch(encoder, ctx, A, B, C);
     [encoder endEncoding];
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
@@ -2420,22 +2425,9 @@ ABFuture ab_dgemm_async(ABMatrix A, ABMatrix B, ABMatrix C) {
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return NULL;
 
-    uint32_t M = A->rows, N = B->cols, K = A->cols;
-
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
-
-    [encoder setComputePipelineState:ctx.dgemmPipeline];
-    [encoder setBuffer:A->buffer offset:0 atIndex:0];
-    [encoder setBuffer:B->buffer offset:0 atIndex:1];
-    [encoder setBuffer:C->buffer offset:0 atIndex:2];
-    [encoder setBytes:&M length:sizeof(M) atIndex:3];
-    [encoder setBytes:&N length:sizeof(N) atIndex:4];
-    [encoder setBytes:&K length:sizeof(K) atIndex:5];
-
-    MTLSize grid = MTLSizeMake((N + 63) / 64, (M + 63) / 64, 1);
-    MTLSize block = MTLSizeMake(16, 16, 1);
-    [encoder dispatchThreadgroups:grid threadsPerThreadgroup:block];
+    encode_dgemm_square_dispatch(encoder, ctx, A, B, C);
     [encoder endEncoding];
 
     [cmdBuf commit];

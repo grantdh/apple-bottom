@@ -40,11 +40,11 @@ It does **not** catch:
 ## Coverage status
 
 - **Registry-migrated (PR-1, ghost-guarded):**
-  - `tests/test_correctness.c` — 66 tests
+  - `tests/test_correctness.c` — 69 tests
   - `tests/test_chaos.c` — 18 tests
   - `tests/test_device_api.c` — 11 tests (7 unparameterized + 4
     wrappers around 2 parameterized helpers)
-  - `tests/test_blas_abi.c` — 16 suites (622 cases), see below
+  - `tests/test_blas_abi.c` — 16 suites (631 cases), see below
 
 - **Pending PR-1.5 (still single-main, no ghost-guard):**
   - `tests/test_precision.c` — needs decomposition strategy

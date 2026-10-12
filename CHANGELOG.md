@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 _TBD following Si64 benchmark campaign._
 
+### Fixed
+- **Morton remap dropped output tiles on non-square power-of-two grids**
+  (K-P0-1). The remap is now applied only when it is a bijection
+  (gridW == gridH or gridW == 2·gridH). Before, shapes such as 512×256,
+  1024×256 and tall-skinny 1024×64 / 2048×128 returned AB_OK with tiles of C
+  unwritten, which also corrupted ZGEMM, the BLAS wrappers, MPIR and DTRSM.
+- **`ab_dgemm_async` left kernel buffers 6/7 unbound** (K-P1-3), which
+  aborts under Metal API validation. It now shares the dispatch helper with
+  `ab_dgemm`, so the two give bitwise-identical results.
+
 ## [1.3.0] - 2026-04-18
 
 ### Added (Phase 6)

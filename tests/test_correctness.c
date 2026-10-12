@@ -1909,6 +1909,159 @@ static void test_morton_qe_realistic_dims(void) {
     else { char buf[80]; snprintf(buf, 80, "worst=%.2e across %d shapes", worst_err, nshapes); FAIL(buf); }
 }
 
+// K-P0-1: power-of-2 tile grids that are neither square nor 2:1 wide, where
+// the Morton remap is not a bijection and used to leave tiles of C unwritten.
+// 64x64 tiles: 512x256 (grid 4x8), 256x1024 (16x4), 1024x256 (4x16).
+// Tall-skinny 128x16 tiles (ab_dgemm_scaled with M >= 4N): 1024x64 (4x8),
+// 2048x128 (8x16). ab_dgemm_async also covers K-P1-3 under MTL_DEBUG_LAYER=1.
+typedef enum { MR_DGEMM, MR_DGEMM_SCALED, MR_DGEMM_ASYNC } MortonRectOp;
+
+static double morton_rect_err(MortonRectOp op, int M, int N, int K) {
+    double* A = malloc((size_t)M * K * sizeof(double));
+    double* B = malloc((size_t)K * N * sizeof(double));
+    double* C_gpu = malloc((size_t)M * N * sizeof(double));
+    double* C_ref = malloc((size_t)M * N * sizeof(double));
+
+    srand48(7 + M + N);
+    for (int i = 0; i < M * K; i++) A[i] = drand48() * 2.0 - 1.0;
+    for (int i = 0; i < K * N; i++) B[i] = drand48() * 2.0 - 1.0;
+    for (int i = 0; i < M * N; i++) C_gpu[i] = 12345.0;  // poison: unwritten tiles keep it
+
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                M, N, K, 1.0, A, K, B, N, 0.0, C_ref, N);
+
+    ABMatrix mA = ab_matrix_create(M, K);
+    ABMatrix mB = ab_matrix_create(K, N);
+    ABMatrix mC = ab_matrix_create(M, N);
+    ab_matrix_upload(mA, A, true);
+    ab_matrix_upload(mB, B, true);
+    ab_matrix_upload(mC, C_gpu, true);
+
+    ABStatus s = AB_ERROR_INVALID_ARG;
+    if (op == MR_DGEMM) {
+        s = ab_dgemm(mA, mB, mC);
+    } else if (op == MR_DGEMM_SCALED) {
+        s = ab_dgemm_scaled(1.0, mA, mB, 0.0, mC);
+    } else {
+        ABFuture f = ab_dgemm_async(mA, mB, mC);
+        if (f) { s = ab_future_wait(f); ab_future_destroy(f); }
+    }
+    ab_matrix_download(mC, C_gpu, true);
+
+    double err = (s == AB_OK) ? frob_rel_err_rect(C_gpu, C_ref, M, N) : INFINITY;
+
+    ab_matrix_destroy(mA); ab_matrix_destroy(mB); ab_matrix_destroy(mC);
+    free(A); free(B); free(C_gpu); free(C_ref);
+    return err;
+}
+
+static void test_morton_rect_pow2_grids(void) {
+    TEST("K-P0-1: DGEMM non-square pow2 tile grids");
+    ab_init();
+
+    static const struct { int M, N; } shapes[] = {
+        {512, 256}, {256, 1024}, {1024, 256}, {1024, 64}, {2048, 128},
+    };
+    static const MortonRectOp ops[] = {MR_DGEMM, MR_DGEMM_SCALED, MR_DGEMM_ASYNC};
+
+    int all_ok = 1;
+    double worst_err = 0;
+    for (size_t si = 0; si < TEST_REGISTRY_SIZE(shapes); si++) {
+        for (size_t oi = 0; oi < TEST_REGISTRY_SIZE(ops); oi++) {
+            double err = morton_rect_err(ops[oi], shapes[si].M, shapes[si].N, 64);
+            if (!(err < 1e-13)) all_ok = 0;
+            if (err > worst_err) worst_err = err;
+        }
+    }
+
+    ab_shutdown();
+
+    if (all_ok) PASS();
+    else { char buf[80]; snprintf(buf, 80, "worst=%.2e", worst_err); FAIL(buf); }
+}
+
+// K-P0-1 downstream: the MPIR residual (1024x64) and the first DTRSM trailing
+// update (960x64) both run on the tall-skinny 4x8 grid.
+static void test_morton_mpir_panel(void) {
+    TEST("K-P0-1: MPIR N=1024 NRHS=64");
+    ab_init();
+    int N = 1024, NRHS = 64;
+
+    double* A_data = malloc((size_t)N * N * sizeof(double));
+    double* X_true = malloc((size_t)N * NRHS * sizeof(double));
+    double* B_data = malloc((size_t)N * NRHS * sizeof(double));
+
+    srand48(1024);
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++)
+            A_data[i * N + j] = drand48() * 2 - 1;
+        A_data[i * N + i] += 10.0 * N;
+    }
+    for (int i = 0; i < N * NRHS; i++)
+        X_true[i] = drand48() * 2 - 1;
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                N, NRHS, N, 1.0, A_data, N, X_true, NRHS, 0.0, B_data, NRHS);
+
+    ABMatrix mA = ab_matrix_create(N, N);
+    ABMatrix mB = ab_matrix_create(N, NRHS);
+    ab_matrix_upload(mA, A_data, true);
+    ab_matrix_upload(mB, B_data, true);
+
+    ABStatus s = ab_dgesv_mpir(mA, mB);
+
+    double* X_sol = malloc((size_t)N * NRHS * sizeof(double));
+    ab_matrix_download(mB, X_sol, true);
+    double rel_err = frob_rel_err_rect(X_sol, X_true, N, NRHS);
+
+    ab_matrix_destroy(mA); ab_matrix_destroy(mB);
+    free(A_data); free(X_true); free(B_data); free(X_sol);
+    ab_shutdown();
+
+    if (s == AB_OK && rel_err < 1e-13) PASS();
+    else { char buf[64]; snprintf(buf, 64, "s=%d err=%.2e", s, rel_err); FAIL(buf); }
+}
+
+static void test_morton_dtrsm_panel(void) {
+    TEST("K-P0-1: DTRSM N=1024 NRHS=64");
+    ab_init();
+    int N = 1024, NRHS = 64;
+
+    double* A_data = malloc((size_t)N * N * sizeof(double));
+    double* X_true = malloc((size_t)N * NRHS * sizeof(double));
+    double* B_data = malloc((size_t)N * NRHS * sizeof(double));
+
+    // Unit-scale diagonal, off-diagonal O(1/N): well conditioned at any N.
+    srand48(2048);
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < N; j++) {
+            if (j < i) A_data[i * N + j] = (drand48() * 2 - 1) / N;
+            else if (j == i) A_data[i * N + j] = 1.0 + drand48();
+            else A_data[i * N + j] = 0.0;
+        }
+    for (int i = 0; i < N * NRHS; i++)
+        X_true[i] = drand48() * 2 - 1;
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                N, NRHS, N, 1.0, A_data, N, X_true, NRHS, 0.0, B_data, NRHS);
+
+    ABMatrix mA = ab_matrix_create(N, N);
+    ABMatrix mB = ab_matrix_create(N, NRHS);
+    ab_matrix_upload(mA, A_data, true);
+    ab_matrix_upload(mB, B_data, true);
+
+    ABStatus s = ab_dtrsm(AB_LEFT, AB_LOWER, AB_NO_TRANS, AB_NON_UNIT, 1.0, mA, mB);
+
+    double* X_sol = malloc((size_t)N * NRHS * sizeof(double));
+    ab_matrix_download(mB, X_sol, true);
+    double rel_err = frob_rel_err_rect(X_sol, X_true, N, NRHS);
+
+    ab_matrix_destroy(mA); ab_matrix_destroy(mB);
+    free(A_data); free(X_true); free(B_data); free(X_sol);
+    ab_shutdown();
+
+    if (s == AB_OK && rel_err < 1e-13) PASS();
+    else { char buf[64]; snprintf(buf, 64, "s=%d err=%.2e", s, rel_err); FAIL(buf); }
+}
+
 // =============================================================================
 // Main
 // =============================================================================
@@ -1980,6 +2133,9 @@ static const TestCase TESTS[] = {
     {"test_morton_dgemm_1536",                test_morton_dgemm_1536},
     {"test_morton_zgemm_768",                 test_morton_zgemm_768},
     {"test_morton_qe_realistic_dims",         test_morton_qe_realistic_dims},
+    {"test_morton_rect_pow2_grids",           test_morton_rect_pow2_grids},
+    {"test_morton_mpir_panel",                test_morton_mpir_panel},
+    {"test_morton_dtrsm_panel",               test_morton_dtrsm_panel},
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
 
