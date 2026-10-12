@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "blas_trans.h"
 #include "profiling/blas_profiler.h"
 
 /* Forward declarations — GPU-path DD kernels live in blas_wrapper.c */
@@ -56,13 +57,6 @@ static uint64_t fb_get_crossover(void) {
     return _fb_cross;
 }
 
-/* Convert Fortran trans char to CBLAS enum. */
-static inline enum CBLAS_TRANSPOSE trans_to_cblas(char t) {
-    if (t == 'N' || t == 'n') return CblasNoTrans;
-    if (t == 'T' || t == 't') return CblasTrans;
-    return CblasConjTrans;  /* 'C'/'c' */
-}
-
 /* =============================================================================
  * dgemm_ — shadows Accelerate's dgemm_
  * =============================================================================
@@ -87,7 +81,7 @@ void dgemm_(
                       *alpha, A, *ldA, B, *ldB, *beta, C, *ldC);
     } else {
         cblas_dgemm(CblasColMajor,
-                    trans_to_cblas(*transA), trans_to_cblas(*transB),
+                    ab_blas_trans(*transA, false), ab_blas_trans(*transB, false),
                     *M, *N, *K,
                     *alpha, A, *ldA, B, *ldB, *beta, C, *ldC);
     }
@@ -122,7 +116,7 @@ void zgemm_(
                       *alpha, A, *ldA, B, *ldB, *beta, C, *ldC);
     } else {
         cblas_zgemm(CblasColMajor,
-                    trans_to_cblas(*transA), trans_to_cblas(*transB),
+                    ab_blas_trans(*transA, true), ab_blas_trans(*transB, true),
                     *M, *N, *K,
                     alpha, A, *ldA, B, *ldB, beta, C, *ldC);
     }
