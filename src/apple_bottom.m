@@ -871,7 +871,8 @@ static void convert_dd_to_fp64_parallel(const DDFloat* src, double* dst, size_t 
 struct ABMatrix_s {
     id<MTLBuffer> buffer;
     int rows, cols;
-    size_t count;
+    size_t count;     // logical elements, rows * cols
+    size_t capacity;  // elements the buffer holds (>= count after pool reuse)
     bool uploaded;
 };
 
@@ -888,11 +889,35 @@ struct ABSession_s {
 };
 
 // =============================================================================
+// Autorelease Scope for Public Entry Points
+// =============================================================================
+// Metal returns command buffers and encoders autoreleased, and Fortran or C
+// hosts never drain an autorelease pool, so each GPU call used to leak them
+// for the life of the process (~170 B per call). Entry points that create
+// command buffers or encoders open this scope first. It is @autoreleasepool
+// as RAII: push/pop is the runtime ABI @autoreleasepool lowers to (Clang ARC
+// spec, "Runtime support"), and the destructor also covers early returns and
+// goto-cleanup paths without re-indenting every function body.
+extern "C" void *objc_autoreleasePoolPush(void);
+extern "C" void objc_autoreleasePoolPop(void *pool);
+
+namespace {
+struct ABAutoreleaseScope {
+    void *pool = objc_autoreleasePoolPush();
+    ABAutoreleaseScope() = default;
+    ABAutoreleaseScope(const ABAutoreleaseScope&) = delete;
+    ABAutoreleaseScope& operator=(const ABAutoreleaseScope&) = delete;
+    ~ABAutoreleaseScope() { objc_autoreleasePoolPop(pool); }
+};
+}  // namespace
+
+// =============================================================================
 // Public API: Initialization
 // =============================================================================
 
 // Thread-safe initialization with support for shutdown/reinit
 ABStatus ab_init(void) {
+    ABAutoreleaseScope pool;
     os_unfair_lock_lock(&g_init_lock);
 
     if (g_initialized) {
@@ -951,6 +976,7 @@ ABMatrix ab_matrix_create(int rows, int cols) {
     m->rows = rows;
     m->cols = cols;
     m->count = (size_t)rows * cols;
+    m->capacity = m->count;
     m->uploaded = false;
 
     // Check for allocation size overflow
@@ -1012,6 +1038,7 @@ ABStatus ab_matrix_download(ABMatrix m, double* data, bool parallel) {
 }
 
 ABStatus ab_matrix_zero(ABMatrix m) {
+    ABAutoreleaseScope pool;
     if (!m) return AB_ERROR_INVALID_ARG;
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return AB_ERROR_NO_DEVICE;
@@ -1029,6 +1056,7 @@ ABStatus ab_matrix_zero(ABMatrix m) {
 }
 
 ABStatus ab_matrix_copy(ABMatrix src, ABMatrix dst) {
+    ABAutoreleaseScope pool;
     if (!src || !dst) return AB_ERROR_INVALID_ARG;
     if (src->count != dst->count) return AB_ERROR_DIMENSION_MISMATCH;
     ABContextImpl* ctx = [ABContextImpl shared];
@@ -1162,6 +1190,7 @@ static void encode_elemwise_dispatch(id<MTLComputeCommandEncoder> encoder,
 // =============================================================================
 
 ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C) {
+    ABAutoreleaseScope pool;
     if (!A || !B || !C) return AB_ERROR_INVALID_ARG;
     if (A->cols != B->rows || A->rows != C->rows || B->cols != C->cols) return AB_ERROR_DIMENSION_MISMATCH;
     ABContextImpl* ctx = [ABContextImpl shared];
@@ -1175,6 +1204,7 @@ ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C) {
     [encoder endEncoding];
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
+    if (cmdBuf.status == MTLCommandBufferStatusError) return AB_ERROR_KERNEL_FAILED;
 
     stats_add_kernel(get_time_ms() - t0);
     stats_add_dgemm();
@@ -1182,6 +1212,7 @@ ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C) {
 }
 
 ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C) {
+    ABAutoreleaseScope pool;
     if (!A || !B || !C) return AB_ERROR_INVALID_ARG;
     if (A->cols != B->rows || A->rows != C->rows || B->cols != C->cols) return AB_ERROR_DIMENSION_MISMATCH;
     ABContextImpl* ctx = [ABContextImpl shared];
@@ -1229,6 +1260,7 @@ ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMa
     [encoder endEncoding];
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
+    if (cmdBuf.status == MTLCommandBufferStatusError) return AB_ERROR_KERNEL_FAILED;
 
     stats_add_kernel(get_time_ms() - t0);
     stats_add_dgemm();
@@ -1236,6 +1268,7 @@ ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMa
 }
 
 ABStatus ab_matrix_add(ABMatrix A, ABMatrix B, ABMatrix C) {
+    ABAutoreleaseScope pool;
     if (!A || !B || !C) return AB_ERROR_INVALID_ARG;
     if (A->count != B->count || A->count != C->count) return AB_ERROR_DIMENSION_MISMATCH;
     ABContextImpl* ctx = [ABContextImpl shared];
@@ -1257,6 +1290,7 @@ ABStatus ab_matrix_add(ABMatrix A, ABMatrix B, ABMatrix C) {
 }
 
 ABStatus ab_matrix_sub(ABMatrix A, ABMatrix B, ABMatrix C) {
+    ABAutoreleaseScope pool;
     if (!A || !B || !C) return AB_ERROR_INVALID_ARG;
     if (A->count != B->count || A->count != C->count) return AB_ERROR_DIMENSION_MISMATCH;
     ABContextImpl* ctx = [ABContextImpl shared];
@@ -1278,6 +1312,7 @@ ABStatus ab_matrix_sub(ABMatrix A, ABMatrix B, ABMatrix C) {
 }
 
 ABStatus ab_matrix_scale(double alpha, ABMatrix A) {
+    ABAutoreleaseScope pool;
     if (!A) return AB_ERROR_INVALID_ARG;
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return AB_ERROR_NO_DEVICE;
@@ -1311,6 +1346,7 @@ ABStatus ab_zgemm_ex(
     ABMatrix Br, ABMatrix Bi,
     ABMatrix Cr, ABMatrix Ci
 ) {
+    ABAutoreleaseScope pool;
     if (!Ar || !Ai || !Br || !Bi || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
 
     ABContextImpl* ctx = [ABContextImpl shared];
@@ -1386,6 +1422,10 @@ ABStatus ab_zgemm_ex(
         [enc endEncoding];
         [cmdBuf commit];
         [cmdBuf waitUntilCompleted];
+        if (cmdBuf.status == MTLCommandBufferStatusError) {
+            status = AB_ERROR_KERNEL_FAILED;
+            goto cleanup;
+        }
 
         A_work_r->uploaded = true;
         A_work_i->uploaded = true;
@@ -1440,6 +1480,10 @@ ABStatus ab_zgemm_ex(
         [enc endEncoding];
         [cmdBuf commit];
         [cmdBuf waitUntilCompleted];
+        if (cmdBuf.status == MTLCommandBufferStatusError) {
+            status = AB_ERROR_KERNEL_FAILED;
+            goto cleanup;
+        }
 
         B_work_r->uploaded = true;
         B_work_i->uploaded = true;
@@ -1620,6 +1664,7 @@ ABStatus ab_zgemm(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix C
 }
 
 ABStatus ab_dsyrk(ABMatrix A, ABMatrix C) {
+    ABAutoreleaseScope pool;
     if (!A || !C) return AB_ERROR_INVALID_ARG;
     if (A->rows != C->rows || C->rows != C->cols) return AB_ERROR_DIMENSION_MISMATCH;
     ABContextImpl* ctx = [ABContextImpl shared];
@@ -2068,6 +2113,7 @@ mpir_cleanup:
 }
 
 ABStatus ab_zherk(ABMatrix Ar, ABMatrix Ai, ABMatrix Cr, ABMatrix Ci) {
+    ABAutoreleaseScope pool;
     if (!Ar || !Ai || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
 
     int N = Ar->rows;
@@ -2159,6 +2205,7 @@ ABStatus ab_dgemm_batched(
     int batch_count,
     ABMatrix* As, ABMatrix* Bs, ABMatrix* Cs
 ) {
+    ABAutoreleaseScope pool;
     if (batch_count <= 0) return AB_OK;
     if (!As || !Bs || !Cs) return AB_ERROR_INVALID_ARG;
 
@@ -2196,6 +2243,7 @@ ABStatus ab_zgemm_batched(
     ABMatrix* Brs, ABMatrix* Bis,
     ABMatrix* Crs, ABMatrix* Cis
 ) {
+    ABAutoreleaseScope pool;
     if (batch_count <= 0) return AB_OK;
     if (!Ars || !Ais || !Brs || !Bis || !Crs || !Cis) return AB_ERROR_INVALID_ARG;
 
@@ -2345,6 +2393,7 @@ void ab_pool_destroy(ABMemoryPool pool) {
 
 ABMatrix ab_pool_get_matrix(ABMemoryPool pool, int rows, int cols) {
     if (!pool) return ab_matrix_create(rows, cols);
+    if (rows <= 0 || cols <= 0) return NULL;
     size_t needed = (size_t)rows * cols;
     
     // Look for available matrix with matching size
@@ -2363,10 +2412,11 @@ ABMatrix ab_pool_get_matrix(ABMemoryPool pool, int rows, int cols) {
     for (int i = 0; i < pool->count; i++) {
         if (!pool->entries[i].in_use && pool->entries[i].matrix) {
             ABMatrix m = pool->entries[i].matrix;
-            if (m->count >= needed) {
+            if (m->capacity >= needed) {
                 pool->entries[i].in_use = true;
                 m->rows = rows;
                 m->cols = cols;
+                m->count = needed;  // upload/download/elementwise ops use count
                 m->uploaded = false;
                 return m;
             }
@@ -2417,6 +2467,7 @@ static ABFuture create_future_with_buffer(id<MTLCommandBuffer> cmdBuffer) {
 }
 
 ABFuture ab_dgemm_async(ABMatrix A, ABMatrix B, ABMatrix C) {
+    ABAutoreleaseScope pool;
     if (!A || !B || !C) return NULL;
     if (A->cols != B->rows) return NULL;
     if (A->rows != C->rows || B->cols != C->cols) return NULL;
@@ -2439,6 +2490,7 @@ ABFuture ab_dgemm_async(ABMatrix A, ABMatrix B, ABMatrix C) {
 
 ABFuture ab_zgemm_async(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
                         ABMatrix Cr, ABMatrix Ci) {
+    ABAutoreleaseScope pool;
     id<MTLCommandBuffer> cmdBuf = nil;
     ABStatus s = ab_zgemm_internal_async(Ar, Ai, Br, Bi, Cr, Ci, &cmdBuf);
     if (s != AB_OK || !cmdBuf) {
@@ -2513,6 +2565,7 @@ struct ABBatch_s {
 };
 
 ABBatch ab_batch_create(void) {
+    ABAutoreleaseScope pool;
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return NULL;
 
@@ -2568,6 +2621,7 @@ ABStatus ab_batch_dgemm_scaled(ABBatch batch, double alpha, ABMatrix A, ABMatrix
 
 ABStatus ab_batch_zgemm(ABBatch batch, ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
                          ABMatrix Cr, ABMatrix Ci) {
+    ABAutoreleaseScope pool;
     if (!batch || !Ar || !Ai || !Br || !Bi || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
     if (batch->committed) return AB_ERROR_INVALID_ARG;
 
@@ -2622,6 +2676,7 @@ ABStatus ab_batch_zgemm(ABBatch batch, ABMatrix Ar, ABMatrix Ai, ABMatrix Br, AB
 }
 
 ABStatus ab_batch_barrier(ABBatch batch) {
+    ABAutoreleaseScope pool;
     if (!batch) return AB_ERROR_INVALID_ARG;
     if (batch->committed) return AB_ERROR_INVALID_ARG;
 

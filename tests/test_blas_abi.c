@@ -154,24 +154,6 @@ typedef struct {
 } XfailEntry;
 
 static const XfailEntry XFAIL[] = {
-    // ab_dgemm_blas: GPU path transposes on anything but 'N'; CPU branch only on 'T'.
-    {"ab_dgemm_*/gpu/n?/*/*/*",                 "K-P0-3/H-P1-1"},
-    {"ab_dgemm_*/gpu/?n/*/*/*",                 "K-P0-3/H-P1-1"},
-    {"ab_dgemm_blas/cpu/[Ctc]?/*/*/*",          "K-P0-3/H-P1-1"},
-    {"ab_dgemm_blas/cpu/?[Ctc]/*/*/*",          "K-P0-3/H-P1-1"},
-    // ab_zgemm_blas: lowercase flags ('n' transposes, 'c' drops the conjugate;
-    // CPU branch maps 'n' and 't' to ConjTrans).
-    {"ab_zgemm_*/gpu/[ntc]?/*/*/*",             "K-P0-3/H-P0-2"},
-    {"ab_zgemm_*/gpu/?[ntc]/*/*/*",             "K-P0-3/H-P0-2"},
-    {"ab_zgemm_blas/cpu/[nt]?/*/*/*",           "K-P0-3"},
-    {"ab_zgemm_blas/cpu/?[nt]/*/*/*",           "K-P0-3"},
-    // ab_zgemm_blas GPU path repacks op(A)/op(B) with stored dims: transposed
-    // A with M != K or B with N != K gives beta*C or SIGSEGV (QE cegterg).
-    {"ab_zgemm_*/gpu/[TC]?/*/*/*",              "H-P0-2"},
-    {"ab_zgemm_*/gpu/?[TC]/*/*/*",              "H-P0-2"},
-    {"ab_zgemm_*/auto/CN/150x150x2000/*/*",     "H-P0-2"},
-    // alpha == 0 still reads A and B on the GPU path (NaN propagates).
-    {"ab_[dz]gemm_*/gpu/*/*/*/a0nanAB",         "H-P1-7"},
     // No lazy init: AB_MODE=gpu without ab_init() silently runs cblas.
     {"*/gpu-noinit/*/*/*/*",                    "H-P1-2"},
     // dgemm_/zgemm_ are exported as $NEWLAPACK variants only; Fortran binds Accelerate.

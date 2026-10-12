@@ -12,6 +12,8 @@
 #include <stdio.h>
 #include <time.h>
 
+#include "blas_trans.h"
+
 // Per-stage profiling for ab_{d,z}gemm_blas, gated on AB_PROFILE=1.
 // Zero cost when disabled (single cached env read, single branch).
 // Prints stage breakdown to stderr at the end of each call.
@@ -132,6 +134,74 @@ static bool ab_use_gpu_complex(int m, int n, int k) {
 }
 
 // =============================================================================
+// Host-side helpers shared by the BLAS-ABI entry points
+// =============================================================================
+// Inputs are column-major with leading dimension ld; ABMatrix is row-major.
+// All index arithmetic is size_t: ld*cols can exceed 2^31 even when every
+// dimension is within AB_MAX_DIMENSION.
+
+// Pack op(X), rows x cols, into row-major dst. op(X)[i][j] is X[j*ld+i] for
+// CblasNoTrans and X[i*ld+j] otherwise; each loop order walks X contiguously.
+static void pack_op_real(enum CBLAS_TRANSPOSE t, const double* X, int ld,
+                         int rows, int cols, double* dst) {
+    size_t r = (size_t)rows, c = (size_t)cols, l = (size_t)ld;
+    if (t == CblasNoTrans) {
+        for (size_t j = 0; j < c; j++)
+            for (size_t i = 0; i < r; i++)
+                dst[i * c + j] = X[j * l + i];
+    } else {
+        for (size_t i = 0; i < r; i++)
+            for (size_t j = 0; j < c; j++)
+                dst[i * c + j] = X[i * l + j];
+    }
+}
+
+// Complex variant: split op(X) into row-major real and imaginary parts,
+// conjugating for CblasConjTrans.
+static void pack_op_complex(enum CBLAS_TRANSPOSE t, const double complex* X, int ld,
+                            int rows, int cols, double* re, double* im) {
+    size_t r = (size_t)rows, c = (size_t)cols, l = (size_t)ld;
+    if (t == CblasNoTrans) {
+        for (size_t j = 0; j < c; j++)
+            for (size_t i = 0; i < r; i++) {
+                double complex val = X[j * l + i];
+                re[i * c + j] = creal(val);
+                im[i * c + j] = cimag(val);
+            }
+    } else {
+        bool conjugate = (t == CblasConjTrans);
+        for (size_t i = 0; i < r; i++)
+            for (size_t j = 0; j < c; j++) {
+                double complex val = X[i * l + j];
+                if (conjugate) val = conj(val);
+                re[i * c + j] = creal(val);
+                im[i * c + j] = cimag(val);
+            }
+    }
+}
+
+// Whole-call CPU paths (Accelerate cblas, column-major). Used below the GPU
+// threshold, for BLAS quick returns and invalid flags, and as the fallback
+// when any GPU step fails before C is written, so C always gets a correct
+// result.
+static void dgemm_cpu(enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
+                      int M, int N, int K, double alpha,
+                      const double* A, int ldA, const double* B, int ldB,
+                      double beta, double* C, int ldC) {
+    _ab_last_path = "cpu";
+    cblas_dgemm(CblasColMajor, ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+}
+
+static void zgemm_cpu(enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
+                      int M, int N, int K, double complex alpha,
+                      const double complex* A, int ldA,
+                      const double complex* B, int ldB,
+                      double complex beta, double complex* C, int ldC) {
+    _ab_last_path = "cpu";
+    cblas_zgemm(CblasColMajor, ta, tb, M, N, K, &alpha, A, ldA, B, ldB, &beta, C, ldC);
+}
+
+// =============================================================================
 // BLAS-compatible ZGEMM - this is what Fortran calls
 // Handles: transA, transB, alpha, beta, leading dimensions
 // =============================================================================
@@ -144,119 +214,72 @@ void ab_zgemm_blas(
     double complex beta,
     double complex* C, int ldC
 ) {
-    // AMX path for small matrices (heterogeneous dispatch)
-    if (!ab_use_gpu_complex(M, N, K)) {
-        cblas_zgemm(CblasColMajor,
-                    transA == 'N' ? CblasNoTrans :
-                    transA == 'T' ? CblasTrans : CblasConjTrans,
-                    transB == 'N' ? CblasNoTrans :
-                    transB == 'T' ? CblasTrans : CblasConjTrans,
-                    M, N, K, &alpha, A, ldA, B, ldB, &beta, C, ldC);
+    enum CBLAS_TRANSPOSE ta = ab_blas_trans(transA, true);
+    enum CBLAS_TRANSPOSE tb = ab_blas_trans(transB, true);
+
+    // AMX path for small matrices (heterogeneous dispatch); also the BLAS
+    // quick return for alpha == 0 (A and B must not be read) and invalid flags.
+    if (ta == AB_TRANS_INVALID || tb == AB_TRANS_INVALID || alpha == 0.0 ||
+        !ab_use_gpu_complex(M, N, K)) {
+        zgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }
 
-    // GPU path: compute A*B on GPU, apply alpha/beta in epilogue
+    // GPU path: compute op(A)*op(B) on GPU, apply alpha/beta in epilogue
     int _prof = ab_profile_enabled();
     double _t0 = _prof ? ab_now_sec() : 0;
     double _t_alloc=0, _t_A_repack=0, _t_A_upload=0,
            _t_B_repack=0, _t_B_upload=0, _t_C_upload=0,
            _t_kernel=0, _t_download=0, _t_epilogue=0, _t_destroy=0;
+    bool ok = false;
+    double *Ar_data = NULL, *Ai_data = NULL, *Br_data = NULL, *Bi_data = NULL;
+    double *Cr_data = NULL, *Ci_data = NULL;
 
-    // Dimensions of A and B after transpose
-    int A_rows = (transA == 'N') ? M : K;
-    int A_cols = (transA == 'N') ? K : M;
-    int B_rows = (transB == 'N') ? K : N;
-    int B_cols = (transB == 'N') ? N : K;
-
-    // Allocate split-complex GPU matrices
-    ABMatrix mAr = ab_matrix_create(A_rows, A_cols);
-    ABMatrix mAi = ab_matrix_create(A_rows, A_cols);
-    ABMatrix mBr = ab_matrix_create(B_rows, B_cols);
-    ABMatrix mBi = ab_matrix_create(B_rows, B_cols);
+    // Allocate split-complex GPU matrices: op(A) is M×K, op(B) is K×N
+    ABMatrix mAr = ab_matrix_create(M, K);
+    ABMatrix mAi = ab_matrix_create(M, K);
+    ABMatrix mBr = ab_matrix_create(K, N);
+    ABMatrix mBi = ab_matrix_create(K, N);
     ABMatrix mCr = ab_matrix_create(M, N);
     ABMatrix mCi = ab_matrix_create(M, N);
     if (_prof) { double t = ab_now_sec(); _t_alloc = t - _t0; _t0 = t; }
-    
-    if (!mAr || !mAi || !mBr || !mBi || !mCr || !mCi) {
-        if (mAr) ab_matrix_destroy(mAr);
-        if (mAi) ab_matrix_destroy(mAi);
-        if (mBr) ab_matrix_destroy(mBr);
-        if (mBi) ab_matrix_destroy(mBi);
-        if (mCr) ab_matrix_destroy(mCr);
-        if (mCi) ab_matrix_destroy(mCi);
-        cblas_zgemm(CblasColMajor,
-                    transA == 'N' ? CblasNoTrans : 
-                    transA == 'T' ? CblasTrans : CblasConjTrans,
-                    transB == 'N' ? CblasNoTrans :
-                    transB == 'T' ? CblasTrans : CblasConjTrans,
-                    M, N, K, &alpha, A, ldA, B, ldB, &beta, C, ldC);
-        return;
-    }
-    
-    // Upload A with transpose handling (column-major to row-major)
-    size_t A_count = (size_t)A_rows * A_cols;
-    double* Ar_data = malloc(A_count * sizeof(double));
-    double* Ai_data = malloc(A_count * sizeof(double));
+    if (!mAr || !mAi || !mBr || !mBi || !mCr || !mCi) goto cleanup;
 
-    for (int col = 0; col < A_cols; col++) {
-        for (int row = 0; row < A_rows; row++) {
-            int src_row, src_col;
-            if (transA == 'N') {
-                src_row = row; src_col = col;
-            } else {
-                src_row = col; src_col = row;
-            }
-            double complex val = A[src_col * ldA + src_row];
-            if (transA == 'C') val = conj(val);
-
-            size_t dst = (size_t)row * A_cols + col;
-            Ar_data[dst] = creal(val);
-            Ai_data[dst] = cimag(val);
-        }
-    }
+    // Upload op(A) (column-major to row-major, transposed/conjugated as asked)
+    Ar_data = malloc((size_t)M * K * sizeof(double));
+    Ai_data = malloc((size_t)M * K * sizeof(double));
+    if (!Ar_data || !Ai_data) goto cleanup;
+    pack_op_complex(ta, A, ldA, M, K, Ar_data, Ai_data);
     if (_prof) { double t = ab_now_sec(); _t_A_repack = t - _t0; _t0 = t; }
-    ab_matrix_upload(mAr, Ar_data, true);
-    ab_matrix_upload(mAi, Ai_data, true);
+    if (ab_matrix_upload(mAr, Ar_data, true) != AB_OK ||
+        ab_matrix_upload(mAi, Ai_data, true) != AB_OK) goto cleanup;
     free(Ar_data); free(Ai_data);
+    Ar_data = Ai_data = NULL;
     if (_prof) { double t = ab_now_sec(); _t_A_upload = t - _t0; _t0 = t; }
 
-    // Upload B with transpose handling
-    size_t B_count = (size_t)B_rows * B_cols;
-    double* Br_data = malloc(B_count * sizeof(double));
-    double* Bi_data = malloc(B_count * sizeof(double));
-
-    for (int col = 0; col < B_cols; col++) {
-        for (int row = 0; row < B_rows; row++) {
-            int src_row, src_col;
-            if (transB == 'N') {
-                src_row = row; src_col = col;
-            } else {
-                src_row = col; src_col = row;
-            }
-            double complex val = B[src_col * ldB + src_row];
-            if (transB == 'C') val = conj(val);
-
-            size_t dst = (size_t)row * B_cols + col;
-            Br_data[dst] = creal(val);
-            Bi_data[dst] = cimag(val);
-        }
-    }
+    // Upload op(B)
+    Br_data = malloc((size_t)K * N * sizeof(double));
+    Bi_data = malloc((size_t)K * N * sizeof(double));
+    if (!Br_data || !Bi_data) goto cleanup;
+    pack_op_complex(tb, B, ldB, K, N, Br_data, Bi_data);
     if (_prof) { double t = ab_now_sec(); _t_B_repack = t - _t0; _t0 = t; }
-    ab_matrix_upload(mBr, Br_data, true);
-    ab_matrix_upload(mBi, Bi_data, true);
+    if (ab_matrix_upload(mBr, Br_data, true) != AB_OK ||
+        ab_matrix_upload(mBi, Bi_data, true) != AB_OK) goto cleanup;
     free(Br_data); free(Bi_data);
+    Br_data = Bi_data = NULL;
     if (_prof) { double t = ab_now_sec(); _t_B_upload = t - _t0; _t0 = t; }
     (void)_t_C_upload;  // beta != 0 path not instrumented in this pass
 
-    // Compute C = A * B
-    ab_zgemm(mAr, mAi, mBr, mBi, mCr, mCi);
+    // Compute C = op(A) * op(B)
+    if (ab_zgemm(mAr, mAi, mBr, mBi, mCr, mCi) != AB_OK) goto cleanup;
     if (_prof) { double t = ab_now_sec(); _t_kernel = t - _t0; _t0 = t; }
 
     // Download result and apply alpha/beta epilogue
-    double* Cr_data = malloc(M * N * sizeof(double));
-    double* Ci_data = malloc(M * N * sizeof(double));
-    ab_matrix_download(mCr, Cr_data, true);
-    ab_matrix_download(mCi, Ci_data, true);
+    Cr_data = malloc((size_t)M * N * sizeof(double));
+    Ci_data = malloc((size_t)M * N * sizeof(double));
+    if (!Cr_data || !Ci_data) goto cleanup;
+    if (ab_matrix_download(mCr, Cr_data, true) != AB_OK ||
+        ab_matrix_download(mCi, Ci_data, true) != AB_OK) goto cleanup;
     if (_prof) { double t = ab_now_sec(); _t_download = t - _t0; _t0 = t; }
 
     // Convert row-major back to column-major with alpha/beta:
@@ -266,9 +289,10 @@ void ab_zgemm_blas(
     bool needs_beta = (br != 0.0 || bi != 0.0);
     bool non_unit_alpha = (ar != 1.0 || ai != 0.0);
 
-    for (int col = 0; col < N; col++) {
-        for (int row = 0; row < M; row++) {
-            size_t src = (size_t)row * N + col;
+    for (size_t col = 0; col < (size_t)N; col++) {
+        for (size_t row = 0; row < (size_t)M; row++) {
+            size_t src = row * N + col;
+            size_t dst = col * ldC + row;
             double pr = Cr_data[src], pi = Ci_data[src];
 
             // Apply alpha: alpha * (A*B)
@@ -283,20 +307,29 @@ void ab_zgemm_blas(
 
             // Apply beta: + beta * C_old
             if (needs_beta) {
-                double complex c_old = C[col * ldC + row];
+                double complex c_old = C[dst];
                 result_r += br * creal(c_old) - bi * cimag(c_old);
                 result_i += br * cimag(c_old) + bi * creal(c_old);
             }
 
-            C[col * ldC + row] = result_r + I * result_i;
+            C[dst] = result_r + I * result_i;
         }
     }
-    free(Cr_data); free(Ci_data);
+    ok = true;
     if (_prof) { double t = ab_now_sec(); _t_epilogue = t - _t0; _t0 = t; }
 
+cleanup:
+    free(Ar_data); free(Ai_data); free(Br_data); free(Bi_data);
+    free(Cr_data); free(Ci_data);
     ab_matrix_destroy(mAr); ab_matrix_destroy(mAi);
     ab_matrix_destroy(mBr); ab_matrix_destroy(mBi);
     ab_matrix_destroy(mCr); ab_matrix_destroy(mCi);
+
+    // Any failure happened before C was written: redo the whole call on CPU.
+    if (!ok) {
+        zgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+        return;
+    }
     if (_prof) {
         double t = ab_now_sec(); _t_destroy = t - _t0;
         double sum = _t_alloc + _t_A_repack + _t_A_upload +
@@ -329,89 +362,67 @@ void ab_dgemm_blas(
     double beta,
     double* C, int ldC
 ) {
-    // AMX path for small matrices (heterogeneous dispatch)
-    if (!ab_use_gpu(M, N, K)) {
-        cblas_dgemm(CblasColMajor,
-                    transA == 'T' ? CblasTrans : CblasNoTrans,
-                    transB == 'T' ? CblasTrans : CblasNoTrans,
-                    M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+    enum CBLAS_TRANSPOSE ta = ab_blas_trans(transA, false);
+    enum CBLAS_TRANSPOSE tb = ab_blas_trans(transB, false);
+
+    // AMX path for small matrices (heterogeneous dispatch); also the BLAS
+    // quick return for alpha == 0 (A and B must not be read) and invalid flags.
+    if (ta == AB_TRANS_INVALID || tb == AB_TRANS_INVALID || alpha == 0.0 ||
+        !ab_use_gpu(M, N, K)) {
+        dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }
 
     // GPU path: supports arbitrary alpha/beta and transpose via scaled kernel
+    bool ok = false;
+    double *A_row = NULL, *B_row = NULL, *C_row = NULL;
     ABMatrix mA = ab_matrix_create(M, K);
     ABMatrix mB = ab_matrix_create(K, N);
     ABMatrix mC = ab_matrix_create(M, N);
+    if (!mA || !mB || !mC) goto cleanup;
 
-    if (!mA || !mB || !mC) {
-        if (mA) ab_matrix_destroy(mA);
-        if (mB) ab_matrix_destroy(mB);
-        if (mC) ab_matrix_destroy(mC);
-        cblas_dgemm(CblasColMajor,
-                    transA == 'T' ? CblasTrans : CblasNoTrans,
-                    transB == 'T' ? CblasTrans : CblasNoTrans,
-                    M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
-        return;
-    }
-
-    // Upload op(A) as M×K row-major (handles column-major + transpose)
-    // BLAS convention: op(A) is M×K
-    //   transA='N': A is col-major M×K, A[col*ldA+row] → row-major[row*K+col]
-    //   transA='T': A is col-major K×M, op(A)[i,j] = A[j,i] = A[i*ldA+j]
-    double* A_row = malloc((size_t)M * K * sizeof(double));
-    if (transA == 'N') {
-        for (int j = 0; j < K; j++)
-            for (int i = 0; i < M; i++)
-                A_row[i * K + j] = A[j * ldA + i];
-    } else {
-        // transA='T': A stored as col-major K×M
-        // op(A)[i,j] = A^T[i,j] = A_colmaj[j,i] = A[i*ldA+j]
-        for (int i = 0; i < M; i++)
-            for (int j = 0; j < K; j++)
-                A_row[i * K + j] = A[i * ldA + j];
-    }
-    ab_matrix_upload(mA, A_row, true);
+    // Upload op(A) as M×K and op(B) as K×N, row-major
+    A_row = malloc((size_t)M * K * sizeof(double));
+    if (!A_row) goto cleanup;
+    pack_op_real(ta, A, ldA, M, K, A_row);
+    if (ab_matrix_upload(mA, A_row, true) != AB_OK) goto cleanup;
     free(A_row);
+    A_row = NULL;
 
-    // Upload op(B) as K×N row-major
-    //   transB='N': B is col-major K×N → row-major[row*N+col]
-    //   transB='T': B is col-major N×K, op(B)[i,j] = B^T[i,j] = B[i*ldB+j]
-    double* B_row = malloc((size_t)K * N * sizeof(double));
-    if (transB == 'N') {
-        for (int j = 0; j < N; j++)
-            for (int i = 0; i < K; i++)
-                B_row[i * N + j] = B[j * ldB + i];
-    } else {
-        // transB='T': B stored as col-major N×K
-        for (int i = 0; i < K; i++)
-            for (int j = 0; j < N; j++)
-                B_row[i * N + j] = B[i * ldB + j];
-    }
-    ab_matrix_upload(mB, B_row, true);
+    B_row = malloc((size_t)K * N * sizeof(double));
+    if (!B_row) goto cleanup;
+    pack_op_real(tb, B, ldB, K, N, B_row);
+    if (ab_matrix_upload(mB, B_row, true) != AB_OK) goto cleanup;
     free(B_row);
+    B_row = NULL;
 
-    // Upload existing C when beta != 0 (needed for accumulation C = alpha*A*B + beta*C)
-    double* C_row = malloc((size_t)M * N * sizeof(double));
+    // Upload existing C only when beta != 0 (C = alpha*A*B + beta*C); with
+    // beta == 0 C is never read, per BLAS (the kernel skips beta*C).
+    C_row = malloc((size_t)M * N * sizeof(double));
+    if (!C_row) goto cleanup;
     if (beta != 0.0) {
-        for (int j = 0; j < N; j++)
-            for (int i = 0; i < M; i++)
-                C_row[i * N + j] = C[j * ldC + i];
-        ab_matrix_upload(mC, C_row, true);
+        pack_op_real(CblasNoTrans, C, ldC, M, N, C_row);
+        if (ab_matrix_upload(mC, C_row, true) != AB_OK) goto cleanup;
     }
 
     // Compute C = alpha*A*B + beta*C on GPU
-    ab_dgemm_scaled(alpha, mA, mB, beta, mC);
+    if (ab_dgemm_scaled(alpha, mA, mB, beta, mC) != AB_OK) goto cleanup;
 
     // Download result (row-major to column-major)
-    ab_matrix_download(mC, C_row, true);
-    for (int j = 0; j < N; j++)
-        for (int i = 0; i < M; i++)
+    if (ab_matrix_download(mC, C_row, true) != AB_OK) goto cleanup;
+    for (size_t j = 0; j < (size_t)N; j++)
+        for (size_t i = 0; i < (size_t)M; i++)
             C[j * ldC + i] = C_row[i * N + j];
-    free(C_row);
+    ok = true;
 
+cleanup:
+    free(A_row); free(B_row); free(C_row);
     ab_matrix_destroy(mA);
     ab_matrix_destroy(mB);
     ab_matrix_destroy(mC);
+
+    // Any failure happened before C was written: redo the whole call on CPU.
+    if (!ok) dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
 }
 
 // Fortran-callable wrappers (ab_zgemm_, ab_dgemm_) are in fortran_bridge.c

@@ -525,6 +525,34 @@ static void test_pool_iteration_pattern(void) {
     PASS();
 }
 
+// K-P1-4: reusing a larger pooled buffer must reset the logical element count
+// (upload/download loop over it), and reuse must be judged by capacity.
+static void test_pool_reuse_resets_count(void) {
+    TEST("ab_pool reuse resets element count");
+    ab_init();
+    ABMemoryPool pool = ab_pool_create(0);
+    ABMatrix big = ab_pool_get_matrix(pool, 100, 100);
+    ab_pool_reset(pool);
+    ABMatrix small = ab_pool_get_matrix(pool, 10, 10);
+    int rows = 0, cols = 0;
+    ab_matrix_dims(small, &rows, &cols);
+    int ok = small == big && rows == 10 && cols == 10 && ab_matrix_count(small) == 100;
+
+    double in[100], out[100];
+    for (int i = 0; i < 100; i++) in[i] = i + 0.5;
+    ok = ok && ab_matrix_upload(small, in, false) == AB_OK &&
+         ab_matrix_download(small, out, false) == AB_OK &&
+         memcmp(in, out, sizeof in) == 0;
+
+    ab_pool_reset(pool);
+    ABMatrix again = ab_pool_get_matrix(pool, 100, 100);
+    ok = ok && again == big && ab_matrix_count(again) == 10000;
+
+    ab_pool_destroy(pool);
+    ab_shutdown();
+    if (ok) PASS(); else FAIL("stale count or capacity after pool reuse");
+}
+
 // =============================================================================
 // Async API Tests
 // =============================================================================
@@ -2095,6 +2123,7 @@ static const TestCase TESTS[] = {
     {"test_pool_get_matrix",                  test_pool_get_matrix},
     {"test_pool_reset_reuse",                 test_pool_reset_reuse},
     {"test_pool_iteration_pattern",           test_pool_iteration_pattern},
+    {"test_pool_reuse_resets_count",          test_pool_reuse_resets_count},
     {"test_async_dgemm_basic",                test_async_dgemm_basic},
     {"test_async_future_poll",                test_async_future_poll},
     {"test_async_overlap",                    test_async_overlap},
