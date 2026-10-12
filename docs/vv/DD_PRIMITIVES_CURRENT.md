@@ -54,7 +54,7 @@ Operation counts:
 
 The two cross-term FMAs are nested: `fma(a.hi, b.lo, fma(a.lo, b.hi, e1))`.
 This form replaced the earlier additive-accumulation sequence in commit
-`af722c3` ("perf: nested FMA cross-terms in dd_mul/dd_fma (2 roundings vs 4)"),
+`735e504` ("perf: nested FMA cross-terms in dd_mul/dd_fma (2 roundings vs 4)"),
 which is what drove the effective rounding-event count per cross-term from 4
 down to 2.
 
@@ -66,7 +66,7 @@ roundoff — Muller–Rideau 2022 Theorem 2.7, tightened from JMP 2017's origina
 
 Source: `src/apple_bottom.m:168-194` (inside the `#ifdef APPLEBOTTOM_USE_DWTIMESDW3`
 branch at line 168). Landed as `feat: add DWTimesDW3 compile-time variant (opt-in)`
-in commit `55bc79a`.
+in commit `ad993e1`.
 
 ```metal
 inline DD dd_mul(DD a, DD b) {
@@ -122,10 +122,10 @@ The FMA-cross-term migration described in earlier planning notes ("replace
 additive accumulation with nested `fma()` calls, moving from ~5-13u² down to
 ≤2u² for the cross-term step") has already landed:
 
-- `af722c3` (April 2026) introduced nested FMA cross-terms in the default
-  path. That is what made the default `< 5u²` instead of the pre-af722c3
+- `735e504` (April 2026) introduced nested FMA cross-terms in the default
+  path. That is what made the default `< 5u²` instead of the pre-735e504
   `< ~6-13u²` bound.
-- `55bc79a` (April 2026) added DWTimesDW3 as a compile-time opt-in, pushing
+- `ad993e1` (April 2026) added DWTimesDW3 as a compile-time opt-in, pushing
   the bound to `< 4u²` at the cost of +1 mul +1 add per primitive.
 
 There is no lower-hanging cross-term rewrite left in a DD representation;

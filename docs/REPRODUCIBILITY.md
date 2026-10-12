@@ -5,7 +5,7 @@
 - Hardware: Apple M2 Max (38-core GPU)
 - macOS: 26.2 (build 25C56)
 - Xcode: 26.0.1 (build 17A400)
-- apple-bottom: commit `0805de5` (HEAD at time of capture)
+- apple-bottom: commit `3d2381b` (HEAD at time of capture)
 
 ## Build
 

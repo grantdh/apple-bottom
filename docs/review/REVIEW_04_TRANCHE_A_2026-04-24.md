@@ -13,15 +13,15 @@ differs sharply between them:
 This commit characterizes the **end-to-end** regime via the
 `ab_*_blas` path. It is the regime Fortran host codes actually
 experience when linked against apple-bottom. Steady-state numbers
-are preserved in `benchmarks/results/2026-04-22-b9b0641/{dgemm,zgemm}.csv`
+are preserved in `benchmarks/results/2026-04-22-6b5447a/{dgemm,zgemm}.csv`
 and pulled in below for comparison.
 
 ## Sweep provenance
 
-- **Commit:** `271a0f0` — `bench: add rect bench + dispatch-path hook for REVIEW_04`
+- **Commit:** `0bfb147` — `bench: add rect bench + dispatch-path hook for REVIEW_04`
 - **Runner:** `benchmarks/scripts/run_rect_sweep.sh`
 - **Config files:** `benchmarks/configs/rect_{dgemm,zgemm}.txt`
-- **Raw CSVs (12 files):** `benchmarks/results/2026-04-24-271a0f0-rect/`
+- **Raw CSVs (12 files):** `benchmarks/results/2026-04-24-0bfb147-rect/`
   - `{dgemm,zgemm}_{cpu,gpu,auto}_sweep{1,2}.csv`
   - DGEMM: 25 shapes × 5 runs × 2 sweeps = 250 rows/CSV-pair
   - ZGEMM: 38 shapes × 5 runs × 2 sweeps = 380 rows/CSV-pair
@@ -109,7 +109,7 @@ SCF iteration.
 
 ## Anchor-shape side-by-side: end-to-end vs steady-state
 
-Steady-state numbers from `benchmarks/results/2026-04-22-b9b0641/{dgemm,zgemm}.csv`
+Steady-state numbers from `benchmarks/results/2026-04-22-6b5447a/{dgemm,zgemm}.csv`
 (same hardware, same `libapplebottom.dylib` at the ancestor commit).
 
 | Shape | cpu e2e | gpu e2e | cpu ss | gpu ss | gpu ratio (ss/e2e) |
@@ -247,7 +247,7 @@ stage holds the unexplained 1.4 s. Only then should R4-2b be fixed.
 ```bash
 # Hardware: M2 Max, 38-core GPU, 96 GB unified memory
 # OS: macOS 26.2, Xcode 26.0.1
-# Commit: 271a0f0
+# Commit: 0bfb147
 
 cd ~/Dev/Claude/apple-bottom
 make clean && make bench-rect
@@ -267,7 +267,7 @@ when the 2048 shapes dominate).
 Same-day followup to the R4-2b investigation listed in the original
 "Out of scope / follow-up" section. Concrete next step (per-stage
 instrumentation under `AB_PROFILE=1`) was implemented in commit
-`be4c6fd` (`bench: AB_PROFILE env-gated per-stage timing in
+`07c6a87` (`bench: AB_PROFILE env-gated per-stage timing in
 ab_*_blas (R4-2b)`). Probe was a single N=2048 ZGEMM call via
 `ab_zgemm_blas` with one warmup, AB_MODE=gpu, AB_PROFILE=1.
 

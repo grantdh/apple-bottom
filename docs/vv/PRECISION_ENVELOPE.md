@@ -1,7 +1,7 @@
 # Precision Envelope — apple-bottom v1.0.2
 
 **Document Status**: Validated (2026-03-31)
-**Validation Baseline**: Git tag `v1.0.2-bugfix` (SHA: 700934f)
+**Validation Baseline**: Git tag `v1.0.2-bugfix` (SHA: d115498)
 **Test System**: Apple M2 Max, macOS 14.7, Metal 3
 
 ---
@@ -311,7 +311,7 @@ FLOP_count ≥ 100M  (approximately N³ ≥ 100M for DGEMM)
 
 | Item | Value | Notes |
 |------|-------|-------|
-| **Validated version** | v1.0.2-bugfix | Git tag `v1.0.2-bugfix` (SHA: 700934f) |
+| **Validated version** | v1.0.2-bugfix | Git tag `v1.0.2-bugfix` (SHA: d115498) |
 | **Compiler** | clang 15.0.0 (Apple) | `-O3 -std=c11` |
 | **Metal SDK** | macOS 15.0+ SDK (Xcode 16+) | **`MTLMathModeSafe` is CRITICAL** - without it precision degrades from ~10⁻¹⁵ to ~10⁻⁸ |
 | **Test system** | M2 Max, 64GB RAM | 12 CPU cores, 38 GPU cores |

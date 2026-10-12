@@ -4,7 +4,7 @@
 **Type**: Production Validation (Code-to-Code)
 **Status**: ✓ PASS (validated 2026-03-31)
 **Validation Engineer**: Grant Heileman
-**Baseline**: apple-bottom v1.0.2-bugfix (SHA: 700934f)
+**Baseline**: apple-bottom v1.0.2-bugfix (SHA: d115498)
 
 ---
 

@@ -95,7 +95,7 @@ _TBD following Si64 benchmark campaign._
   - Reduces GPU dispatch overhead for QE's many small ZGEMM calls
 
 ### Fixed
-- **BUG-8: ARC leak in Metal-ref structs** — `ABMatrix_s`, `ABFuture_s`, `ABBatch_s`, and `ab_dev_buffer_s` now allocate via `new`/`delete` so ARC destructors release their `id<MTL…>` strong refs (was `calloc`/`free`, which does not run ARC destructors and leaked the buffers, command buffers, and encoders). Landed in 55bc79a.
+- **BUG-8: ARC leak in Metal-ref structs** — `ABMatrix_s`, `ABFuture_s`, `ABBatch_s`, and `ab_dev_buffer_s` now allocate via `new`/`delete` so ARC destructors release their `id<MTL…>` strong refs (was `calloc`/`free`, which does not run ARC destructors and leaked the buffers, command buffers, and encoders). Landed in ad993e1.
 
 ### Changed
 - **README.md**: Complete rewrite as high-conversion landing page
@@ -191,7 +191,7 @@ _TBD following Si64 benchmark campaign._
 - **Status**: VALIDATED for production DFT, MD, FEM iterative solvers
 
 ### Notes
-- Validated baseline: Git tag `v1.0.2-bugfix` (SHA: 700934f)
+- Validated baseline: Git tag `v1.0.2-bugfix` (SHA: d115498)
 - All precision claims backed by empirical convergence data
 - Known limitation: Rectangular matrices (aspect ratio >10:1) fail correctness
 
