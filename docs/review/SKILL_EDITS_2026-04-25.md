@@ -22,16 +22,16 @@ between sprints.
 
 Anchored to the REVIEW_04 Tranche A commit chain:
 
-- **`271a0f0`** — bench: add rect bench + dispatch-path hook for REVIEW_04
+- **`0bfb147`** — bench: add rect bench + dispatch-path hook for REVIEW_04
   (infrastructure: `bench_rect_{dgemm,zgemm}`, configs, sweep runner,
   `ab_get_last_dispatch_path()` thread-local hook).
-- **`19130d5`** — docs: REVIEW_04 Tranche A — end-to-end rect sweep
-  (12 CSVs under `benchmarks/results/2026-04-24-271a0f0-rect/`, 1890 verify
+- **`3fb2959`** — docs: REVIEW_04 Tranche A — end-to-end rect sweep
+  (12 CSVs under `benchmarks/results/2026-04-24-0bfb147-rect/`, 1890 verify
   rows / 0 failures, R4-2 split between threshold-tuning and unexplained
   overhead).
-- **`be4c6fd`** — bench: AB_PROFILE env-gated per-stage timing in `ab_*_blas`
+- **`07c6a87`** — bench: AB_PROFILE env-gated per-stage timing in `ab_*_blas`
   (R4-2b instrumentation; per-stage breakdown in `ab_zgemm_blas`).
-- **`1b70258`** — docs: REVIEW_04 Tranche A followup — R4-2b localized
+- **`7e67e6e`** — docs: REVIEW_04 Tranche A followup — R4-2b localized
   (sum-of-stages = wall to 0.04 ms; FP64↔DD conversion at ~140 MB/s
   identified as dominant cost).
 
@@ -61,8 +61,8 @@ kernel.
 +//
 +// Steady-state regime — native ABMatrix API, ABMatrix handles persisted across calls,
 +// upload and FP64<->DD conversion amortized:
-+//   DGEMM: GPU wins for N >= 2048   (anchor: benchmarks/results/2026-04-22-b9b0641/dgemm.csv)
-+//   ZGEMM: GPU wins for N >= 1024   (anchor: benchmarks/results/2026-04-22-b9b0641/zgemm.csv)
++//   DGEMM: GPU wins for N >= 2048   (anchor: benchmarks/results/2026-04-22-6b5447a/dgemm.csv)
++//   ZGEMM: GPU wins for N >= 1024   (anchor: benchmarks/results/2026-04-22-6b5447a/zgemm.csv)
 +//   DSYRK: GPU wins for N >= 3072   (steady-state; prior measurement, not re-measured for end-to-end regime)
 +//   ZHERK: GPU wins for N >= 1024   (steady-state; v1.4 introduced GPU-native transpose / no CPU roundtrip; not re-measured for end-to-end regime)
 +//
@@ -70,9 +70,9 @@ kernel.
 +// the path Fortran host codes hit through dgemm_/zgemm_):
 +//   No crossover in the measured grid through N=2048. AMX wins by 15-170x at all
 +//   tested shapes, dominated by FP64<->DD conversion at ~140 MB/s effective bandwidth
-+//   (root cause localized in commit be4c6fd via AB_PROFILE=1).
++//   (root cause localized in commit 07c6a87 via AB_PROFILE=1).
 +//   For Fortran host codes calling dgemm_/zgemm_ without handle caching: AB_MODE=cpu
-+//   is the right default. Anchor: benchmarks/results/2026-04-24-271a0f0-rect/.
++//   is the right default. Anchor: benchmarks/results/2026-04-24-0bfb147-rect/.
 +//   DSYRK/ZHERK end-to-end behavior expected to be similar to GEMM (same conversion
 +//   path); not directly measured.
  //
@@ -100,15 +100,15 @@ re-materialized. Diff is against md5 `ab69c1d154509b6ad4b7ab9cedbe0dfe`.)
 +
 +Callers retain `ABMatrix` handles across calls; matrices are uploaded once per shape and reused across iterations. Dispatcher FLOP thresholds (50 MFLOPs DGEMM real path, 100 MFLOPs complex/skinny path) are calibrated to this regime. Crossover is real and falls in the documented range: N ≥ 1024 (ZGEMM), N ≥ 2048 (DGEMM). Headline kernel throughput at N=2048: DGEMM 654 GFLOP/s, ZGEMM 813 GFLOP/s.
 +
-+Anchors: `benchmarks/results/2026-04-22-b9b0641/{dgemm,zgemm}.csv` (steady-state benches `bench_dgemm.c`, `bench_zgemm.c`).
++Anchors: `benchmarks/results/2026-04-22-6b5447a/{dgemm,zgemm}.csv` (steady-state benches `bench_dgemm.c`, `bench_zgemm.c`).
 +
 +### End-to-end regime — BLAS-ABI path, ab_*_blas, no handle persistence
 +
 +Callers reach the library through Fortran `dgemm_`/`zgemm_` symbols mapped to `ab_dgemm_blas`/`ab_zgemm_blas`. Each call allocates ABMatrix handles, col→row repacks, runs FP64↔DD conversion (upload), dispatches the compute kernel, downloads, and destroys — every call. **There is no crossover in the measured grid through N=2048**; AMX wins at all tested shapes by 15–170×. Headline at N=2048: DGEMM 20 GFLOP/s, ZGEMM 40 GFLOP/s.
 +
-+Anchors: `benchmarks/results/2026-04-24-271a0f0-rect/` (12 CSVs, 1890 verify rows / 0 failures), provenance in `docs/review/REVIEW_04_TRANCHE_A_2026-04-24.md`.
++Anchors: `benchmarks/results/2026-04-24-0bfb147-rect/` (12 CSVs, 1890 verify rows / 0 failures), provenance in `docs/review/REVIEW_04_TRANCHE_A_2026-04-24.md`.
 +
-+Root cause is **neither** the GPU kernel **nor** dispatcher threshold calibration. AB_PROFILE=1 stage breakdown on a single N=2048 ZGEMM call (commit `be4c6fd`) localized the dominant cost to FP64↔DD conversion in upload/download, running at ~140 MB/s effective bandwidth — ~280× below naive memcpy on Apple Silicon UMA. Detail in `docs/review/REVIEW_04_TRANCHE_A_2026-04-24.md`, "Update 2026-04-24 — R4-2b localized."
++Root cause is **neither** the GPU kernel **nor** dispatcher threshold calibration. AB_PROFILE=1 stage breakdown on a single N=2048 ZGEMM call (commit `07c6a87`) localized the dominant cost to FP64↔DD conversion in upload/download, running at ~140 MB/s effective bandwidth — ~280× below naive memcpy on Apple Silicon UMA. Detail in `docs/review/REVIEW_04_TRANCHE_A_2026-04-24.md`, "Update 2026-04-24 — R4-2b localized."
 +
 +### Recommendation matrix
 +
@@ -120,7 +120,7 @@ re-materialized. Diff is against md5 `ab69c1d154509b6ad4b7ab9cedbe0dfe`.)
 +
 +### Reading the rest of this document
 +
-+Every GFLOP/s figure, speedup percentage, and routing claim below applies to **one** of the two regimes. Where prior corrections (commits `10af966`, `a98e91f`, and the present commit) have added regime labels, trust them. Where a number is unlabeled and predates 2026-04-25, assume steady-state by lineage but verify against the cited CSV before relying on it for an end-to-end conclusion.
++Every GFLOP/s figure, speedup percentage, and routing claim below applies to **one** of the two regimes. Where prior corrections (commits `1ed39a7`, `98df6b1`, and the present commit) have added regime labels, trust them. Where a number is unlabeled and predates 2026-04-25, assume steady-state by lineage but verify against the cited CSV before relying on it for an end-to-end conclusion.
 +
 +---
 +
@@ -143,17 +143,17 @@ re-materialized. Diff is against md5 `ab69c1d154509b6ad4b7ab9cedbe0dfe`.)
  | comp-10/12 no renorm | — | 7.7 bits | ✗ c.lo overflow |
  | FP16 Ozaki via MPS | — | — | ✗ DEAD (no FP16 speedup) |
 
--43.3% FP32 utilization is a floor on sustained-boost compute, not a ceiling of theoretical peak — error-free transforms on SIMD hardware are intrinsically constrained by dd_fma's 18 FP32 FLOPs (9 per DP FLOP). See `docs/vv/VV_REPORT.md` §10 (methodology) and `docs/design/FP32_UTILIZATION.md` (derivation). Anchored to 654 GFLOP/s measurement in `benchmarks/results/2026-04-22-b9b0641/dgemm.csv`.
-+In the steady-state regime [§0], 43.3% FP32 utilization is a floor on sustained-boost compute, not a ceiling of theoretical peak — error-free transforms on SIMD hardware are intrinsically constrained by dd_fma's 18 FP32 FLOPs (9 per DP FLOP). See `docs/vv/VV_REPORT.md` §10 (methodology) and `docs/design/FP32_UTILIZATION.md` (derivation). Anchored to 654 GFLOP/s measurement in `benchmarks/results/2026-04-22-b9b0641/dgemm.csv`. The end-to-end BLAS-ABI path achieves ~1.3% effective FP32 utilization at the same shape (N=2048 DGEMM, 20 GFLOP/s wall) — dominated by FP64↔DD conversion overhead at ~140 MB/s, not by kernel work. See §0 and `docs/review/REVIEW_04_TRANCHE_A_2026-04-24.md`.
+-43.3% FP32 utilization is a floor on sustained-boost compute, not a ceiling of theoretical peak — error-free transforms on SIMD hardware are intrinsically constrained by dd_fma's 18 FP32 FLOPs (9 per DP FLOP). See `docs/vv/VV_REPORT.md` §10 (methodology) and `docs/design/FP32_UTILIZATION.md` (derivation). Anchored to 654 GFLOP/s measurement in `benchmarks/results/2026-04-22-6b5447a/dgemm.csv`.
++In the steady-state regime [§0], 43.3% FP32 utilization is a floor on sustained-boost compute, not a ceiling of theoretical peak — error-free transforms on SIMD hardware are intrinsically constrained by dd_fma's 18 FP32 FLOPs (9 per DP FLOP). See `docs/vv/VV_REPORT.md` §10 (methodology) and `docs/design/FP32_UTILIZATION.md` (derivation). Anchored to 654 GFLOP/s measurement in `benchmarks/results/2026-04-22-6b5447a/dgemm.csv`. The end-to-end BLAS-ABI path achieves ~1.3% effective FP32 utilization at the same shape (N=2048 DGEMM, 20 GFLOP/s wall) — dominated by FP64↔DD conversion overhead at ~140 MB/s, not by kernel work. See §0 and `docs/review/REVIEW_04_TRANCHE_A_2026-04-24.md`.
 
  ### ZGEMM strategy
 
  Native complex DD: ~320 GFLOP/s (AMX: ~620). **Failed.**
 
--Gauss 3-multiply (3× DGEMM): **+14–33% vs AMX** across two independent 2026-04-22 runs (`benchmarks/results/2026-04-22-b9b0641/zgemm.csv`, `benchmarks/results/2026-04-22-94a699d-run2/zgemm.csv`). Crossover at N=1024, peak at N=2048–3072, ±10% run-to-run from GPU boost-clock volatility. The older +23–43% range (see table ~L678) is historical; post-correction measurements show the narrower envelope. Dispatcher selects GPU by FLOP threshold (see `src/blas_wrapper.c`), not by raw N.
-+The Gauss 3-multiply ZGEMM kernel is **+14–33% faster than AMX in the steady-state regime** across two independent 2026-04-22 runs (`benchmarks/results/2026-04-22-b9b0641/zgemm.csv`, `benchmarks/results/2026-04-22-94a699d-run2/zgemm.csv`). Crossover at N=1024, peak at N=2048–3072, ±10% run-to-run from GPU boost-clock volatility. The older +23–43% range (see §16 historical table) is a kernel-evolution snapshot from earlier 2025–2026; the current envelope is the +14–33% figure.
+-Gauss 3-multiply (3× DGEMM): **+14–33% vs AMX** across two independent 2026-04-22 runs (`benchmarks/results/2026-04-22-6b5447a/zgemm.csv`, `benchmarks/results/2026-04-22-29db164-run2/zgemm.csv`). Crossover at N=1024, peak at N=2048–3072, ±10% run-to-run from GPU boost-clock volatility. The older +23–43% range (see table ~L678) is historical; post-correction measurements show the narrower envelope. Dispatcher selects GPU by FLOP threshold (see `src/blas_wrapper.c`), not by raw N.
++The Gauss 3-multiply ZGEMM kernel is **+14–33% faster than AMX in the steady-state regime** across two independent 2026-04-22 runs (`benchmarks/results/2026-04-22-6b5447a/zgemm.csv`, `benchmarks/results/2026-04-22-29db164-run2/zgemm.csv`). Crossover at N=1024, peak at N=2048–3072, ±10% run-to-run from GPU boost-clock volatility. The older +23–43% range (see §16 historical table) is a kernel-evolution snapshot from earlier 2025–2026; the current envelope is the +14–33% figure.
 +
-+In the end-to-end regime (Fortran BLAS-ABI through `ab_zgemm_blas`), **AMX wins at all measured shapes through N=2048** by 15–40× (`benchmarks/results/2026-04-24-271a0f0-rect/`). The +14–33% figure characterizes kernel-vs-kernel throughput; it does not predict end-to-end behavior for callers without `ABMatrix` handle persistence. See §0.
++In the end-to-end regime (Fortran BLAS-ABI through `ab_zgemm_blas`), **AMX wins at all measured shapes through N=2048** by 15–40× (`benchmarks/results/2026-04-24-0bfb147-rect/`). The +14–33% figure characterizes kernel-vs-kernel throughput; it does not predict end-to-end behavior for callers without `ABMatrix` handle persistence. See §0.
 +
 +Dispatcher routing uses **two** gates: `min(M, N, K) ≥ AB_MIN_GPU_DIM` (default 32) AND a FLOP-class threshold (50 MFLOPs DGEMM real path, 100 MFLOPs complex/skinny path). Both gates are calibrated to the steady-state crossover and do not predict end-to-end crossover. See §16 for the full routing rule, `src/blas_wrapper.c::ab_use_gpu*()` for the authoritative source.
 @@ -663,6 +702,8 @@
@@ -218,8 +218,8 @@ skill was implicitly steady-state by lineage but not labeled as such.
 A future reader skimming the skill for "what GFLOP/s should I expect
 in QE / Yambo" would arrive at the wrong number without this subsection.
 
-**Cross-refs:** Empirical grounding from commits `19130d5` (sweep CSVs)
-and `1b70258` (R4-2b localization). The commit reference inside the
+**Cross-refs:** Empirical grounding from commits `3fb2959` (sweep CSVs)
+and `7e67e6e` (R4-2b localization). The commit reference inside the
 new subsection (`docs/review/SKILL_EDITS_2026-04-25.md`) is this file.
 
 ### Edit 2 — Skill ToC (L12)
@@ -244,7 +244,7 @@ infer "640 GFLOP/s production" applies to QE-via-Fortran-`dgemm_`. It
 doesn't.
 
 **Cross-ref:** Steady-state numbers anchored to
-`benchmarks/results/2026-04-22-b9b0641/dgemm.csv` (committed in earlier
+`benchmarks/results/2026-04-22-6b5447a/dgemm.csv` (committed in earlier
 sprints).
 
 ### Edit 4 — Skill §8 43.3% utilization paragraph (L456 pre-edit, L489 post-edit)
@@ -282,8 +282,8 @@ and the FLOP threshold itself differs by op class. Plus the regime
 conflation is the load-bearing fix.
 
 **Cross-refs:** Steady-state +14–33% from `benchmarks/results/2026-04-22-*`;
-end-to-end 15–40× loss from `benchmarks/results/2026-04-24-271a0f0-rect/`;
-two-gate rule from `src/blas_wrapper.c::ab_use_gpu*()` (commit `271a0f0`
+end-to-end 15–40× loss from `benchmarks/results/2026-04-24-0bfb147-rect/`;
+two-gate rule from `src/blas_wrapper.c::ab_use_gpu*()` (commit `0bfb147`
 introduced the dispatch-path hook used by `bench_rect_*` to validate this
 on every call).
 

@@ -29,8 +29,8 @@ and REVIEW_03.
   bare claim with no CSV source. Replaced with a 43.3% floor framing that
   cross-references `docs/vv/VV_REPORT.md §10` (methodology) and
   `docs/design/FP32_UTILIZATION.md` (derivation), anchored to the 654 GFLOP/s
-  measurement in `benchmarks/results/2026-04-22-b9b0641/dgemm.csv`. Follows
-  the `974badf` correction (643 → 654 GFLOP/s CSV-provenance fix).
+  measurement in `benchmarks/results/2026-04-22-6b5447a/dgemm.csv`. Follows
+  the `0139c20` correction (643 → 654 GFLOP/s CSV-provenance fix).
 - **L464 (R3-4).** The old text — `"Gauss 3-multiply (3× DGEMM): +23-43% vs
   AMX at ≥1024. This is the production path."` — both overclaimed the upper
   bound (neither of the two 2026-04-22 runs reached +43%) and mischaracterized
@@ -50,14 +50,14 @@ and REVIEW_03.
  | FP16 Ozaki via MPS | — | — | ✗ DEAD (no FP16 speedup) |
 
 -42% FP32 utilization ceiling is intrinsic to error-free transforms on SIMD hardware — publishable result.
-+43.3% FP32 utilization is a floor on sustained-boost compute, not a ceiling of theoretical peak — error-free transforms on SIMD hardware are intrinsically constrained by dd_fma's 18 FP32 FLOPs (9 per DP FLOP). See `docs/vv/VV_REPORT.md` §10 (methodology) and `docs/design/FP32_UTILIZATION.md` (derivation). Anchored to 654 GFLOP/s measurement in `benchmarks/results/2026-04-22-b9b0641/dgemm.csv`.
++43.3% FP32 utilization is a floor on sustained-boost compute, not a ceiling of theoretical peak — error-free transforms on SIMD hardware are intrinsically constrained by dd_fma's 18 FP32 FLOPs (9 per DP FLOP). See `docs/vv/VV_REPORT.md` §10 (methodology) and `docs/design/FP32_UTILIZATION.md` (derivation). Anchored to 654 GFLOP/s measurement in `benchmarks/results/2026-04-22-6b5447a/dgemm.csv`.
 
  ### ZGEMM strategy
 
  Native complex DD: ~320 GFLOP/s (AMX: ~620). **Failed.**
 
 -Gauss 3-multiply (3× DGEMM): **+23-43% vs AMX at ≥1024**. This is the production path.
-+Gauss 3-multiply (3× DGEMM): **+14–33% vs AMX** across two independent 2026-04-22 runs (`benchmarks/results/2026-04-22-b9b0641/zgemm.csv`, `benchmarks/results/2026-04-22-94a699d-run2/zgemm.csv`). Crossover at N=1024, peak at N=2048–3072, ±10% run-to-run from GPU boost-clock volatility. The older +23–43% range (see table ~L678) is historical; post-correction measurements show the narrower envelope. Dispatcher selects GPU by FLOP threshold (see `src/blas_wrapper.c`), not by raw N.
++Gauss 3-multiply (3× DGEMM): **+14–33% vs AMX** across two independent 2026-04-22 runs (`benchmarks/results/2026-04-22-6b5447a/zgemm.csv`, `benchmarks/results/2026-04-22-29db164-run2/zgemm.csv`). Crossover at N=1024, peak at N=2048–3072, ±10% run-to-run from GPU boost-clock volatility. The older +23–43% range (see table ~L678) is historical; post-correction measurements show the narrower envelope. Dispatcher selects GPU by FLOP threshold (see `src/blas_wrapper.c`), not by raw N.
  ```
  K1 = Ar × Br,  K2 = Ai × Bi,  K3 = (Ar+Ai) × (Br+Bi)
  Cr = K1 - K2,  Ci = K3 - K1 - K2
@@ -91,7 +91,7 @@ Replace:
 
 With:
 ```
-43.3% FP32 utilization is a floor on sustained-boost compute, not a ceiling of theoretical peak — error-free transforms on SIMD hardware are intrinsically constrained by dd_fma's 18 FP32 FLOPs (9 per DP FLOP). See `docs/vv/VV_REPORT.md` §10 (methodology) and `docs/design/FP32_UTILIZATION.md` (derivation). Anchored to 654 GFLOP/s measurement in `benchmarks/results/2026-04-22-b9b0641/dgemm.csv`.
+43.3% FP32 utilization is a floor on sustained-boost compute, not a ceiling of theoretical peak — error-free transforms on SIMD hardware are intrinsically constrained by dd_fma's 18 FP32 FLOPs (9 per DP FLOP). See `docs/vv/VV_REPORT.md` §10 (methodology) and `docs/design/FP32_UTILIZATION.md` (derivation). Anchored to 654 GFLOP/s measurement in `benchmarks/results/2026-04-22-6b5447a/dgemm.csv`.
 ```
 
 ### Edit 2 — around line 464
@@ -103,7 +103,7 @@ Gauss 3-multiply (3× DGEMM): **+23-43% vs AMX at ≥1024**. This is the product
 
 With:
 ```
-Gauss 3-multiply (3× DGEMM): **+14–33% vs AMX** across two independent 2026-04-22 runs (`benchmarks/results/2026-04-22-b9b0641/zgemm.csv`, `benchmarks/results/2026-04-22-94a699d-run2/zgemm.csv`). Crossover at N=1024, peak at N=2048–3072, ±10% run-to-run from GPU boost-clock volatility. The older +23–43% range (see table ~L678) is historical; post-correction measurements show the narrower envelope. Dispatcher selects GPU by FLOP threshold (see `src/blas_wrapper.c`), not by raw N.
+Gauss 3-multiply (3× DGEMM): **+14–33% vs AMX** across two independent 2026-04-22 runs (`benchmarks/results/2026-04-22-6b5447a/zgemm.csv`, `benchmarks/results/2026-04-22-29db164-run2/zgemm.csv`). Crossover at N=1024, peak at N=2048–3072, ±10% run-to-run from GPU boost-clock volatility. The older +23–43% range (see table ~L678) is historical; post-correction measurements show the narrower envelope. Dispatcher selects GPU by FLOP threshold (see `src/blas_wrapper.c`), not by raw N.
 ```
 
 ### Verification after re-application

@@ -18,8 +18,8 @@
 //
 // Steady-state regime — native ABMatrix API, ABMatrix handles persisted across calls,
 // upload and FP64<->DD conversion amortized:
-//   DGEMM: GPU wins for N >= 2048   (anchor: benchmarks/results/2026-04-22-b9b0641/dgemm.csv)
-//   ZGEMM: GPU wins for N >= 1024   (anchor: benchmarks/results/2026-04-22-b9b0641/zgemm.csv)
+//   DGEMM: GPU wins for N >= 2048   (anchor: benchmarks/results/2026-04-22-6b5447a/dgemm.csv)
+//   ZGEMM: GPU wins for N >= 1024   (anchor: benchmarks/results/2026-04-22-6b5447a/zgemm.csv)
 //   DSYRK: GPU wins for N >= 3072   (steady-state; prior measurement, not re-measured for end-to-end regime)
 //   ZHERK: GPU wins for N >= 1024   (steady-state; v1.4 introduced GPU-native transpose / no CPU roundtrip; not re-measured for end-to-end regime)
 //
@@ -27,9 +27,9 @@
 // the path Fortran host codes hit through dgemm_/zgemm_):
 //   No crossover in the measured grid through N=2048. AMX wins by 15-170x at all
 //   tested shapes, dominated by FP64<->DD conversion at ~140 MB/s effective bandwidth
-//   (root cause localized in commit be4c6fd via AB_PROFILE=1).
+//   (root cause localized in commit 07c6a87 via AB_PROFILE=1).
 //   For Fortran host codes calling dgemm_/zgemm_ without handle caching: AB_MODE=cpu
-//   is the right default. Anchor: benchmarks/results/2026-04-24-271a0f0-rect/.
+//   is the right default. Anchor: benchmarks/results/2026-04-24-0bfb147-rect/.
 //   DSYRK/ZHERK end-to-end behavior expected to be similar to GEMM (same conversion
 //   path); not directly measured.
 //

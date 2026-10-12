@@ -4,7 +4,7 @@
 **Report Version**: 1.1
 **Date**: 2026-04-23
 **Status**: Validated for Production Use
-**Validated Baseline**: Git tag `v1.0.2-bugfix` (SHA: 700934f)
+**Validated Baseline**: Git tag `v1.0.2-bugfix` (SHA: d115498)
 **Revision 1.1**: Added §10 Clock-pin and Utilization Methodology; §10 Conclusions renumbered to §11, §11 References renumbered to §12.
 **Test System**: Apple M2 Max, macOS 14.7, Metal 3
 **Validation Standard**: NASA-STD-7009A, ASME V&V 10-2006
@@ -417,7 +417,7 @@ apple-bottom is suitable for production use in:
 | Item | Value |
 |------|-------|
 | **Validated Version** | v1.0.2-bugfix |
-| **Git SHA** | 700934f |
+| **Git SHA** | d115498 |
 | **Tag Date** | 2026-03-31 |
 | **Repository** | https://github.com/grantdh/apple-bottom |
 
@@ -568,10 +568,10 @@ diff <(grep "total energy" system_gpu.out) \
 
 | Artifact | Git SHA | Tag | Date |
 |----------|---------|-----|------|
-| `src/apple_bottom.m` | 700934f | v1.0.2-bugfix | 2026-03-31 |
-| `tests/verification/test_convergence.c` | dce51b6 | (validation) | 2026-03-31 |
-| `docs/vv/PRECISION_ENVELOPE.md` | dce51b6 | (validation) | 2026-03-31 |
-| `tests/validation/VAL001_QE_Si64.md` | 9633cf6 | (validation) | 2026-03-31 |
+| `src/apple_bottom.m` | d115498 | v1.0.2-bugfix | 2026-03-31 |
+| `tests/verification/test_convergence.c` | d89484d | (validation) | 2026-03-31 |
+| `docs/vv/PRECISION_ENVELOPE.md` | d89484d | (validation) | 2026-03-31 |
+| `tests/validation/VAL001_QE_Si64.md` | 433fef7 | (validation) | 2026-03-31 |
 
 ---
 
@@ -621,8 +621,8 @@ Measured: < 10⁻¹¹ (conservative)
 **Headline: FP32 utilization is 35–45% of theoretical peak at boost clock.**
 On an M2 Max 38-core GPU (peak 13.60 TFLOP/s = 1.398 GHz × 38 × 128 FMA × 2),
 DD-DGEMM sustains 654–672 GFLOP/s (dgemm.csv min at N=2048, bench_paper.csv
-max at N=4096; see `benchmarks/results/2026-04-22-b9b0641/dgemm.csv` and
-`benchmarks/results/2026-04-23-5cfcd52/bench_paper.csv`).
+max at N=4096; see `benchmarks/results/2026-04-22-6b5447a/dgemm.csv` and
+`benchmarks/results/2026-04-23-2c76e39/bench_paper.csv`).
 Each DD-FMA consumes 9 FP32 FLOPs, giving 5.89–6.05 TFLOP/s effective FP32.
 Point estimate: 43.3% of theoretical peak at boost clock.
 
@@ -649,12 +649,12 @@ The 35–45% band reflects uncertainty in the denominator:
   of the best-case FP32 envelope the hardware can offer.
 
 Run-to-run variance in GPU GFLOP/s at N≥2048 (e.g., 726 vs 813 at N=2048
-across ZGEMM runs 94a699d and 0805de5 — a 12% spread) tracks this
+across ZGEMM runs 29db164 and 3d2381b — a 12% spread) tracks this
 boost-clock volatility directly.
 
 ### References
-- Benchmark CSVs (run 1): `benchmarks/results/2026-04-22-b9b0641/{dgemm,zgemm,sgemm}.csv`
-- Benchmark CSVs (run 2): `benchmarks/results/2026-04-22-94a699d-run2/zgemm.csv`
+- Benchmark CSVs (run 1): `benchmarks/results/2026-04-22-6b5447a/{dgemm,zgemm,sgemm}.csv`
+- Benchmark CSVs (run 2): `benchmarks/results/2026-04-22-29db164-run2/zgemm.csv`
 - Powermetrics captures: `docs/vv/powermetrics/`
 - Reproducibility: `docs/REPRODUCIBILITY.md`
 - FP32 utilization derivation: `docs/design/FP32_UTILIZATION.md`
