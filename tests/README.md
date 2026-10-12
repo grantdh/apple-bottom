@@ -44,6 +44,7 @@ It does **not** catch:
   - `tests/test_chaos.c` — 18 tests
   - `tests/test_device_api.c` — 11 tests (7 unparameterized + 4
     wrappers around 2 parameterized helpers)
+  - `tests/test_blas_abi.c` — 16 suites (622 cases), see below
 
 - **Pending PR-1.5 (still single-main, no ghost-guard):**
   - `tests/test_precision.c` — needs decomposition strategy
@@ -56,6 +57,20 @@ It does **not** catch:
   - `tests/test_rectangular.c`
   - `tests/test_original_rectangular.c`
   - `tests/test_rectangle_debug.c`
+
+## BLAS-ABI conformance harness
+
+`tests/test_blas_abi.c` checks `ab_dgemm_blas` / `ab_zgemm_blas`,
+`ab_dgemm_` / `ab_zgemm_`, the plain `dgemm_` / `zgemm_` symbols and the
+native GEMMs against Accelerate `cblas_*gemm` (column-major), using a
+componentwise bound of 1e-11. Each `TESTS[]` entry is a suite that runs in
+its own child process (`AB_MODE` is cached per process), and a crashing case
+fails only itself. Known failures live in the file's `XFAIL` table, tagged
+with audit IDs. An XFAIL that now passes (XPASS), or an entry that matches
+no case (STALE), fails the run: when a fix lands, delete its entries.
+`./build/test_blas_abi -v` lists every case. `make test-symbols` is the
+strict export check for `_dgemm_` / `_zgemm_` and fails until H-P0-1 is
+fixed.
 
 ## Meta-test
 

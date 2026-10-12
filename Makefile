@@ -169,11 +169,18 @@ $(BUILD)/test_device_api: tests/test_device_api.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
+# BLAS-ABI conformance harness: column-major ab_*gemm_blas / ab_*gemm_ /
+# dgemm_ / zgemm_ vs Accelerate cblas. Known failures are tracked in the
+# XFAIL table in tests/test_blas_abi.c (XPASS and stale entries fail the run).
+$(BUILD)/test_blas_abi: tests/test_blas_abi.c lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
 $(BUILD)/test_convergence: tests/verification/test_convergence.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
-test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api test-ghost-detection
+test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_blas_abi test-ghost-detection
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "Running Tests"
@@ -181,6 +188,7 @@ test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api
 	./$(BUILD)/test_precision
 	./$(BUILD)/test_correctness
 	./$(BUILD)/test_device_api
+	./$(BUILD)/test_blas_abi
 	@echo ""
 	@echo "✓ All tests passed!"
 
@@ -365,7 +373,7 @@ bench-paper-csv: $(BUILD)/bench_paper
 # CI Targets
 # =============================================================================
 
-.PHONY: build-check ci-local verify-symbols
+.PHONY: build-check ci-local verify-symbols test-symbols
 
 # Verify the dylib exports standard Fortran BLAS names (dgemm_, zgemm_)
 # and that Accelerate is properly re-exported. This confirms the dylib
@@ -387,6 +395,21 @@ verify-symbols: $(BUILD)/libapplebottom.dylib
 	@echo "✓ Symbols look correct — this is a drop-in BLAS dylib"
 	@echo ""
 
+# Strict Fortran-ABI export check: a gfortran CALL DGEMM/ZGEMM binds to the
+# plain _dgemm_/_zgemm_ symbols, so the dylib must define exactly those names
+# ($NEWLAPACK-suffixed or ab_-prefixed exports do not count). Fails until
+# H-P0-1 is fixed; tests/test_blas_abi.c tracks the same defect as an XFAIL.
+test-symbols: $(BUILD)/libapplebottom.dylib
+	@missing=0; \
+	for s in _dgemm_ _zgemm_; do \
+		if nm -gU $(BUILD)/libapplebottom.dylib | awk '{print $$NF}' | grep -qx "$$s"; then \
+			echo "  ✓ exports $$s"; \
+		else \
+			echo "  ✗ missing $$s (H-P0-1)"; missing=1; \
+		fi; \
+	done; \
+	exit $$missing
+
 # Build check: compile all source files to .o without linking
 # Used by GitHub Actions to verify syntax and compilation (fast check)
 build-check: | $(BUILD)
@@ -406,6 +429,8 @@ build-check: | $(BUILD)
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_correctness.c -o $(BUILD)/test_correctness.o
 	@echo "Compiling test_precision.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_precision.c -o $(BUILD)/test_precision.o
+	@echo "Compiling test_blas_abi.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_blas_abi.c -o $(BUILD)/test_blas_abi.o
 	@echo "Compiling test_chaos.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_chaos.c -o $(BUILD)/test_chaos.o
 	@echo "Compiling test_convergence.c..."
@@ -416,7 +441,7 @@ build-check: | $(BUILD)
 
 # Local CI: run full test suite + convergence study, generate CI report
 # Only writes CI_REPORT.txt if all tests pass (exits on first failure)
-ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_convergence test-ghost-detection
+ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_blas_abi $(BUILD)/test_convergence test-ghost-detection
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "CI Local Validation"
@@ -426,6 +451,7 @@ ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos 
 	@./$(BUILD)/test_precision > $(BUILD)/test_precision.log 2>&1 && echo "✓ test_precision: PASS" || (echo "✗ test_precision: FAIL" && cat $(BUILD)/test_precision.log && exit 1)
 	@./$(BUILD)/test_correctness > $(BUILD)/test_correctness.log 2>&1 && echo "✓ test_correctness: PASS" || (echo "✗ test_correctness: FAIL" && cat $(BUILD)/test_correctness.log && exit 1)
 	@./$(BUILD)/test_chaos > $(BUILD)/test_chaos.log 2>&1 && echo "✓ test_chaos: PASS" || (echo "✗ test_chaos: FAIL" && cat $(BUILD)/test_chaos.log && exit 1)
+	@./$(BUILD)/test_blas_abi > $(BUILD)/test_blas_abi.log 2>&1 && echo "✓ test_blas_abi: PASS" || (echo "✗ test_blas_abi: FAIL" && cat $(BUILD)/test_blas_abi.log && exit 1)
 	@echo ""
 	@echo "Running convergence study (V-2)..."
 	@./$(BUILD)/test_convergence > $(BUILD)/test_convergence.log 2>&1 && echo "✓ test_convergence: PASS" || (echo "✗ test_convergence: FAIL" && cat $(BUILD)/test_convergence.log && exit 1)
@@ -445,6 +471,7 @@ ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos 
 		echo "TEST_PRECISION: PASS ($$PRECISION_PASS tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_CORRECTNESS: PASS ($$CORRECTNESS_PASS tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_CONVERGENCE: PASS" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_BLAS_ABI: PASS ($$(grep "^Results:" $(BUILD)/test_blas_abi.log | sed -E "s/^Results: //"))" >> $(BUILD)/CI_REPORT.txt; \
 		echo "test-ghost-detection: PASS" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_TOTAL: $$TOTAL" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_PASSED: $$TOTAL" >> $(BUILD)/CI_REPORT.txt; \
