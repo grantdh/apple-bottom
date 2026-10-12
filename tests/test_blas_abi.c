@@ -154,24 +154,6 @@ typedef struct {
 } XfailEntry;
 
 static const XfailEntry XFAIL[] = {
-    // Morton remap is not a bijection unless gridW == gridH or gridW == 2*gridH
-    // (64x64 tiles; tall-skinny kernel 128x16 tiles when M >= 4N).
-    {"ab_dgemm/512x256x64",                     "K-P0-1"},
-    {"ab_dgemm/256x1024x64",                    "K-P0-1"},
-    {"ab_dgemm/1024x256x64",                    "K-P0-1"},
-    {"ab_dgemm_scaled/512x256x64",              "K-P0-1"},
-    {"ab_dgemm_scaled/256x1024x64",             "K-P0-1"},
-    {"ab_dgemm_scaled/1024x64x64",              "K-P0-1"},
-    {"ab_dgemm_scaled/2048x128x64",             "K-P0-1"},
-    {"ab_zgemm/512x256x64",                     "K-P0-1"},
-    {"ab_zgemm/256x1024x64",                    "K-P0-1"},
-    {"ab_zgemm/1024x64x64",                     "K-P0-1"},
-    {"ab_zgemm/2048x128x64",                    "K-P0-1"},
-    {"ab_batch_dgemm/512x256x64",               "K-P0-1"},
-    {"ab_[dz]gemm_*/gpu/NN/512x256x64/*/*",     "K-P0-1"},
-    {"ab_[dz]gemm_*/gpu/NN/1024x64x64/*/*",     "K-P0-1"},
-    // ab_dgemm_async leaves gridW/gridH (buffers 6/7) unbound: API-validation abort.
-    {"ab_dgemm_async/512x256x64",               "K-P1-3"},
     // ab_dgemm_blas: GPU path transposes on anything but 'N'; CPU branch only on 'T'.
     {"ab_dgemm_*/gpu/n?/*/*/*",                 "K-P0-3/H-P1-1"},
     {"ab_dgemm_*/gpu/?n/*/*/*",                 "K-P0-3/H-P1-1"},
@@ -312,21 +294,22 @@ static void add_native(Op op, int M, int N, int K) {
     c->alpha = SCALARS[SC_GEN].alpha; c->beta = SCALARS[SC_GEN].beta;   // ab_dgemm_scaled only
 }
 
-// Native ABMatrix GEMMs (row-major) on grids that are powers of two but not
-// square. 256x512 (grid 8x4) and the TS shapes outside the square kernel are
-// controls that pass today.
+// Native ABMatrix GEMMs (row-major) on tile grids that are powers of two but
+// neither square nor 2:1 wide (K-P0-1 regressions; 1024x64 and 2048x128 use the
+// 128x16 tall-skinny tiles where the entry point routes M >= 4N there).
+// 256x512 (grid 8x4) is a control. The suite runs under MTL_DEBUG_LAYER=1,
+// which also catches unbound kernel buffers (K-P1-3).
 static void gen_native(const Suite *s) {
     (void)s;
     static const int SHAPES[][2] = {
         {512, 256}, {256, 1024}, {1024, 256}, {1024, 64}, {2048, 128}, {256, 512},
     };
-    static const Op OPS[] = {OP_DGEMM, OP_DGEMM_SCALED, OP_ZGEMM};
+    static const Op OPS[] = {
+        OP_DGEMM, OP_DGEMM_SCALED, OP_ZGEMM, OP_BATCH_DGEMM, OP_DGEMM_ASYNC,
+    };
     for (size_t o = 0; o < TEST_REGISTRY_SIZE(OPS); o++)
         for (size_t i = 0; i < TEST_REGISTRY_SIZE(SHAPES); i++)
             add_native(OPS[o], SHAPES[i][0], SHAPES[i][1], 64);
-    add_native(OP_BATCH_DGEMM, 512, 256, 64);
-    add_native(OP_BATCH_DGEMM, 256, 512, 64);
-    add_native(OP_DGEMM_ASYNC, 512, 256, 64);
 }
 
 static void add_symbol(const char *sym, const void *addr) {
