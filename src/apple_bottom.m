@@ -762,12 +762,19 @@ static os_unfair_lock g_init_lock = OS_UNFAIR_LOCK_INIT;
         // MTLMathModeSafe is CRITICAL for DD precision - prevents FMA reordering
         // that breaks error-free transformations. Without it, precision degrades
         // from ~10⁻¹⁶ to ~10⁻⁸. KVC fallback @(3) was harmful, causing regression.
-        // Only available in macOS 15.0+ SDK, so older SDKs can't achieve full precision.
+        // mathMode needs macOS 15 at run time and a macOS 15+ SDK at build time.
+        // Otherwise fastMathEnabled=NO, which gives the same full DD precision.
 #if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
-        opts.mathMode = MTLMathModeSafe;
-#else
-        NSLog(@"WARNING: MTLMathModeSafe not available — DD precision degraded to ~10⁻⁸");
+        if (@available(macOS 15.0, *)) {
+            opts.mathMode = MTLMathModeSafe;
+        } else
 #endif
+        {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            opts.fastMathEnabled = NO;
+#pragma clang diagnostic pop
+        }
 
         // Propagate the host-side DD-algorithm selector into the Metal compiler so
         // the MSL `#ifdef APPLEBOTTOM_USE_DWTIMESDW3` branch sees the same define.
