@@ -95,42 +95,37 @@ static int ab_get_mode(void) {
     return _ab_mode;
 }
 
-// Thread-local record of the last dispatch decision. Used by bench harnesses
-// to confirm AB_MODE routing without touching internals. Zero runtime cost.
+// Thread-local record of the path the last BLAS-ABI call on this thread
+// actually took, for bench harnesses and the profiler hook in
+// fortran_bridge.c. Only the two places that produce C write it: "cpu" in
+// ab_internal_*gemm_cpu, "gpu" once the GPU result is in C (H-P1-2). The
+// routing queries below never touch it. Zero runtime cost.
 static __thread const char *_ab_last_path = "none";
 const char* ab_get_last_dispatch_path(void) { return _ab_last_path; }
 
 bool ab_use_gpu(int m, int n, int k) {
     int mode = ab_get_mode();
-    if (mode == AB_MODE_CPU) { _ab_last_path = "cpu"; return false; }
+    if (mode == AB_MODE_CPU) return false;
     int min_dim = ab_get_min_gpu_dim();
     // Dims below GPU minimum are never profitable (threadgroups underutilized)
-    if (m <= min_dim || n <= min_dim || k <= min_dim) {
-        _ab_last_path = "cpu"; return false;
-    }
-    if (mode == AB_MODE_GPU) { _ab_last_path = "gpu"; return true; }
+    if (m <= min_dim || n <= min_dim || k <= min_dim) return false;
+    if (mode == AB_MODE_GPU) return true;
     // AUTO: heterogeneous heuristic
     uint64_t flops = 2ULL * m * n * k;
-    bool use = (m < 64 || n < 64 || k < 64)
-               ? (flops >= ab_get_crossover_flops())
-               : (flops >= ab_get_crossover_flops_real());
-    _ab_last_path = use ? "gpu" : "cpu";
-    return use;
+    return (m < 64 || n < 64 || k < 64)
+           ? (flops >= ab_get_crossover_flops())
+           : (flops >= ab_get_crossover_flops_real());
 }
 
 // Complex version accounts for 4x arithmetic density
 static bool ab_use_gpu_complex(int m, int n, int k) {
     int mode = ab_get_mode();
-    if (mode == AB_MODE_CPU) { _ab_last_path = "cpu"; return false; }
+    if (mode == AB_MODE_CPU) return false;
     int min_dim = ab_get_min_gpu_dim();
-    if (m <= min_dim || n <= min_dim || k <= min_dim) {
-        _ab_last_path = "cpu"; return false;
-    }
-    if (mode == AB_MODE_GPU) { _ab_last_path = "gpu"; return true; }
+    if (m <= min_dim || n <= min_dim || k <= min_dim) return false;
+    if (mode == AB_MODE_GPU) return true;
     uint64_t flops = 8ULL * m * n * k;
-    bool use = flops >= ab_get_crossover_flops();
-    _ab_last_path = use ? "gpu" : "cpu";
-    return use;
+    return flops >= ab_get_crossover_flops();
 }
 
 // =============================================================================
@@ -183,22 +178,32 @@ static void pack_op_complex(enum CBLAS_TRANSPOSE t, const double complex* X, int
 // Whole-call CPU paths (Accelerate cblas, column-major). Used below the GPU
 // threshold, for BLAS quick returns and invalid flags, and as the fallback
 // when any GPU step fails before C is written, so C always gets a correct
-// result.
-static void dgemm_cpu(enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
-                      int M, int N, int K, double alpha,
-                      const double* A, int ldA, const double* B, int ldB,
-                      double beta, double* C, int ldC) {
+// result. Internal, not in apple_bottom.h: fortran_bridge.c calls them for
+// the calls it routes to the CPU itself, so the path record stays accurate.
+void ab_internal_dgemm_cpu(enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
+                           int M, int N, int K, double alpha,
+                           const double* A, int ldA, const double* B, int ldB,
+                           double beta, double* C, int ldC) {
     _ab_last_path = "cpu";
     cblas_dgemm(CblasColMajor, ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
 }
 
-static void zgemm_cpu(enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
-                      int M, int N, int K, double complex alpha,
-                      const double complex* A, int ldA,
-                      const double complex* B, int ldB,
-                      double complex beta, double complex* C, int ldC) {
+void ab_internal_zgemm_cpu(enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
+                           int M, int N, int K, double complex alpha,
+                           const double complex* A, int ldA,
+                           const double complex* B, int ldB,
+                           double complex beta, double complex* C, int ldC) {
     _ab_last_path = "cpu";
     cblas_zgemm(CblasColMajor, ta, tb, M, N, K, &alpha, A, ldA, B, ldB, &beta, C, ldC);
+}
+
+// A GPU-routed call that has to run on cblas instead. The path record says
+// "cpu" either way; under AB_PROFILE also say why, so a fallback is not
+// mistaken for a routing decision (H-P2-8).
+static void note_gpu_fallback(const char *routine, int M, int N, int K, ABStatus init) {
+    if (ab_profile_enabled())
+        fprintf(stderr, "AB_PROFILE %s M=%d N=%d K=%d  GPU fallback to cblas: %s\n",
+                routine, M, N, K, init != AB_OK ? ab_status_string(init) : "GPU step failed");
 }
 
 // =============================================================================
@@ -221,9 +226,14 @@ void ab_zgemm_blas(
     // quick return for alpha == 0 (A and B must not be read) and invalid flags.
     if (ta == AB_TRANS_INVALID || tb == AB_TRANS_INVALID || alpha == 0.0 ||
         !ab_use_gpu_complex(M, N, K)) {
-        zgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+        ab_internal_zgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }
+
+    // Hosts that reach us through zgemm_ (QE, Yambo) never call ab_init(), so
+    // create the Metal context on first GPU use (H-P1-2). ab_init() is
+    // idempotent and thread-safe; if it fails, the allocations below fail too.
+    ABStatus init = ab_init();
 
     // GPU path: compute op(A)*op(B) on GPU, apply alpha/beta in epilogue
     int _prof = ab_profile_enabled();
@@ -327,9 +337,11 @@ cleanup:
 
     // Any failure happened before C was written: redo the whole call on CPU.
     if (!ok) {
-        zgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+        note_gpu_fallback("zgemm", M, N, K, init);
+        ab_internal_zgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }
+    _ab_last_path = "gpu";
     if (_prof) {
         double t = ab_now_sec(); _t_destroy = t - _t0;
         double sum = _t_alloc + _t_A_repack + _t_A_upload +
@@ -369,9 +381,12 @@ void ab_dgemm_blas(
     // quick return for alpha == 0 (A and B must not be read) and invalid flags.
     if (ta == AB_TRANS_INVALID || tb == AB_TRANS_INVALID || alpha == 0.0 ||
         !ab_use_gpu(M, N, K)) {
-        dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+        ab_internal_dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }
+
+    // Lazy Metal context, as in ab_zgemm_blas (H-P1-2).
+    ABStatus init = ab_init();
 
     // GPU path: supports arbitrary alpha/beta and transpose via scaled kernel
     bool ok = false;
@@ -422,7 +437,12 @@ cleanup:
     ab_matrix_destroy(mC);
 
     // Any failure happened before C was written: redo the whole call on CPU.
-    if (!ok) dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+    if (!ok) {
+        note_gpu_fallback("dgemm", M, N, K, init);
+        ab_internal_dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+        return;
+    }
+    _ab_last_path = "gpu";
 }
 
 // Fortran-callable wrappers (ab_zgemm_, ab_dgemm_) are in fortran_bridge.c

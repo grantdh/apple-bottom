@@ -15,16 +15,18 @@
 // A case passes when
 //   max_ij |C_ij - Cref_ij| / (|alpha| (|op(A)| |op(B)|)_ij + |beta| |C0_ij| + tiny) <= 1e-11,
 // A and B are bitwise unchanged, C outside its M x N block is bitwise
-// unchanged, and the case's routing expectation holds (ROUTE_GPU: the GEMM
-// counters in ab_get_stats() advanced and ab_get_last_dispatch_path() is
-// "gpu"; ROUTE_CPU: the counters did not advance). Leading-dimension padding
-// is filled with NaN so that reading it shows up in the result.
+// unchanged, ab_get_last_dispatch_path() names what computed C ("gpu" if the
+// GEMM counters in ab_get_stats() advanced, "cpu" otherwise), under
+// AB_PROFILE the profiler counts dgemm_/zgemm_ calls the same way, and the
+// case's routing expectation holds (ROUTE_GPU: the counters advanced;
+// ROUTE_CPU: they did not). Leading-dimension padding is filled with NaN so
+// that reading it shows up in the result.
 //
 // Isolation: every suite runs in a child process (this binary re-executed
 // with --child lo hi), because
 //   - AB_MODE is read once and cached (ab_get_mode in blas_wrapper.c,
 //     fb_get_mode in fortran_bridge.c), so each mode needs a fresh process;
-//   - the lazy-init suite must run in a process that never called ab_init();
+//   - the gpu-noinit suites must run in processes that never called ab_init();
 //   - known-bad cases crash (SIGSEGV, Metal API-validation SIGABRT, exit(255)
 //     from cblas parameter checks). A crash fails only the case in progress;
 //     the parent restarts the child at the next case.
@@ -83,9 +85,13 @@ void fortran_zgemm(const char *transA, const char *transB,
                    const double complex *B, const int *ldB,
                    const double complex *beta, double complex *C, const int *ldC) __asm__("_zgemm_");
 
+// AB_PROFILE table writer, exported by blas_profiler.c (internal header).
+void ab_prof_dump(FILE *out);
+
 #define TOL             1e-11
 #define MAX_CASES       1024
 #define MIN_GPU_DIM     32      // DEFAULT_MIN_GPU_DIM in blas_wrapper.c
+#define MAX_MATRIX_DIM  46340   // AB_MAX_DIMENSION in apple_bottom.m
 #define CASE_TIMEOUT_S  120
 
 // =============================================================================
@@ -154,8 +160,7 @@ typedef struct {
 } XfailEntry;
 
 static const XfailEntry XFAIL[] = {
-    // No lazy init: AB_MODE=gpu without ab_init() silently runs cblas.
-    {"*/gpu-noinit/*/*/*/*",                    "H-P1-2"},
+    // No known failures.
 };
 
 static int xfail_hits[TEST_REGISTRY_SIZE(XFAIL)];
@@ -177,6 +182,7 @@ struct Suite {
     const char *ab_mode;        // AB_MODE for the child (NULL: unset)
     bool init;                  // call ab_init() before the first case
     bool debug_layer;           // MTL_DEBUG_LAYER=1 (Metal API validation)
+    bool profile;               // AB_PROFILE=1
     Op op;                      // entry point (gen_blas suites only)
     void (*gen)(const Suite *s);
     int lo, hi;                 // case range, set by build_cases()
@@ -244,6 +250,10 @@ static void gen_blas(const Suite *s) {
     add_std(s, 'N', 'N', 0, 80, 72, 3, SC_GEN);                      // quick returns
     add_std(s, 'N', 'N', 96, 0, 72, 3, SC_GEN);
     add_std(s, 'N', 'N', 96, 80, 0, 3, SC_GEN);
+
+    // op(A) exceeds the ABMatrix dimension limit: routed to the GPU, the
+    // call fails there and must fall back to cblas and report "cpu".
+    add_blas(s, s->op, 'N', 'N', MAX_MATRIX_DIM + 1, 48, 48, 0, SC_GEN, ROUTE_CPU);
 }
 
 // AB_MODE=auto: the QE cegterg call crosses both FLOP thresholds (3.6e8 >= 1e8).
@@ -254,13 +264,17 @@ static void gen_auto(const Suite *s) {
     add_blas(s, OP_DGEMM_BLAS, 'T', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_GPU);
 }
 
-// AB_MODE=gpu without ab_init(): the GPU path must still be taken.
-static void gen_noinit(const Suite *s) {
-    add_blas(s, OP_DGEMM_BLAS, 'N', 'N', 96, 80, 72, 3, SC_GEN, ROUTE_GPU);
-    add_blas(s, OP_ZGEMM_BLAS, 'N', 'N', 96, 80, 72, 3, SC_GEN, ROUTE_GPU);
-    add_blas(s, OP_DGEMM_F,    'N', 'N', 96, 80, 72, 3, SC_GEN, ROUTE_GPU);
-    add_blas(s, OP_ZGEMM_F,    'N', 'N', 96, 80, 72, 3, SC_GEN, ROUTE_GPU);
-    add_blas(s, OP_ZGEMM_BLAS, 'C', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_GPU);
+// AB_MODE=auto and AB_PROFILE=1, no ab_init(). The bridge sends all three
+// shapes to ab_*gemm_blas, but only the first runs on the GPU: K = 16 is
+// below AB_MIN_GPU_DIM (the audit's 2048x2048x16 call) and the last one
+// fails on the GPU and falls back. The profiler must report what ran.
+static void gen_profile(const Suite *s) {
+    static const Op OPS[] = {OP_DGEMM_SYM, OP_ZGEMM_SYM};
+    for (size_t o = 0; o < TEST_REGISTRY_SIZE(OPS); o++) {
+        add_blas(s, OPS[o], 'N', 'N', 256, 256, 2048, 0, SC_GEN, ROUTE_GPU);
+        add_blas(s, OPS[o], 'N', 'N', 2048, 2048, 16, 0, SC_GEN, ROUTE_CPU);
+        add_blas(s, OPS[o], 'N', 'N', MAX_MATRIX_DIM + 1, 48, 48, 0, SC_GEN, ROUTE_CPU);
+    }
 }
 
 static void add_native(Op op, int M, int N, int K) {
@@ -308,11 +322,19 @@ enum {
     SU_DGEMM_BLAS_GPU, SU_DGEMM_BLAS_CPU, SU_ZGEMM_BLAS_GPU, SU_ZGEMM_BLAS_CPU,
     SU_DGEMM_F_GPU, SU_DGEMM_F_CPU, SU_ZGEMM_F_GPU, SU_ZGEMM_F_CPU,
     SU_DGEMM_SYM_GPU, SU_DGEMM_SYM_CPU, SU_ZGEMM_SYM_GPU, SU_ZGEMM_SYM_CPU,
-    SU_AUTO, SU_NOINIT, SU_NATIVE, SU_SYMBOLS, SU_COUNT
+    SU_AUTO,
+    SU_DGEMM_BLAS_NOINIT, SU_ZGEMM_BLAS_NOINIT, SU_DGEMM_F_NOINIT, SU_ZGEMM_F_NOINIT,
+    SU_DGEMM_SYM_NOINIT, SU_ZGEMM_SYM_NOINIT,
+    SU_PROFILE, SU_NATIVE, SU_SYMBOLS, SU_COUNT
 };
 
 #define BLAS_SUITE(entry, mode) \
     {.label = mode, .ab_mode = mode, .init = true, .op = entry, .gen = gen_blas}
+
+// AB_MODE=gpu in a process that never calls ab_init(), as in QE: the first
+// GPU-routed call must create the Metal context itself (H-P1-2).
+#define NOINIT_SUITE(entry) \
+    {.label = "gpu-noinit", .ab_mode = "gpu", .op = entry, .gen = gen_blas}
 
 static Suite SUITES[SU_COUNT] = {
     [SU_DGEMM_BLAS_GPU] = BLAS_SUITE(OP_DGEMM_BLAS, "gpu"),
@@ -328,7 +350,14 @@ static Suite SUITES[SU_COUNT] = {
     [SU_ZGEMM_SYM_GPU]  = BLAS_SUITE(OP_ZGEMM_SYM, "gpu"),
     [SU_ZGEMM_SYM_CPU]  = BLAS_SUITE(OP_ZGEMM_SYM, "cpu"),
     [SU_AUTO]    = {.label = "auto", .ab_mode = "auto", .init = true, .gen = gen_auto},
-    [SU_NOINIT]  = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_noinit},
+    [SU_DGEMM_BLAS_NOINIT] = NOINIT_SUITE(OP_DGEMM_BLAS),
+    [SU_ZGEMM_BLAS_NOINIT] = NOINIT_SUITE(OP_ZGEMM_BLAS),
+    [SU_DGEMM_F_NOINIT]    = NOINIT_SUITE(OP_DGEMM_F),
+    [SU_ZGEMM_F_NOINIT]    = NOINIT_SUITE(OP_ZGEMM_F),
+    [SU_DGEMM_SYM_NOINIT]  = NOINIT_SUITE(OP_DGEMM_SYM),
+    [SU_ZGEMM_SYM_NOINIT]  = NOINIT_SUITE(OP_ZGEMM_SYM),
+    [SU_PROFILE] = {.label = "auto-profile", .ab_mode = "auto", .profile = true,
+                    .gen = gen_profile},
     [SU_NATIVE]  = {.init = true, .debug_layer = true, .gen = gen_native},
     [SU_SYMBOLS] = {.gen = gen_symbols},
 };
@@ -475,19 +504,53 @@ static uint64_t gpu_gemm_count(void) {
     return s.dgemm_count + s.zgemm_count;
 }
 
+// Under AB_PROFILE, after every dgemm_/zgemm_ call (bridge entry points;
+// ab_*gemm_blas are not profiled) the profiler row for the routine must hold
+// all calls so far, with a GPU share equal to the calls that ran on the GPU.
+static bool profile_ok(const AbiCase *c, uint64_t gpu_gemms) {
+    static unsigned long long calls[2], gpu[2];
+    if (!getenv("AB_PROFILE") || c->op == OP_DGEMM_BLAS || c->op == OP_ZGEMM_BLAS)
+        return true;
+    const int z = op_is_complex(c->op);
+    calls[z]++;
+    gpu[z] += gpu_gemms > 0;
+
+    char *table = NULL;
+    size_t len = 0;
+    FILE *f = open_memstream(&table, &len);
+    ab_prof_dump(f);
+    fclose(f);
+    bool ok = false;
+    char *save = NULL;
+    for (char *line = strtok_r(table, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        char name[32];
+        unsigned long long n;
+        double ms, pct;
+        if (sscanf(line, "%31s %llu %lf %lf%%", name, &n, &ms, &pct) == 4 &&
+            !strcmp(name, z ? "zgemm" : "dgemm"))
+            ok = n == calls[z] && fabs(pct - 100.0 * gpu[z] / calls[z]) < 0.051;
+    }
+    free(table);
+    return ok;
+}
+
 static bool blas_verdict(const AbiCase *c, double err, bool inputs_ok, bool outside_ok,
                          uint64_t gpu_gemms, char *detail, size_t n) {
     const char *path = ab_get_last_dispatch_path();
+    bool path_ok = !strcmp(path, gpu_gemms > 0 ? "gpu" : "cpu");
+    bool prof_ok = profile_ok(c, gpu_gemms);
     bool routed = c->route == ROUTE_ANY ||
-                  (c->route == ROUTE_GPU && gpu_gemms > 0 && !strcmp(path, "gpu")) ||
+                  (c->route == ROUTE_GPU && gpu_gemms > 0) ||
                   (c->route == ROUTE_CPU && gpu_gemms == 0);
-    snprintf(detail, n, "err=%.1e path=%s gpu_gemms=%llu%s%s%s", err, path,
+    snprintf(detail, n, "err=%.1e path=%s gpu_gemms=%llu%s%s%s%s%s", err, path,
              (unsigned long long)gpu_gemms,
              inputs_ok ? "" : " [A or B modified]",
              outside_ok ? "" : " [C outside MxN modified]",
+             path_ok ? "" : " [path record does not match]",
+             prof_ok ? "" : " [AB_PROFILE GPU share does not match]",
              routed ? "" : c->route == ROUTE_GPU ? " [GPU path not taken]"
-                                                 : " [GPU used in cpu mode]");
-    return err <= TOL && inputs_ok && outside_ok && routed;
+                                                 : " [GPU used, expected cblas]");
+    return err <= TOL && inputs_ok && outside_ok && path_ok && prof_ok && routed;
 }
 
 static bool run_blas_real(const AbiCase *c, char *detail, size_t n) {
@@ -812,9 +875,10 @@ static void record(const AbiCase *c, bool ok, const char *detail) {
 // Child environment: the caller's, minus AB_* and MTL_DEBUG_LAYER, plus the suite's.
 static char **child_env(const Suite *s, char *mode_buf, size_t mode_len) {
     static char debug_layer[] = "MTL_DEBUG_LAYER=1";
+    static char profile[] = "AB_PROFILE=1";
     size_t n = 0;
     while (environ[n]) n++;
-    char **env = calloc(n + 3, sizeof *env);
+    char **env = calloc(n + 4, sizeof *env);
     size_t k = 0;
     for (size_t i = 0; i < n; i++)
         if (strncmp(environ[i], "AB_", 3) && strncmp(environ[i], "MTL_DEBUG_LAYER=", 16))
@@ -824,6 +888,7 @@ static char **child_env(const Suite *s, char *mode_buf, size_t mode_len) {
         env[k++] = mode_buf;
     }
     if (s->debug_layer) env[k++] = debug_layer;
+    if (s->profile) env[k++] = profile;
     return env;
 }
 
@@ -941,7 +1006,13 @@ static void test_dgemm_sym_cpu(void)    { run_suite(SU_DGEMM_SYM_CPU); }
 static void test_zgemm_sym_gpu(void)    { run_suite(SU_ZGEMM_SYM_GPU); }
 static void test_zgemm_sym_cpu(void)    { run_suite(SU_ZGEMM_SYM_CPU); }
 static void test_auto_mode(void)        { run_suite(SU_AUTO); }
-static void test_lazy_init(void)        { run_suite(SU_NOINIT); }
+static void test_dgemm_blas_noinit(void) { run_suite(SU_DGEMM_BLAS_NOINIT); }
+static void test_zgemm_blas_noinit(void) { run_suite(SU_ZGEMM_BLAS_NOINIT); }
+static void test_ab_dgemm_f_noinit(void) { run_suite(SU_DGEMM_F_NOINIT); }
+static void test_ab_zgemm_f_noinit(void) { run_suite(SU_ZGEMM_F_NOINIT); }
+static void test_dgemm_sym_noinit(void)  { run_suite(SU_DGEMM_SYM_NOINIT); }
+static void test_zgemm_sym_noinit(void)  { run_suite(SU_ZGEMM_SYM_NOINIT); }
+static void test_profile_path(void)     { run_suite(SU_PROFILE); }
 static void test_native_morton(void)    { run_suite(SU_NATIVE); }
 static void test_fortran_symbols(void)  { run_suite(SU_SYMBOLS); }
 
@@ -959,7 +1030,13 @@ static const TestCase TESTS[] = {
     {"test_zgemm_sym_gpu",    test_zgemm_sym_gpu},
     {"test_zgemm_sym_cpu",    test_zgemm_sym_cpu},
     {"test_auto_mode",        test_auto_mode},
-    {"test_lazy_init",        test_lazy_init},
+    {"test_dgemm_blas_noinit", test_dgemm_blas_noinit},
+    {"test_zgemm_blas_noinit", test_zgemm_blas_noinit},
+    {"test_ab_dgemm_f_noinit", test_ab_dgemm_f_noinit},
+    {"test_ab_zgemm_f_noinit", test_ab_zgemm_f_noinit},
+    {"test_dgemm_sym_noinit",  test_dgemm_sym_noinit},
+    {"test_zgemm_sym_noinit",  test_zgemm_sym_noinit},
+    {"test_profile_path",     test_profile_path},
     {"test_native_morton",    test_native_morton},
     {"test_fortran_symbols",  test_fortran_symbols},
 };

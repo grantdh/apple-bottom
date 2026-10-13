@@ -244,6 +244,7 @@ const char* ab_status_string(ABStatus status);
 // BLAS-compatible dispatch-aware entry points (respect AB_MODE + crossover thresholds).
 // These are the entry points host codes reach via the dgemm_/zgemm_ Fortran symbols;
 // benchmarks use them directly to measure end-to-end dispatch behavior.
+// They create the Metal context on first GPU use, so callers need not call ab_init().
 void ab_dgemm_blas(char transA, char transB, int M, int N, int K,
                    double alpha, const double* A, int ldA,
                    const double* B, int ldB,
@@ -255,8 +256,9 @@ void ab_zgemm_blas(char transA, char transB, int M, int N, int K,
                    double _Complex beta,
                    double _Complex* C, int ldC);
 
-// Returns the dispatch path taken by the most recent ab_*_blas call on this
-// thread: "cpu", "gpu", or "none" before any call. Thread-local.
+// Returns the dispatch path taken by the most recent ab_*_blas (or dgemm_/zgemm_)
+// call on this thread: "gpu" only if the GPU computed C, "cpu" if cblas did
+// (including a fallback after a GPU failure), or "none" before any call. Thread-local.
 const char* ab_get_last_dispatch_path(void);
 
 #ifdef __cplusplus
