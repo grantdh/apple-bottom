@@ -213,7 +213,7 @@ with ab.Session() as session:
 ```python
 pool = ab.MemoryPool(size_hint=16)
 matrix = pool.get_matrix(rows, cols)
-pool.reset()
+pool.reset()  # matrices obtained before the reset can no longer be used
 ```
 
 ### Statistics

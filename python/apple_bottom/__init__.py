@@ -457,6 +457,7 @@ class _Handle:
 
     _ptr = None   # C handle; None once closed or if creation failed
     _free = None  # ctypes destroy function; None when another object owns _ptr
+    _generation = 0  # bumped when the handles this owner lent out are taken back
 
     def close(self) -> None:
         """Release the handle now. Calling close() again does nothing."""
@@ -490,11 +491,13 @@ class Matrix(_Handle):
     Handles creation, data transfer, and cleanup (close(), `with`, or
     garbage collection). A matrix obtained from MemoryPool.get_matrix() or
     Session.get() belongs to that pool or session, which frees it; closing
-    such a matrix only detaches the wrapper.
+    such a matrix only detaches the wrapper. A pool matrix can no longer be
+    used once the pool is reset.
     """
 
     _free = _libwrap.ab_matrix_destroy
     _owner = None  # MemoryPool or Session that owns a borrowed handle
+    _owner_generation = 0  # owner's _generation when the handle was borrowed
 
     def __init__(self, rows: int, cols: int):
         """
@@ -526,12 +529,18 @@ class Matrix(_Handle):
         m = cls.__new__(cls)
         m._ptr, m._rows, m._cols = handle, rows, cols
         m._owner = owner  # keeps the owner, and so the handle, alive
+        m._owner_generation = owner._generation
         m._free = None
         return m
 
     def _live(self):
         if self._owner is not None:
             self._owner._live()  # raises once the pool or session is closed
+            # After MemoryPool.reset() the pool may hand this handle out again
+            # with another shape; this wrapper's shape would then overflow
+            # host buffers in download().
+            if self._owner._generation != self._owner_generation:
+                raise InvalidArgumentError("Matrix was returned to its MemoryPool by reset()")
         return super()._live()
 
     @property
@@ -662,8 +671,12 @@ class MemoryPool(_Handle):
         return Matrix._borrow(mat, rows, cols, self)
 
     def reset(self) -> None:
-        """Mark all matrices in pool as available for reuse."""
+        """
+        Mark all matrices in pool as available for reuse. Matrices obtained
+        before the reset raise InvalidArgumentError if used again.
+        """
         _libwrap.ab_pool_reset(self._live())
+        self._generation += 1
 
 
 # =============================================================================

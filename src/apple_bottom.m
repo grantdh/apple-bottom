@@ -21,6 +21,7 @@
 #import <dispatch/dispatch.h>
 #import <os/lock.h>
 #include <mach/mach_time.h>
+#include <pthread.h>
 #include "apple_bottom.h"
 
 // =============================================================================
@@ -740,8 +741,15 @@ static ABContextImpl* g_context = nil;
 static bool g_initialized = false;
 static os_unfair_lock g_init_lock = OS_UNFAIR_LOCK_INIT;
 
+// Metal does not survive fork(): a child inherits g_context but crashes on
+// first use. ab_init() registers this child handler with the first context,
+// so a forked child sees no context and GPU-routed BLAS calls run on cblas.
+// It is set only in the single-threaded child, before anything else runs.
+static bool g_forked_child = false;
+static void ab_atfork_child(void) { g_forked_child = true; }
+
 @implementation ABContextImpl
-+ (instancetype)shared { return g_context; }
++ (instancetype)shared { return g_forked_child ? nil : g_context; }
 + (void)shutdown {
     os_unfair_lock_lock(&g_init_lock);
     g_context = nil;
@@ -764,17 +772,22 @@ static os_unfair_lock g_init_lock = OS_UNFAIR_LOCK_INIT;
         // from ~10⁻¹⁶ to ~10⁻⁸. KVC fallback @(3) was harmful, causing regression.
         // mathMode needs macOS 15 at run time and a macOS 15+ SDK at build time.
         // Otherwise fastMathEnabled=NO, which gives the same full DD precision.
+        // The run-time test is respondsToSelector, not @available: @available
+        // below a macOS 15 deployment target emits a call to compiler-rt's
+        // __isPlatformVersionAtLeast, which gfortran does not link in when it
+        // links the static archive.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability"
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
-        if (@available(macOS 15.0, *)) {
+        if ([opts respondsToSelector:@selector(setMathMode:)]) {
             opts.mathMode = MTLMathModeSafe;
         } else
 #endif
         {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
             opts.fastMathEnabled = NO;
-#pragma clang diagnostic pop
         }
+#pragma clang diagnostic pop
 
         // Propagate the host-side DD-algorithm selector into the Metal compiler so
         // the MSL `#ifdef APPLEBOTTOM_USE_DWTIMESDW3` branch sees the same define.
@@ -948,6 +961,9 @@ struct ABAutoreleaseScope {
 
 // Thread-safe initialization with support for shutdown/reinit
 ABStatus ab_init(void) {
+    // Checked before the lock, which another parent thread may have held at fork().
+    if (g_forked_child) return AB_ERROR_NO_DEVICE;
+
     ABAutoreleaseScope pool;
     os_unfair_lock_lock(&g_init_lock);
 
@@ -962,6 +978,9 @@ ABStatus ab_init(void) {
 
     if (status == AB_OK) {
         g_initialized = true;
+        static bool atfork_registered = false;
+        if (!atfork_registered)
+            atfork_registered = pthread_atfork(NULL, NULL, ab_atfork_child) == 0;
     }
 
     os_unfair_lock_unlock(&g_init_lock);
@@ -969,7 +988,7 @@ ABStatus ab_init(void) {
 }
 
 void ab_shutdown(void) {
-    if (g_context) {
+    if ([ABContextImpl shared]) {  // a forked child must not release the parent's Metal objects
         [ABContextImpl shutdown];
         os_unfair_lock_lock(&g_stats_lock);
         memset(&g_stats, 0, sizeof(g_stats));
@@ -982,7 +1001,7 @@ const char* ab_device_name(void) {
     return ctx ? ctx.device.name.UTF8String : "Unknown";
 }
 
-bool ab_is_initialized(void) { return g_context != nil; }
+bool ab_is_initialized(void) { return [ABContextImpl shared] != nil; }
 
 // =============================================================================
 // Public API: Matrix Lifecycle

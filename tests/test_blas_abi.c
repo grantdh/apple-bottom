@@ -20,16 +20,19 @@
 // AB_PROFILE the profiler counts dgemm_/zgemm_ calls the same way, and the
 // case's routing expectation holds (ROUTE_GPU: the counters advanced;
 // ROUTE_CPU: they did not). Leading-dimension padding is filled with NaN so
-// that reading it shows up in the result.
+// that reading it shows up in the result. An illegal-argument case passes
+// only if the call never returns: cblas must reject it as reference xerbla
+// would, naming the bad parameter and ending the process with status 255.
 //
 // Isolation: every suite runs in a child process (this binary re-executed
 // with --child lo hi), because
 //   - AB_MODE is read once and cached (ab_get_mode in blas_wrapper.c,
 //     fb_get_mode in fortran_bridge.c), so each mode needs a fresh process;
 //   - the gpu-noinit suites must run in processes that never called ab_init();
-//   - known-bad cases crash (SIGSEGV, Metal API-validation SIGABRT, exit(255)
-//     from cblas parameter checks). A crash fails only the case in progress;
-//     the parent restarts the child at the next case.
+//   - known-bad cases crash (SIGSEGV, Metal API-validation SIGABRT), and
+//     illegal-argument cases end the child on purpose (exit(255) from the
+//     cblas parameter check). A crash fails only the case in progress; the
+//     parent restarts the child at the next case.
 // posix_spawn is used rather than a bare fork(): Metal cannot reach
 // MTLCompilerService from a forked child that did not exec.
 //
@@ -54,6 +57,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -134,6 +138,19 @@ static const Scalars SCALARS[] = {
     [SC_A0_NAN_AB] = {"a0nanAB", CMPLX(0.0, 0.0),   CMPLX(0.5, -0.25),  POISON_AB},  // A, B must not be read
 };
 
+// Illegal BLAS arguments. Accelerate's cblas rejects each one by printing
+// "Parameter number <param> passed to cblas_<x>gemm had an invalid value" and
+// exiting with status 255; <param> counts cblas_<x>gemm's arguments, with
+// Order as 1.
+enum { BAD_NONE, BAD_TRANSA, BAD_TRANSB, BAD_M, BAD_N, BAD_K, BAD_LDA, BAD_LDB, BAD_LDC,
+       BAD_COUNT };
+
+static const struct { const char *arg; int param; } BAD_ARGS[] = {
+    [BAD_TRANSA] = {"transA", 2}, [BAD_TRANSB] = {"transB", 3},
+    [BAD_M] = {"M", 4},   [BAD_N] = {"N", 5},     [BAD_K] = {"K", 6},
+    [BAD_LDA] = {"lda", 9}, [BAD_LDB] = {"ldb", 11}, [BAD_LDC] = {"ldc", 14},
+};
+
 typedef struct {
     char name[80];
     Op op;
@@ -142,6 +159,8 @@ typedef struct {
     double complex alpha, beta;
     Poison poison;
     Route route;
+    int bad;                            // BAD_*: pass this argument illegal
+    bool fork;                          // repeat the call in a fork()ed child
     const void *sym;                    // OP_SYMBOL only
 } AbiCase;
 
@@ -151,7 +170,8 @@ static int n_cases;
 // =============================================================================
 // XFAIL table: known failures, first match wins (fnmatch, FNM_PATHNAME).
 // Case names: <entry>/<mode>/<transA><transB>/<M>x<N>x<K>/ld+<pad>/<scalars>
-// for BLAS-ABI cases, <entry>/<M>x<N>x<K> for native cases.
+// for BLAS-ABI cases, .../<M>x<N>x<K>/illegal-<arg> for illegal-argument
+// cases, <entry>/<M>x<N>x<K> for native cases.
 // =============================================================================
 
 typedef struct {
@@ -204,8 +224,8 @@ static AbiCase *new_case(void) {
     return c;
 }
 
-static void add_blas(const Suite *s, Op op, char ta, char tb, int M, int N, int K,
-                     int pad, int scalars, Route route) {
+static AbiCase *add_blas(const Suite *s, Op op, char ta, char tb, int M, int N, int K,
+                         int pad, int scalars, Route route) {
     const Scalars *sc = &SCALARS[scalars];
     AbiCase *c = new_case();
     snprintf(c->name, sizeof c->name, "%s/%s/%c%c/%dx%dx%d/ld+%d/%s",
@@ -214,6 +234,7 @@ static void add_blas(const Suite *s, Op op, char ta, char tb, int M, int N, int 
     c->M = M; c->N = N; c->K = K; c->pad = pad;
     c->alpha = sc->alpha; c->beta = sc->beta; c->poison = sc->poison;
     c->route = route;
+    return c;
 }
 
 // gen_blas suites run with AB_MODE=gpu or cpu. In gpu mode the GPU must be
@@ -277,6 +298,34 @@ static void gen_profile(const Suite *s) {
     }
 }
 
+// Each illegal argument through each BLAS-ABI entry point, in AB_MODE=gpu
+// without ab_init() (as in QE), on a shape whose legal call runs on the GPU.
+// The legal call is NT (NC for complex) with tight leading dimensions; the
+// illegal ld is one less than the stored rows. M > K and N > K, so an ld
+// check against the wrong dimension accepts it.
+static void gen_illegal(const Suite *s) {
+    static const Op OPS[] = {
+        OP_DGEMM_BLAS, OP_ZGEMM_BLAS, OP_DGEMM_F, OP_ZGEMM_F, OP_DGEMM_SYM, OP_ZGEMM_SYM,
+    };
+    for (size_t o = 0; o < TEST_REGISTRY_SIZE(OPS); o++)
+        for (int bad = BAD_TRANSA; bad < BAD_COUNT; bad++) {
+            AbiCase *c = add_blas(s, OPS[o], 'N', op_is_complex(OPS[o]) ? 'C' : 'T',
+                                  96, 80, 72, 0, SC_GEN, ROUTE_ANY);
+            c->bad = bad;
+            snprintf(c->name, sizeof c->name, "%s/%s/%c%c/%dx%dx%d/illegal-%s",
+                     OP_NAME[c->op], s->label, c->ta, c->tb, c->M, c->N, c->K,
+                     BAD_ARGS[bad].arg);
+        }
+}
+
+// AB_MODE=gpu without ab_init(): a GPU call creates the Metal context, then
+// a fork()ed child repeats it. Metal does not survive fork(), so the child
+// must run the call on cblas and get the same correct result.
+static void gen_fork(const Suite *s) {
+    add_blas(s, OP_DGEMM_SYM, 'N', 'N', 96, 80, 72, 3, SC_GEN, ROUTE_GPU)->fork = true;
+    add_blas(s, OP_ZGEMM_SYM, 'N', 'N', 96, 80, 72, 3, SC_GEN, ROUTE_GPU)->fork = true;
+}
+
 static void add_native(Op op, int M, int N, int K) {
     AbiCase *c = new_case();
     snprintf(c->name, sizeof c->name, "%s/%dx%dx%d", OP_NAME[op], M, N, K);
@@ -324,7 +373,7 @@ enum {
     SU_DGEMM_SYM_GPU, SU_DGEMM_SYM_CPU, SU_ZGEMM_SYM_GPU, SU_ZGEMM_SYM_CPU,
     SU_AUTO,
     SU_DGEMM_BLAS_NOINIT, SU_ZGEMM_BLAS_NOINIT, SU_DGEMM_F_NOINIT, SU_ZGEMM_F_NOINIT,
-    SU_DGEMM_SYM_NOINIT, SU_ZGEMM_SYM_NOINIT,
+    SU_DGEMM_SYM_NOINIT, SU_ZGEMM_SYM_NOINIT, SU_ILLEGAL, SU_FORK,
     SU_PROFILE, SU_NATIVE, SU_SYMBOLS, SU_COUNT
 };
 
@@ -356,6 +405,8 @@ static Suite SUITES[SU_COUNT] = {
     [SU_ZGEMM_F_NOINIT]    = NOINIT_SUITE(OP_ZGEMM_F),
     [SU_DGEMM_SYM_NOINIT]  = NOINIT_SUITE(OP_DGEMM_SYM),
     [SU_ZGEMM_SYM_NOINIT]  = NOINIT_SUITE(OP_ZGEMM_SYM),
+    [SU_ILLEGAL] = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_illegal},
+    [SU_FORK]    = {.label = "gpu-noinit-fork", .ab_mode = "gpu", .gen = gen_fork},
     [SU_PROFILE] = {.label = "auto-profile", .ab_mode = "auto", .profile = true,
                     .gen = gen_profile},
     [SU_NATIVE]  = {.init = true, .debug_layer = true, .gen = gen_native},
@@ -537,6 +588,12 @@ static bool profile_ok(const AbiCase *c, uint64_t gpu_gemms) {
 static bool blas_verdict(const AbiCase *c, double err, bool inputs_ok, bool outside_ok,
                          uint64_t gpu_gemms, char *detail, size_t n) {
     const char *path = ab_get_last_dispatch_path();
+    if (c->bad) {
+        snprintf(detail, n, "call with illegal %s returned (path=%s gpu_gemms=%llu); "
+                 "cblas should have rejected it", BAD_ARGS[c->bad].arg, path,
+                 (unsigned long long)gpu_gemms);
+        return false;
+    }
     bool path_ok = !strcmp(path, gpu_gemms > 0 ? "gpu" : "cpu");
     bool prof_ok = profile_ok(c, gpu_gemms);
     bool routed = c->route == ROUTE_ANY ||
@@ -551,6 +608,25 @@ static bool blas_verdict(const AbiCase *c, double err, bool inputs_ok, bool outs
              routed ? "" : c->route == ROUTE_GPU ? " [GPU path not taken]"
                                                  : " [GPU used, expected cblas]");
     return err <= TOL && inputs_ok && outside_ok && path_ok && prof_ok && routed;
+}
+
+// The arguments a BLAS-ABI case passes: its legal call, with c->bad made
+// illegal. Buffers are always sized for the legal call.
+typedef struct { char ta, tb; int M, N, K, lda, ldb, ldc; } BlasArgs;
+
+static BlasArgs blas_args(const AbiCase *c, Layout la, Layout lb, Layout lc) {
+    BlasArgs a = {c->ta, c->tb, c->M, c->N, c->K, la.ld, lb.ld, lc.ld};
+    switch (c->bad) {
+    case BAD_TRANSA: a.ta = 'X'; break;
+    case BAD_TRANSB: a.tb = 'X'; break;
+    case BAD_M:      a.M = -1; break;
+    case BAD_N:      a.N = -1; break;
+    case BAD_K:      a.K = -1; break;
+    case BAD_LDA:    a.lda = la.rows - 1; break;
+    case BAD_LDB:    a.ldb = lb.rows - 1; break;
+    case BAD_LDC:    a.ldc = lc.rows - 1; break;
+    }
+    return a;
 }
 
 static bool run_blas_real(const AbiCase *c, char *detail, size_t n) {
@@ -586,16 +662,17 @@ static bool run_blas_real(const AbiCase *c, char *detail, size_t n) {
         }
     }
 
+    const BlasArgs a = blas_args(c, la, lb, lc);
     uint64_t g0 = gpu_gemm_count();
     switch (c->op) {
     case OP_DGEMM_BLAS:
-        ab_dgemm_blas(c->ta, c->tb, M, N, K, alpha, A, la.ld, B, lb.ld, beta, C, lc.ld);
+        ab_dgemm_blas(a.ta, a.tb, a.M, a.N, a.K, alpha, A, a.lda, B, a.ldb, beta, C, a.ldc);
         break;
     case OP_DGEMM_F:
-        ab_dgemm_(&c->ta, &c->tb, &M, &N, &K, &alpha, A, &la.ld, B, &lb.ld, &beta, C, &lc.ld);
+        ab_dgemm_(&a.ta, &a.tb, &a.M, &a.N, &a.K, &alpha, A, &a.lda, B, &a.ldb, &beta, C, &a.ldc);
         break;
     default:
-        fortran_dgemm(&c->ta, &c->tb, &M, &N, &K, &alpha, A, &la.ld, B, &lb.ld, &beta, C, &lc.ld);
+        fortran_dgemm(&a.ta, &a.tb, &a.M, &a.N, &a.K, &alpha, A, &a.lda, B, &a.ldb, &beta, C, &a.ldc);
         break;
     }
     uint64_t gpu_gemms = gpu_gemm_count() - g0;
@@ -645,16 +722,17 @@ static bool run_blas_complex(const AbiCase *c, char *detail, size_t n) {
         }
     }
 
+    const BlasArgs a = blas_args(c, la, lb, lc);
     uint64_t g0 = gpu_gemm_count();
     switch (c->op) {
     case OP_ZGEMM_BLAS:
-        ab_zgemm_blas(c->ta, c->tb, M, N, K, alpha, A, la.ld, B, lb.ld, beta, C, lc.ld);
+        ab_zgemm_blas(a.ta, a.tb, a.M, a.N, a.K, alpha, A, a.lda, B, a.ldb, beta, C, a.ldc);
         break;
     case OP_ZGEMM_F:
-        ab_zgemm_(&c->ta, &c->tb, &M, &N, &K, &alpha, A, &la.ld, B, &lb.ld, &beta, C, &lc.ld);
+        ab_zgemm_(&a.ta, &a.tb, &a.M, &a.N, &a.K, &alpha, A, &a.lda, B, &a.ldb, &beta, C, &a.ldc);
         break;
     default:
-        fortran_zgemm(&c->ta, &c->tb, &M, &N, &K, &alpha, A, &la.ld, B, &lb.ld, &beta, C, &lc.ld);
+        fortran_zgemm(&a.ta, &a.tb, &a.M, &a.N, &a.K, &alpha, A, &a.lda, B, &a.ldb, &beta, C, &a.ldc);
         break;
     }
     uint64_t gpu_gemms = gpu_gemm_count() - g0;
@@ -665,6 +743,42 @@ static bool run_blas_complex(const AbiCase *c, char *detail, size_t n) {
     bool ok = blas_verdict(c, err, inputs_ok, outside_ok, gpu_gemms, detail, n);
 
     free(A); free(A0); free(B); free(B0); free(C); free(C0); free(Cref); free(absAB);
+    return ok;
+}
+
+// Runs c on the GPU, then fork()s; the child repeats c, which must now run
+// on cblas (ROUTE_CPU) and pass the same checks. It reports through a shared
+// page and its exit status.
+static bool run_fork(const AbiCase *c, char *detail, size_t n) {
+    bool (*run)(const AbiCase *, char *, size_t) =
+        op_is_complex(c->op) ? run_blas_complex : run_blas_real;
+    const size_t page = 4096;
+    char before[256], how[64] = "";
+    bool ok = run(c, before, sizeof before);
+
+    char *after = mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
+    if (after == MAP_FAILED) {
+        snprintf(detail, n, "mmap: %s", strerror(errno));
+        return false;
+    }
+    snprintf(after, page, "no report");
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid == 0) {
+        AbiCase in_child = *c;
+        in_child.route = ROUTE_CPU;
+        _exit(run(&in_child, after, page) ? 0 : 1);
+    }
+    int status = 0;
+    if (pid < 0)
+        snprintf(how, sizeof how, " [fork: %s]", strerror(errno));
+    else
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    if (pid > 0 && WIFSIGNALED(status))
+        snprintf(how, sizeof how, " [killed by signal %d]", WTERMSIG(status));
+    ok = ok && pid > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    snprintf(detail, n, "parent: %s; forked child: %s%s", before, after, how);
+    munmap(after, page);
     return ok;
 }
 
@@ -799,6 +913,7 @@ static bool run_symbol(const AbiCase *c, char *detail, size_t n) {
 static bool run_case(int idx, char *detail, size_t n) {
     const AbiCase *c = &CASES[idx];
     rng_state = 0x9E3779B97F4A7C15ULL * (uint64_t)(idx + 1);
+    if (c->fork) return run_fork(c, detail, n);
     switch (c->op) {
     case OP_DGEMM_BLAS: case OP_DGEMM_F: case OP_DGEMM_SYM:
         return run_blas_real(c, detail, n);
@@ -958,6 +1073,16 @@ static int run_child(const Suite *s, int lo, char *why, size_t why_len) {
     return next;
 }
 
+// An illegal-argument case passes when its child ended the way cblas rejects
+// it: exit status 255 after naming the expected parameter.
+static bool rejected_by_cblas(const AbiCase *c, const char *why) {
+    static const char exited[] = "child exited with status 255: ";
+    char want[96];
+    snprintf(want, sizeof want, "Parameter number %d passed to cblas_%cgemm had an invalid value",
+             BAD_ARGS[c->bad].param, op_is_complex(c->op) ? 'z' : 'd');
+    return !strncmp(why, exited, sizeof exited - 1) && strstr(why, want);
+}
+
 static void run_suite(int si) {
     const Suite *s = &SUITES[si];
     const int p0 = tests_passed, x0 = tests_xfailed, f0 = tests_failed, xp0 = tests_xpassed;
@@ -970,6 +1095,11 @@ static void run_suite(int si) {
         char why[640];
         next = run_child(s, next, why, sizeof why);
         if (!why[0]) continue;
+        if (next < s->hi && CASES[next].bad) {   // the expected end of this child
+            record(&CASES[next], rejected_by_cblas(&CASES[next], why), why);
+            next++;
+            continue;
+        }
         crashes++;
         if (next < s->hi) {
             record(&CASES[next], false, why);
@@ -1012,6 +1142,8 @@ static void test_ab_dgemm_f_noinit(void) { run_suite(SU_DGEMM_F_NOINIT); }
 static void test_ab_zgemm_f_noinit(void) { run_suite(SU_ZGEMM_F_NOINIT); }
 static void test_dgemm_sym_noinit(void)  { run_suite(SU_DGEMM_SYM_NOINIT); }
 static void test_zgemm_sym_noinit(void)  { run_suite(SU_ZGEMM_SYM_NOINIT); }
+static void test_illegal_args(void)     { run_suite(SU_ILLEGAL); }
+static void test_fork_after_gpu(void)   { run_suite(SU_FORK); }
 static void test_profile_path(void)     { run_suite(SU_PROFILE); }
 static void test_native_morton(void)    { run_suite(SU_NATIVE); }
 static void test_fortran_symbols(void)  { run_suite(SU_SYMBOLS); }
@@ -1036,6 +1168,8 @@ static const TestCase TESTS[] = {
     {"test_ab_zgemm_f_noinit", test_ab_zgemm_f_noinit},
     {"test_dgemm_sym_noinit",  test_dgemm_sym_noinit},
     {"test_zgemm_sym_noinit",  test_zgemm_sym_noinit},
+    {"test_illegal_args",     test_illegal_args},
+    {"test_fork_after_gpu",   test_fork_after_gpu},
     {"test_profile_path",     test_profile_path},
     {"test_native_morton",    test_native_morton},
     {"test_fortran_symbols",  test_fortran_symbols},
