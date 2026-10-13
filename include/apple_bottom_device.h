@@ -113,13 +113,20 @@ void ab_dev_stream_destroy(ab_dev_stream_t stream);
 ABStatus ab_dev_stream_sync(ab_dev_stream_t stream);
 
 // -----------------------------------------------------------------------------
-// BLAS entry points (Week-2 scope — declared, not yet implemented)
+// BLAS entry points
 // -----------------------------------------------------------------------------
 //
 // All matrix arguments are *column-major* (Fortran order). Offsets are
 // measured in elements of the corresponding Fortran datatype:
 //   ab_dev_dgemm: offsets are in doubles
 //   ab_dev_zgemm: offsets are in complex-doubles (= 2 × double)
+//
+// transA/transB follow BLAS: op(X) is X, X^T or X^H (AB_CONJ_TRANS is a
+// plain transpose for ab_dev_dgemm). Leading dimensions count the stored
+// rows (lda >= rows of A as stored, i.e. m or k). An invalid flag, a short
+// leading dimension, m, n or k <= 0, or a matrix extending past its buffer
+// returns AB_ERROR_INVALID_ARG. m, n or k above 46340 (the AB_MAX_DIMENSION
+// limit in apple_bottom.h) returns AB_ERROR_ALLOC_FAILED.
 //
 // The _offset variants exist so Fortran callers can express `A(1,j)` etc.
 // without having to reinterpret the opaque handle as a pointer.

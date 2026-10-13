@@ -23,7 +23,7 @@ make ci-local
 ```
 
 This will:
-- Run all 42 tests (test_precision + test_correctness)
+- Run all 135 tests (precision, correctness, chaos, device-API, BLAS-ABI; see the counting rule in `tests/README.md`) plus the ghost-detection, symbol and Fortran checks
 - Run convergence study (V-2)
 - Generate `build/CI_REPORT.txt` with test results and convergence data hash
 
@@ -31,18 +31,23 @@ This will:
 ```
 ✓ test_precision: PASS
 ✓ test_correctness: PASS
+✓ test_chaos: PASS
+✓ test_device_api: PASS
+✓ test_blas_abi: PASS
 ✓ test_convergence: PASS
 
 GIT_SHA: <current-commit-sha>
-TEST_TOTAL: 42
-TEST_PASSED: 42
+TEST_TOTAL: 135
+TEST_PASSED: 135
 TEST_FAILED: 0
+DEVICE_API_CHECKS: 152
+BLAS_ABI_CASES: 944 passed, 0 xfailed, 0 failed, 0 xpassed, 0 stale XFAIL entries
 CONVERGENCE_POINTS: 7
 STATUS: PASS
 ```
 
 - [ ] `make ci-local` completed successfully
-- [ ] All 42 tests passed
+- [ ] All 135 tests passed
 - [ ] Convergence study generated 7 data points (N ∈ {64, 128, 256, 512, 1024, 2048, 4096})
 - [ ] Review `build/convergence_data.csv` for expected error ranges (Frobenius ~10⁻¹⁴ to 5×10⁻¹⁴)
 
@@ -54,7 +59,7 @@ Check that CI passed on the latest commit:
 
 **Check at:** `https://github.com/grantdh/apple-bottom/actions`
 
-**Note:** GitHub Actions runners don't expose Metal GPU access, so CI only verifies compile-time correctness. Full GPU validation (48 tests + convergence study) must be run locally via `make ci-local` (see step 2 above).
+**Note:** GitHub Actions runners don't expose Metal GPU access, so CI only verifies compile-time correctness. Full GPU validation (135 tests + convergence study) must be run locally via `make ci-local` (see step 2 above).
 
 ### 4. Documentation Review
 

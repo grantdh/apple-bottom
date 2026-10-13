@@ -34,6 +34,22 @@ _TBD following Si64 benchmark campaign._
   it. The AB_PROFILE table counts a `dgemm_`/`zgemm_` call as GPU only if it
   ran there, and a GPU failure that falls back to cblas prints its reason
   under AB_PROFILE.
+- **`ab_dev_dgemm` / `ab_dev_zgemm` ignored their column-major contract**
+  (K-P0-2, H-P0-4). Column-major buffers were read as row-major, so square
+  inputs returned B·A, transpose flags were ignored or returned -3, and other
+  shapes were wrong. Both now compute Cᵀ = op(B)ᵀ·op(A)ᵀ on the transposed
+  operands and honour transA/transB, ld and offsets. Invalid flags, short
+  leading dimensions and operands that run past their buffer return
+  `AB_ERROR_INVALID_ARG`. `test_device_api` compared against the row-major
+  API, which enforced the bug; it now checks against column-major cblas.
+
+### Changed
+- **`make ci-local` runs `test_device_api` and counts tests one way**
+  (RH-P1-1). `TEST_TOTAL` counts tests (precision cases, `TESTS[]` entries
+  and BLAS-ABI suites: 135), with device-API `CHECK`s and BLAS-ABI cases on
+  their own lines. `test_convergence` takes its CSV path as `argv[1]`, so
+  `make ci-local BUILD=...` reports the convergence data instead of
+  `missing`.
 
 ## [1.3.0] - 2026-04-18
 

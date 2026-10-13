@@ -9,6 +9,8 @@
 //   4. memset then D2H
 //   5. NULL / out-of-range error paths
 //   6. Stream create / sync / destroy doesn't crash
+// and the Week-2 BLAS: ab_dev_dgemm / ab_dev_zgemm against column-major
+// cblas, plus the element-wise ops.
 //
 // Pass criteria: all assertions hold. Exits non-zero on first failure.
 // =============================================================================
@@ -153,162 +155,356 @@ static void test_streams(void) {
 // =============================================================================
 // Week-2 BLAS validation tests
 // =============================================================================
+//
+// ab_dev_dgemm / ab_dev_zgemm take column-major operands
+// (apple_bottom_device.h), so the reference is Accelerate cblas_dgemm /
+// cblas_zgemm in CblasColMajor (K-P0-2 / H-P0-4). Leading-dimension padding
+// and the elements before an operand's offset are NaN, so reading them shows
+// up in C. A, B and C outside its m x n block must come back bitwise
+// unchanged. With beta == 0 the C block is NaN too: BLAS must not read it.
 
 #include <math.h>
+#include <complex.h>
+#include <Accelerate/Accelerate.h>
+
+#define GEMM_TOL 1e-11
+
+typedef struct {
+    ABTranspose ta, tb;
+    int m, n, k;
+    int pad;                        // ld = stored rows + pad
+    size_t off;                     // element offset of A, B, C (0: plain entry point)
+    double complex alpha, beta;     // ab_dev_dgemm uses the real parts
+} GemmCase;
+
+// A column-major rows x cols block at element `off` with leading dimension
+// `ld`, in a buffer of w doubles per element (1 real, 2 complex).
+typedef struct { size_t off; int ld, rows, cols, w; } Operand;
 
 static double rand_double(void) {
     return (double)rand() / (double)RAND_MAX * 2.0 - 1.0;
 }
 
-// Compute Frobenius norm of difference between two arrays
-static double frobenius_diff(const double* a, const double* b, size_t n) {
-    double sum = 0;
-    for (size_t i = 0; i < n; i++) {
-        double d = a[i] - b[i];
-        sum += d * d;
-    }
-    return sqrt(sum);
+static const char* trans_name(ABTranspose t) {
+    return t == AB_NO_TRANS ? "N" : t == AB_TRANS ? "T" : "C";
 }
 
-// Test: ab_dev_dgemm via device-buffer path matches ab_dgemm_scaled via
-// matrix-handle path.  Both paths do FP64→DD conversion, so results should
-// be bit-identical (Frobenius error == 0).
-static void test_dgemm_bit_identical(int N) {
-    printf("[BLAS-1] DGEMM bit-identical N=%d\n", N);
-    size_t nn = (size_t)N * N;
-
-    double* A_data = (double*)malloc(nn * sizeof(double));
-    double* B_data = (double*)malloc(nn * sizeof(double));
-    double* C_ref  = (double*)malloc(nn * sizeof(double));
-    double* C_dev  = (double*)malloc(nn * sizeof(double));
-    assert(A_data && B_data && C_ref && C_dev);
-
-    srand(42);
-    for (size_t i = 0; i < nn; i++) { A_data[i] = rand_double(); B_data[i] = rand_double(); }
-
-    // Path 1: matrix-handle API
-    ABMatrix mA = ab_matrix_create(N, N);
-    ABMatrix mB = ab_matrix_create(N, N);
-    ABMatrix mC = ab_matrix_create(N, N);
-    assert(mA && mB && mC);
-    ab_matrix_upload(mA, A_data, true);
-    ab_matrix_upload(mB, B_data, true);
-    ab_dgemm_scaled(1.0, mA, mB, 0.0, mC);
-    ab_matrix_download(mC, C_ref, true);
-    ab_matrix_destroy(mA);
-    ab_matrix_destroy(mB);
-    ab_matrix_destroy(mC);
-
-    // Path 2: device-buffer API
-    ab_dev_buffer_t dA = ab_dev_malloc(nn * sizeof(double));
-    ab_dev_buffer_t dB = ab_dev_malloc(nn * sizeof(double));
-    ab_dev_buffer_t dC = ab_dev_malloc(nn * sizeof(double));
-    assert(dA && dB && dC);
-    ab_dev_memcpy_h2d(dA, 0, A_data, nn * sizeof(double));
-    ab_dev_memcpy_h2d(dB, 0, B_data, nn * sizeof(double));
-    ab_dev_memset(dC, 0, 0, nn * sizeof(double));
-
-    ABStatus s = ab_dev_dgemm(AB_NO_TRANS, AB_NO_TRANS, N, N, N,
-                              1.0, dA, N, dB, N, 0.0, dC, N);
-    CHECK(s == AB_OK, "ab_dev_dgemm returns AB_OK");
-
-    ab_dev_memcpy_d2h(C_dev, dC, 0, nn * sizeof(double));
-
-    double err = frobenius_diff(C_ref, C_dev, nn);
-    char msg[128];
-    snprintf(msg, sizeof(msg), "DGEMM N=%d Frobenius diff = %.2e (expect 0)", N, err);
-    CHECK(err == 0.0, msg);
-
-    ab_dev_free(dA);
-    ab_dev_free(dB);
-    ab_dev_free(dC);
-    free(A_data); free(B_data); free(C_ref); free(C_dev);
+static enum CBLAS_TRANSPOSE ref_trans(ABTranspose t, bool cplx) {
+    if (t == AB_NO_TRANS) return CblasNoTrans;
+    return (t == AB_CONJ_TRANS && cplx) ? CblasConjTrans : CblasTrans;
 }
 
-// Test: ab_dev_zgemm via device-buffer path matches ab_zgemm via matrix-handle
-// path.  Complex data in the device buffer is interleaved [r,i,r,i,...].
-static void test_zgemm_bit_identical(int N) {
-    printf("[BLAS-2] ZGEMM bit-identical N=%d\n", N);
-    size_t nn = (size_t)N * N;
+static size_t operand_elems(Operand o) {
+    return o.off + (size_t)o.ld * o.cols;
+}
 
-    // Interleaved complex: 2 doubles per element
-    double* A_cplx = (double*)malloc(nn * 2 * sizeof(double));
-    double* B_cplx = (double*)malloc(nn * 2 * sizeof(double));
-    double* C_dev  = (double*)malloc(nn * 2 * sizeof(double));
+static bool in_block(Operand o, size_t e) {
+    if (e < o.off) return false;
+    return (e - o.off) % o.ld < (size_t)o.rows && (e - o.off) / o.ld < (size_t)o.cols;
+}
 
-    // Separate real/imag for matrix-handle path
-    double* Ar = (double*)malloc(nn * sizeof(double));
-    double* Ai = (double*)malloc(nn * sizeof(double));
-    double* Br = (double*)malloc(nn * sizeof(double));
-    double* Bi = (double*)malloc(nn * sizeof(double));
-    double* Cr_ref = (double*)malloc(nn * sizeof(double));
-    double* Ci_ref = (double*)malloc(nn * sizeof(double));
-    assert(A_cplx && B_cplx && C_dev && Ar && Ai && Br && Bi && Cr_ref && Ci_ref);
+// NaN everywhere; uniform in [-1, 1) inside the block unless nan_block.
+static double* make_operand(Operand o, bool nan_block) {
+    double* X = (double*)malloc(operand_elems(o) * o.w * sizeof(double));
+    assert(X);
+    for (size_t e = 0; e < operand_elems(o); e++)
+        for (int q = 0; q < o.w; q++)
+            X[e * o.w + q] = (!nan_block && in_block(o, e)) ? rand_double() : NAN;
+    return X;
+}
+
+// max |C - Cref| / max |Cref| over the block; NaN if C has a NaN there.
+static double block_rel_err(Operand o, const double* C, const double* Cref) {
+    double diff = 0.0, ref = 0.0;
+    for (size_t e = 0; e < operand_elems(o); e++) {
+        if (!in_block(o, e)) continue;
+        double d = 0.0, r = 0.0;
+        for (int q = 0; q < o.w; q++) {
+            double x = C[e * o.w + q] - Cref[e * o.w + q];
+            d += x * x;
+            r += Cref[e * o.w + q] * Cref[e * o.w + q];
+        }
+        if (isnan(d)) return NAN;
+        diff = fmax(diff, sqrt(d));
+        ref = fmax(ref, sqrt(r));
+    }
+    return diff / ref;
+}
+
+static bool outside_block_unchanged(Operand o, const double* X, const double* X0) {
+    for (size_t e = 0; e < operand_elems(o); e++)
+        if (!in_block(o, e) && memcmp(X + e * o.w, X0 + e * o.w, o.w * sizeof(double)))
+            return false;
+    return true;
+}
+
+// One ab_dev_dgemm / ab_dev_zgemm call against cblas ColMajor (3 CHECKs).
+static void check_gemm(bool cplx, GemmCase c) {
+    bool tA = (c.ta != AB_NO_TRANS), tB = (c.tb != AB_NO_TRANS);
+    int w = cplx ? 2 : 1;
+    int a_rows = tA ? c.k : c.m, a_cols = tA ? c.m : c.k;
+    int b_rows = tB ? c.n : c.k, b_cols = tB ? c.k : c.n;
+    Operand oA = {c.off, a_rows + c.pad, a_rows, a_cols, w};
+    Operand oB = {c.off, b_rows + c.pad, b_rows, b_cols, w};
+    Operand oC = {c.off, c.m + c.pad, c.m, c.n, w};
+    size_t bytesA = operand_elems(oA) * w * sizeof(double);
+    size_t bytesB = operand_elems(oB) * w * sizeof(double);
+    size_t bytesC = operand_elems(oC) * w * sizeof(double);
 
     srand(42);
-    for (size_t i = 0; i < nn; i++) {
-        Ar[i] = rand_double(); Ai[i] = rand_double();
-        Br[i] = rand_double(); Bi[i] = rand_double();
-        A_cplx[i * 2] = Ar[i]; A_cplx[i * 2 + 1] = Ai[i];
-        B_cplx[i * 2] = Br[i]; B_cplx[i * 2 + 1] = Bi[i];
-    }
+    double* A    = make_operand(oA, false);
+    double* B    = make_operand(oB, false);
+    double* C0   = make_operand(oC, c.beta == 0.0);
+    double* Cref = (double*)malloc(bytesC);
+    double* C    = (double*)malloc(bytesC);
+    double* A1   = (double*)malloc(bytesA);
+    double* B1   = (double*)malloc(bytesB);
+    assert(Cref && C && A1 && B1);
+    memcpy(Cref, C0, bytesC);
 
-    // Path 1: matrix-handle API (separate real/imag)
-    ABMatrix mAr = ab_matrix_create(N, N);
-    ABMatrix mAi = ab_matrix_create(N, N);
-    ABMatrix mBr = ab_matrix_create(N, N);
-    ABMatrix mBi = ab_matrix_create(N, N);
-    ABMatrix mCr = ab_matrix_create(N, N);
-    ABMatrix mCi = ab_matrix_create(N, N);
-    assert(mAr && mAi && mBr && mBi && mCr && mCi);
-
-    ab_matrix_upload(mAr, Ar, true);
-    ab_matrix_upload(mAi, Ai, true);
-    ab_matrix_upload(mBr, Br, true);
-    ab_matrix_upload(mBi, Bi, true);
-    ab_zgemm(mAr, mAi, mBr, mBi, mCr, mCi);
-    ab_matrix_download(mCr, Cr_ref, true);
-    ab_matrix_download(mCi, Ci_ref, true);
-    ab_matrix_destroy(mAr); ab_matrix_destroy(mAi);
-    ab_matrix_destroy(mBr); ab_matrix_destroy(mBi);
-    ab_matrix_destroy(mCr); ab_matrix_destroy(mCi);
-
-    // Path 2: device-buffer API (interleaved complex)
-    ab_dev_buffer_t dA = ab_dev_malloc(nn * 2 * sizeof(double));
-    ab_dev_buffer_t dB = ab_dev_malloc(nn * 2 * sizeof(double));
-    ab_dev_buffer_t dC = ab_dev_malloc(nn * 2 * sizeof(double));
+    ab_dev_buffer_t dA = ab_dev_malloc(bytesA);
+    ab_dev_buffer_t dB = ab_dev_malloc(bytesB);
+    ab_dev_buffer_t dC = ab_dev_malloc(bytesC);
     assert(dA && dB && dC);
-    ab_dev_memcpy_h2d(dA, 0, A_cplx, nn * 2 * sizeof(double));
-    ab_dev_memcpy_h2d(dB, 0, B_cplx, nn * 2 * sizeof(double));
-    ab_dev_memset(dC, 0, 0, nn * 2 * sizeof(double));
+    ab_dev_memcpy_h2d(dA, 0, A, bytesA);
+    ab_dev_memcpy_h2d(dB, 0, B, bytesB);
+    ab_dev_memcpy_h2d(dC, 0, C0, bytesC);
 
-    double alpha[2] = {1.0, 0.0};
-    double beta_z[2] = {0.0, 0.0};
-    ABStatus s = ab_dev_zgemm(AB_NO_TRANS, AB_NO_TRANS, N, N, N,
-                              alpha, dA, N, dB, N, beta_z, dC, N);
-    CHECK(s == AB_OK, "ab_dev_zgemm returns AB_OK");
-
-    ab_dev_memcpy_d2h(C_dev, dC, 0, nn * 2 * sizeof(double));
-
-    // Compare: deinterleave C_dev and compare with Cr_ref, Ci_ref
-    double err_r = 0, err_i = 0;
-    for (size_t i = 0; i < nn; i++) {
-        double dr = C_dev[i * 2]     - Cr_ref[i];
-        double di = C_dev[i * 2 + 1] - Ci_ref[i];
-        err_r += dr * dr;
-        err_i += di * di;
+    ABStatus s;
+    if (cplx) {
+        cblas_zgemm(CblasColMajor, ref_trans(c.ta, true), ref_trans(c.tb, true),
+                    c.m, c.n, c.k, &c.alpha,
+                    (double complex*)A + c.off, oA.ld,
+                    (double complex*)B + c.off, oB.ld,
+                    &c.beta, (double complex*)Cref + c.off, oC.ld);
+        double alpha[2] = {creal(c.alpha), cimag(c.alpha)};
+        double beta[2]  = {creal(c.beta), cimag(c.beta)};
+        s = c.off ? ab_dev_zgemm_offset(c.ta, c.tb, c.m, c.n, c.k, alpha,
+                                        dA, c.off, oA.ld, dB, c.off, oB.ld,
+                                        beta, dC, c.off, oC.ld)
+                  : ab_dev_zgemm(c.ta, c.tb, c.m, c.n, c.k, alpha,
+                                 dA, oA.ld, dB, oB.ld, beta, dC, oC.ld);
+    } else {
+        cblas_dgemm(CblasColMajor, ref_trans(c.ta, false), ref_trans(c.tb, false),
+                    c.m, c.n, c.k, creal(c.alpha), A + c.off, oA.ld,
+                    B + c.off, oB.ld, creal(c.beta), Cref + c.off, oC.ld);
+        s = c.off ? ab_dev_dgemm_offset(c.ta, c.tb, c.m, c.n, c.k, creal(c.alpha),
+                                        dA, c.off, oA.ld, dB, c.off, oB.ld,
+                                        creal(c.beta), dC, c.off, oC.ld)
+                  : ab_dev_dgemm(c.ta, c.tb, c.m, c.n, c.k, creal(c.alpha),
+                                 dA, oA.ld, dB, oB.ld, creal(c.beta), dC, oC.ld);
     }
-    err_r = sqrt(err_r);
-    err_i = sqrt(err_i);
-    double err = sqrt(err_r * err_r + err_i * err_i);
+    ab_dev_memcpy_d2h(C, dC, 0, bytesC);
+    ab_dev_memcpy_d2h(A1, dA, 0, bytesA);
+    ab_dev_memcpy_d2h(B1, dB, 0, bytesB);
 
-    char msg[128];
-    snprintf(msg, sizeof(msg), "ZGEMM N=%d Frobenius diff = %.2e (expect 0)", N, err);
-    CHECK(err == 0.0, msg);
+    char label[96], msg[192];
+    snprintf(label, sizeof(label), "%s %s%s %dx%dx%d pad %d off %zu%s",
+             cplx ? "zgemm" : "dgemm", trans_name(c.ta), trans_name(c.tb),
+             c.m, c.n, c.k, c.pad, c.off, c.beta == 0.0 ? " beta 0" : "");
+    snprintf(msg, sizeof(msg), "%s: returns AB_OK", label);
+    CHECK(s == AB_OK, msg);
+
+    double err = block_rel_err(oC, C, Cref);
+    snprintf(msg, sizeof(msg), "%s: rel err %.2e vs cblas ColMajor (tol %.0e)",
+             label, err, GEMM_TOL);
+    CHECK(err <= GEMM_TOL, msg);  // false for NaN
+
+    snprintf(msg, sizeof(msg), "%s: A, B and C outside its block unchanged", label);
+    CHECK(!memcmp(A1, A, bytesA) && !memcmp(B1, B, bytesB) &&
+          outside_block_unchanged(oC, C, C0), msg);
 
     ab_dev_free(dA); ab_dev_free(dB); ab_dev_free(dC);
-    free(A_cplx); free(B_cplx); free(C_dev);
-    free(Ar); free(Ai); free(Br); free(Bi); free(Cr_ref); free(Ci_ref);
+    free(A); free(B); free(C0); free(Cref); free(C); free(A1); free(B1);
+}
+
+static const ABTranspose ALL_TRANS[] = {AB_NO_TRANS, AB_TRANS, AB_CONJ_TRANS};
+
+// Every flag pair with m, n, k distinct, ld > rows and nonzero offsets
+// (ab_dev_dgemm treats AB_CONJ_TRANS as a plain transpose).
+static void check_all_trans(bool cplx, double complex alpha, double complex beta) {
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            check_gemm(cplx, (GemmCase){ALL_TRANS[i], ALL_TRANS[j], 96, 80, 72, 3, 5,
+                                        alpha, beta});
+}
+
+// Square 64^3: the row-major reading returned B*A here, and B*A again
+// with the transA flag ignored.
+static void test_dgemm_square(void) {
+    printf("[GEMM-1] DGEMM square vs cblas ColMajor\n");
+    check_gemm(false, (GemmCase){AB_NO_TRANS, AB_NO_TRANS, 64, 64, 64, 0, 0, 1.0, 0.0});
+    check_gemm(false, (GemmCase){AB_TRANS,    AB_NO_TRANS, 64, 64, 64, 0, 0, 1.0, 0.0});
+}
+
+static void test_dgemm_all_trans(void) {
+    printf("[GEMM-2] DGEMM all trans pairs vs cblas ColMajor\n");
+    check_all_trans(false, 1.25, -0.75);
+}
+
+// Tall-skinny either way round (the kernel runs on C^T, so m >= 4n and
+// n >= 4m select different kernels), then a larger padded case.
+static void test_dgemm_shapes(void) {
+    printf("[GEMM-3] DGEMM tall-skinny and large shapes vs cblas ColMajor\n");
+    check_gemm(false, (GemmCase){AB_NO_TRANS, AB_TRANS,    300, 40, 56, 2, 0, 1.25, -0.75});
+    check_gemm(false, (GemmCase){AB_TRANS,    AB_NO_TRANS, 40, 300, 56, 2, 7, 1.0, 0.0});
+    check_gemm(false, (GemmCase){AB_TRANS,    AB_NO_TRANS, 1024, 768, 520, 8, 3, 1.0, 1.0});
+}
+
+static void test_zgemm_square(void) {
+    printf("[GEMM-4] ZGEMM square vs cblas ColMajor\n");
+    check_gemm(true, (GemmCase){AB_NO_TRANS,   AB_NO_TRANS, 64, 64, 64, 0, 0, 1.0, 0.0});
+    check_gemm(true, (GemmCase){AB_CONJ_TRANS, AB_NO_TRANS, 64, 64, 64, 0, 0, 1.0, 0.0});
+}
+
+// General complex alpha/beta: the host-side epilogue path.
+static void test_zgemm_all_trans(void) {
+    printf("[GEMM-5] ZGEMM all trans pairs, complex alpha/beta, vs cblas ColMajor\n");
+    check_all_trans(true, CMPLX(1.25, -0.5), CMPLX(-0.75, 0.25));
+}
+
+// alpha = 1, beta = 0: the direct ab_zgemm_ex path.
+static void test_zgemm_all_trans_unit(void) {
+    printf("[GEMM-6] ZGEMM all trans pairs, alpha=1 beta=0, vs cblas ColMajor\n");
+    check_all_trans(true, 1.0, 0.0);
+}
+
+// The QE cegterg 'C','N' pattern (m, n << k) plus tall-skinny either way.
+static void test_zgemm_shapes(void) {
+    printf("[GEMM-7] ZGEMM QE-like and tall-skinny shapes vs cblas ColMajor\n");
+    check_gemm(true, (GemmCase){AB_CONJ_TRANS, AB_NO_TRANS, 150, 150, 2000, 4, 0,
+                                1.0, 0.0});
+    check_gemm(true, (GemmCase){AB_NO_TRANS, AB_CONJ_TRANS, 300, 40, 56, 2, 9,
+                                CMPLX(0.5, 1.0), 0.0});
+    check_gemm(true, (GemmCase){AB_TRANS, AB_TRANS, 40, 300, 56, 2, 0,
+                                CMPLX(1.25, -0.5), 1.0});
+}
+
+// Invalid flags, short leading dimensions and operands that run past their
+// buffer are rejected before anything is read or written.
+static void test_gemm_arg_errors(void) {
+    printf("[GEMM-8] GEMM argument checks\n");
+    enum { M = 8, N = 6, K = 4 };
+    // Sized for complex operands, so twice what the real calls need.
+    size_t bytesC = (size_t)M * N * 2 * sizeof(double);
+    ab_dev_buffer_t dA = ab_dev_malloc((size_t)M * K * 2 * sizeof(double));
+    ab_dev_buffer_t dB = ab_dev_malloc((size_t)K * N * 2 * sizeof(double));
+    ab_dev_buffer_t dC = ab_dev_malloc(bytesC);
+    assert(dA && dB && dC);
+    ab_dev_memset(dC, 0, 0x5A, bytesC);
+    const ABTranspose bad = (ABTranspose)7;
+    double one[2] = {1.0, 0.0}, zero[2] = {0.0, 0.0};
+
+    CHECK(ab_dev_dgemm(bad, AB_NO_TRANS, M, N, K, 1.0, dA, M, dB, K, 0.0, dC, M)
+          == AB_ERROR_INVALID_ARG, "dgemm rejects an invalid transA");
+    CHECK(ab_dev_dgemm(AB_NO_TRANS, AB_NO_TRANS, M, N, K, 1.0, dA, M - 1, dB, K, 0.0, dC, M)
+          == AB_ERROR_INVALID_ARG, "dgemm rejects lda < m");
+    CHECK(ab_dev_dgemm(AB_TRANS, AB_NO_TRANS, M, N, K, 1.0, dA, K - 1, dB, K, 0.0, dC, M)
+          == AB_ERROR_INVALID_ARG, "dgemm rejects lda < k with transA");
+    CHECK(ab_dev_dgemm_offset(AB_NO_TRANS, AB_NO_TRANS, M, N, K, 1.0, dA, 0, M,
+                              dB, 0, K, 0.0, dC, (size_t)M * N + 1, M)
+          == AB_ERROR_INVALID_ARG, "dgemm rejects C running past its buffer");
+    CHECK(ab_dev_zgemm(AB_NO_TRANS, bad, M, N, K, one, dA, M, dB, K, zero, dC, M)
+          == AB_ERROR_INVALID_ARG, "zgemm rejects an invalid transB");
+    CHECK(ab_dev_zgemm(AB_NO_TRANS, AB_NO_TRANS, M, N, K, one, dA, M, dB, K, zero, dC, M - 1)
+          == AB_ERROR_INVALID_ARG, "zgemm rejects ldc < m");
+    CHECK(ab_dev_zgemm(AB_NO_TRANS, AB_NO_TRANS, M, N, K, one, dA, M, dB, K + 1, zero, dC, M)
+          == AB_ERROR_INVALID_ARG, "zgemm rejects B running past its buffer");
+
+    unsigned char* host = (unsigned char*)malloc(bytesC);
+    assert(host);
+    ab_dev_memcpy_d2h(host, dC, 0, bytesC);
+    int ok = 1;
+    for (size_t i = 0; i < bytesC; i++) if (host[i] != 0x5A) { ok = 0; break; }
+    CHECK(ok, "rejected calls leave C untouched");
+
+    free(host);
+    ab_dev_free(dA); ab_dev_free(dB); ab_dev_free(dC);
+}
+
+// The device path adds nothing but the layout change. Column-major A, B, C
+// with ld = rows are row-major A^T, B^T, C^T, so ab_dev_dgemm NN must be
+// bitwise ab_dgemm_scaled(B^T, A^T) and ab_dev_zgemm 'C','N' (alpha = 1,
+// beta = 0) bitwise ab_zgemm_ex('N', 'C', B^T, A^T) on those handles.
+static void test_gemm_matches_host_api(void) {
+    printf("[GEMM-9] device GEMM bitwise equal to the host API on C^T\n");
+    enum { M = 96, N = 80, K = 72 };
+    const double alpha = 1.25, beta = -0.75;
+    // Bytes of a real A, B, C; the complex operands are twice that.
+    size_t bA = (size_t)M * K * sizeof(double), bB = (size_t)K * N * sizeof(double);
+    size_t bC = (size_t)M * N * sizeof(double);
+    double* A  = (double*)malloc(2 * bA);
+    double* B  = (double*)malloc(2 * bB);
+    double* C  = (double*)malloc(bC);
+    double* Cd = (double*)malloc(2 * bC);
+    double* Ch = (double*)malloc(2 * bC);
+    assert(A && B && C && Cd && Ch);
+    srand(7);
+    for (int i = 0; i < 2 * M * K; i++) A[i] = rand_double();
+    for (int i = 0; i < 2 * K * N; i++) B[i] = rand_double();
+    for (int i = 0; i < M * N; i++) C[i] = rand_double();
+
+    // DGEMM NN, general alpha/beta: A, B are the first M*K, K*N doubles.
+    ab_dev_buffer_t dA = ab_dev_malloc(bA), dB = ab_dev_malloc(bB), dC = ab_dev_malloc(bC);
+    assert(dA && dB && dC);
+    ab_dev_memcpy_h2d(dA, 0, A, bA);
+    ab_dev_memcpy_h2d(dB, 0, B, bB);
+    ab_dev_memcpy_h2d(dC, 0, C, bC);
+    ABStatus sd = ab_dev_dgemm(AB_NO_TRANS, AB_NO_TRANS, M, N, K, alpha,
+                               dA, M, dB, K, beta, dC, M);
+    ab_dev_memcpy_d2h(Cd, dC, 0, bC);
+    ab_dev_free(dA); ab_dev_free(dB); ab_dev_free(dC);
+
+    ABMatrix hA = ab_matrix_create(K, M), hB = ab_matrix_create(N, K);
+    ABMatrix hC = ab_matrix_create(N, M);
+    assert(hA && hB && hC);
+    ab_matrix_upload(hA, A, true);
+    ab_matrix_upload(hB, B, true);
+    ab_matrix_upload(hC, C, true);
+    ABStatus sh = ab_dgemm_scaled(alpha, hB, hA, beta, hC);
+    ab_matrix_download(hC, Ch, true);
+    ab_matrix_destroy(hA); ab_matrix_destroy(hB); ab_matrix_destroy(hC);
+    CHECK(sd == AB_OK && sh == AB_OK && !memcmp(Cd, Ch, bC),
+          "dgemm NN 96x80x72 bitwise ab_dgemm_scaled(B^T, A^T)");
+
+    // ZGEMM 'C','N' (A stored K x M), alpha = 1, beta = 0: the QE pattern.
+    double one[2] = {1.0, 0.0}, zero[2] = {0.0, 0.0};
+    dA = ab_dev_malloc(2 * bA); dB = ab_dev_malloc(2 * bB); dC = ab_dev_malloc(2 * bC);
+    assert(dA && dB && dC);
+    ab_dev_memcpy_h2d(dA, 0, A, 2 * bA);
+    ab_dev_memcpy_h2d(dB, 0, B, 2 * bB);
+    sd = ab_dev_zgemm(AB_CONJ_TRANS, AB_NO_TRANS, M, N, K, one,
+                      dA, K, dB, K, zero, dC, M);
+    ab_dev_memcpy_d2h(Cd, dC, 0, 2 * bC);
+    ab_dev_free(dA); ab_dev_free(dB); ab_dev_free(dC);
+
+    // Real/imag planes for A, B and C; M*N is the largest of the three.
+    _Static_assert(K <= M && K <= N, "planes are sized M*N");
+    double* re = (double*)malloc(bC);
+    double* im = (double*)malloc(bC);
+    assert(re && im);
+    ABMatrix hAr = ab_matrix_create(M, K), hAi = ab_matrix_create(M, K);
+    ABMatrix hBr = ab_matrix_create(N, K), hBi = ab_matrix_create(N, K);
+    ABMatrix hCr = ab_matrix_create(N, M), hCi = ab_matrix_create(N, M);
+    assert(hAr && hAi && hBr && hBi && hCr && hCi);
+    for (int i = 0; i < K * M; i++) { re[i] = A[2 * i]; im[i] = A[2 * i + 1]; }
+    ab_matrix_upload(hAr, re, true);
+    ab_matrix_upload(hAi, im, true);
+    for (int i = 0; i < K * N; i++) { re[i] = B[2 * i]; im[i] = B[2 * i + 1]; }
+    ab_matrix_upload(hBr, re, true);
+    ab_matrix_upload(hBi, im, true);
+    sh = ab_zgemm_ex(AB_NO_TRANS, AB_CONJ_TRANS, hBr, hBi, hAr, hAi, hCr, hCi);
+    ab_matrix_download(hCr, re, true);
+    ab_matrix_download(hCi, im, true);
+    for (int i = 0; i < M * N; i++) { Ch[2 * i] = re[i]; Ch[2 * i + 1] = im[i]; }
+    ab_matrix_destroy(hAr); ab_matrix_destroy(hAi);
+    ab_matrix_destroy(hBr); ab_matrix_destroy(hBi);
+    ab_matrix_destroy(hCr); ab_matrix_destroy(hCi);
+    CHECK(sd == AB_OK && sh == AB_OK && !memcmp(Cd, Ch, 2 * bC),
+          "zgemm CN 96x80x72 bitwise ab_zgemm_ex(N, C, B^T, A^T)");
+
+    free(re); free(im);
+    free(A); free(B); free(C); free(Cd); free(Ch);
 }
 
 // Test element-wise operations
@@ -353,15 +549,6 @@ static void test_elementwise(void) {
     ab_dev_free(dx); ab_dev_free(dy);
 }
 
-/* PR-1 §2(b'') wrappers — give parameterized helpers void(void) signatures
- * so each pre-migration invocation in main() corresponds to one TestCase
- * registry entry. Original helper bodies are unchanged. Naming convention:
- * append the argument value as a suffix. */
-static void test_dgemm_bit_identical_1024(void) { test_dgemm_bit_identical(1024); }
-static void test_dgemm_bit_identical_768(void)  { test_dgemm_bit_identical(768); }
-static void test_zgemm_bit_identical_1024(void) { test_zgemm_bit_identical(1024); }
-static void test_zgemm_bit_identical_768(void)  { test_zgemm_bit_identical(768); }
-
 static const TestCase TESTS[] = {
     {"test_lifecycle",                test_lifecycle},
     {"test_roundtrip",                test_roundtrip},
@@ -369,10 +556,15 @@ static const TestCase TESTS[] = {
     {"test_memset",                   test_memset},
     {"test_error_paths",              test_error_paths},
     {"test_streams",                  test_streams},
-    {"test_dgemm_bit_identical_1024", test_dgemm_bit_identical_1024},
-    {"test_dgemm_bit_identical_768",  test_dgemm_bit_identical_768},
-    {"test_zgemm_bit_identical_1024", test_zgemm_bit_identical_1024},
-    {"test_zgemm_bit_identical_768",  test_zgemm_bit_identical_768},
+    {"test_dgemm_square",             test_dgemm_square},
+    {"test_dgemm_all_trans",          test_dgemm_all_trans},
+    {"test_dgemm_shapes",             test_dgemm_shapes},
+    {"test_zgemm_square",             test_zgemm_square},
+    {"test_zgemm_all_trans",          test_zgemm_all_trans},
+    {"test_zgemm_all_trans_unit",     test_zgemm_all_trans_unit},
+    {"test_zgemm_shapes",             test_zgemm_shapes},
+    {"test_gemm_arg_errors",          test_gemm_arg_errors},
+    {"test_gemm_matches_host_api",    test_gemm_matches_host_api},
     {"test_elementwise",              test_elementwise},
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
