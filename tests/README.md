@@ -40,9 +40,9 @@ It does **not** catch:
 ## Coverage status
 
 Counting rule (README, `make ci-local`): a *test* is one `test_precision`
-case, one `TESTS[]` entry, or one BLAS-ABI suite. `make test` runs 117
-(8 precision + 71 correctness + 16 device-API + 22 BLAS-ABI) and
-`make ci-local` adds the 18 chaos tests, for a `TEST_TOTAL` of 135.
+case, one `TESTS[]` entry, or one BLAS-ABI suite. `make test` runs 123
+(14 precision + 71 correctness + 16 device-API + 22 BLAS-ABI) and
+`make ci-local` adds the 18 chaos tests, for a `TEST_TOTAL` of 141.
 Device-API `CHECK`s and BLAS-ABI cases are reported on their own
 `CI_REPORT.txt` lines and are not part of the total.
 

@@ -10,8 +10,11 @@
 // - Measure Frobenius relative error: ||C_gpu - C_ref||_F / ||C_ref||_F
 // - Measure max element-wise relative error: max_i |C_gpu[i] - C_ref[i]| / |C_ref[i]|
 // - Fit log(error) = α·log(N) + β to determine convergence rate α
-// - Expected: α ≈ 1.0 (error grows linearly with N due to accumulation)
-// - Acceptance: α < 1.5 (if slope > 1.5, indicates kernel bug)
+// - Expected: α ≈ 0.5 (random-sign rounding errors add up like √N; the
+//   worst case is α = 1)
+// - Acceptance: Frobenius error <= FROB_BOUND·√N·u² at every N (magnitude:
+//   catches precision loss, e.g. a build without MTLMathModeSafe, whose slope
+//   is still ≈ 0.5) and α < 1.5 (if slope > 1.5, indicates kernel bug)
 // =============================================================================
 
 #include "apple_bottom.h"
@@ -22,6 +25,11 @@
 #include <math.h>
 #include <time.h>
 #include <Accelerate/Accelerate.h>
+
+// Same normwise bound as tests/test_precision.c: ||ΔC||_F/||C||_F <=
+// FROB_BOUND·√N·u², u² = 2⁻⁴⁸. Measured 0.22–0.24·√N·u² here.
+#define U2         0x1p-48
+#define FROB_BOUND 1.0
 
 typedef struct {
     int N;
@@ -157,14 +165,18 @@ int main(int argc, char** argv) {
 
     printf("Testing convergence across matrix sizes:\n");
     printf("══════════════════════════════════════════════════════════════════\n");
-    printf("  Size  │ Frobenius Err │ Max Elem Err │ Status\n");
-    printf("────────┼───────────────┼──────────────┼────────\n");
+    printf("  Size  │ Frobenius Err │ Max Elem Err │   Bound   │ Status\n");
+    printf("────────┼───────────────┼──────────────┼───────────┼────────\n");
 
+    int all_bounded = 1;
     for (int i = 0; i < n_sizes; i++) {
         points[i] = test_size(sizes[i]);
-        const char* status_str = (points[i].frob_err < 1e-13) ? "✓ PASS" : "⚠ WARN";
-        printf(" %5d  │   %.2e   │   %.2e   │ %s\n",
-               points[i].N, points[i].frob_err, points[i].max_err, status_str);
+        double bound = FROB_BOUND * sqrt((double)points[i].N) * U2;
+        int bounded = points[i].frob_err <= bound;
+        if (!bounded) all_bounded = 0;
+        printf(" %5d  │   %.2e   │   %.2e   │ %.2e  │ %s\n",
+               points[i].N, points[i].frob_err, points[i].max_err, bound,
+               bounded ? "✓ PASS" : "✗ FAIL");
     }
 
     printf("══════════════════════════════════════════════════════════════════\n\n");
@@ -190,7 +202,7 @@ int main(int argc, char** argv) {
     printf("\n");
 
     printf("Expected behavior:\n");
-    printf("  - Slope ≈ 1.0 indicates O(N·ε²) error growth (accumulation)\n");
+    printf("  - Slope ≈ 0.5: random-sign rounding errors grow like √N (worst case 1.0)\n");
     printf("  - Slope < 1.5 is acceptable for DD arithmetic\n");
     printf("  - R² > 0.9 indicates good linear fit in log-log space\n");
     printf("\n");
@@ -225,19 +237,11 @@ int main(int argc, char** argv) {
         printf("✓ PASS: Frobenius R² = %.4f > 0.85 (good fit)\n", r2_frob);
     }
 
-    // Check that all errors are within DD precision bounds
-    int all_bounded = 1;
-    for (int i = 0; i < n_sizes; i++) {
-        double expected_bound = points[i].N * 1e-14;  // O(N·ε) bound for DD
-        if (points[i].frob_err > expected_bound) {
-            all_bounded = 0;
-        }
-    }
-
     if (all_bounded) {
-        printf("✓ PASS: All errors within O(N·ε) bound for DD precision\n");
+        printf("✓ PASS: All Frobenius errors within %.0f·√N·u² (DD precision)\n", FROB_BOUND);
     } else {
-        printf("⚠ WARN: Some errors exceed O(N·ε) bound\n");
+        printf("✗ FAIL: Frobenius error above %.0f·√N·u² (DD precision lost)\n", FROB_BOUND);
+        pass = 0;
     }
 
     printf("\n══════════════════════════════════════════════════════════════════\n");
