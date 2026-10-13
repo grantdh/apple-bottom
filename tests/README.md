@@ -69,8 +69,19 @@ fails only itself. Known failures live in the file's `XFAIL` table, tagged
 with audit IDs. An XFAIL that now passes (XPASS), or an entry that matches
 no case (STALE), fails the run: when a fix lands, delete its entries.
 `./build/test_blas_abi -v` lists every case. `make test-symbols` is the
-strict export check for `_dgemm_` / `_zgemm_` and fails until H-P0-1 is
-fixed.
+strict export check: the dylib and the static archive must each export
+exactly `_dgemm_` / `_zgemm_`, and not the `$NEWLAPACK` variants (H-P0-1).
+
+## Fortran binding probe
+
+`tests/test_fortran_blas.f90` is a plain gfortran `CALL DGEMM` / `CALL
+ZGEMM` (the QE cegterg `'T'`/`'C'`, `'N'` pattern with M != K and padded
+leading dimensions). `make test-fortran` links it once against the dylib and
+once against the static archive and runs both with `AB_MODE=gpu`. Each call
+must reach the GPU path (`ab_get_last_dispatch_path()` is `"gpu"` and the
+`ab_get_stats()` GEMM counter advanced) and match a reference loop within
+1e-11. The target is skipped, with a message, when neither `gfortran-15`
+nor `gfortran` is on `PATH`; set `GFORTRAN=` to pick a compiler.
 
 ## Meta-test
 

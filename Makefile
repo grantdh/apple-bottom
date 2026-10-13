@@ -180,7 +180,7 @@ $(BUILD)/test_convergence: tests/verification/test_convergence.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
-test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_blas_abi test-ghost-detection
+test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_blas_abi test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "Running Tests"
@@ -216,6 +216,34 @@ test-ghost-detection: $(BUILD)/test_ghost_detection
 		echo "META-FAIL: unexpected exit code $$rc (signal? abort?)"; \
 		exit 1; \
 	fi
+
+# End-to-end Fortran binding probe (H-P0-1): a gfortran CALL DGEMM/ZGEMM,
+# linked once against the dylib and once against the static archive, must
+# reach the apple-bottom GPU path and give a correct result. Skipped when
+# neither gfortran-15 nor gfortran is on PATH; override with GFORTRAN=...
+GFORTRAN := $(firstword $(shell command -v gfortran-15 gfortran 2>/dev/null))
+
+$(BUILD)/test_fortran_blas: tests/test_fortran_blas.f90 lib | $(BUILD)
+	$(GFORTRAN) -O2 -Wall -Wextra $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
+$(BUILD)/test_fortran_blas_static: tests/test_fortran_blas.f90 lib | $(BUILD)
+	$(GFORTRAN) -O2 -Wall -Wextra $< $(BUILD)/libapplebottom.a -o $@ $(LDFLAGS)
+	@echo "Built: $@"
+
+.PHONY: test-fortran
+ifeq ($(GFORTRAN),)
+test-fortran:
+	@echo "SKIP test-fortran: neither gfortran-15 nor gfortran is on PATH"
+else
+test-fortran: $(BUILD)/test_fortran_blas $(BUILD)/test_fortran_blas_static
+	@echo ""
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "Running Fortran BLAS binding probe (dylib, static archive)"
+	@echo "═══════════════════════════════════════════════════════════════════"
+	AB_MODE=gpu ./$(BUILD)/test_fortran_blas
+	AB_MODE=gpu ./$(BUILD)/test_fortran_blas_static
+endif
 
 test-verification: $(BUILD)/test_convergence
 	@echo ""
@@ -375,18 +403,14 @@ bench-paper-csv: $(BUILD)/bench_paper
 
 .PHONY: build-check ci-local verify-symbols test-symbols
 
-# Verify the dylib exports standard Fortran BLAS names (dgemm_, zgemm_)
-# and that Accelerate is properly re-exported. This confirms the dylib
-# is a true drop-in for Fortran host codes (QE, Yambo, …).
-verify-symbols: $(BUILD)/libapplebottom.dylib
+# Verify the dylib is a drop-in BLAS for Fortran host codes (QE, Yambo, …):
+# it defines the exact Fortran BLAS names (test-symbols) and re-exports
+# Accelerate for everything it does not shadow.
+verify-symbols: test-symbols
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
-	@echo "Verifying libapplebottom.dylib symbol exports"
+	@echo "Verifying libapplebottom.dylib Accelerate re-export"
 	@echo "═══════════════════════════════════════════════════════════════════"
-	@echo ""
-	@echo "Shadowed Fortran BLAS symbols (should be defined in our dylib):"
-	@nm -gU $(BUILD)/libapplebottom.dylib 2>/dev/null | grep -E " _(dgemm_|zgemm_|ab_dgemm_|ab_zgemm_)$$" \
-	    || (echo "  ✗ MISSING standard BLAS exports" && exit 1)
 	@echo ""
 	@echo "Accelerate re-export (LC_REEXPORT_DYLIB entries):"
 	@otool -l $(BUILD)/libapplebottom.dylib | grep -A 2 LC_REEXPORT_DYLIB \
@@ -395,20 +419,30 @@ verify-symbols: $(BUILD)/libapplebottom.dylib
 	@echo "✓ Symbols look correct — this is a drop-in BLAS dylib"
 	@echo ""
 
-# Strict Fortran-ABI export check: a gfortran CALL DGEMM/ZGEMM binds to the
-# plain _dgemm_/_zgemm_ symbols, so the dylib must define exactly those names
-# ($NEWLAPACK-suffixed or ab_-prefixed exports do not count). Fails until
-# H-P0-1 is fixed; tests/test_blas_abi.c tracks the same defect as an XFAIL.
-test-symbols: $(BUILD)/libapplebottom.dylib
-	@missing=0; \
-	for s in _dgemm_ _zgemm_; do \
-		if nm -gU $(BUILD)/libapplebottom.dylib | awk '{print $$NF}' | grep -qx "$$s"; then \
-			echo "  ✓ exports $$s"; \
-		else \
-			echo "  ✗ missing $$s (H-P0-1)"; missing=1; \
-		fi; \
+# Strict Fortran-ABI export check (H-P0-1): a gfortran CALL DGEMM/ZGEMM binds
+# to the plain _dgemm_/_zgemm_ symbols, so the dylib and the static archive
+# must each define exactly those names (ab_-prefixed exports do not count).
+# The $NEWLAPACK variants must not be exported: C code calling dgemm_ through
+# the new Accelerate headers keeps getting Accelerate.
+test-symbols: $(BUILD)/libapplebottom.dylib $(BUILD)/libapplebottom.a
+	@echo "Fortran BLAS exports:"
+	@bad=0; \
+	for lib in $^; do \
+		syms=$$(nm -gU $$lib 2>/dev/null | awk '{print $$NF}'); \
+		for s in _dgemm_ _zgemm_; do \
+			if echo "$$syms" | grep -qx "$$s"; then \
+				echo "  ✓ $$lib exports $$s"; \
+			else \
+				echo "  ✗ $$lib does not export $$s (H-P0-1)"; bad=1; \
+			fi; \
+		done; \
+		for s in '_dgemm$$NEWLAPACK' '_zgemm$$NEWLAPACK'; do \
+			if echo "$$syms" | grep -qxF "$$s"; then \
+				echo "  ✗ $$lib exports $$s"; bad=1; \
+			fi; \
+		done; \
 	done; \
-	exit $$missing
+	exit $$bad
 
 # Build check: compile all source files to .o without linking
 # Used by GitHub Actions to verify syntax and compilation (fast check)
@@ -441,7 +475,7 @@ build-check: | $(BUILD)
 
 # Local CI: run full test suite + convergence study, generate CI report
 # Only writes CI_REPORT.txt if all tests pass (exits on first failure)
-ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_blas_abi $(BUILD)/test_convergence test-ghost-detection
+ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_blas_abi $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "CI Local Validation"
@@ -473,6 +507,8 @@ ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos 
 		echo "TEST_CONVERGENCE: PASS" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_BLAS_ABI: PASS ($$(grep "^Results:" $(BUILD)/test_blas_abi.log | sed -E "s/^Results: //"))" >> $(BUILD)/CI_REPORT.txt; \
 		echo "test-ghost-detection: PASS" >> $(BUILD)/CI_REPORT.txt; \
+		echo "test-symbols: PASS" >> $(BUILD)/CI_REPORT.txt; \
+		echo "test-fortran: $(if $(GFORTRAN),PASS,SKIP (no gfortran))" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_TOTAL: $$TOTAL" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_PASSED: $$TOTAL" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_FAILED: $$FAILED" >> $(BUILD)/CI_REPORT.txt; \
