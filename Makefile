@@ -250,7 +250,7 @@ test-verification: $(BUILD)/test_convergence
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "Running Verification Tests (V&V)"
 	@echo "═══════════════════════════════════════════════════════════════════"
-	./$(BUILD)/test_convergence
+	./$(BUILD)/test_convergence $(BUILD)/convergence_data.csv
 	@echo ""
 
 # Adversarial & system-level test suite
@@ -475,7 +475,14 @@ build-check: | $(BUILD)
 
 # Local CI: run full test suite + convergence study, generate CI report
 # Only writes CI_REPORT.txt if all tests pass (exits on first failure)
-ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_blas_abi $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
+#
+# Counting rule (also README.md, tests/README.md): TEST_TOTAL counts tests.
+# A test is one test_precision case, one TESTS[] registry entry of
+# test_correctness / test_chaos / test_device_api, or one test_blas_abi
+# suite. Device-API CHECKs and BLAS-ABI cases are reported on their own
+# lines and are not part of TEST_TOTAL. The report is written only after
+# every binary passed, so TEST_PASSED = TEST_TOTAL and TEST_FAILED = 0.
+ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_blas_abi $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "CI Local Validation"
@@ -485,33 +492,43 @@ ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos 
 	@./$(BUILD)/test_precision > $(BUILD)/test_precision.log 2>&1 && echo "✓ test_precision: PASS" || (echo "✗ test_precision: FAIL" && cat $(BUILD)/test_precision.log && exit 1)
 	@./$(BUILD)/test_correctness > $(BUILD)/test_correctness.log 2>&1 && echo "✓ test_correctness: PASS" || (echo "✗ test_correctness: FAIL" && cat $(BUILD)/test_correctness.log && exit 1)
 	@./$(BUILD)/test_chaos > $(BUILD)/test_chaos.log 2>&1 && echo "✓ test_chaos: PASS" || (echo "✗ test_chaos: FAIL" && cat $(BUILD)/test_chaos.log && exit 1)
+	@./$(BUILD)/test_device_api > $(BUILD)/test_device_api.log 2>&1 && echo "✓ test_device_api: PASS" || (echo "✗ test_device_api: FAIL" && cat $(BUILD)/test_device_api.log && exit 1)
 	@./$(BUILD)/test_blas_abi > $(BUILD)/test_blas_abi.log 2>&1 && echo "✓ test_blas_abi: PASS" || (echo "✗ test_blas_abi: FAIL" && cat $(BUILD)/test_blas_abi.log && exit 1)
 	@echo ""
 	@echo "Running convergence study (V-2)..."
-	@./$(BUILD)/test_convergence > $(BUILD)/test_convergence.log 2>&1 && echo "✓ test_convergence: PASS" || (echo "✗ test_convergence: FAIL" && cat $(BUILD)/test_convergence.log && exit 1)
+	@rm -f $(BUILD)/convergence_data.csv
+	@./$(BUILD)/test_convergence $(BUILD)/convergence_data.csv > $(BUILD)/test_convergence.log 2>&1 && echo "✓ test_convergence: PASS" || (echo "✗ test_convergence: FAIL" && cat $(BUILD)/test_convergence.log && exit 1)
 	@echo ""
 	@echo "Generating CI report..."
 	@bash -c ' \
-		PRECISION_PASS=$$(grep -c "✓ PASS" $(BUILD)/test_precision.log || echo 0); \
-		CORRECTNESS_LINE=$$(grep "Results:" $(BUILD)/test_correctness.log); \
-		CORRECTNESS_PASS=$$(echo "$$CORRECTNESS_LINE" | sed -E "s/.*Results: ([0-9]+) passed.*/\1/"); \
-		CORRECTNESS_FAIL=$$(echo "$$CORRECTNESS_LINE" | sed -E "s/.*Results: [0-9]+ passed, ([0-9]+) failed.*/\1/"); \
-		TOTAL=$$((PRECISION_PASS + CORRECTNESS_PASS)); \
-		FAILED=$$CORRECTNESS_FAIL; \
+		PRECISION=$$(grep -c "✓ PASS" $(BUILD)/test_precision.log); \
+		CORRECTNESS=$$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_correctness.log); \
+		CHAOS=$$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_chaos.log); \
+		DEVICE_API=$$(sed -nE "s/^Summary: ([0-9]+) test.*/\1/p" $(BUILD)/test_device_api.log); \
+		DEVICE_API_CHECKS=$$(sed -nE "s/^Summary: .* ([0-9]+) CHECK.*/\1/p" $(BUILD)/test_device_api.log); \
+		BLAS_ABI=$$(grep -cE "^\[[0-9]+/[0-9]+\] " $(BUILD)/test_blas_abi.log); \
+		for n in "$$PRECISION" "$$CORRECTNESS" "$$CHAOS" "$$DEVICE_API" "$$DEVICE_API_CHECKS" "$$BLAS_ABI"; do \
+			case "$$n" in ""|*[!0-9]*|0) echo "✗ CI report: could not read a test count from the logs"; exit 1;; esac; \
+		done; \
+		TOTAL=$$((PRECISION + CORRECTNESS + CHAOS + DEVICE_API + BLAS_ABI)); \
 		echo "GIT_SHA: $$(git rev-parse HEAD)" > $(BUILD)/CI_REPORT.txt; \
 		echo "GIT_BRANCH: $$(git rev-parse --abbrev-ref HEAD)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TIMESTAMP: $$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $(BUILD)/CI_REPORT.txt; \
 		echo "HOSTNAME: $$(hostname)" >> $(BUILD)/CI_REPORT.txt; \
-		echo "TEST_PRECISION: PASS ($$PRECISION_PASS tests)" >> $(BUILD)/CI_REPORT.txt; \
-		echo "TEST_CORRECTNESS: PASS ($$CORRECTNESS_PASS tests)" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_PRECISION: PASS ($$PRECISION tests)" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_CORRECTNESS: PASS ($$CORRECTNESS tests)" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_CHAOS: PASS ($$CHAOS tests)" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_DEVICE_API: PASS ($$DEVICE_API tests)" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_BLAS_ABI: PASS ($$BLAS_ABI tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_CONVERGENCE: PASS" >> $(BUILD)/CI_REPORT.txt; \
-		echo "TEST_BLAS_ABI: PASS ($$(grep "^Results:" $(BUILD)/test_blas_abi.log | sed -E "s/^Results: //"))" >> $(BUILD)/CI_REPORT.txt; \
 		echo "test-ghost-detection: PASS" >> $(BUILD)/CI_REPORT.txt; \
 		echo "test-symbols: PASS" >> $(BUILD)/CI_REPORT.txt; \
 		echo "test-fortran: $(if $(GFORTRAN),PASS,SKIP (no gfortran))" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_TOTAL: $$TOTAL" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_PASSED: $$TOTAL" >> $(BUILD)/CI_REPORT.txt; \
-		echo "TEST_FAILED: $$FAILED" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_FAILED: 0" >> $(BUILD)/CI_REPORT.txt; \
+		echo "DEVICE_API_CHECKS: $$DEVICE_API_CHECKS" >> $(BUILD)/CI_REPORT.txt; \
+		echo "BLAS_ABI_CASES: $$(sed -nE "s/^Results: //p" $(BUILD)/test_blas_abi.log)" >> $(BUILD)/CI_REPORT.txt; \
 		if [ -f $(BUILD)/convergence_data.csv ]; then \
 			POINTS=$$(tail -n +2 $(BUILD)/convergence_data.csv | wc -l | tr -d " "); \
 			SHA=$$(shasum -a 256 $(BUILD)/convergence_data.csv | cut -d" " -f1); \

@@ -238,70 +238,93 @@ ABStatus ab_dev_stream_sync(ab_dev_stream_t stream) {
 // For _offset variants: we offset into the raw FP64 data in shared memory
 // before uploading into the temp ABMatrix.  The Fortran offset is in elements
 // of the corresponding type (doubles for DGEMM, complex-doubles for ZGEMM).
+//
+// Layout: the device buffers are column-major, ABMatrix is row-major, and a
+// column-major X read as row-major is X^T.  So both GEMMs compute
+// C^T = op(B)^T * op(A)^T on the transposed operands (K-P0-2 / H-P0-4).
 // -----------------------------------------------------------------------------
+
+static inline bool dev_trans_valid(ABTranspose t) {
+    return t == AB_NO_TRANS || t == AB_TRANS || t == AB_CONJ_TRANS;
+}
+
+// Helper: true if a column-major `rows` × `cols` submatrix with leading
+// dimension `ld`, starting `offset` elements of `elem_size` bytes into `buf`,
+// has ld >= rows (the BLAS rule) and lies inside the buffer.
+static bool dev_submatrix_fits(ab_dev_buffer_t buf, size_t offset, int ld,
+                               int rows, int cols, size_t elem_size) {
+    // Counted in elements, so nothing can overflow.
+    size_t span = (size_t)ld * (size_t)(cols - 1) + (size_t)rows;
+    return ld >= rows && range_in_bounds(offset, span, buf->nbytes / elem_size);
+}
 
 // Helper: extract a column-major submatrix from a raw FP64 device buffer
 // into an ABMatrix. The source is at byte (offset * sizeof(double)) in the
 // device buffer, column-major with leading dimension `ld`, and we extract
-// `rows` × `cols` elements.
+// `rows` × `cols` elements. The ABMatrix receives X^T (cols × rows), or X
+// itself (rows × cols) when `transpose` is set.
 static ABStatus dev_upload_real_submatrix(
     ABMatrix dst, ab_dev_buffer_t src, size_t elem_offset, int ld,
-    int rows, int cols)
+    int rows, int cols, bool transpose)
 {
     const double* base = (const double*)[src->mtl contents] + elem_offset;
-    double* staging = (double*)malloc((size_t)rows * cols * sizeof(double));
+    size_t r = (size_t)rows, c = (size_t)cols, l = (size_t)ld;
+    double* staging = (double*)malloc(r * c * sizeof(double));
     if (!staging) return AB_ERROR_ALLOC_FAILED;
 
     // Pack column-major with stride `ld` into contiguous column-major with
-    // stride `rows`.
-    for (int j = 0; j < cols; j++)
-        for (int i = 0; i < rows; i++)
-            staging[j * rows + i] = base[j * ld + i];
+    // stride `rows` (row-major X^T), or into row-major X.
+    for (size_t j = 0; j < c; j++)
+        for (size_t i = 0; i < r; i++)
+            staging[transpose ? i * c + j : j * r + i] = base[j * l + i];
 
     ABStatus s = ab_matrix_upload(dst, staging, true);
     free(staging);
     return s;
 }
 
-// Helper: download ABMatrix (DD→FP64) into a column-major submatrix in a
-// device buffer.
+// Helper: download ABMatrix (DD→FP64) holding C^T (cols × rows, row-major)
+// into a column-major `rows` × `cols` submatrix in a device buffer.
 static ABStatus dev_download_real_submatrix(
     ab_dev_buffer_t dst, size_t elem_offset, int ld,
     ABMatrix src, int rows, int cols)
 {
-    double* staging = (double*)malloc((size_t)rows * cols * sizeof(double));
+    size_t r = (size_t)rows, c = (size_t)cols, l = (size_t)ld;
+    double* staging = (double*)malloc(r * c * sizeof(double));
     if (!staging) return AB_ERROR_ALLOC_FAILED;
 
     ABStatus s = ab_matrix_download(src, staging, true);
     if (s != AB_OK) { free(staging); return s; }
 
     double* base = (double*)[dst->mtl contents] + elem_offset;
-    for (int j = 0; j < cols; j++)
-        for (int i = 0; i < rows; i++)
-            base[j * ld + i] = staging[j * rows + i];
+    for (size_t j = 0; j < c; j++)
+        for (size_t i = 0; i < r; i++)
+            base[j * l + i] = staging[j * r + i];
 
     free(staging);
     return AB_OK;
 }
 
 // Helper: extract interleaved complex column-major data into separate real
-// and imaginary ABMatrix handles.  Complex data is stored as [r0,i0,r1,i1,...]
-// with leading dimension `ld` (in complex elements, so 2*ld doubles per column).
+// and imaginary ABMatrix handles, which receive X^T (cols × rows).  Complex
+// data is stored as [r0,i0,r1,i1,...] with leading dimension `ld` (in complex
+// elements, so 2*ld doubles per column).
 static ABStatus dev_upload_complex_submatrix(
     ABMatrix dst_r, ABMatrix dst_i,
     ab_dev_buffer_t src, size_t cmplx_offset, int ld,
     int rows, int cols)
 {
     const double* base = (const double*)[src->mtl contents] + cmplx_offset * 2;
-    size_t n = (size_t)rows * cols;
+    size_t r = (size_t)rows, c = (size_t)cols, l = (size_t)ld;
+    size_t n = r * c;
     double* re = (double*)malloc(n * sizeof(double));
     double* im = (double*)malloc(n * sizeof(double));
     if (!re || !im) { free(re); free(im); return AB_ERROR_ALLOC_FAILED; }
 
-    for (int j = 0; j < cols; j++)
-        for (int i = 0; i < rows; i++) {
-            re[j * rows + i] = base[(j * ld + i) * 2];
-            im[j * rows + i] = base[(j * ld + i) * 2 + 1];
+    for (size_t j = 0; j < c; j++)
+        for (size_t i = 0; i < r; i++) {
+            re[j * r + i] = base[(j * l + i) * 2];
+            im[j * r + i] = base[(j * l + i) * 2 + 1];
         }
 
     ABStatus s = ab_matrix_upload(dst_r, re, true);
@@ -311,13 +334,14 @@ static ABStatus dev_upload_complex_submatrix(
     return s;
 }
 
-// Helper: download separate real/imag ABMatrix handles back into interleaved
-// complex data in a device buffer.
+// Helper: download separate real/imag ABMatrix handles holding C^T
+// (cols × rows) back into interleaved complex data in a device buffer.
 static ABStatus dev_download_complex_submatrix(
     ab_dev_buffer_t dst, size_t cmplx_offset, int ld,
     ABMatrix src_r, ABMatrix src_i, int rows, int cols)
 {
-    size_t n = (size_t)rows * cols;
+    size_t r = (size_t)rows, c = (size_t)cols, l = (size_t)ld;
+    size_t n = r * c;
     double* re = (double*)malloc(n * sizeof(double));
     double* im = (double*)malloc(n * sizeof(double));
     if (!re || !im) { free(re); free(im); return AB_ERROR_ALLOC_FAILED; }
@@ -327,10 +351,10 @@ static ABStatus dev_download_complex_submatrix(
     if (s != AB_OK) { free(re); free(im); return s; }
 
     double* base = (double*)[dst->mtl contents] + cmplx_offset * 2;
-    for (int j = 0; j < cols; j++)
-        for (int i = 0; i < rows; i++) {
-            base[(j * ld + i) * 2]     = re[j * rows + i];
-            base[(j * ld + i) * 2 + 1] = im[j * rows + i];
+    for (size_t j = 0; j < c; j++)
+        for (size_t i = 0; i < r; i++) {
+            base[(j * l + i) * 2]     = re[j * r + i];
+            base[(j * l + i) * 2 + 1] = im[j * r + i];
         }
 
     free(re);
@@ -360,44 +384,42 @@ ABStatus ab_dev_dgemm_offset(ABTranspose transA, ABTranspose transB,
                              ab_dev_buffer_t C, size_t c_offset, int ldc) {
     if (!A || !B || !C) return AB_ERROR_INVALID_ARG;
     if (m <= 0 || n <= 0 || k <= 0) return AB_ERROR_INVALID_ARG;
+    if (!dev_trans_valid(transA) || !dev_trans_valid(transB)) return AB_ERROR_INVALID_ARG;
 
-    // Transpose determines the logical dimensions of each input
-    int A_rows = (transA == AB_NO_TRANS) ? m : k;
-    int A_cols = (transA == AB_NO_TRANS) ? k : m;
-    int B_rows = (transB == AB_NO_TRANS) ? k : n;
-    int B_cols = (transB == AB_NO_TRANS) ? n : k;
+    // Stored (column-major) dimensions of A and B. For real data
+    // AB_CONJ_TRANS is a plain transpose.
+    bool tA = (transA != AB_NO_TRANS), tB = (transB != AB_NO_TRANS);
+    int A_rows = tA ? k : m, A_cols = tA ? m : k;
+    int B_rows = tB ? n : k, B_cols = tB ? k : n;
+    if (!dev_submatrix_fits(A, a_offset, lda, A_rows, A_cols, sizeof(double)) ||
+        !dev_submatrix_fits(B, b_offset, ldb, B_rows, B_cols, sizeof(double)) ||
+        !dev_submatrix_fits(C, c_offset, ldc, m, n, sizeof(double)))
+        return AB_ERROR_INVALID_ARG;
 
     // Create temporary ABMatrix handles (heap-allocated, FP64→DD conversion)
-    ABMatrix mA = ab_matrix_create(A_rows, A_cols);
-    ABMatrix mB = ab_matrix_create(B_rows, B_cols);
-    ABMatrix mC = ab_matrix_create(m, n);
+    // for op(A)^T (k×m), op(B)^T (n×k) and C^T (n×m).
+    ABMatrix mA = ab_matrix_create(k, m);
+    ABMatrix mB = ab_matrix_create(n, k);
+    ABMatrix mC = ab_matrix_create(n, m);
     ABStatus s = AB_ERROR_ALLOC_FAILED;
     if (!mA || !mB || !mC) goto dgemm_cleanup;
 
-    // Upload from device buffer shared memory into DD-format ABMatrix
-    s = dev_upload_real_submatrix(mA, A, a_offset, lda, A_rows, A_cols);
+    // Upload from device buffer shared memory into DD-format ABMatrix.
+    // op(X)^T is X^T (a plain repack) for NO_TRANS and X (a host-side
+    // transpose) otherwise; ab_dgemm_scaled takes no transpose flags.
+    s = dev_upload_real_submatrix(mA, A, a_offset, lda, A_rows, A_cols, tA);
     if (s != AB_OK) goto dgemm_cleanup;
-    s = dev_upload_real_submatrix(mB, B, b_offset, ldb, B_rows, B_cols);
+    s = dev_upload_real_submatrix(mB, B, b_offset, ldb, B_rows, B_cols, tB);
     if (s != AB_OK) goto dgemm_cleanup;
 
     // If beta != 0, we need C's current contents
     if (beta != 0.0) {
-        s = dev_upload_real_submatrix(mC, C, c_offset, ldc, m, n);
+        s = dev_upload_real_submatrix(mC, C, c_offset, ldc, m, n, false);
         if (s != AB_OK) goto dgemm_cleanup;
     }
 
-    // Dispatch: the existing API handles transpose internally for DGEMM only
-    // via ab_dgemm_scaled (no transpose) or by pre-transposing.  For Week-2,
-    // transpose support routes through host-side repack in the upload helper
-    // (the staging buffer is already in the correct layout).  The ABMatrix
-    // holds the logical matrix contents, so we dispatch as NO_TRANS.
-    //
-    // Note: ab_dgemm_scaled does NOT support transpose flags — it always
-    // computes C = alpha*A*B + beta*C.  If the caller wants op(A)*op(B),
-    // the upload helper has already materialized the transposed data in the
-    // ABMatrix.  This is correct because we uploaded A_rows×A_cols where
-    // A_rows/A_cols account for the transpose.
-    s = ab_dgemm_scaled(alpha, mA, mB, beta, mC);
+    // C^T = alpha * op(B)^T * op(A)^T + beta * C^T
+    s = ab_dgemm_scaled(alpha, mB, mA, beta, mC);
     if (s != AB_OK) goto dgemm_cleanup;
 
     // Download DD→FP64 back into device buffer
@@ -433,20 +455,26 @@ ABStatus ab_dev_zgemm_offset(ABTranspose transA, ABTranspose transB,
                              ab_dev_buffer_t C, size_t c_offset, int ldc) {
     if (!A || !B || !C || !alpha || !beta) return AB_ERROR_INVALID_ARG;
     if (m <= 0 || n <= 0 || k <= 0) return AB_ERROR_INVALID_ARG;
+    if (!dev_trans_valid(transA) || !dev_trans_valid(transB)) return AB_ERROR_INVALID_ARG;
 
+    // Stored (column-major) dimensions of A and B
     int A_rows = (transA == AB_NO_TRANS) ? m : k;
     int A_cols = (transA == AB_NO_TRANS) ? k : m;
     int B_rows = (transB == AB_NO_TRANS) ? k : n;
     int B_cols = (transB == AB_NO_TRANS) ? n : k;
+    if (!dev_submatrix_fits(A, a_offset, lda, A_rows, A_cols, 2 * sizeof(double)) ||
+        !dev_submatrix_fits(B, b_offset, ldb, B_rows, B_cols, 2 * sizeof(double)) ||
+        !dev_submatrix_fits(C, c_offset, ldc, m, n, 2 * sizeof(double)))
+        return AB_ERROR_INVALID_ARG;
     bool need_beta = (beta[0] != 0.0 || beta[1] != 0.0);
 
-    // Create 6 ABMatrix handles: separate real + imaginary for A, B, C
-    ABMatrix mAr = ab_matrix_create(A_rows, A_cols);
-    ABMatrix mAi = ab_matrix_create(A_rows, A_cols);
-    ABMatrix mBr = ab_matrix_create(B_rows, B_cols);
-    ABMatrix mBi = ab_matrix_create(B_rows, B_cols);
-    ABMatrix mCr = ab_matrix_create(m, n);
-    ABMatrix mCi = ab_matrix_create(m, n);
+    // Create 6 ABMatrix handles: separate real + imaginary for A^T, B^T, C^T
+    ABMatrix mAr = ab_matrix_create(A_cols, A_rows);
+    ABMatrix mAi = ab_matrix_create(A_cols, A_rows);
+    ABMatrix mBr = ab_matrix_create(B_cols, B_rows);
+    ABMatrix mBi = ab_matrix_create(B_cols, B_rows);
+    ABMatrix mCr = ab_matrix_create(n, m);
+    ABMatrix mCi = ab_matrix_create(n, m);
     ABStatus s = AB_ERROR_ALLOC_FAILED;
     if (!mAr || !mAi || !mBr || !mBi || !mCr || !mCi) goto zgemm_cleanup;
 
@@ -465,21 +493,25 @@ ABStatus ab_dev_zgemm_offset(ABTranspose transA, ABTranspose transB,
     // Dispatch via ab_zgemm_ex (handles transpose on GPU).
     // ab_zgemm_ex computes C = op(A) * op(B) with alpha=1, beta=0.
     // For general alpha/beta, we need to scale manually.
+    // op(X)^T = op(X^T) for every flag ((X^H)^T = conj(X) = (X^T)^H), so
+    // C^T = op(B)^T * op(A)^T is ab_zgemm_ex with the operands and their
+    // flags swapped. The alpha/beta epilogue is elementwise, so it runs on
+    // C^T unchanged.
     if (!need_beta && alpha[0] == 1.0 && alpha[1] == 0.0) {
         // Simple case: C = A * B (the most common case in QE)
-        s = ab_zgemm_ex(transA, transB, mAr, mAi, mBr, mBi, mCr, mCi);
+        s = ab_zgemm_ex(transB, transA, mBr, mBi, mAr, mAi, mCr, mCi);
     } else {
         // General case: C_new = alpha * op(A)*op(B) + beta * C_old
-        // Step 1: compute T = op(A)*op(B) into temporary matrices
-        ABMatrix mTr = ab_matrix_create(m, n);
-        ABMatrix mTi = ab_matrix_create(m, n);
+        // Step 1: compute T = (op(A)*op(B))^T into temporary matrices
+        ABMatrix mTr = ab_matrix_create(n, m);
+        ABMatrix mTi = ab_matrix_create(n, m);
         if (!mTr || !mTi) {
             ab_matrix_destroy(mTr);
             ab_matrix_destroy(mTi);
             s = AB_ERROR_ALLOC_FAILED;
             goto zgemm_cleanup;
         }
-        s = ab_zgemm_ex(transA, transB, mAr, mAi, mBr, mBi, mTr, mTi);
+        s = ab_zgemm_ex(transB, transA, mBr, mBi, mAr, mAi, mTr, mTi);
         if (s != AB_OK) {
             ab_matrix_destroy(mTr);
             ab_matrix_destroy(mTi);

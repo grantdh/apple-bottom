@@ -17,6 +17,8 @@
 #include "apple_bottom.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <errno.h>
 #include <math.h>
 #include <time.h>
 #include <Accelerate/Accelerate.h>
@@ -130,7 +132,11 @@ static ConvergencePoint test_size(int N) {
     return pt;
 }
 
-int main(void) {
+int main(int argc, char** argv) {
+    // CSV output path: argv[1] (the Makefile passes $(BUILD)/...), else the
+    // default build directory.
+    const char* csv_path = argc > 1 ? argv[1] : "build/convergence_data.csv";
+
     printf("╔══════════════════════════════════════════════════════════════════╗\n");
     printf("║  V-2: DGEMM Convergence Study                                    ║\n");
     printf("╚══════════════════════════════════════════════════════════════════╝\n\n");
@@ -190,7 +196,7 @@ int main(void) {
     printf("\n");
 
     // Write CSV for plotting
-    FILE* csv = fopen("build/convergence_data.csv", "w");
+    FILE* csv = fopen(csv_path, "w");
     if (csv) {
         fprintf(csv, "N,Frobenius_Error,Max_Element_Error\n");
         for (int i = 0; i < n_sizes; i++) {
@@ -198,7 +204,9 @@ int main(void) {
                     points[i].N, points[i].frob_err, points[i].max_err);
         }
         fclose(csv);
-        printf("Data written to: build/convergence_data.csv\n\n");
+        printf("Data written to: %s\n\n", csv_path);
+    } else {
+        fprintf(stderr, "Cannot write %s: %s\n", csv_path, strerror(errno));
     }
 
     // Acceptance criteria

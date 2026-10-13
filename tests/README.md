@@ -14,10 +14,10 @@ The migrated test runners (`test_correctness.c`, `test_chaos.c`,
 2. Add an entry to the `TESTS[]` array: `{"test_my_thing", test_my_thing}`.
 3. Recompile: `make clean && make test`.
 
-For parameterized helpers (e.g., `test_dgemm_bit_identical(int N)`),
-register a `void(void)` wrapper per argument value — convention is
-`test_helper_<argvalue>` (see `test_dgemm_bit_identical_1024`,
-`test_dgemm_bit_identical_768` in `test_device_api.c`).
+For parameterized helpers, register a `void(void)` wrapper per argument
+value — convention is `test_helper_<argvalue>` — or, as the GEMM tests in
+`test_device_api.c` do, call a case-checking helper from each registered
+test (`check_gemm()` runs one case and makes three `CHECK`s).
 
 ## What the per-test delta guard catches and what it does not
 
@@ -39,12 +39,22 @@ It does **not** catch:
 
 ## Coverage status
 
+Counting rule (README, `make ci-local`): a *test* is one `test_precision`
+case, one `TESTS[]` entry, or one BLAS-ABI suite. `make test` runs 117
+(8 precision + 71 correctness + 16 device-API + 22 BLAS-ABI) and
+`make ci-local` adds the 18 chaos tests, for a `TEST_TOTAL` of 135.
+Device-API `CHECK`s and BLAS-ABI cases are reported on their own
+`CI_REPORT.txt` lines and are not part of the total.
+
 - **Registry-migrated (PR-1, ghost-guarded):**
-  - `tests/test_correctness.c` — 69 tests
+  - `tests/test_correctness.c` — 71 tests
   - `tests/test_chaos.c` — 18 tests
-  - `tests/test_device_api.c` — 11 tests (7 unparameterized + 4
-    wrappers around 2 parameterized helpers)
-  - `tests/test_blas_abi.c` — 16 suites (631 cases), see below
+  - `tests/test_device_api.c` — 16 tests (152 `CHECK`s); the GEMM
+    tests compare `ab_dev_dgemm` / `ab_dev_zgemm` with column-major
+    cblas over all trans pairs, non-square and tall-skinny shapes,
+    `ld > rows` and buffer offsets (K-P0-2 / H-P0-4), and check that
+    the device path is bitwise the host API on the transposed operands
+  - `tests/test_blas_abi.c` — 22 suites (944 cases), see below
 
 - **Pending PR-1.5 (still single-main, no ghost-guard):**
   - `tests/test_precision.c` — needs decomposition strategy
