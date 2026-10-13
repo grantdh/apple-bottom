@@ -156,9 +156,6 @@ typedef struct {
 static const XfailEntry XFAIL[] = {
     // No lazy init: AB_MODE=gpu without ab_init() silently runs cblas.
     {"*/gpu-noinit/*/*/*/*",                    "H-P1-2"},
-    // dgemm_/zgemm_ are exported as $NEWLAPACK variants only; Fortran binds Accelerate.
-    {"symbol/dgemm_",                           "H-P0-1"},
-    {"symbol/zgemm_",                           "H-P0-1"},
 };
 
 static int xfail_hits[TEST_REGISTRY_SIZE(XFAIL)];
@@ -215,14 +212,11 @@ static void add_blas(const Suite *s, Op op, char ta, char tb, int M, int N, int 
 
 // gen_blas suites run with AB_MODE=gpu or cpu. In gpu mode the GPU must be
 // used unless a dimension is <= AB_MIN_GPU_DIM or alpha == 0 (BLAS quick
-// return is allowed). dgemm_/zgemm_ bind to Accelerate today (H-P0-1); that is
-// asserted once by the symbol suite, so their cases only check the result.
+// return is allowed).
 static void add_std(const Suite *s, char ta, char tb, int M, int N, int K,
                     int pad, int scalars) {
     Route route = ROUTE_GPU;
-    if (s->op == OP_DGEMM_SYM || s->op == OP_ZGEMM_SYM)
-        route = ROUTE_ANY;
-    else if (!strcmp(s->ab_mode, "cpu"))
+    if (!strcmp(s->ab_mode, "cpu"))
         route = ROUTE_CPU;
     else if (SCALARS[scalars].alpha == 0.0 ||
              M <= MIN_GPU_DIM || N <= MIN_GPU_DIM || K <= MIN_GPU_DIM)
@@ -256,7 +250,7 @@ static void gen_blas(const Suite *s) {
 static void gen_auto(const Suite *s) {
     add_blas(s, OP_ZGEMM_BLAS, 'C', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_GPU);
     add_blas(s, OP_ZGEMM_F,    'C', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_GPU);
-    add_blas(s, OP_ZGEMM_SYM,  'C', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_ANY);
+    add_blas(s, OP_ZGEMM_SYM,  'C', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_GPU);
     add_blas(s, OP_DGEMM_BLAS, 'T', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_GPU);
 }
 

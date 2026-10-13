@@ -15,6 +15,14 @@ _TBD following Si64 benchmark campaign._
 - **`ab_dgemm_async` left kernel buffers 6/7 unbound** (K-P1-3), which
   aborts under Metal API validation. It now shares the dispatch helper with
   `ab_dgemm`, so the two give bitwise-identical results.
+- **Fortran `CALL DGEMM` / `CALL ZGEMM` never reached apple-bottom**
+  (H-P0-1). Under `ACCELERATE_NEW_LAPACK` the `dgemm_`/`zgemm_` definitions
+  were emitted as `_dgemm$NEWLAPACK`/`_zgemm$NEWLAPACK`, so Fortran hosts
+  linked with `-lapplebottom` (dylib or static) bound to Accelerate. Both
+  libraries now export exactly `_dgemm_` and `_zgemm_`. The `$NEWLAPACK`
+  names are no longer exported, so C callers of the new Accelerate headers
+  get Accelerate. `make verify-symbols` checks the exact names (it accepted
+  `_ab_dgemm_` before), and `make test-fortran` runs a gfortran probe.
 
 ## [1.3.0] - 2026-04-18
 

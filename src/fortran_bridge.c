@@ -7,6 +7,15 @@
  * edits. On macOS two-level namespace, these symbols shadow Accelerate's
  * when -lapplebottom appears before -framework Accelerate.
  *
+ * In C the entry points are named fortran_dgemm/fortran_zgemm and bound to
+ * the exact symbols with asm labels. Under ACCELERATE_NEW_LAPACK,
+ * <Accelerate/Accelerate.h> declares dgemm_/zgemm_ with
+ * __asm("_dgemm$NEWLAPACK"), so a function spelled dgemm_ would be emitted
+ * under that name and a Fortran CALL DGEMM (a reference to _dgemm_) would
+ * bind to Accelerate (H-P0-1). The $NEWLAPACK names are deliberately not
+ * exported: C code calling dgemm_ through the new Accelerate headers keeps
+ * getting Accelerate.
+ *
  * CPU fallback goes through the CBLAS interface (cblas_dgemm / cblas_zgemm)
  * so we never self-recurse into our own dgemm_/zgemm_.
  *
@@ -61,7 +70,14 @@ static uint64_t fb_get_crossover(void) {
  * dgemm_ — shadows Accelerate's dgemm_
  * =============================================================================
  */
-void dgemm_(
+void fortran_dgemm(
+    const char *transA, const char *transB,
+    const int *M, const int *N, const int *K,
+    const double *alpha, const double *A, const int *ldA,
+    const double *B, const int *ldB,
+    const double *beta, double *C, const int *ldC) __asm__("_dgemm_");
+
+void fortran_dgemm(
     const char *transA, const char *transB,
     const int *M, const int *N, const int *K,
     const double *alpha, const double *A, const int *ldA,
@@ -96,7 +112,14 @@ void dgemm_(
  * zgemm_ — shadows Accelerate's zgemm_
  * =============================================================================
  */
-void zgemm_(
+void fortran_zgemm(
+    const char *transA, const char *transB,
+    const int *M, const int *N, const int *K,
+    const double complex *alpha, const double complex *A, const int *ldA,
+    const double complex *B, const int *ldB,
+    const double complex *beta, double complex *C, const int *ldC) __asm__("_zgemm_");
+
+void fortran_zgemm(
     const char *transA, const char *transB,
     const int *M, const int *N, const int *K,
     const double complex *alpha, const double complex *A, const int *ldA,
@@ -141,7 +164,7 @@ void ab_dgemm_(
     const double *B, const int *ldB,
     const double *beta, double *C, const int *ldC)
 {
-    dgemm_(transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+    fortran_dgemm(transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
 }
 
 void ab_zgemm_(
@@ -151,5 +174,5 @@ void ab_zgemm_(
     const double complex *B, const int *ldB,
     const double complex *beta, double complex *C, const int *ldC)
 {
-    zgemm_(transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+    fortran_zgemm(transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
 }
