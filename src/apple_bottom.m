@@ -853,15 +853,39 @@ id<MTLComputePipelineState> ab_internal_sub_pipeline(void) {
 }
 
 // =============================================================================
-// Parallel Conversion Helpers
+// Conversion Helpers
 // =============================================================================
+// Plain loops the compiler vectorizes (~30 GB/s on one core). Large arrays are
+// split into a few contiguous chunks across cores; one dispatch_apply block per
+// element ran at ~125 MB/s (H-P0-3). Results are identical either way.
+
+#define AB_CONVERT_PARALLEL_MIN ((size_t)1 << 20)  // elements; serial below this
+#define AB_CONVERT_CHUNKS 8
+
+static void convert_fp64_to_dd(const double* src, DDFloat* dst, size_t count) {
+    for (size_t i = 0; i < count; i++) dst[i] = fp64_to_dd(src[i]);
+}
+
+static void convert_dd_to_fp64(const DDFloat* src, double* dst, size_t count) {
+    for (size_t i = 0; i < count; i++) dst[i] = dd_to_fp64(src[i]);
+}
+
+// Runs body(offset, n) over [0, count) in contiguous ranges.
+static void for_each_chunk(size_t count, void (^body)(size_t offset, size_t n)) {
+    if (count < AB_CONVERT_PARALLEL_MIN) { body(0, count); return; }
+    size_t chunk = (count + AB_CONVERT_CHUNKS - 1) / AB_CONVERT_CHUNKS;
+    dispatch_apply(AB_CONVERT_CHUNKS, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t c) {
+        size_t offset = c * chunk;
+        body(offset, MIN(chunk, count - offset));
+    });
+}
 
 static void convert_fp64_to_dd_parallel(const double* src, DDFloat* dst, size_t count) {
-    dispatch_apply(count, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t i) { dst[i] = fp64_to_dd(src[i]); });
+    for_each_chunk(count, ^(size_t offset, size_t n) { convert_fp64_to_dd(src + offset, dst + offset, n); });
 }
 
 static void convert_dd_to_fp64_parallel(const DDFloat* src, double* dst, size_t count) {
-    dispatch_apply(count, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t i) { dst[i] = dd_to_fp64(src[i]); });
+    for_each_chunk(count, ^(size_t offset, size_t n) { convert_dd_to_fp64(src + offset, dst + offset, n); });
 }
 
 // =============================================================================
@@ -1016,10 +1040,10 @@ ABStatus ab_matrix_upload(ABMatrix m, const double* data, bool parallel) {
     if (!m || !data) return AB_ERROR_INVALID_ARG;
     double t0 = get_time_ms();
     DDFloat* dst = (DDFloat*)m->buffer.contents;
-    if (parallel && m->count > 1000)
+    if (parallel)
         convert_fp64_to_dd_parallel(data, dst, m->count);
     else
-        for (size_t i = 0; i < m->count; i++) dst[i] = fp64_to_dd(data[i]);
+        convert_fp64_to_dd(data, dst, m->count);
     m->uploaded = true;
     stats_add_upload(get_time_ms() - t0, m->count);
     return AB_OK;
@@ -1029,10 +1053,10 @@ ABStatus ab_matrix_download(ABMatrix m, double* data, bool parallel) {
     if (!m || !data) return AB_ERROR_INVALID_ARG;
     double t0 = get_time_ms();
     DDFloat* src = (DDFloat*)m->buffer.contents;
-    if (parallel && m->count > 1000)
+    if (parallel)
         convert_dd_to_fp64_parallel(src, data, m->count);
     else
-        for (size_t i = 0; i < m->count; i++) data[i] = dd_to_fp64(src[i]);
+        convert_dd_to_fp64(src, data, m->count);
     stats_add_download(get_time_ms() - t0, m->count);
     return AB_OK;
 }
