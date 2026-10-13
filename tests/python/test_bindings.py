@@ -158,6 +158,34 @@ class BindingsTest(unittest.TestCase):
         del pool, A, B, C
         gc.collect()
 
+    def test_pool_reset_retires_matrices(self):
+        # After reset() the pool hands the same handle out again, here with a
+        # larger shape. A wrapper kept from before the reset must refuse use:
+        # its download() would let C write 1600 values into a 9-value buffer.
+        data = rand_matrix(40, 40)
+        with ab.MemoryPool(4) as pool:
+            big = pool.get_matrix(40, 40)
+            pool.reset()
+            small = pool.get_matrix(3, 3)
+            handle = small._matrix
+            pool.reset()
+            current = pool.get_matrix(40, 40)
+            self.assertEqual(current._matrix, handle)
+
+            for stale in (big, small):
+                with self.assertRaises(ab.InvalidArgumentError):
+                    stale.download()
+                with self.assertRaises(ab.InvalidArgumentError):
+                    stale.upload(rand_matrix(*stale.shape))
+                with self.assertRaises(ab.InvalidArgumentError):
+                    stale.zero()
+
+            current.upload(data)
+            self.assertMatrixClose(current.download(), data, apply(abs, data),
+                                   ROUND_TRIP_TOL)
+        del pool, big, small, current
+        gc.collect()
+
     def test_session(self):
         a, b = rand_matrix(6, 5), rand_matrix(5, 4)
         with ab.Session() as s:

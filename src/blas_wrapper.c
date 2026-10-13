@@ -175,8 +175,21 @@ static void pack_op_complex(enum CBLAS_TRANSPOSE t, const double complex* X, int
     }
 }
 
+// Reference BLAS argument checks (xerbla): TRANS flags, M, N, K >= 0 and
+// each leading dimension >= max(1, rows of the stored operand). The GPU path
+// indexes the caller's arrays with these, so a call that fails a check goes
+// to cblas instead, which rejects it before touching A, B or C.
+static bool blas_args_valid(enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
+                            int M, int N, int K, int ldA, int ldB, int ldC) {
+    int rowsA = ta == CblasNoTrans ? M : K, rowsB = tb == CblasNoTrans ? K : N;
+    return ta != AB_TRANS_INVALID && tb != AB_TRANS_INVALID &&
+           M >= 0 && N >= 0 && K >= 0 &&
+           ldA >= 1 && ldA >= rowsA && ldB >= 1 && ldB >= rowsB &&
+           ldC >= 1 && ldC >= M;
+}
+
 // Whole-call CPU paths (Accelerate cblas, column-major). Used below the GPU
-// threshold, for BLAS quick returns and invalid flags, and as the fallback
+// threshold, for BLAS quick returns and invalid arguments, and as the fallback
 // when any GPU step fails before C is written, so C always gets a correct
 // result. Internal, not in apple_bottom.h: fortran_bridge.c calls them for
 // the calls it routes to the CPU itself, so the path record stays accurate.
@@ -223,8 +236,8 @@ void ab_zgemm_blas(
     enum CBLAS_TRANSPOSE tb = ab_blas_trans(transB, true);
 
     // AMX path for small matrices (heterogeneous dispatch); also the BLAS
-    // quick return for alpha == 0 (A and B must not be read) and invalid flags.
-    if (ta == AB_TRANS_INVALID || tb == AB_TRANS_INVALID || alpha == 0.0 ||
+    // quick return for alpha == 0 (A and B must not be read) and invalid arguments.
+    if (!blas_args_valid(ta, tb, M, N, K, ldA, ldB, ldC) || alpha == 0.0 ||
         !ab_use_gpu_complex(M, N, K)) {
         ab_internal_zgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
@@ -232,7 +245,8 @@ void ab_zgemm_blas(
 
     // Hosts that reach us through zgemm_ (QE, Yambo) never call ab_init(), so
     // create the Metal context on first GPU use (H-P1-2). ab_init() is
-    // idempotent and thread-safe; if it fails, the allocations below fail too.
+    // idempotent and thread-safe; if it fails (no device, or a fork() child),
+    // the allocations below fail too.
     ABStatus init = ab_init();
 
     // GPU path: compute op(A)*op(B) on GPU, apply alpha/beta in epilogue
@@ -378,8 +392,8 @@ void ab_dgemm_blas(
     enum CBLAS_TRANSPOSE tb = ab_blas_trans(transB, false);
 
     // AMX path for small matrices (heterogeneous dispatch); also the BLAS
-    // quick return for alpha == 0 (A and B must not be read) and invalid flags.
-    if (ta == AB_TRANS_INVALID || tb == AB_TRANS_INVALID || alpha == 0.0 ||
+    // quick return for alpha == 0 (A and B must not be read) and invalid arguments.
+    if (!blas_args_valid(ta, tb, M, N, K, ldA, ldB, ldC) || alpha == 0.0 ||
         !ab_use_gpu(M, N, K)) {
         ab_internal_dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;

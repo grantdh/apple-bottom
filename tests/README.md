@@ -40,9 +40,9 @@ It does **not** catch:
 ## Coverage status
 
 Counting rule (README, `make ci-local`): a *test* is one `test_precision`
-case, one `TESTS[]` entry, or one BLAS-ABI suite. `make test` runs 123
-(14 precision + 71 correctness + 16 device-API + 22 BLAS-ABI) and
-`make ci-local` adds the 18 chaos tests, for a `TEST_TOTAL` of 141.
+case, one `TESTS[]` entry, or one BLAS-ABI suite. `make test` runs 125
+(14 precision + 71 correctness + 16 device-API + 24 BLAS-ABI) and
+`make ci-local` adds the 18 chaos tests, for a `TEST_TOTAL` of 143.
 Device-API `CHECK`s and BLAS-ABI cases are reported on their own
 `CI_REPORT.txt` lines and are not part of the total.
 
@@ -54,7 +54,7 @@ Device-API `CHECK`s and BLAS-ABI cases are reported on their own
     cblas over all trans pairs, non-square and tall-skinny shapes,
     `ld > rows` and buffer offsets (K-P0-2 / H-P0-4), and check that
     the device path is bitwise the host API on the transposed operands
-  - `tests/test_blas_abi.c` — 22 suites (944 cases), see below
+  - `tests/test_blas_abi.c` — 24 suites (994 cases), see below
 
 - **Pending PR-1.5 (still single-main, no ghost-guard):**
   - `tests/test_precision.c` — needs decomposition strategy
@@ -76,7 +76,13 @@ native GEMMs against Accelerate `cblas_*gemm` (column-major), using a
 componentwise bound of 1e-11, and checks that `ab_get_last_dispatch_path()`
 names what computed C. Each `TESTS[]` entry is a suite that runs in
 its own child process (`AB_MODE` is cached per process; the `*_noinit`
-suites never call `ab_init()`), and a crashing case fails only itself. Known failures live in the file's `XFAIL` table, tagged
+suites never call `ab_init()`), and a crashing case fails only itself.
+`test_illegal_args` passes each illegal argument (TRANS flag, negative
+M/N/K, short lda/ldb/ldc) through every entry point; the case passes only
+if cblas rejects it as reference xerbla would, naming the parameter and
+ending the child with status 255. `test_fork_after_gpu` forks after a GPU
+call; the child must run the same call on cblas and still pass.
+Known failures live in the file's `XFAIL` table, tagged
 with audit IDs. An XFAIL that now passes (XPASS), or an entry that matches
 no case (STALE), fails the run: when a fix lands, delete its entries.
 `./build/test_blas_abi -v` lists every case. `make test-symbols` is the
