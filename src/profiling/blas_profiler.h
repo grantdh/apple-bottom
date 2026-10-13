@@ -49,6 +49,8 @@ typedef struct {
 } ab_prof_entry_t;
 
 // Record a BLAS call. Called from dispatch layer after timing.
+// used_gpu: the call actually ran on the GPU, not just routed there; a
+// GPU-routed call that ran on cblas counts as AMX.
 // No-op if AB_PROFILE env var not set.
 void ab_prof_record(const char* routine, uint64_t elapsed_ns,
                     size_t m, size_t n, size_t k, int used_gpu);

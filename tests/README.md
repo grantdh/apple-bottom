@@ -63,9 +63,10 @@ It does **not** catch:
 `tests/test_blas_abi.c` checks `ab_dgemm_blas` / `ab_zgemm_blas`,
 `ab_dgemm_` / `ab_zgemm_`, the plain `dgemm_` / `zgemm_` symbols and the
 native GEMMs against Accelerate `cblas_*gemm` (column-major), using a
-componentwise bound of 1e-11. Each `TESTS[]` entry is a suite that runs in
-its own child process (`AB_MODE` is cached per process), and a crashing case
-fails only itself. Known failures live in the file's `XFAIL` table, tagged
+componentwise bound of 1e-11, and checks that `ab_get_last_dispatch_path()`
+names what computed C. Each `TESTS[]` entry is a suite that runs in
+its own child process (`AB_MODE` is cached per process; the `*_noinit`
+suites never call `ab_init()`), and a crashing case fails only itself. Known failures live in the file's `XFAIL` table, tagged
 with audit IDs. An XFAIL that now passes (XPASS), or an entry that matches
 no case (STALE), fails the run: when a fix lands, delete its entries.
 `./build/test_blas_abi -v` lists every case. `make test-symbols` is the
@@ -77,11 +78,12 @@ exactly `_dgemm_` / `_zgemm_`, and not the `$NEWLAPACK` variants (H-P0-1).
 `tests/test_fortran_blas.f90` is a plain gfortran `CALL DGEMM` / `CALL
 ZGEMM` (the QE cegterg `'T'`/`'C'`, `'N'` pattern with M != K and padded
 leading dimensions). `make test-fortran` links it once against the dylib and
-once against the static archive and runs both with `AB_MODE=gpu`. Each call
-must reach the GPU path (`ab_get_last_dispatch_path()` is `"gpu"` and the
-`ab_get_stats()` GEMM counter advanced) and match a reference loop within
-1e-11. The target is skipped, with a message, when neither `gfortran-15`
-nor `gfortran` is on `PATH`; set `GFORTRAN=` to pick a compiler.
+once against the static archive and runs both with `AB_MODE=gpu`. Like QE,
+it never calls `ab_init()`. Each call must reach the GPU path
+(`ab_get_last_dispatch_path()` is `"gpu"` and the `ab_get_stats()` GEMM
+counter advanced) and match a reference loop within 1e-11. The target is
+skipped, with a message, when neither `gfortran-15` nor `gfortran` is on
+`PATH`; set `GFORTRAN=` to pick a compiler.
 
 ## Meta-test
 

@@ -23,6 +23,17 @@ _TBD following Si64 benchmark campaign._
   names are no longer exported, so C callers of the new Accelerate headers
   get Accelerate. `make verify-symbols` checks the exact names (it accepted
   `_ab_dgemm_` before), and `make test-fortran` runs a gfortran probe.
+- **BLAS-ABI calls ran on cblas unless the host called `ab_init()`**
+  (H-P1-2). `ab_dgemm_blas`/`ab_zgemm_blas`, and through them
+  `dgemm_`/`zgemm_`, now create the Metal context on first GPU use, so
+  hosts such as QE reach the GPU without an init call.
+- **Dispatch path and AB_PROFILE reported the routing decision, not the path
+  taken** (H-P1-2, H-P2-8). `ab_get_last_dispatch_path()` says `"gpu"` only
+  once the GPU result is in C and `"cpu"` for every cblas run, including
+  calls the Fortran bridge keeps on the CPU; `ab_use_gpu()` no longer sets
+  it. The AB_PROFILE table counts a `dgemm_`/`zgemm_` call as GPU only if it
+  ran there, and a GPU failure that falls back to cblas prints its reason
+  under AB_PROFILE.
 
 ## [1.3.0] - 2026-04-18
 

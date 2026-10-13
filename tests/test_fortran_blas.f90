@@ -3,10 +3,12 @@
 ! =============================================================================
 !
 ! A plain CALL DGEMM / CALL ZGEMM, as in QE or Yambo, linked against
-! libapplebottom. Run with AB_MODE=gpu. Each call must reach apple-bottom's
-! GPU path: ab_get_last_dispatch_path() is "gpu" and the matching
-! ab_get_stats() GEMM counter advanced by one. A call that binds to
-! Accelerate instead leaves both untouched (H-P0-1). The result must also
+! libapplebottom. Run with AB_MODE=gpu. Like QE, the probe never calls
+! ab_init(): the first call must create the Metal context itself (H-P1-2).
+! Each call must reach apple-bottom's GPU path: ab_get_last_dispatch_path()
+! is "gpu" and the matching ab_get_stats() GEMM counter advanced by one. A
+! call that binds to Accelerate instead leaves both untouched (H-P0-1), and
+! one that falls back to cblas reports "cpu". The result must also
 ! match a reference loop within the BLAS-ABI harness bound
 !   |C - Cref| <= 1e-11 * (|alpha| (|op(A)| |op(B)|) + |beta| |C0|)
 ! elementwise. Leading-dimension padding is NaN, so reading it shows up.
@@ -26,9 +28,6 @@ program test_fortran_blas
    end type ab_stats_t
 
    interface
-      integer(c_int) function ab_init() bind(C, name='ab_init')
-         import :: c_int
-      end function ab_init
       type(ab_stats_t) function ab_get_stats() bind(C, name='ab_get_stats')
          import :: ab_stats_t
       end function ab_get_stats
@@ -42,13 +41,6 @@ program test_fortran_blas
    integer, parameter :: lda = k + pad, ldb = k + pad, ldc = m + pad
    real(c_double), parameter :: tol = 1.0d-11
    integer :: failures = 0
-
-   ! Until the BLAS-ABI entry points initialize lazily, the host must call
-   ! ab_init(); without it every GPU-routed call silently runs on cblas.
-   if (ab_init() /= 0) then
-      print '(a)', 'FAIL ab_init() did not return AB_OK'
-      stop 1
-   end if
 
    call check_dgemm()
    call check_zgemm()
