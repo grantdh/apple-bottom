@@ -265,6 +265,19 @@ test-chaos: $(BUILD)/test_chaos
 	@echo "═══════════════════════════════════════════════════════════════════"
 	./$(BUILD)/test_chaos
 
+# Python bindings smoke test (H-P1-5): stdlib unittest, numpy not required.
+# Not part of `make test`. `python3 -I` ignores PYTHONPATH, so the test puts
+# python/ on sys.path itself; AB_LIBRARY pins the dylib under test.
+PYTHON ?= python3
+
+.PHONY: test-python
+test-python: $(BUILD)/libapplebottom.dylib
+	@echo ""
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "Running Python binding tests"
+	@echo "═══════════════════════════════════════════════════════════════════"
+	AB_LIBRARY=$(abspath $(BUILD)/libapplebottom.dylib) $(PYTHON) -I tests/python/test_bindings.py
+
 # Rectangular matrix diagnostic test
 $(BUILD)/test_rectangular_diag: tests/test_rectangular_diag.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)

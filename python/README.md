@@ -2,6 +2,8 @@
 
 High-performance FP64-class BLAS for Apple Silicon GPUs, from Python.
 
+> **Experimental:** the bindings are not covered by `make test`; check them against your build with `make test-python`.
+
 ## Features
 
 - **High-precision arithmetic**: ~10⁻¹⁵ Frobenius relative error via double-float emulation

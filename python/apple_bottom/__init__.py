@@ -3,14 +3,24 @@ Apple Bottom — FP64-class BLAS for Apple Silicon GPU
 
 A Python ctypes wrapper providing both low-level and high-level APIs
 for accelerated matrix operations on Apple Silicon GPUs.
+
+numpy is optional: without it, matrices are passed as sequences of rows
+and results come back as lists of rows.
 """
 
+from __future__ import annotations
+
 import ctypes
-import numpy as np
+import os
 from ctypes import c_int, c_double, c_bool, c_size_t, c_uint64, c_void_p, c_char_p, POINTER
 from pathlib import Path
 from typing import Optional, Tuple, Union, ContextManager
 import warnings
+
+try:
+    import numpy as np
+except ImportError:
+    np = None
 
 __version__ = "1.2.0"
 
@@ -92,11 +102,15 @@ def _find_library() -> ctypes.CDLL:
     Find and load libapplebottom from standard locations.
 
     Search order:
+    0. $AB_LIBRARY, if set (exact path; no fallback)
     1. ../build/ relative to this file
     2. /usr/local/lib
     3. /opt/homebrew/lib
     4. System library path via ctypes.util.find_library
     """
+    if os.environ.get("AB_LIBRARY"):
+        return ctypes.CDLL(os.environ["AB_LIBRARY"], use_errno=True)
+
     candidates = []
 
     # Try relative to this module
@@ -186,10 +200,14 @@ class _LibWrapper:
 
     def _setup_functions(self) -> None:
         """Configure ctypes function signatures."""
+        # ABStatus/ABTranspose arguments and results are declared as plain
+        # c_int: ctypes returns a c_int *subclass* restype as an unconverted
+        # ctypes object, not a Python int.
+
         # Initialization
         self.ab_init = self.lib.ab_init
         self.ab_init.argtypes = []
-        self.ab_init.restype = ABStatus
+        self.ab_init.restype = c_int
 
         self.ab_shutdown = self.lib.ab_shutdown
         self.ab_shutdown.argtypes = []
@@ -223,19 +241,19 @@ class _LibWrapper:
         # Data transfer
         self.ab_matrix_upload = self.lib.ab_matrix_upload
         self.ab_matrix_upload.argtypes = [ABMatrix, POINTER(c_double), c_bool]
-        self.ab_matrix_upload.restype = ABStatus
+        self.ab_matrix_upload.restype = c_int
 
         self.ab_matrix_download = self.lib.ab_matrix_download
         self.ab_matrix_download.argtypes = [ABMatrix, POINTER(c_double), c_bool]
-        self.ab_matrix_download.restype = ABStatus
+        self.ab_matrix_download.restype = c_int
 
         self.ab_matrix_zero = self.lib.ab_matrix_zero
         self.ab_matrix_zero.argtypes = [ABMatrix]
-        self.ab_matrix_zero.restype = ABStatus
+        self.ab_matrix_zero.restype = c_int
 
         self.ab_matrix_copy = self.lib.ab_matrix_copy
         self.ab_matrix_copy.argtypes = [ABMatrix, ABMatrix]
-        self.ab_matrix_copy.restype = ABStatus
+        self.ab_matrix_copy.restype = c_int
 
         # Memory pool
         self.ab_pool_create = self.lib.ab_pool_create
@@ -265,7 +283,7 @@ class _LibWrapper:
 
         self.ab_future_wait = self.lib.ab_future_wait
         self.ab_future_wait.argtypes = [ABFuture]
-        self.ab_future_wait.restype = ABStatus
+        self.ab_future_wait.restype = c_int
 
         self.ab_future_is_ready = self.lib.ab_future_is_ready
         self.ab_future_is_ready.argtypes = [ABFuture]
@@ -273,7 +291,7 @@ class _LibWrapper:
 
         self.ab_future_status = self.lib.ab_future_status
         self.ab_future_status.argtypes = [ABFuture]
-        self.ab_future_status.restype = ABStatus
+        self.ab_future_status.restype = c_int
 
         self.ab_future_destroy = self.lib.ab_future_destroy
         self.ab_future_destroy.argtypes = [ABFuture]
@@ -282,43 +300,43 @@ class _LibWrapper:
         # BLAS operations
         self.ab_dgemm = self.lib.ab_dgemm
         self.ab_dgemm.argtypes = [ABMatrix, ABMatrix, ABMatrix]
-        self.ab_dgemm.restype = ABStatus
+        self.ab_dgemm.restype = c_int
 
         self.ab_dgemm_scaled = self.lib.ab_dgemm_scaled
         self.ab_dgemm_scaled.argtypes = [c_double, ABMatrix, ABMatrix, c_double, ABMatrix]
-        self.ab_dgemm_scaled.restype = ABStatus
+        self.ab_dgemm_scaled.restype = c_int
 
         self.ab_zgemm = self.lib.ab_zgemm
         self.ab_zgemm.argtypes = [ABMatrix, ABMatrix, ABMatrix, ABMatrix, ABMatrix, ABMatrix]
-        self.ab_zgemm.restype = ABStatus
+        self.ab_zgemm.restype = c_int
 
         self.ab_zgemm_ex = self.lib.ab_zgemm_ex
         self.ab_zgemm_ex.argtypes = [
-            ABTranspose, ABTranspose,
+            c_int, c_int,
             ABMatrix, ABMatrix, ABMatrix, ABMatrix, ABMatrix, ABMatrix
         ]
-        self.ab_zgemm_ex.restype = ABStatus
+        self.ab_zgemm_ex.restype = c_int
 
         self.ab_dsyrk = self.lib.ab_dsyrk
         self.ab_dsyrk.argtypes = [ABMatrix, ABMatrix]
-        self.ab_dsyrk.restype = ABStatus
+        self.ab_dsyrk.restype = c_int
 
         self.ab_zherk = self.lib.ab_zherk
         self.ab_zherk.argtypes = [ABMatrix, ABMatrix, ABMatrix, ABMatrix]
-        self.ab_zherk.restype = ABStatus
+        self.ab_zherk.restype = c_int
 
         # Element-wise operations
         self.ab_matrix_add = self.lib.ab_matrix_add
         self.ab_matrix_add.argtypes = [ABMatrix, ABMatrix, ABMatrix]
-        self.ab_matrix_add.restype = ABStatus
+        self.ab_matrix_add.restype = c_int
 
         self.ab_matrix_sub = self.lib.ab_matrix_sub
         self.ab_matrix_sub.argtypes = [ABMatrix, ABMatrix, ABMatrix]
-        self.ab_matrix_sub.restype = ABStatus
+        self.ab_matrix_sub.restype = c_int
 
         self.ab_matrix_scale = self.lib.ab_matrix_scale
         self.ab_matrix_scale.argtypes = [c_double, ABMatrix]
-        self.ab_matrix_scale.restype = ABStatus
+        self.ab_matrix_scale.restype = c_int
 
         # Session API
         self.ab_session_create = self.lib.ab_session_create
@@ -331,7 +349,7 @@ class _LibWrapper:
 
         self.ab_session_add = self.lib.ab_session_add
         self.ab_session_add.argtypes = [ABSession, c_char_p, c_int, c_int]
-        self.ab_session_add.restype = ABStatus
+        self.ab_session_add.restype = c_int
 
         self.ab_session_get = self.lib.ab_session_get
         self.ab_session_get.argtypes = [ABSession, c_char_p]
@@ -339,21 +357,21 @@ class _LibWrapper:
 
         self.ab_session_upload = self.lib.ab_session_upload
         self.ab_session_upload.argtypes = [ABSession, c_char_p, POINTER(c_double)]
-        self.ab_session_upload.restype = ABStatus
+        self.ab_session_upload.restype = c_int
 
         self.ab_session_download = self.lib.ab_session_download
         self.ab_session_download.argtypes = [ABSession, c_char_p, POINTER(c_double)]
-        self.ab_session_download.restype = ABStatus
+        self.ab_session_download.restype = c_int
 
         self.ab_session_dgemm = self.lib.ab_session_dgemm
         self.ab_session_dgemm.argtypes = [ABSession, c_char_p, c_char_p, c_char_p]
-        self.ab_session_dgemm.restype = ABStatus
+        self.ab_session_dgemm.restype = c_int
 
         self.ab_session_zgemm = self.lib.ab_session_zgemm
         self.ab_session_zgemm.argtypes = [
             ABSession, c_char_p, c_char_p, c_char_p, c_char_p, c_char_p, c_char_p
         ]
-        self.ab_session_zgemm.restype = ABStatus
+        self.ab_session_zgemm.restype = c_int
 
         # Statistics
         self.ab_get_stats = self.lib.ab_get_stats
@@ -370,7 +388,7 @@ class _LibWrapper:
 
         # Utility
         self.ab_status_string = self.lib.ab_status_string
-        self.ab_status_string.argtypes = [ABStatus]
+        self.ab_status_string.argtypes = [c_int]
         self.ab_status_string.restype = c_char_p
 
 
@@ -378,14 +396,105 @@ _libwrap = _LibWrapper(_lib)
 
 
 # =============================================================================
+# Host Data: numpy arrays, or sequences of rows when numpy is not installed
+# =============================================================================
+def _shape(data) -> Tuple[int, int]:
+    """(rows, cols) of host data: a 2-D numpy array or a sequence of rows."""
+    if np is not None and isinstance(data, np.ndarray):
+        if data.ndim != 2:
+            raise DimensionMismatchError(f"Expected a 2-D array, got shape {data.shape}")
+        return data.shape
+    return len(data), (len(data[0]) if len(data) else 0)
+
+
+def _host_data(data, shape: Tuple[int, int]):
+    """
+    Return a pointer to `data` as row-major float64 for a GPU matrix of
+    `shape`. `data` is a float64 numpy array or a sequence of rows.
+    """
+    if np is not None and isinstance(data, np.ndarray):
+        if data.shape != shape:
+            raise DimensionMismatchError(
+                f"Data shape {data.shape} doesn't match matrix {shape}"
+            )
+        if data.dtype != np.float64:
+            raise ValueError(f"Expected float64, got {data.dtype}")
+        # The pointer keeps a reference to the (possibly copied) array.
+        return np.ascontiguousarray(data).ctypes.data_as(POINTER(c_double))
+
+    rows, cols = shape
+    if len(data) != rows or any(len(row) != cols for row in data):
+        raise DimensionMismatchError(f"Data doesn't match matrix shape {shape}")
+    return (c_double * (rows * cols))(*(x for row in data for x in row))
+
+
+def _host_result(shape: Tuple[int, int], fill):
+    """
+    Allocate a row-major float64 buffer of `shape`, check the status that
+    fill(pointer) returns, and return the buffer: a numpy array, or a list
+    of rows when numpy is not installed.
+    """
+    if np is not None:
+        out = np.empty(shape, dtype=np.float64, order='C')
+        _check_status(fill(out.ctypes.data_as(POINTER(c_double))))
+        return out
+
+    rows, cols = shape
+    flat = (c_double * (rows * cols))()
+    _check_status(fill(flat))
+    return [flat[i * cols:(i + 1) * cols] for i in range(rows)]
+
+
+# =============================================================================
+# Handle Ownership
+# =============================================================================
+class _Handle:
+    """
+    Base for wrappers around one C handle. An owned handle is freed exactly
+    once: by close(), on leaving a `with` block, or at garbage collection,
+    whichever comes first.
+    """
+
+    _ptr = None   # C handle; None once closed or if creation failed
+    _free = None  # ctypes destroy function; None when another object owns _ptr
+
+    def close(self) -> None:
+        """Release the handle now. Calling close() again does nothing."""
+        ptr, self._ptr = self._ptr, None
+        if ptr and self._free:
+            self._free(ptr)
+
+    def __del__(self):
+        self.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
+    def _live(self):
+        """Return the C handle, or raise if it has been closed."""
+        if not self._ptr:
+            raise InvalidArgumentError(f"{type(self).__name__} is closed")
+        return self._ptr
+
+
+# =============================================================================
 # High-Level API: Matrix Class
 # =============================================================================
-class Matrix:
+class Matrix(_Handle):
     """
     Represents a GPU-resident matrix.
 
-    Handles creation, data transfer, and automatic cleanup.
+    Handles creation, data transfer, and cleanup (close(), `with`, or
+    garbage collection). A matrix obtained from MemoryPool.get_matrix() or
+    Session.get() belongs to that pool or session, which frees it; closing
+    such a matrix only detaches the wrapper.
     """
+
+    _free = _libwrap.ab_matrix_destroy
+    _owner = None  # MemoryPool or Session that owns a borrowed handle
 
     def __init__(self, rows: int, cols: int):
         """
@@ -405,16 +514,30 @@ class Matrix:
                 f"Matrix dimensions ({rows}, {cols}) exceed maximum {MAX_DIMENSION}"
             )
 
-        self._matrix = _libwrap.ab_matrix_create(rows, cols)
-        if not self._matrix:
+        self._ptr = _libwrap.ab_matrix_create(rows, cols)
+        if not self._ptr:
             raise AllocationError("Failed to allocate GPU matrix")
         self._rows = rows
         self._cols = cols
 
-    def __del__(self):
-        """Automatically destroy GPU matrix on garbage collection."""
-        if hasattr(self, '_matrix') and self._matrix:
-            _libwrap.ab_matrix_destroy(self._matrix)
+    @classmethod
+    def _borrow(cls, handle, rows: int, cols: int, owner: _Handle) -> Matrix:
+        """Wrap a handle that `owner` (a MemoryPool or Session) frees."""
+        m = cls.__new__(cls)
+        m._ptr, m._rows, m._cols = handle, rows, cols
+        m._owner = owner  # keeps the owner, and so the handle, alive
+        m._free = None
+        return m
+
+    def _live(self):
+        if self._owner is not None:
+            self._owner._live()  # raises once the pool or session is closed
+        return super()._live()
+
+    @property
+    def _matrix(self):
+        """The live C handle, for direct _libwrap calls."""
+        return self._live()
 
     @property
     def shape(self) -> Tuple[int, int]:
@@ -441,25 +564,17 @@ class Matrix:
         Upload data to GPU.
 
         Args:
-            data: numpy array of shape (rows, cols) with dtype float64
+            data: numpy array of shape (rows, cols) with dtype float64, or
+                a sequence of `rows` rows of `cols` numbers
             parallel: Use parallel upload (faster but uses more CPU resources)
 
         Raises:
             DimensionMismatchError: If data shape doesn't match matrix
-            ValueError: If data is not contiguous float64
+            ValueError: If a numpy array is not float64
         """
-        if data.shape != (self._rows, self._cols):
-            raise DimensionMismatchError(
-                f"Data shape {data.shape} doesn't match matrix {self.shape}"
-            )
-        if data.dtype != np.float64:
-            raise ValueError(f"Expected float64, got {data.dtype}")
-        if not data.flags['C_CONTIGUOUS']:
-            data = np.ascontiguousarray(data)
-
         status = _libwrap.ab_matrix_upload(
             self._matrix,
-            data.ctypes.data_as(POINTER(c_double)),
+            _host_data(data, self.shape),
             parallel
         )
         _check_status(status)
@@ -472,16 +587,14 @@ class Matrix:
             parallel: Use parallel download
 
         Returns:
-            numpy array of shape (rows, cols) with dtype float64
+            numpy array of shape (rows, cols) with dtype float64, or a list
+            of rows if numpy is not installed
         """
-        result = np.empty((self._rows, self._cols), dtype=np.float64, order='C')
-        status = _libwrap.ab_matrix_download(
-            self._matrix,
-            result.ctypes.data_as(POINTER(c_double)),
-            parallel
+        handle = self._matrix
+        return _host_result(
+            self.shape,
+            lambda out: _libwrap.ab_matrix_download(handle, out, parallel)
         )
-        _check_status(status)
-        return result
 
     def zero(self) -> None:
         """Fill matrix with zeros on GPU."""
@@ -507,12 +620,16 @@ class Matrix:
 # =============================================================================
 # High-Level API: MemoryPool Class
 # =============================================================================
-class MemoryPool:
+class MemoryPool(_Handle):
     """
     GPU memory pool for reusing matrix allocations.
 
-    Reduces allocation overhead in iterative codes.
+    Reduces allocation overhead in iterative codes. Closing the pool
+    (close(), `with`, or garbage collection) frees every matrix it handed
+    out; it stays alive while any of those matrices is referenced.
     """
+
+    _free = _libwrap.ab_pool_destroy
 
     def __init__(self, size_hint: int = 16):
         """
@@ -521,14 +638,9 @@ class MemoryPool:
         Args:
             size_hint: Estimated number of matrices to pre-allocate
         """
-        self._pool = _libwrap.ab_pool_create(size_hint)
-        if not self._pool:
+        self._ptr = _libwrap.ab_pool_create(size_hint)
+        if not self._ptr:
             raise AllocationError("Failed to create memory pool")
-
-    def __del__(self):
-        """Destroy pool on garbage collection."""
-        if hasattr(self, '_pool') and self._pool:
-            _libwrap.ab_pool_destroy(self._pool)
 
     def get_matrix(self, rows: int, cols: int) -> Matrix:
         """
@@ -544,52 +656,35 @@ class MemoryPool:
         Raises:
             AllocationError: If pool is at capacity
         """
-        mat = _libwrap.ab_pool_get_matrix(self._pool, rows, cols)
+        mat = _libwrap.ab_pool_get_matrix(self._live(), rows, cols)
         if not mat:
             raise AllocationError("Memory pool at capacity (max 128 matrices)")
-
-        # Wrap the C pointer in our Matrix class
-        # Note: We don't own this pointer, pool does
-        wrapper = Matrix.__new__(Matrix)
-        wrapper._matrix = mat
-        wrapper._rows = rows
-        wrapper._cols = cols
-        return wrapper
+        return Matrix._borrow(mat, rows, cols, self)
 
     def reset(self) -> None:
         """Mark all matrices in pool as available for reuse."""
-        _libwrap.ab_pool_reset(self._pool)
+        _libwrap.ab_pool_reset(self._live())
 
 
 # =============================================================================
 # High-Level API: Session Class
 # =============================================================================
-class Session:
+class Session(_Handle):
     """
     Named matrix session for organizing related matrices.
 
-    Simplifies management of multiple matrices and operations.
+    Simplifies management of multiple matrices and operations. Closing the
+    session (close(), `with`, or garbage collection) frees its matrices.
     """
+
+    _free = _libwrap.ab_session_destroy
 
     def __init__(self):
         """Create a new session."""
-        self._session = _libwrap.ab_session_create()
-        if not self._session:
+        self._ptr = _libwrap.ab_session_create()
+        if not self._ptr:
             raise AllocationError("Failed to create session")
         self._matrices = {}
-
-    def __del__(self):
-        """Destroy session on garbage collection."""
-        if hasattr(self, '_session') and self._session:
-            _libwrap.ab_session_destroy(self._session)
-
-    def __enter__(self) -> 'Session':
-        """Context manager entry."""
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        """Context manager exit."""
-        self.__del__()
 
     def add(self, name: str, rows: int, cols: int) -> None:
         """
@@ -607,7 +702,7 @@ class Session:
             raise InvalidArgumentError(f"Matrix '{name}' already exists in session")
 
         name_bytes = name.encode('utf-8')
-        status = _libwrap.ab_session_add(self._session, name_bytes, rows, cols)
+        status = _libwrap.ab_session_add(self._live(), name_bytes, rows, cols)
         _check_status(status)
         self._matrices[name] = (rows, cols)
 
@@ -624,16 +719,12 @@ class Session:
         if name not in self._matrices:
             raise KeyError(f"Matrix '{name}' not found in session")
 
-        mat = _libwrap.ab_session_get(self._session, name.encode('utf-8'))
+        mat = _libwrap.ab_session_get(self._live(), name.encode('utf-8'))
         if not mat:
             raise KeyError(f"Matrix '{name}' not found in session")
 
         rows, cols = self._matrices[name]
-        wrapper = Matrix.__new__(Matrix)
-        wrapper._matrix = mat
-        wrapper._rows = rows
-        wrapper._cols = cols
-        return wrapper
+        return Matrix._borrow(mat, rows, cols, self)
 
     def upload(self, name: str, data: np.ndarray) -> None:
         """
@@ -641,25 +732,16 @@ class Session:
 
         Args:
             name: Matrix name
-            data: numpy array (must match declared shape)
+            data: numpy float64 array or sequence of rows (must match
+                declared shape)
         """
         if name not in self._matrices:
             raise KeyError(f"Matrix '{name}' not found in session")
 
-        rows, cols = self._matrices[name]
-        if data.shape != (rows, cols):
-            raise DimensionMismatchError(
-                f"Data shape {data.shape} doesn't match matrix ({rows}, {cols})"
-            )
-        if data.dtype != np.float64:
-            raise ValueError(f"Expected float64, got {data.dtype}")
-        if not data.flags['C_CONTIGUOUS']:
-            data = np.ascontiguousarray(data)
-
         status = _libwrap.ab_session_upload(
-            self._session,
+            self._live(),
             name.encode('utf-8'),
-            data.ctypes.data_as(POINTER(c_double))
+            _host_data(data, self._matrices[name])
         )
         _check_status(status)
 
@@ -671,21 +753,16 @@ class Session:
             name: Matrix name
 
         Returns:
-            numpy array
+            numpy array, or a list of rows if numpy is not installed
         """
         if name not in self._matrices:
             raise KeyError(f"Matrix '{name}' not found in session")
 
-        rows, cols = self._matrices[name]
-        result = np.empty((rows, cols), dtype=np.float64, order='C')
-
-        status = _libwrap.ab_session_download(
-            self._session,
-            name.encode('utf-8'),
-            result.ctypes.data_as(POINTER(c_double))
+        session, key = self._live(), name.encode('utf-8')
+        return _host_result(
+            self._matrices[name],
+            lambda out: _libwrap.ab_session_download(session, key, out)
         )
-        _check_status(status)
-        return result
 
     def dgemm(self, A: str, B: str, C: str) -> None:
         """
@@ -697,7 +774,7 @@ class Session:
             C: Name of output matrix
         """
         status = _libwrap.ab_session_dgemm(
-            self._session,
+            self._live(),
             A.encode('utf-8'),
             B.encode('utf-8'),
             C.encode('utf-8')
@@ -714,7 +791,7 @@ class Session:
             Cr, Ci: Real and imaginary parts of C (output)
         """
         status = _libwrap.ab_session_zgemm(
-            self._session,
+            self._live(),
             Ar.encode('utf-8'),
             Ai.encode('utf-8'),
             Br.encode('utf-8'),
@@ -762,30 +839,24 @@ def dgemm(A: np.ndarray, B: np.ndarray, alpha: float = 1.0, beta: float = 0.0) -
     and download in one call.
 
     Args:
-        A: Left operand, shape (m, k), dtype float64
-        B: Right operand, shape (k, n), dtype float64
+        A: Left operand, shape (m, k), dtype float64 (or a sequence of rows)
+        B: Right operand, shape (k, n), dtype float64 (or a sequence of rows)
         alpha: Scalar multiplier (default 1.0)
         beta: Scalar for C accumulation (default 0.0)
 
     Returns:
-        Result matrix, shape (m, n), dtype float64
+        Result matrix, shape (m, n), dtype float64 (a list of rows if numpy
+        is not installed)
 
     Raises:
         DimensionMismatchError: If A.shape[1] != B.shape[0]
-        ValueError: If inputs are not float64
+        ValueError: If numpy inputs are not float64
     """
-    if A.dtype != np.float64 or B.dtype != np.float64:
-        raise ValueError("Both inputs must be float64")
-    if A.shape[1] != B.shape[0]:
+    (m, k), (k_b, n) = _shape(A), _shape(B)
+    if k != k_b:
         raise DimensionMismatchError(
-            f"Cannot multiply {A.shape} and {B.shape}: inner dimensions mismatch"
+            f"Cannot multiply {(m, k)} and {(k_b, n)}: inner dimensions mismatch"
         )
-
-    A = np.ascontiguousarray(A)
-    B = np.ascontiguousarray(B)
-
-    m, k = A.shape
-    n = B.shape[1]
 
     # Create GPU matrices
     gpu_A = Matrix(m, k)
@@ -817,27 +888,18 @@ def zgemm(Ar: np.ndarray, Ai: np.ndarray, Br: np.ndarray, Bi: np.ndarray) -> Tup
     Args:
         Ar, Ai: Real and imaginary parts of left operand
         Br, Bi: Real and imaginary parts of right operand
+        (float64 numpy arrays or sequences of rows)
 
     Returns:
         Tuple (Cr, Ci) of real and imaginary parts of result
     """
-    if Ar.dtype != np.float64 or Ai.dtype != np.float64:
-        raise ValueError("A parts must be float64")
-    if Br.dtype != np.float64 or Bi.dtype != np.float64:
-        raise ValueError("B parts must be float64")
-
-    m, k = Ar.shape
-    n = Br.shape[1]
+    m, k = _shape(Ar)
+    n = _shape(Br)[1]
 
     # Validate dimensions
     for arr, name in [(Ar, "Ar"), (Ai, "Ai"), (Br, "Br"), (Bi, "Bi")]:
-        if arr.shape[0] == 0 or arr.shape[1] == 0:
+        if 0 in _shape(arr):
             raise DimensionMismatchError(f"{name} has zero dimension")
-
-    Ar = np.ascontiguousarray(Ar)
-    Ai = np.ascontiguousarray(Ai)
-    Br = np.ascontiguousarray(Br)
-    Bi = np.ascontiguousarray(Bi)
 
     # Create GPU matrices
     gpu_Ar = Matrix(m, k)
@@ -874,16 +936,12 @@ def dsyrk(A: np.ndarray) -> np.ndarray:
     Perform symmetric rank-k update: C = A @ A.T.
 
     Args:
-        A: Input matrix, shape (m, n), dtype float64
+        A: Input matrix, shape (m, n), dtype float64 (or a sequence of rows)
 
     Returns:
         Result matrix, shape (m, m), dtype float64
     """
-    if A.dtype != np.float64:
-        raise ValueError("Input must be float64")
-
-    A = np.ascontiguousarray(A)
-    m, n = A.shape
+    m, n = _shape(A)
 
     gpu_A = Matrix(m, n)
     gpu_C = Matrix(m, m)
