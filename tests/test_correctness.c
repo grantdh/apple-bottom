@@ -131,6 +131,51 @@ static void test_upload_null_matrix(void) {
     if (s == AB_ERROR_INVALID_ARG) PASS(); else FAIL("should fail");
 }
 
+// H-P0-3: chunked parallel FP64<->DD conversion must match the serial loop bit
+// for bit, including values outside the DD range (subnormal, overflow, Inf, NaN).
+static void test_convert_parallel_bitwise(void) {
+    TEST("H-P0-3: parallel conversion == serial");
+    ab_init();
+    static const double edge[] = {
+        0.0, -0.0, 4.9406564584124654e-324, -2.2250738585072014e-308, 1e-310,
+        1e-40, -1.401298464324817e-45, 1e-46, 1.1754943508222875e-38, 1e-35,
+        1e30, -1e30, 3.4028234663852886e38, -3.4028234663852886e38, 3.5e38,
+        1e300, INFINITY, -INFINITY, NAN, -NAN, 3.141592653589793, -1.0 / 3.0,
+    };
+    const size_t n_edge = sizeof edge / sizeof edge[0];
+    // Below the parallel threshold, and above it (2^20) with a ragged last chunk.
+    const int shapes[2][2] = {{31, 33}, {1031, 1021}};
+    int ok = 1;
+    for (int s = 0; s < 2 && ok; s++) {
+        int rows = shapes[s][0], cols = shapes[s][1];
+        size_t n = (size_t)rows * cols;
+        double* src = malloc(n * sizeof(double));
+        double* ser = malloc(n * sizeof(double));
+        double* par = malloc(n * sizeof(double));
+        ABMatrix mS = ab_matrix_create(rows, cols);
+        ABMatrix mP = ab_matrix_create(rows, cols);
+        ok = src && ser && par && mS && mP;
+        if (ok) {
+            for (size_t i = 0; i < n; i++)
+                src[i] = i % 7 ? sin((double)i) * pow(10.0, (double)(i % 61) - 30.0)
+                               : edge[(i / 7) % n_edge];
+            // Upload both ways, download serially: the two uploads must agree.
+            ok = ab_matrix_upload(mS, src, false) == AB_OK &&
+                 ab_matrix_upload(mP, src, true) == AB_OK &&
+                 ab_matrix_download(mS, ser, false) == AB_OK &&
+                 ab_matrix_download(mP, par, false) == AB_OK &&
+                 memcmp(ser, par, n * sizeof(double)) == 0;
+            // Same buffer, parallel download.
+            ok = ok && ab_matrix_download(mS, par, true) == AB_OK &&
+                 memcmp(ser, par, n * sizeof(double)) == 0;
+        }
+        ab_matrix_destroy(mS); ab_matrix_destroy(mP);
+        free(src); free(ser); free(par);
+    }
+    ab_shutdown();
+    if (ok) PASS(); else FAIL("parallel and serial results differ");
+}
+
 static void test_matrix_zero(void) {
     TEST("ab_matrix_zero");
     ab_init();
@@ -2106,6 +2151,7 @@ static const TestCase TESTS[] = {
     {"test_upload_null_data",                 test_upload_null_data},
     {"test_download_null_data",               test_download_null_data},
     {"test_upload_null_matrix",               test_upload_null_matrix},
+    {"test_convert_parallel_bitwise",         test_convert_parallel_bitwise},
     {"test_matrix_zero",                      test_matrix_zero},
     {"test_dgemm_identity",                   test_dgemm_identity},
     {"test_dgemm_zero",                       test_dgemm_zero},
