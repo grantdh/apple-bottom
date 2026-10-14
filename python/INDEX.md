@@ -30,7 +30,7 @@ python/
 
 1. **Imports and Constants** (lines 1-30)
    - Version info
-   - MAX_DIMENSION, POOL_CAPACITY, SESSION_CAPACITY
+   - MAX_ELEMENTS, MAX_DIMENSION, POOL_CAPACITY, SESSION_CAPACITY
 
 2. **Error Classes** (lines ~40-95)
    - AppleBottomError (base)
@@ -173,7 +173,8 @@ Memory overhead:
 ## Constants and Limits
 
 ```python
-MAX_DIMENSION = 46340        # Max rows/cols per matrix
+MAX_ELEMENTS = 2**31 - 1     # Max rows * cols per matrix
+MAX_DIMENSION = 2**31 - 1    # Max rows or cols alone
 POOL_CAPACITY = 128          # Max matrices in pool
 SESSION_CAPACITY = 64        # Max matrices per session
 

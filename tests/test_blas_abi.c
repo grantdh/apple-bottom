@@ -95,7 +95,7 @@ void ab_prof_dump(FILE *out);
 #define TOL             1e-11
 #define MAX_CASES       1024
 #define MIN_GPU_DIM     32      // DEFAULT_MIN_GPU_DIM in blas_wrapper.c
-#define MAX_MATRIX_DIM  46340   // AB_MAX_DIMENSION in apple_bottom.m
+#define OLD_MAX_DIM     46340   // v1.3 per-dimension limit, now a per-matrix one
 #define CASE_TIMEOUT_S  120
 
 // =============================================================================
@@ -128,7 +128,7 @@ typedef struct {
     Poison poison;
 } Scalars;
 
-enum { SC_GEN, SC_A1B0, SC_B1, SC_B0_NAN_C, SC_A0_NAN_AB };
+enum { SC_GEN, SC_A1B0, SC_B1, SC_B0_NAN_C, SC_A0_NAN_AB, SC_A2B0 };
 
 static const Scalars SCALARS[] = {
     [SC_GEN]       = {"gen",     CMPLX(1.25, -0.5), CMPLX(-0.75, 0.25), POISON_NONE},
@@ -136,6 +136,7 @@ static const Scalars SCALARS[] = {
     [SC_B1]        = {"b1",      CMPLX(1.25, -0.5), CMPLX(1.0, 0.0),    POISON_NONE},
     [SC_B0_NAN_C]  = {"b0nanC",  CMPLX(1.25, -0.5), CMPLX(0.0, 0.0),    POISON_C},   // C must not be read
     [SC_A0_NAN_AB] = {"a0nanAB", CMPLX(0.0, 0.0),   CMPLX(0.5, -0.25),  POISON_AB},  // A, B must not be read
+    [SC_A2B0]      = {"a2b0",    CMPLX(2.0, 0.0),   CMPLX(0.0, 0.0),    POISON_NONE},  // QE newq, gamma point
 };
 
 // Illegal BLAS arguments. Accelerate's cblas rejects each one by printing
@@ -272,9 +273,7 @@ static void gen_blas(const Suite *s) {
     add_std(s, 'N', 'N', 96, 0, 72, 3, SC_GEN);
     add_std(s, 'N', 'N', 96, 80, 0, 3, SC_GEN);
 
-    // op(A) exceeds the ABMatrix dimension limit: routed to the GPU, the
-    // call fails there and must fall back to cblas and report "cpu".
-    add_blas(s, s->op, 'N', 'N', MAX_MATRIX_DIM + 1, 48, 48, 0, SC_GEN, ROUTE_CPU);
+    add_std(s, 'N', 'N', OLD_MAX_DIM + 1, 48, 48, 0, SC_GEN);       // past the v1.3 limit
 }
 
 // AB_MODE=auto: the QE cegterg call crosses both FLOP thresholds (3.6e8 >= 1e8).
@@ -286,15 +285,16 @@ static void gen_auto(const Suite *s) {
 }
 
 // AB_MODE=auto and AB_PROFILE=1, no ab_init(). The bridge sends all three
-// shapes to ab_*gemm_blas, but only the first runs on the GPU: K = 16 is
-// below AB_MIN_GPU_DIM (the audit's 2048x2048x16 call) and the last one
-// fails on the GPU and falls back. The profiler must report what ran.
+// shapes to ab_*gemm_blas, which keeps the second on cblas: K = 16 is below
+// AB_MIN_GPU_DIM (the audit's 2048x2048x16 call). The last is past the v1.3
+// limit and must run on the GPU. The profiler must report what ran; the fork
+// suite covers a GPU-routed call that falls back.
 static void gen_profile(const Suite *s) {
     static const Op OPS[] = {OP_DGEMM_SYM, OP_ZGEMM_SYM};
     for (size_t o = 0; o < TEST_REGISTRY_SIZE(OPS); o++) {
         add_blas(s, OPS[o], 'N', 'N', 256, 256, 2048, 0, SC_GEN, ROUTE_GPU);
         add_blas(s, OPS[o], 'N', 'N', 2048, 2048, 16, 0, SC_GEN, ROUTE_CPU);
-        add_blas(s, OPS[o], 'N', 'N', MAX_MATRIX_DIM + 1, 48, 48, 0, SC_GEN, ROUTE_CPU);
+        add_blas(s, OPS[o], 'N', 'N', OLD_MAX_DIM + 1, 48, 48, 0, SC_GEN, ROUTE_GPU);
     }
 }
 
@@ -318,12 +318,32 @@ static void gen_illegal(const Suite *s) {
         }
 }
 
-// AB_MODE=gpu without ab_init(): a GPU call creates the Metal context, then
-// a fork()ed child repeats it. Metal does not survive fork(), so the child
-// must run the call on cblas and get the same correct result.
+// AB_MODE=gpu and AB_PROFILE=1 without ab_init(): a GPU call creates the
+// Metal context, then a fork()ed child repeats it. Metal does not survive
+// fork(), so the child must fall back to cblas, get the same correct result
+// and be profiled as a CPU call. (The shapes stay small: Accelerate's own
+// threaded cblas does not survive fork() either.)
 static void gen_fork(const Suite *s) {
     add_blas(s, OP_DGEMM_SYM, 'N', 'N', 96, 80, 72, 3, SC_GEN, ROUTE_GPU)->fork = true;
     add_blas(s, OP_ZGEMM_SYM, 'N', 'N', 96, 80, 72, 3, SC_GEN, ROUTE_GPU)->fork = true;
+}
+
+// The only QE Si64 calls the v1.3 per-dimension limit (46340) kept off the
+// GPU: the PAW DGEMMs of newq ('T','N', 171 x 64 x 2*ngm_l, alpha = 2 at the
+// gamma point) and addusdens (2*ngm_l x 171 x 64; QE passes 'N','T'). 171 =
+// nh(nh+1)/2 projector pairs (nh = 18 per Si atom), 64 = atoms, 2*ngm_l =
+// 71834 (gamma point) or 143666 (k-points), the rank's dense-grid G-vectors
+// as real pairs; QE's ld is 2*ngm_l, the ld > rows variants are extra. The
+// 'C','N' ZGEMM with K = 100000 is synthetic (cegterg's K is ~9000 per rank).
+// Through dgemm_/zgemm_ in AB_MODE=gpu without ab_init(), every case must
+// run on the GPU. This checks robustness only: these DGEMMs are memory-bound
+// and faster on Accelerate, where AB_MODE=auto should leave them.
+static void gen_qe(const Suite *s) {
+    add_blas(s, OP_DGEMM_SYM, 'T', 'N', 171, 64, 71834, 0, SC_A2B0, ROUTE_GPU);
+    add_blas(s, OP_DGEMM_SYM, 'T', 'N', 171, 64, 143666, 3, SC_A2B0, ROUTE_GPU);
+    add_blas(s, OP_DGEMM_SYM, 'N', 'N', 71834, 171, 64, 0, SC_A2B0, ROUTE_GPU);
+    add_blas(s, OP_DGEMM_SYM, 'N', 'N', 143666, 171, 64, 3, SC_A2B0, ROUTE_GPU);
+    add_blas(s, OP_ZGEMM_SYM, 'C', 'N', 171, 64, 100000, 0, SC_A1B0, ROUTE_GPU);
 }
 
 static void add_native(Op op, int M, int N, int K) {
@@ -373,7 +393,7 @@ enum {
     SU_DGEMM_SYM_GPU, SU_DGEMM_SYM_CPU, SU_ZGEMM_SYM_GPU, SU_ZGEMM_SYM_CPU,
     SU_AUTO,
     SU_DGEMM_BLAS_NOINIT, SU_ZGEMM_BLAS_NOINIT, SU_DGEMM_F_NOINIT, SU_ZGEMM_F_NOINIT,
-    SU_DGEMM_SYM_NOINIT, SU_ZGEMM_SYM_NOINIT, SU_ILLEGAL, SU_FORK,
+    SU_DGEMM_SYM_NOINIT, SU_ZGEMM_SYM_NOINIT, SU_ILLEGAL, SU_FORK, SU_QE,
     SU_PROFILE, SU_NATIVE, SU_SYMBOLS, SU_COUNT
 };
 
@@ -406,7 +426,9 @@ static Suite SUITES[SU_COUNT] = {
     [SU_DGEMM_SYM_NOINIT]  = NOINIT_SUITE(OP_DGEMM_SYM),
     [SU_ZGEMM_SYM_NOINIT]  = NOINIT_SUITE(OP_ZGEMM_SYM),
     [SU_ILLEGAL] = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_illegal},
-    [SU_FORK]    = {.label = "gpu-noinit-fork", .ab_mode = "gpu", .gen = gen_fork},
+    [SU_FORK]    = {.label = "gpu-noinit-fork", .ab_mode = "gpu", .profile = true,
+                    .gen = gen_fork},
+    [SU_QE]      = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_qe},
     [SU_PROFILE] = {.label = "auto-profile", .ab_mode = "auto", .profile = true,
                     .gen = gen_profile},
     [SU_NATIVE]  = {.init = true, .debug_layer = true, .gen = gen_native},
@@ -1144,6 +1166,7 @@ static void test_dgemm_sym_noinit(void)  { run_suite(SU_DGEMM_SYM_NOINIT); }
 static void test_zgemm_sym_noinit(void)  { run_suite(SU_ZGEMM_SYM_NOINIT); }
 static void test_illegal_args(void)     { run_suite(SU_ILLEGAL); }
 static void test_fork_after_gpu(void)   { run_suite(SU_FORK); }
+static void test_qe_shapes(void)        { run_suite(SU_QE); }
 static void test_profile_path(void)     { run_suite(SU_PROFILE); }
 static void test_native_morton(void)    { run_suite(SU_NATIVE); }
 static void test_fortran_symbols(void)  { run_suite(SU_SYMBOLS); }
@@ -1170,6 +1193,7 @@ static const TestCase TESTS[] = {
     {"test_zgemm_sym_noinit",  test_zgemm_sym_noinit},
     {"test_illegal_args",     test_illegal_args},
     {"test_fork_after_gpu",   test_fork_after_gpu},
+    {"test_qe_shapes",        test_qe_shapes},
     {"test_profile_path",     test_profile_path},
     {"test_native_morton",    test_native_morton},
     {"test_fortran_symbols",  test_fortran_symbols},

@@ -34,7 +34,12 @@
 //   path); not directly measured.
 //
 // API Limits:
-//   - AB_MAX_DIMENSION = 46340 (max matrix dimension, overflow protection)
+//   - Matrix size: rows * cols <= AB_MAX_MATRIX_ELEMENTS (2^31 - 1) and the DD
+//     buffer, rows * cols * 8 bytes, <= the Metal device's maxBufferLength. The
+//     limit is on the total, not on each dimension: tall-skinny shapes such as
+//     143666 x 171 are fine. ab_matrix_check_size() says whether a shape fits;
+//     BLAS-ABI calls with a larger operand run on Accelerate (AB_PROFILE=1
+//     prints why).
 //   - Memory pool capacity: 128 entries (ab_pool_get_matrix returns NULL when full)
 //   - Session capacity: 64 matrices per session
 // =============================================================================
@@ -68,6 +73,7 @@ typedef enum {
     AB_ERROR_KERNEL_FAILED = -5,
     AB_ERROR_INVALID_ARG = -6,
     AB_ERROR_SHADER_COMPILE = -7,
+    AB_ERROR_TOO_LARGE = -8,      // matrix beyond the size limits (see API Limits)
 } ABStatus;
 
 typedef enum {
@@ -107,6 +113,15 @@ const char* ab_device_name(void);
 bool ab_is_initialized(void);
 
 // Matrix lifecycle
+// Most elements (rows * cols) one matrix may hold: the GPU kernels index
+// elements with 32-bit unsigned arithmetic.
+#define AB_MAX_MATRIX_ELEMENTS 2147483647
+
+// AB_OK if a rows x cols matrix fits the size limits; AB_ERROR_INVALID_ARG if
+// rows or cols <= 0, AB_ERROR_TOO_LARGE beyond AB_MAX_MATRIX_ELEMENTS or the
+// device's maxBufferLength, AB_ERROR_NO_DEVICE before ab_init(). Allocates nothing.
+ABStatus ab_matrix_check_size(int rows, int cols);
+// NULL if ab_matrix_check_size(rows, cols) fails or the allocation does.
 ABMatrix ab_matrix_create(int rows, int cols);
 void ab_matrix_destroy(ABMatrix m);
 void ab_matrix_dims(ABMatrix m, int* rows, int* cols);

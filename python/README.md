@@ -272,7 +272,7 @@ except ab.AppleBottomError as e:
 
 ## Library Limits
 
-- Maximum matrix dimension: 46,340 (AB_MAX_DIMENSION)
+- Maximum matrix size: rows × cols ≤ 2³¹ − 1 elements (`MAX_ELEMENTS`, `AB_MAX_MATRIX_ELEMENTS`), any shape
 - Memory pool capacity: 128 matrices
 - Session capacity: 64 matrices per session
 - Thread safety: Matrix operations are NOT thread-safe (Metal queue is serialized)

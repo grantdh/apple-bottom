@@ -92,7 +92,7 @@ except ab.AppleBottomError as e:
 
 ## Limits
 
-- Max dimension: 46,340
+- Max matrix size: rows × cols ≤ 2³¹ − 1 elements
 - Max matrices per pool: 128
 - Max matrices per session: 64
 - Requires Apple Silicon Mac (M1, M2, M3, etc.)

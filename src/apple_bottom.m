@@ -1007,17 +1007,29 @@ bool ab_is_initialized(void) { return [ABContextImpl shared] != nil; }
 // Public API: Matrix Lifecycle
 // =============================================================================
 
-// Maximum supported dimension (prevent overflow: 46340² < 2³¹)
-#define AB_MAX_DIMENSION 46340
+// Size limits of one matrix. Each kernel indexes a matrix as r * cols + c (or
+// the transposed form) in 32-bit unsigned arithmetic, with r and c at most
+// one tile past the edge before the bounds check. rows * cols <=
+// AB_MAX_MATRIX_ELEMENTS (2^31 - 1) keeps every index exact for any shape,
+// and keeps the int index math of the DTRSM and MPIR host loops in range.
+// The DD buffer must also fit in one MTLBuffer.
+static ABStatus matrix_size_status(ABContextImpl* ctx, int rows, int cols) {
+    if (rows <= 0 || cols <= 0) return AB_ERROR_INVALID_ARG;
+    size_t count = (size_t)rows * (size_t)cols;
+    if (count > AB_MAX_MATRIX_ELEMENTS) return AB_ERROR_TOO_LARGE;
+    if (!ctx) return AB_ERROR_NO_DEVICE;
+    if (count * sizeof(DDFloat) > ctx.device.maxBufferLength) return AB_ERROR_TOO_LARGE;
+    return AB_OK;
+}
+
+ABStatus ab_matrix_check_size(int rows, int cols) {
+    return matrix_size_status([ABContextImpl shared], rows, cols);
+}
 
 ABMatrix ab_matrix_create(int rows, int cols) {
-    // Input validation
-    if (rows <= 0 || cols <= 0) return NULL;
-    if (rows > AB_MAX_DIMENSION || cols > AB_MAX_DIMENSION) return NULL;
-    
     ABContextImpl* ctx = [ABContextImpl shared];
-    if (!ctx) return NULL;
-    
+    if (matrix_size_status(ctx, rows, cols) != AB_OK) return NULL;
+
     // Use C++ new so ARC-managed id<MTLBuffer> field gets a proper
     // constructor (BUG-8: malloc+free leaked Metal objects under ARC).
     struct ABMatrix_s* m = new struct ABMatrix_s();
@@ -1029,13 +1041,7 @@ ABMatrix ab_matrix_create(int rows, int cols) {
     m->capacity = m->count;
     m->uploaded = false;
 
-    // Check for allocation size overflow
     size_t alloc_size = m->count * sizeof(DDFloat);
-    if (alloc_size / sizeof(DDFloat) != m->count) {
-        delete m;
-        return NULL;
-    }
-
     m->buffer = [ctx.device newBufferWithLength:alloc_size options:MTLResourceStorageModeShared];
     if (!m->buffer) { delete m; return NULL; }
     
@@ -2776,7 +2782,9 @@ void ab_session_destroy(ABSession s) {
 
 ABStatus ab_session_add(ABSession s, const char* name, int rows, int cols) {
     if (!s || !name || s->count >= MAX_SESSION_MATRICES) return AB_ERROR_INVALID_ARG;
-    
+    ABStatus st = ab_matrix_check_size(rows, cols);
+    if (st != AB_OK) return st;
+
     ABMatrix m = ab_matrix_create(rows, cols);
     if (!m) return AB_ERROR_ALLOC_FAILED;
     
@@ -2860,6 +2868,7 @@ const char* ab_status_string(ABStatus status) {
         case AB_ERROR_KERNEL_FAILED: return "GPU kernel execution failed";
         case AB_ERROR_INVALID_ARG: return "Invalid argument";
         case AB_ERROR_SHADER_COMPILE: return "Shader compilation failed";
+        case AB_ERROR_TOO_LARGE: return "Matrix exceeds GPU size limits";
         default: return "Unknown error";
     }
 }

@@ -52,7 +52,7 @@ Always validate matrix dimensions before calling apple-bottom:
 
 ```c
 // Good
-if (rows > 0 && cols > 0 && rows <= MAX_DIM && cols <= MAX_DIM) {
+if (ab_matrix_check_size(rows, cols) == AB_OK) {  // rows * cols within limits
     ABMatrix m = ab_matrix_create(rows, cols);
 }
 

@@ -133,7 +133,7 @@ static bool ab_use_gpu_complex(int m, int n, int k) {
 // =============================================================================
 // Inputs are column-major with leading dimension ld; ABMatrix is row-major.
 // All index arithmetic is size_t: ld*cols can exceed 2^31 even when every
-// dimension is within AB_MAX_DIMENSION.
+// operand is within the ABMatrix size limits.
 
 // Pack op(X), rows x cols, into row-major dst. op(X)[i][j] is X[j*ld+i] for
 // CblasNoTrans and X[i*ld+j] otherwise; each loop order walks X contiguously.
@@ -213,10 +213,23 @@ void ab_internal_zgemm_cpu(enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
 // A GPU-routed call that has to run on cblas instead. The path record says
 // "cpu" either way; under AB_PROFILE also say why, so a fallback is not
 // mistaken for a routing decision (H-P2-8).
-static void note_gpu_fallback(const char *routine, int M, int N, int K, ABStatus init) {
+static void note_gpu_fallback(const char *routine, int M, int N, int K, const char *why) {
     if (ab_profile_enabled())
         fprintf(stderr, "AB_PROFILE %s M=%d N=%d K=%d  GPU fallback to cblas: %s\n",
-                routine, M, N, K, init != AB_OK ? ab_status_string(init) : "GPU step failed");
+                routine, M, N, K, why);
+}
+
+// Hosts that reach us through dgemm_/zgemm_ (QE, Yambo) never call ab_init(),
+// so create the Metal context on first GPU use (H-P1-2); ab_init() is
+// idempotent and thread-safe. It fails for no device and in a fork() child.
+// Then op(A) (M x K), op(B) (K x N) and C (M x N) must each fit the ABMatrix
+// size limits.
+static ABStatus gpu_ready(int M, int N, int K) {
+    ABStatus st = ab_init();
+    if (st == AB_OK) st = ab_matrix_check_size(M, K);
+    if (st == AB_OK) st = ab_matrix_check_size(K, N);
+    if (st == AB_OK) st = ab_matrix_check_size(M, N);
+    return st;
 }
 
 // =============================================================================
@@ -243,11 +256,12 @@ void ab_zgemm_blas(
         return;
     }
 
-    // Hosts that reach us through zgemm_ (QE, Yambo) never call ab_init(), so
-    // create the Metal context on first GPU use (H-P1-2). ab_init() is
-    // idempotent and thread-safe; if it fails (no device, or a fork() child),
-    // the allocations below fail too.
-    ABStatus init = ab_init();
+    ABStatus ready = gpu_ready(M, N, K);
+    if (ready != AB_OK) {
+        note_gpu_fallback("zgemm", M, N, K, ab_status_string(ready));
+        ab_internal_zgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+        return;
+    }
 
     // GPU path: compute op(A)*op(B) on GPU, apply alpha/beta in epilogue
     int _prof = ab_profile_enabled();
@@ -351,7 +365,7 @@ cleanup:
 
     // Any failure happened before C was written: redo the whole call on CPU.
     if (!ok) {
-        note_gpu_fallback("zgemm", M, N, K, init);
+        note_gpu_fallback("zgemm", M, N, K, "GPU step failed");
         ab_internal_zgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }
@@ -399,8 +413,12 @@ void ab_dgemm_blas(
         return;
     }
 
-    // Lazy Metal context, as in ab_zgemm_blas (H-P1-2).
-    ABStatus init = ab_init();
+    ABStatus ready = gpu_ready(M, N, K);
+    if (ready != AB_OK) {
+        note_gpu_fallback("dgemm", M, N, K, ab_status_string(ready));
+        ab_internal_dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+        return;
+    }
 
     // GPU path: supports arbitrary alpha/beta and transpose via scaled kernel
     bool ok = false;
@@ -452,7 +470,7 @@ cleanup:
 
     // Any failure happened before C was written: redo the whole call on CPU.
     if (!ok) {
-        note_gpu_fallback("dgemm", M, N, K, init);
+        note_gpu_fallback("dgemm", M, N, K, "GPU step failed");
         ab_internal_dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }

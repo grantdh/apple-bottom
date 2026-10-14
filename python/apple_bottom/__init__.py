@@ -27,7 +27,8 @@ __version__ = "1.2.0"
 # =============================================================================
 # Constants
 # =============================================================================
-MAX_DIMENSION = 46340
+MAX_ELEMENTS = 2**31 - 1     # AB_MAX_MATRIX_ELEMENTS: rows * cols per matrix
+MAX_DIMENSION = 2**31 - 1    # rows or cols alone (a C int)
 POOL_CAPACITY = 128
 SESSION_CAPACITY = 64
 
@@ -84,6 +85,7 @@ _STATUS_TO_EXCEPTION = {
     -5: KernelExecutionError,
     -6: InvalidArgumentError,
     -7: ShaderCompileError,
+    -8: InvalidArgumentError,  # AB_ERROR_TOO_LARGE
 }
 
 
@@ -167,6 +169,7 @@ class ABStatus(ctypes.c_int):
     ERROR_KERNEL_FAILED = -5
     ERROR_INVALID_ARG = -6
     ERROR_SHADER_COMPILE = -7
+    ERROR_TOO_LARGE = -8
 
 
 class ABTranspose(ctypes.c_int):
@@ -508,13 +511,13 @@ class Matrix(_Handle):
             cols: Number of columns
 
         Raises:
-            InvalidArgumentError: If dimensions exceed MAX_DIMENSION
+            InvalidArgumentError: If rows * cols exceeds MAX_ELEMENTS
             DeviceNotFoundError: If GPU device is unavailable
             AllocationError: If GPU memory allocation fails
         """
-        if rows > MAX_DIMENSION or cols > MAX_DIMENSION:
+        if rows > MAX_DIMENSION or cols > MAX_DIMENSION or rows * cols > MAX_ELEMENTS:
             raise InvalidArgumentError(
-                f"Matrix dimensions ({rows}, {cols}) exceed maximum {MAX_DIMENSION}"
+                f"Matrix dimensions ({rows}, {cols}) exceed maximum {MAX_ELEMENTS} elements"
             )
 
         self._ptr = _libwrap.ab_matrix_create(rows, cols)
@@ -1005,6 +1008,7 @@ def status_string(status: int) -> str:
 __all__ = [
     # Constants
     'MAX_DIMENSION',
+    'MAX_ELEMENTS',
     'POOL_CAPACITY',
     'SESSION_CAPACITY',
     # Exceptions

@@ -5,7 +5,7 @@
 
 <p align="center">
   <a href="https://github.com/grantdh/apple-bottom/actions"><img src="https://github.com/grantdh/apple-bottom/actions/workflows/vv-regression.yml/badge.svg" alt="CI"></a>
-  <a href="tests/"><img src="https://img.shields.io/badge/tests-125%20passing-brightgreen" alt="Tests"></a>
+  <a href="tests/"><img src="https://img.shields.io/badge/tests-127%20passing-brightgreen" alt="Tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"></a>
   <a href="#requirements"><img src="https://img.shields.io/badge/platform-Apple%20Silicon-orange" alt="Platform"></a>
   <a href="#architecture"><img src="https://img.shields.io/badge/precision-~10⁻¹⁵-yellow" alt="Precision"></a>
@@ -18,7 +18,7 @@ Apple Silicon GPUs have no native FP64. `apple-bottom` fixes that — double-flo
 ```bash
 git clone https://github.com/grantdh/apple-bottom.git
 cd apple-bottom
-make && make test   # 125/125 tests pass
+make && make test   # 127/127 tests pass
 ```
 
 ## Performance
@@ -124,7 +124,7 @@ Production-validated following NASA-STD-7009A methodology:
 
 - **V-2 Convergence Study**: Frobenius error 6.5×10⁻¹⁵ to 5.1×10⁻¹⁴ for N ∈ {64, 128, ..., 4096}
 - **VAL-1 Production**: Quantum ESPRESSO Si64 DFT — 11 decimal place agreement (-2990.44276157 Ry)
-- **125/125 tests** in `make test`: 14 precision + 71 correctness + 16 device-API tests + 24 BLAS-ABI suites; `make ci-local` adds 18 adversarial tests (143). A test is one precision case, registry entry or BLAS-ABI suite; the 152 device-API `CHECK`s and 994 BLAS-ABI cases are reported separately (see [tests/README.md](tests/README.md#coverage-status))
+- **127/127 tests** in `make test`: 14 precision + 72 correctness + 16 device-API tests + 25 BLAS-ABI suites; `make ci-local` adds 18 adversarial tests (145). A test is one precision case, registry entry or BLAS-ABI suite; the 152 device-API `CHECK`s and 999 BLAS-ABI cases are reported separately (see [tests/README.md](tests/README.md#coverage-status))
 
 Documentation: [V&V Report](docs/vv/VV_REPORT.md) · [Precision Envelope](docs/vv/PRECISION_ENVELOPE.md) · [QE Validation](tests/validation/VAL001_QE_Si64.md)
 
@@ -155,7 +155,7 @@ Documentation: [V&V Report](docs/vv/VV_REPORT.md) · [Precision Envelope](docs/v
 - **Single GEMM calls**: ~100 μs GPU overhead dominates for one-shot operations
 - **ZHERK**: deprecated (20× slower than CPU AMX) — use `cblas_zherk` instead
 - **Thread safety**: Metal command queue serializes; use separate contexts for concurrency (planned)
-- **Max dimension**: 46,340 × 46,340 (overflow protection)
+- **Max matrix size**: rows × cols ≤ 2³¹ − 1 elements per matrix (`AB_MAX_MATRIX_ELEMENTS`), and the DD buffer within the GPU's `maxBufferLength`. Any shape fits, e.g. 143,666 × 171
 
 ## Project Structure
 
@@ -167,7 +167,7 @@ apple-bottom/
 ├── src/fortran_bridge.c        # Fortran ABI bridge for QE/VASP/CP2K
 ├── include/apple_bottom.h      # Public API header (v1.3.1-dev)
 ├── include/apple_bottom_device.h  # Device-buffer API header
-├── tests/                      # 125 tests (precision, correctness, device-API, BLAS-ABI)
+├── tests/                      # 127 tests (precision, correctness, device-API, BLAS-ABI)
 ├── benchmarks/                 # DGEMM, ZGEMM, DSYRK, pool, async benchmarks
 ├── examples/01_basic_dgemm/    # Runnable example
 └── docs/                       # Integration guide + V&V documentation

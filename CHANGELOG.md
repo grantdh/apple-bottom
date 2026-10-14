@@ -111,6 +111,29 @@ _TBD following Si64 benchmark campaign._
   overflow its buffer. numpy is optional, `AB_LIBRARY` selects the dylib,
   and `make test-python` runs the binding tests. The bindings remain
   experimental.
+- **Matrices with more than 46,340 rows or columns never reached the GPU.**
+  The limit was 46,340 per dimension, a square-matrix stand-in for 2³¹
+  elements. In Quantum ESPRESSO Si64 (PAW, 2 MPI ranks) it rejected only
+  the PAW DGEMMs in `newq` (called from `newd`) and `addusdens`,
+  171 × 64 × 2·ngm_l and 2·ngm_l × 171 × 64: 171 = nh(nh+1)/2 projector
+  pairs (nh = 18 per Si atom), 64 = the atoms of that species, and
+  2·ngm_l = 71,834 (gamma point) or 143,666 (k-points) = the rank's
+  dense-grid G-vectors, complex values passed as real pairs. Those
+  BLAS-ABI calls always ran on cblas; the Davidson GEMMs (`regterg`,
+  `cegterg`; long dimension ≈ 9,000 per rank) were never affected. This
+  is a robustness fix, not a speed-up: the PAW DGEMMs are memory-bound
+  and slower on the GPU, and calibrated `AB_MODE=auto` routing keeps them
+  on Accelerate. The limit is now what actually overflows, for any shape:
+  rows × cols ≤ `AB_MAX_MATRIX_ELEMENTS` (2³¹ − 1; the kernels index in
+  32-bit unsigned arithmetic) and the DD buffer within the device's
+  `maxBufferLength`. Every kernel was checked bit-exact on matrices past
+  2²⁹ elements (byte offsets above 4 GiB).
+  Beyond the limit, `ab_matrix_create` returns NULL; the new
+  `ab_matrix_check_size()`, `ab_session_add` and `ab_dev_*gemm` return
+  the new `AB_ERROR_TOO_LARGE` (`ab_dev_*gemm` returned
+  `AB_ERROR_ALLOC_FAILED`); BLAS-ABI calls run on cblas, and `AB_PROFILE=1`
+  prints why. In Python, `MAX_ELEMENTS` (2³¹ − 1) bounds rows × cols and
+  `MAX_DIMENSION` is now 2³¹ − 1.
 
 ### Changed
 - **`_dgemm$NEWLAPACK` / `_zgemm$NEWLAPACK` are no longer exported.** C code
@@ -129,7 +152,7 @@ _TBD following Si64 benchmark campaign._
   Frobenius error exceeds √N·u². A build without safe math now fails both.
 - **`make ci-local` runs `test_device_api` and counts tests one way**
   (RH-P1-1). `TEST_TOTAL` counts tests (precision cases, `TESTS[]` entries
-  and BLAS-ABI suites: 143), with device-API `CHECK`s and BLAS-ABI cases on
+  and BLAS-ABI suites: 145), with device-API `CHECK`s and BLAS-ABI cases on
   their own lines. `test_convergence` takes its CSV path as `argv[1]`, so
   `make ci-local BUILD=...` reports the convergence data instead of
   `missing`.

@@ -125,8 +125,9 @@ ABStatus ab_dev_stream_sync(ab_dev_stream_t stream);
 // plain transpose for ab_dev_dgemm). Leading dimensions count the stored
 // rows (lda >= rows of A as stored, i.e. m or k). An invalid flag, a short
 // leading dimension, m, n or k <= 0, or a matrix extending past its buffer
-// returns AB_ERROR_INVALID_ARG. m, n or k above 46340 (the AB_MAX_DIMENSION
-// limit in apple_bottom.h) returns AB_ERROR_ALLOC_FAILED.
+// returns AB_ERROR_INVALID_ARG. An operand beyond the matrix size limits
+// (AB_MAX_MATRIX_ELEMENTS or the device's maxBufferLength, see apple_bottom.h)
+// returns AB_ERROR_TOO_LARGE.
 //
 // The _offset variants exist so Fortran callers can express `A(1,j)` etc.
 // without having to reinterpret the opaque handle as a pointer.

@@ -258,6 +258,15 @@ static bool dev_submatrix_fits(ab_dev_buffer_t buf, size_t offset, int ld,
     return ld >= rows && range_in_bounds(offset, span, buf->nbytes / elem_size);
 }
 
+// Helper: AB_OK if the m×k, k×n and m×n operands (or their transposes, the
+// same sizes) fit the ABMatrix size limits, else the failing check's status.
+static ABStatus dev_operands_fit(int m, int n, int k) {
+    ABStatus s = ab_matrix_check_size(m, k);
+    if (s == AB_OK) s = ab_matrix_check_size(k, n);
+    if (s == AB_OK) s = ab_matrix_check_size(m, n);
+    return s;
+}
+
 // Helper: extract a column-major submatrix from a raw FP64 device buffer
 // into an ABMatrix. The source is at byte (offset * sizeof(double)) in the
 // device buffer, column-major with leading dimension `ld`, and we extract
@@ -395,6 +404,8 @@ ABStatus ab_dev_dgemm_offset(ABTranspose transA, ABTranspose transB,
         !dev_submatrix_fits(B, b_offset, ldb, B_rows, B_cols, sizeof(double)) ||
         !dev_submatrix_fits(C, c_offset, ldc, m, n, sizeof(double)))
         return AB_ERROR_INVALID_ARG;
+    ABStatus fit = dev_operands_fit(m, n, k);
+    if (fit != AB_OK) return fit;
 
     // Create temporary ABMatrix handles (heap-allocated, FP64→DD conversion)
     // for op(A)^T (k×m), op(B)^T (n×k) and C^T (n×m).
@@ -467,6 +478,8 @@ ABStatus ab_dev_zgemm_offset(ABTranspose transA, ABTranspose transB,
         !dev_submatrix_fits(C, c_offset, ldc, m, n, 2 * sizeof(double)))
         return AB_ERROR_INVALID_ARG;
     bool need_beta = (beta[0] != 0.0 || beta[1] != 0.0);
+    ABStatus fit = dev_operands_fit(m, n, k);
+    if (fit != AB_OK) return fit;
 
     // Create 6 ABMatrix handles: separate real + imaginary for A^T, B^T, C^T
     ABMatrix mAr = ab_matrix_create(A_cols, A_rows);

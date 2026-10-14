@@ -190,9 +190,9 @@ This `~N²·⁵` scaling means max element error grows **faster than the Frobeni
 | Type | Validated Range | Notes |
 |------|----------------|-------|
 | Square matrices | `64 ≤ N ≤ 4096` | Optimal for N ≥ 2048 |
-| Rectangular matrices | Any aspect ratio, `M,N ≤ 46340` | Error scales with K dimension |
+| Rectangular matrices | Any aspect ratio; tested to 143666 × 171 and K = 143666 | Error scales with K dimension |
 | Small matrices | `N ≥ 64` | N < 64: CPU overhead dominates |
-| Large matrices | `N ≤ 4096` (validated), `≤ 46340` (max) | Theoretical limit 46340 |
+| Large matrices | `N ≤ 4096` (validated); `rows·cols ≤ 2³¹ − 1` per matrix (max) | Square limit N = 46340 |
 
 **K-dimension error scaling**: For DGEMM with dimensions M×K × K×N, max element error scales as `O(K)×2⁻⁴⁸`. With K=10000, expect ~1.5×10⁻¹³ max error (still within DD precision class). Rectangular matrices work correctly at all aspect ratios.
 
