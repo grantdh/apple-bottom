@@ -31,17 +31,21 @@ runs error-free transformations on the GPU's FP32 units, compiled without
 fast math. That gives about 10⁻¹⁵ relative error per element instead of
 FP64's 10⁻¹⁶, and FP32's exponent range. Where it helps:
 
-- Large GEMMs on matrices kept on the GPU between calls (the native and
-  device-buffer APIs), where it overtakes Accelerate on an M2 Max.
-- Workloads where the CPU is busy with other work and the GPU is idle.
+- Large GEMMs on matrices kept on the GPU between calls (the native
+  `ABMatrix` API), where it overtakes Accelerate on an M2 Max from about
+  N = 1,500 (DGEMM) and N = 1,000 (ZGEMM).
 - Codes that want measured routing between GPU and CPU behind the standard
   `dgemm_`/`zgemm_` interface, with `AB_REPORT` accounting.
 
 Where it does not:
 
 - Bit-for-bit IEEE FP64 results, or values outside FP32's exponent range.
-- Small or medium GEMMs, one call at a time from host memory: conversion
-  and transfer cost more than the GPU saves.
+- GEMMs issued one call at a time from host memory through the BLAS ABI:
+  on an M2 Max every measured shape is slower than on Accelerate except
+  ZGEMM with both operands transposed at N ≥ 4096. For Quantum ESPRESSO's
+  long-K shapes even the GPU kernel alone is no faster; conversion and
+  transfers add to that. The device-buffer API converts on every call in
+  the same way (it has not been benchmarked separately).
 - Anything beyond the GEMM family: the rest of BLAS and LAPACK comes from
   your BLAS library.
 
@@ -66,6 +70,6 @@ codes.
 | You need | Use |
 |---|---|
 | Exact IEEE FP64, all of BLAS/LAPACK | Accelerate (or another CPU BLAS) |
-| FP64-class GEMMs on the GPU, matrices kept resident | apple-bottom, native or device API |
+| FP64-class GEMMs on the GPU, matrices kept resident | apple-bottom, native `ABMatrix` API |
 | An unchanged Fortran code calling `DGEMM`/`ZGEMM` | Accelerate today on an M2 Max; apple-bottom routes there by default and reports what it did |
 | Machine learning | MLX |

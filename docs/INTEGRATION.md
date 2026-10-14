@@ -19,16 +19,18 @@ Complete guide for integrating apple-bottom into scientific computing codes.
 
 **Yes**, if:
 - You multiply large matrices that can stay on the GPU between calls (the
-  native `ABMatrix` API or the device-buffer API). On an M2 Max the GPU
-  overtakes Accelerate from about N ≈ 1,500 (DGEMM) and N ≈ 1,000 (ZGEMM) with matrices
-  resident ([README](../README.md#performance)).
-- You want FP64-class (~10⁻¹⁵) GEMM results from the GPU, for example to
-  leave the CPU free for other work.
+  native `ABMatrix` API). On an M2 Max the GPU overtakes Accelerate from
+  about N = 1,500 (DGEMM) and N = 1,000 (ZGEMM) with the matrices resident
+  ([README](../README.md#performance)).
+- Results with about 48 significant bits are enough: each value carries
+  ~10⁻¹⁵ relative error, and a GEMM's normwise error grows like √N·10⁻¹⁵
+  (about 5 × 10⁻¹⁴ at N = 4,096).
 
 **Not yet**, if:
-- Your code calls `dgemm_`/`zgemm_` on matrices in host memory, one call at
-  a time. Each call then converts FP64 to DD and back, and on an M2 Max
-  Accelerate is faster for nearly every shape measured. `AB_MODE=auto` keeps
+- Your code calls `dgemm_`/`zgemm_` (or the device-buffer API, which also
+  converts on every call) on matrices in host memory, one call at a time.
+  Each call then converts FP64 to DD and back, and on an M2 Max Accelerate
+  is faster for nearly every shape measured. `AB_MODE=auto` keeps
   such calls on Accelerate, so linking apple-bottom costs little but gains
   nothing there yet.
 - You need IEEE FP64 results bit for bit, or code that runs off Apple
@@ -38,207 +40,104 @@ Complete guide for integrating apple-bottom into scientific computing codes.
 
 ## C Integration
 
-### The Key Insight
+### Building your program
 
-apple-bottom wins by **amortizing conversion overhead**:
+With the library built in place (`make`), the shared library carries its
+Metal, Foundation and C++ dependencies:
 
-```
-Traditional BLAS (per-call):
-  [FP64→DD] → [GPU GEMM] → [DD→FP64]   ← conversion every call = slow
-
-apple-bottom (persistent):
-  [FP64→DD] → [GPU GEMM] → [GPU GEMM] → ... → [DD→FP64]
-       ↑         many iterations              ↑
-    once                                    once
+```bash
+clang -I/path/to/apple-bottom/include my_prog.c -o my_prog \
+      -L/path/to/apple-bottom/build -Wl,-rpath,/path/to/apple-bottom/build -lapplebottom
 ```
 
-### Pattern 1: Iterative Solver
+Linking the static archive instead needs those dependencies spelled out:
 
-If you have a loop that calls DGEMM repeatedly:
+```bash
+clang -I/path/to/apple-bottom/include my_prog.c -o my_prog \
+      /path/to/apple-bottom/build/libapplebottom.a \
+      -lc++ -framework Metal -framework Foundation -framework Accelerate
+```
+
+After `make install PREFIX=$HOME/.local` (default `/usr/local`), pkg-config
+knows the flags:
+`clang my_prog.c $(pkg-config --cflags --libs applebottom)`, with
+`PKG_CONFIG_PATH=$HOME/.local/lib/pkgconfig` for a non-default prefix.
+
+### Storage order
+
+`ab_matrix_upload` / `ab_matrix_download` take **row-major** (C order) data:
+element (i, j) of an M × N matrix is `data[i * N + j]`. The BLAS ABI
+(`ab_dgemm_blas`, `dgemm_`, …) and the device-buffer API are column-major,
+as in BLAS. Column-major arrays uploaded into `ABMatrix` handles are read
+transposed, and `ab_dgemm` then returns B·A instead of A·B, with no error;
+use the BLAS ABI for column-major data.
+
+### Where the GPU pays off
+
+```
+BLAS ABI, one call at a time (dgemm_, ab_dgemm_blas):
+  [pack + FP64→DD] → [upload] → [GPU GEMM] → [download + DD→FP64]   every call
+
+Native API, matrices resident (ABMatrix):
+  [FP64→DD, upload] → [GPU GEMM] → [GPU GEMM] → … → [download, DD→FP64]
+        once                many products                   once
+```
+
+Only the second pattern beats Accelerate, and only for large products: on
+an M2 Max from about N = 1,500 for DGEMM and N = 1,000 for ZGEMM
+([README](../README.md#performance)). Uploading an N × N operand costs
+O(N²) against the product's O(N³), so uploading one new operand per
+product is fine at those sizes; converting and transferring everything for
+every call, as the BLAS ABI must, is not.
+
+### Pattern 1: a chain of large products
 
 ```c
-// BEFORE (using Accelerate)
-void solve_iterative(double* A, double* x, double* b, int N, int max_iter) {
-    double* temp = malloc(N * sizeof(double));
-
-    for (int iter = 0; iter < max_iter; iter++) {
-        cblas_dgemv(CblasRowMajor, CblasNoTrans, N, N,
-                    1.0, A, N, x, 1, 0.0, temp, 1);
-        // ... update x based on temp and b ...
-    }
-    free(temp);
+// P = M[0] · M[1] · … · M[k-1], all N × N, row-major; P stays on the GPU.
+ab_init();                                   // once, at program start
+ABMatrix P = ab_matrix_create(N, N);
+ABMatrix M = ab_matrix_create(N, N);
+ABMatrix T = ab_matrix_create(N, N);
+ab_matrix_upload(P, mats[0], true);
+for (int i = 1; i < k; i++) {
+    ab_matrix_upload(M, mats[i], true);      // O(N^2) upload ...
+    ab_dgemm(P, M, T);                       // ... for an O(N^3) product
+    ABMatrix t = P; P = T; T = t;            // swap handles, no copy
 }
-
-// AFTER (using apple-bottom)
-void solve_iterative(double* A, double* x, double* b, int N, int max_iter) {
-    ab_init();
-
-    // Create GPU matrices ONCE
-    ABMatrix mA = ab_matrix_create(N, N);
-    ABMatrix mX = ab_matrix_create(N, 1);
-    ABMatrix mTemp = ab_matrix_create(N, 1);
-
-    // Upload ONCE
-    ab_matrix_upload(mA, A, true);
-    ab_matrix_upload(mX, x, true);
-
-    for (int iter = 0; iter < max_iter; iter++) {
-        ab_dgemm(mA, mX, mTemp);  // No conversion overhead!
-
-        // Download for CPU scalar operations
-        double* temp_cpu = malloc(N * sizeof(double));
-        ab_matrix_download(mTemp, temp_cpu, false);
-
-        // ... update x ...
-
-        ab_matrix_upload(mX, x, false);
-        free(temp_cpu);
-    }
-
-    // Download final result ONCE
-    ab_matrix_download(mX, x, true);
-
-    ab_matrix_destroy(mA);
-    ab_matrix_destroy(mX);
-    ab_matrix_destroy(mTemp);
-    ab_shutdown();
-}
+ab_matrix_download(P, result, true);
+ab_matrix_destroy(P); ab_matrix_destroy(M); ab_matrix_destroy(T);
+ab_shutdown();                               // once, at program end
 ```
 
-### Pattern 2: SCF Loop (Quantum Chemistry)
+### Pattern 2: iterative codes with named matrices
+
+Sessions keep named matrices for the life of a computation, and pools hand
+out matrices of a given shape without a new allocation each iteration:
 
 ```c
-// DFT Self-Consistent Field loop
-void scf_loop(int nbasis, double* H, double* S, double* P,
-              double tol, int max_iter) {
-    ab_init();
-    ABSession s = ab_session_create();
-
-    // Allocate GPU matrices
-    ab_session_add(s, "H", nbasis, nbasis);       // Hamiltonian
-    ab_session_add(s, "S", nbasis, nbasis);       // Overlap
-    ab_session_add(s, "P", nbasis, nbasis);       // Density
-    ab_session_add(s, "F", nbasis, nbasis);       // Fock matrix
-    ab_session_add(s, "C", nbasis, nbasis);       // Coefficients
-    ab_session_add(s, "Sinvhalf", nbasis, nbasis); // S^(-1/2) for orthogonalization
-    ab_session_add(s, "Fprime", nbasis, nbasis);  // Transformed Fock matrix
-    ab_session_add(s, "Cocc", nbasis, nbasis);    // Occupation matrix
-    ab_session_add(s, "Ctrans", nbasis, nbasis);  // C transpose for density build
-    ab_session_add(s, "T1", nbasis, nbasis);      // Temp
-    ab_session_add(s, "T2", nbasis, nbasis);      // Temp
-
-    // Compute S^(-1/2) (Löwdin orthogonalization)
-    // (In real code: diagonalize S, compute S^(-1/2) = U * s^(-1/2) * U^T)
-    double* Sinvhalf = compute_sinvhalf(S, nbasis);
-
-    // Upload constant matrices ONCE
-    ab_session_upload(s, "H", H);
-    ab_session_upload(s, "S", S);
-    ab_session_upload(s, "P", P);
-    ab_session_upload(s, "Sinvhalf", Sinvhalf);
-
-    // Initialize occupation matrix (1.0 for occupied, 0.0 for virtual)
-    double* Cocc = calloc(nbasis * nbasis, sizeof(double));
-    int nocc = get_num_occupied_orbitals(nbasis);
-    for (int i = 0; i < nocc; i++) Cocc[i * nbasis + i] = 1.0;
-    ab_session_upload(s, "Cocc", Cocc);
-
-    double energy_old = 0;
-
-    for (int iter = 0; iter < max_iter; iter++) {
-        // Build Fock matrix: F = H + G(P)
-        // (G is two-electron integrals - may need custom kernel)
-        build_fock_matrix(s);
-
-        // Transform to orthogonal basis: F' = S^(-1/2) * F * S^(-1/2)
-        ab_session_dgemm(s, "Sinvhalf", "F", "T1");
-        ab_session_dgemm(s, "T1", "Sinvhalf", "Fprime");
-
-        // Diagonalize (download for LAPACK, or use GPU eigensolver)
-        double* F_cpu = malloc(nbasis * nbasis * sizeof(double));
-        ab_session_download(s, "Fprime", F_cpu);
-
-        double* eigenvalues = malloc(nbasis * sizeof(double));
-        double* C_cpu = malloc(nbasis * nbasis * sizeof(double));
-        diagonalize(F_cpu, eigenvalues, C_cpu, nbasis);  // LAPACK
-
-        // Upload new coefficients
-        ab_session_upload(s, "C", C_cpu);
-
-        // Transpose C for density build
-        double* Ctrans_cpu = malloc(nbasis * nbasis * sizeof(double));
-        for (int i = 0; i < nbasis; i++) {
-            for (int j = 0; j < nbasis; j++) {
-                Ctrans_cpu[j * nbasis + i] = C_cpu[i * nbasis + j];
-            }
-        }
-        ab_session_upload(s, "Ctrans", Ctrans_cpu);
-
-        // Build new density: P = C * Cocc * C^T
-        ab_session_dgemm(s, "C", "Cocc", "T1");
-        ab_session_dgemm(s, "T1", "Ctrans", "P");
-
-        // Check convergence
-        double energy = compute_energy(s);
-        if (fabs(energy - energy_old) < tol) {
-            printf("Converged at iteration %d\n", iter);
-            break;
-        }
-        energy_old = energy;
-
-        free(F_cpu);
-        free(eigenvalues);
-        free(C_cpu);
-        free(Ctrans_cpu);
-    }
-
-    // Download final density
-    ab_session_download(s, "P", P);
-
-    free(Sinvhalf);
-    free(Cocc);
-
-    ab_session_destroy(s);
-    ab_shutdown();
+ABSession s = ab_session_create();
+ab_session_add(s, "A", N, N);
+ab_session_add(s, "B", N, N);
+ab_session_add(s, "C", N, N);
+ab_session_upload(s, "A", A_host);            // constant across iterations
+for (int it = 0; it < n_iter; it++) {
+    ab_session_upload(s, "B", B_host[it]);
+    ab_session_dgemm(s, "A", "B", "C");       // C = A · B
+    ab_session_download(s, "C", C_host[it]);
 }
+ab_session_destroy(s);
 ```
 
-### Pattern 3: Batched Operations
+`ab_pool_create` / `ab_pool_get_matrix` / `ab_pool_reset` do the same for
+anonymous temporaries.
 
-If you have many small matrices:
+### Pattern 3: several products in one submission
 
-```c
-// Process a batch of matrices
-void process_batch(double** matrices, int count, int N) {
-    ab_init();
-
-    // Allocate all GPU matrices upfront
-    ABMatrix* gpu_mats = malloc(count * sizeof(ABMatrix));
-    ABMatrix* gpu_results = malloc(count * sizeof(ABMatrix));
-
-    for (int i = 0; i < count; i++) {
-        gpu_mats[i] = ab_matrix_create(N, N);
-        gpu_results[i] = ab_matrix_create(N, N);
-        ab_matrix_upload(gpu_mats[i], matrices[i], true);
-    }
-
-    // Process all
-    for (int i = 0; i < count; i++) {
-        ab_dgemm(gpu_mats[i], gpu_mats[i], gpu_results[i]);  // Square each
-    }
-
-    // Download all
-    for (int i = 0; i < count; i++) {
-        ab_matrix_download(gpu_results[i], matrices[i], true);
-        ab_matrix_destroy(gpu_mats[i]);
-        ab_matrix_destroy(gpu_results[i]);
-    }
-
-    free(gpu_mats);
-    free(gpu_results);
-    ab_shutdown();
-}
-```
+`ab_batch_create`, `ab_batch_dgemm` (or `ab_batch_zgemm`),
+`ab_batch_barrier` between dependent products, `ab_batch_commit` and
+`ab_batch_wait` encode many products into one command buffer, which saves
+the per-submission latency. Each product still has to be large enough to
+beat Accelerate on its own.
 
 ### Performance Tips
 
@@ -278,14 +177,13 @@ for (int i = 0; i < 100; i++) {
 ab_matrix_destroy(m);                      // 1 free
 ```
 
-#### 3. Use Parallel Conversion for Large Matrices
+#### 3. Pass `parallel = true` to uploads and downloads
+
+The library converts serially below about 10⁶ elements and in eight
+parallel chunks above, so `true` is never slower:
 
 ```c
-// For N > 512, use parallel conversion
-ab_matrix_upload(m, data, true);   // true = parallel
-
-// For small matrices, serial is faster
-ab_matrix_upload(m, data, false);  // false = serial
+ab_matrix_upload(m, data, true);
 ```
 
 #### 4. Let measurement decide the route
@@ -295,73 +193,6 @@ call from the calibrated table (`AB_MODE=auto`), so a fixed size cut-off in
 your code is not needed. `make calibrate` measures the table on your own
 machine, and `AB_DISPATCH_TABLE=<file>` uses it without a rebuild
 ([Routing](#routing-ab_modeauto)).
-
-### Python Integration
-
-```python
-import ctypes
-import numpy as np
-
-# Load library
-_lib = ctypes.CDLL("libapplebottom.dylib")
-
-# Define types
-ABMatrix = ctypes.c_void_p
-ABStatus = ctypes.c_int
-
-# Bind functions
-_lib.ab_init.restype = ABStatus
-_lib.ab_matrix_create.argtypes = [ctypes.c_int, ctypes.c_int]
-_lib.ab_matrix_create.restype = ABMatrix
-_lib.ab_matrix_upload.argtypes = [ABMatrix, ctypes.POINTER(ctypes.c_double), ctypes.c_bool]
-_lib.ab_matrix_download.argtypes = [ABMatrix, ctypes.POINTER(ctypes.c_double), ctypes.c_bool]
-_lib.ab_dgemm.argtypes = [ABMatrix, ABMatrix, ABMatrix]
-_lib.ab_dgemm.restype = ABStatus
-
-class GPUMatrix:
-    def __init__(self, rows, cols):
-        self.rows = rows
-        self.cols = cols
-        self._ptr = _lib.ab_matrix_create(rows, cols)
-
-    def upload(self, data):
-        data = np.ascontiguousarray(data, dtype=np.float64)
-        ptr = data.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
-        status = _lib.ab_matrix_upload(self._ptr, ptr, True)
-        if status != 0:
-            raise RuntimeError(f"ab_matrix_upload failed with status {status}")
-
-    def download(self):
-        data = np.zeros((self.rows, self.cols), dtype=np.float64)
-        ptr = data.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
-        status = _lib.ab_matrix_download(self._ptr, ptr, True)
-        if status != 0:
-            raise RuntimeError(f"ab_matrix_download failed with status {status}")
-        return data
-
-def gpu_matmul(A, B):
-    """Matrix multiply using apple-bottom GPU"""
-    status = _lib.ab_init()
-    if status != 0:
-        raise RuntimeError(f"ab_init failed with status {status}")
-
-    M, K = A.shape
-    K2, N = B.shape
-    assert K == K2
-
-    mA = GPUMatrix(M, K)
-    mB = GPUMatrix(K, N)
-    mC = GPUMatrix(M, N)
-
-    mA.upload(A)
-    mB.upload(B)
-
-    status = _lib.ab_dgemm(mA._ptr, mB._ptr, mC._ptr)
-    if status != 0:
-        raise RuntimeError(f"ab_dgemm failed with status {status}")
-
-    return mC.download()
-```
 
 ### Troubleshooting
 
@@ -380,6 +211,37 @@ def gpu_matmul(A, B):
 **Precision issues**
 - Double-float gives ~10⁻¹⁵ precision, not 10⁻¹⁶
 - For ~10⁻¹⁶, use IEEE FP64 on the CPU (Accelerate)
+
+---
+
+## Python Integration
+
+The experimental bindings in [`python/`](../python/) wrap the C API for
+numpy:
+
+```bash
+make                        # builds build/libapplebottom.dylib
+pip install -e python/      # finds ../build/libapplebottom.dylib; or set AB_LIBRARY
+```
+
+```python
+import numpy as np
+import apple_bottom as ab
+
+ab.init()
+C = ab.dgemm(A, B)          # one call: allocate, upload, multiply, download
+
+s = ab.Session()            # resident matrices for repeated products
+s.add("A", n, n); s.add("B", n, n); s.add("C", n, n)
+s.upload("A", A); s.upload("B", B)
+s.dgemm("A", "B", "C")
+C = s.download("C")
+```
+
+`ab.dgemm` converts and transfers every operand on every call, the regime
+in which Accelerate is faster; use a `Session` (or `Matrix` handles) when
+the same matrices take part in several large products. Details:
+[`python/README.md`](../python/README.md).
 
 ---
 
@@ -478,10 +340,10 @@ needed.
 QE develop (7.5), 64-atom Si, PAW): the total energy and every printed band energy
 are the same in all three modes. `AB_MODE=auto` keeps every GEMM of these
 runs on Accelerate, because the calibrated table has no GPU row for QE's
-shapes, so its run time is that of `AB_MODE=cpu` (within 0.1%).
+shapes, so its run time is that of `AB_MODE=cpu` (within 0.2%).
 `AB_MODE=gpu` forces the GEMMs onto the GPU and is slower:
 1.3–17.3% more wall time on the three inputs, because its GEMMs take
-2.5–4.8× as long. On this hardware, linking apple-bottom into QE gives you
+2.5–4.9× as long. On this hardware, linking apple-bottom into QE gives you
 the `AB_REPORT` accounting and a routing that follows measurement, not a
 speed-up.
 
