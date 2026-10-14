@@ -7,7 +7,8 @@ All notable changes to this project will be documented in this file.
 ### Added
 - **`ab_build_info()`** returns the library version and the git commit it
   was built from, with `-dirty` if tracked files differed from it (the
-  Makefile passes `AB_BUILD_SHA`; `unknown` outside a git checkout). Every
+  Makefile passes `AB_BUILD_SHA`; `unknown` outside a git checkout and in a
+  copy vendored inside another repository). Every
   `AB_PROFILE` and `AB_REPORT` report starts with it.
 - **`AB_REPORT=1`**: a short summary on stderr at exit, once per process
   and tagged with the pid. Per routine: calls and wall time by where C was
@@ -30,6 +31,24 @@ All notable changes to this project will be documented in this file.
 - **`AB_DISPATCH_TABLE=<path>`** makes `AB_MODE=auto` use a table file, such
   as the `dispatch_table.txt` of a calibration on another machine, instead
   of the built-in table.
+- **Quantum ESPRESSO validation kit** (`benchmarks/qe/`): the si64 inputs,
+  `run_campaign.sh` (inputs × `AB_MODE`s × repetitions, fresh directories,
+  rotated mode order) and `analyze.py` / `compare.py`, which summarize the
+  BLAS time by route and the GPU stage costs and compare every energy and
+  band energy with the `cpu` run. VAL-1 was repeated with it; results in
+  `benchmarks/results/2026-10-14-1dbdb52-qe-si64/`.
+- **`make version-check`** (`scripts/check_version.sh`, first step of
+  `make ci-local` and of CI) checks that the Python package, CITATION.cff,
+  the README citation and the top CHANGELOG entry state the version in
+  `include/apple_bottom.h`, which the Makefile now reads for the dylib and
+  pkg-config versions.
+- **`make test-rectangular`** builds and runs `tests/test_rectangular.c`
+  (shapes up to 18277 × 150 × 18277), which no target built before.
+- **CI** builds both libraries and runs `make version-check`,
+  `make build-check`, `make test-symbols` and the routing unit tests on
+  macos-14 and macos-15 (it only compiled the sources before). GitHub's
+  runners have no usable Metal GPU, so the GPU suites stay in
+  `make ci-local`.
 
 ### Fixed
 - **Morton remap dropped output tiles on non-square power-of-two grids**
@@ -159,6 +178,24 @@ All notable changes to this project will be documented in this file.
   `AB_ERROR_ALLOC_FAILED`); BLAS-ABI calls run on cblas, and `AB_PROFILE=1`
   prints why. In Python, `MAX_ELEMENTS` (2³¹ − 1) bounds rows × cols and
   `MAX_DIMENSION` is now 2³¹ − 1.
+- **The first GPU call left `FE_OVERFLOW` raised in the caller.**
+  `MTLCreateSystemDefaultDevice()` raises it on its first call in a
+  process (macOS 27), so every Quantum ESPRESSO run that reached the GPU
+  ended with gfortran's `IEEE_OVERFLOW_FLAG is signalling` note.
+  `ab_init()` and the device API now restore the caller's floating-point
+  environment around device creation (`test_init_keeps_host_fp_flags`).
+- **`AB_PROFILE` stage lines could interleave** when threads called BLAS
+  concurrently; each line is now written with one call.
+- **Build tooling.** `make build-check` wrote its objects over the
+  library's (a later `make lib` then reported the build as `unknown`) and
+  skipped `src/device_api.m`; `make test-asan`/`test-ubsan` could not
+  build; a copy vendored inside another git repository stamped that
+  repository's commit as its build SHA; `make calibrate` with `--only`
+  replaced the built-in table with one derived from part of the grid.
+- **`tests/test_rectangular.c` failed correct results.** It compared
+  elementwise relative errors with 1e-14, which cancellation defeats; it now
+  measures componentwise error against |op(A)| |B| and runs the
+  conjugate-transpose case it used to skip.
 
 ### Changed
 - **`AB_MODE=auto`, the default, is calibrated from measured end-to-end
@@ -212,10 +249,43 @@ All notable changes to this project will be documented in this file.
   Frobenius error exceeds √N·u². A build without safe math now fails both.
 - **`make ci-local` runs `test_device_api` and counts tests one way**
   (RH-P1-1). `TEST_TOTAL` counts tests (precision cases, `TESTS[]` entries
-  and BLAS-ABI suites: 155), with device-API `CHECK`s and BLAS-ABI cases on
+  and BLAS-ABI suites: 156), with device-API `CHECK`s and BLAS-ABI cases on
   their own lines. `test_convergence` takes its CSV path as `argv[1]`, so
   `make ci-local BUILD=...` reports the convergence data instead of
   `missing`.
+
+### Removed
+- `CMakeLists.txt`. It built only `src/apple_bottom.m`, a library without
+  the BLAS ABI, routing, device API or profiler; the Makefile is the
+  supported build.
+- Internal review notes (`docs/review/`), `python/INDEX.md` (a copy of the
+  Python README), two committed test binaries and two scratch test sources
+  that no target built.
+
+### Corrected claims
+Earlier releases and documents made claims that measurement does not
+support. They are withdrawn, and the documents now say what was measured:
+- **"22% faster" / "1.22× vs 6-thread OpenBLAS" / "+12% (Si128)" on Quantum
+  ESPRESSO** (README, INTEGRATION, VV_REPORT, VAL-1, blog). Versions
+  1.0–1.3 needed an explicit `ab_init()`, which no QE build called, so those
+  runs never used the GPU, and the 22% compared a serial QE build with an
+  MPI build. Repeated with the GPU path working (VAL-1, revision 2), forcing
+  the GPU makes Si64 runs 1–17% slower on an M2 Max, and `AB_MODE=auto`
+  keeps QE's GEMMs on Accelerate at no cost.
+- **"11 decimal places of agreement"** with QE. The March runs compared CPU
+  with CPU. With the large GEMMs on the GPU (97–100% of GEMM time), the
+  energies and band energies of VAL-1 revision 2 agree with the CPU run in
+  every printed digit (10⁻⁸ Ry, 10⁻⁴ eV).
+- **"2.7× speedup"** (CITATION.cff, rectangular-tiling note). No measurement
+  supports it.
+- **"618 GFLOP/s" / "643 GFLOP/s"** headline DGEMM figures. They were
+  steady-state figures with matrices resident on the GPU, not BLAS-call
+  throughput, and are replaced by dated measurements of both regimes in the
+  README.
+- **DSYRK through the Fortran ABI**, **SGEMM/TGEMM coverage** and
+  **multi-GPU** claims (INTEGRATION, COMPARISON): the library exports only
+  `dgemm_`/`zgemm_` (and `ab_dgemm_`/`ab_zgemm_`) to Fortran, and has no
+  SGEMM, TGEMM or multi-GPU support.
 
 ## [1.3.0] - 2026-04-18
 
