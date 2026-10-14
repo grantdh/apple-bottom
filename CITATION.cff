@@ -2,10 +2,9 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 authors:
   - family-names: "Heileman"
-    given-names: "Grant"
+    given-names: "Grant David"
 title: "apple-bottom: FP64-class BLAS for Apple Silicon GPU"
-version: 1.2.0
-date-released: 2026-03-27
+version: 1.4.0
 url: "https://github.com/grantdh/apple-bottom"
 repository-code: "https://github.com/grantdh/apple-bottom"
 keywords:
@@ -19,7 +18,10 @@ keywords:
   - Quantum ESPRESSO
 license: MIT
 abstract: >
-  High-performance BLAS library for Apple Silicon GPU using Metal compute shaders.
-  Implements FP64-class operations through double-float emulation with ~10⁻¹⁵ precision.
-  Validated in production with Quantum ESPRESSO, achieving 2.7× speedup over single-threaded
-  OpenBLAS on density functional theory workloads.
+  BLAS for Apple Silicon GPUs, which have no FP64 units. Each FP64 value is
+  carried as an unevaluated sum of two FP32 values (double-float, about 48
+  significant bits, ~1e-15 relative error per element) and the arithmetic runs
+  in Metal compute shaders. DGEMM, ZGEMM and DSYRK are available through a C API
+  with GPU-resident matrices, a device-buffer API and a drop-in BLAS ABI
+  (dgemm_/zgemm_) for Fortran codes such as Quantum ESPRESSO, where each call is
+  routed to the GPU or to Accelerate from measured end-to-end timings.

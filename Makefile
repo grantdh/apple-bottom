@@ -42,6 +42,11 @@ SRC = src
 INCLUDE = include
 EXAMPLES = examples
 
+# Library version, from include/apple_bottom.h (scripts/check_version.sh checks
+# that every other place stating it agrees: make version-check).
+VERSION := $(shell sed -nE 's/^.define APPLE_BOTTOM_VERSION_STRING "([^"]+)"/\1/p' $(INCLUDE)/apple_bottom.h)
+VERSION_NUM := $(firstword $(subst -, ,$(VERSION)))
+
 # Build identity reported by ab_build_info() and at the top of every
 # AB_PROFILE / AB_REPORT report: the git commit, with -dirty if tracked files
 # differ from it, or "unknown" outside a git checkout (override with
@@ -113,7 +118,7 @@ $(BUILD)/libapplebottom.a: $(LIB_OBJS)
 # Accelerate is re-exported so -lapplebottom alone provides full BLAS/LAPACK.
 $(BUILD)/libapplebottom.dylib: $(LIB_OBJS)
 	$(CC) -dynamiclib -install_name @rpath/libapplebottom.dylib \
-	    -current_version 1.3.1 -compatibility_version 1.0.0 \
+	    -current_version $(VERSION_NUM) -compatibility_version 1.0.0 \
 	    $^ -o $@ $(DYLIB_LDFLAGS)
 	@echo "Built: $@"
 
@@ -358,7 +363,7 @@ install: lib
 	install -m 644 $(INCLUDE)/apple_bottom.h $(PREFIX)/include/
 	install -m 644 $(INCLUDE)/apple_bottom_device.h $(PREFIX)/include/
 	@sed -e 's|@PREFIX@|$(PREFIX)|g' \
-	     -e 's|@VERSION@|1.3.1|g' \
+	     -e 's|@VERSION@|$(VERSION)|g' \
 	     applebottom.pc.in > $(PREFIX)/lib/pkgconfig/applebottom.pc
 	@echo "Installed to $(PREFIX)"
 
@@ -475,6 +480,10 @@ calibrate: $(BUILD)/calibrate
 # CI Targets
 # =============================================================================
 
+.PHONY: version-check
+version-check:
+	@./scripts/check_version.sh
+
 .PHONY: build-check ci-local verify-symbols test-symbols
 
 # Verify the dylib is a drop-in BLAS for Fortran host codes (QE, Yambo, …):
@@ -562,7 +571,7 @@ build-check: | $(BUILD)
 # test_blas_abi suite. Device-API CHECKs and BLAS-ABI cases are reported on
 # their own lines and are not part of TEST_TOTAL. The report is written only
 # after every binary passed, so TEST_PASSED = TEST_TOTAL and TEST_FAILED = 0.
-ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
+ci-local: version-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "CI Local Validation"

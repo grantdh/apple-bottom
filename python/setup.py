@@ -13,13 +13,12 @@ if readme_file.exists():
 
 setup(
     name="apple-bottom",
-    version="1.2.0",
+    version="1.4.0",
     description="FP64-class BLAS library for Apple Silicon GPUs — Python wrapper",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/example/apple-bottom",
-    author="Grant Heileman",
-    author_email="example@example.com",
+    url="https://github.com/grantdh/apple-bottom",
+    author="Grant David Heileman",
     license="MIT",
     classifiers=[
         "Development Status :: 4 - Beta",

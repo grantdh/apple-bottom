@@ -57,9 +57,9 @@ extern "C" {
 #endif
 
 #define APPLE_BOTTOM_VERSION_MAJOR 1
-#define APPLE_BOTTOM_VERSION_MINOR 3
-#define APPLE_BOTTOM_VERSION_PATCH 1
-#define APPLE_BOTTOM_VERSION_STRING "1.3.1-dev"
+#define APPLE_BOTTOM_VERSION_MINOR 4
+#define APPLE_BOTTOM_VERSION_PATCH 0
+#define APPLE_BOTTOM_VERSION_STRING "1.4.0"
 
 typedef struct ABMatrix_s* ABMatrix;
 typedef struct ABSession_s* ABSession;
@@ -281,7 +281,7 @@ void ab_zgemm_blas(char transA, char transB, int M, int N, int K,
 const char* ab_get_last_dispatch_path(void);
 
 // Library version and the git commit it was built from, "-dirty" if tracked
-// files differed from that commit, e.g. "apple-bottom 1.3.1-dev (428f1cc1a1d3)";
+// files differed from that commit, e.g. "apple-bottom 1.4.0 (428f1cc1a1d3)";
 // "unknown" in place of the commit when built outside a git checkout. Static string.
 const char* ab_build_info(void);
 

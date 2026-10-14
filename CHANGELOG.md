@@ -2,9 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.3.1-dev] - Unreleased
-
-_TBD following Si64 benchmark campaign._
+## [1.4.0] - Unreleased
 
 ### Added
 - **`ab_build_info()`** returns the library version and the git commit it

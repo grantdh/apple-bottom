@@ -165,7 +165,7 @@ apple-bottom/
 ├── src/device_api.m            # Device-buffer API for DevXlib backends
 ├── src/blas_wrapper.c          # BLAS-compatible C API
 ├── src/fortran_bridge.c        # Fortran ABI bridge for QE/VASP/CP2K
-├── include/apple_bottom.h      # Public API header (v1.3.1-dev)
+├── include/apple_bottom.h      # Public API header (v1.4.0)
 ├── include/apple_bottom_device.h  # Device-buffer API header
 ├── tests/                      # 137 tests (precision, correctness, device-API, routing, BLAS-ABI)
 ├── benchmarks/                 # DGEMM, ZGEMM, DSYRK, pool, async benchmarks
@@ -196,7 +196,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md). Bug reports and feature requests welco
   title     = {apple-bottom: FP64-class BLAS for Apple Silicon GPU},
   year      = {2026},
   url       = {https://github.com/grantdh/apple-bottom},
-  version   = {1.3.1-dev}
+  version   = {1.4.0}
 }
 ```
 
