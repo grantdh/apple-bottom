@@ -23,7 +23,7 @@ make ci-local
 ```
 
 This will:
-- Run all 155 tests (precision, correctness, chaos, device-API, routing, BLAS-ABI; see the counting rule in `tests/README.md`) plus the ghost-detection, symbol and Fortran checks
+- Run all 156 tests (precision, correctness, chaos, device-API, routing, BLAS-ABI; see the counting rule in `tests/README.md`) plus the ghost-detection, symbol and Fortran checks
 - Run convergence study (V-2)
 - Generate `build/CI_REPORT.txt` with test results and convergence data hash
 
@@ -39,8 +39,8 @@ This will:
 
 GIT_SHA: <current-commit-sha>
 AB_BUILD_SHA: <12-digit commit; a release build must not end in -dirty>
-TEST_TOTAL: 155
-TEST_PASSED: 155
+TEST_TOTAL: 156
+TEST_PASSED: 156
 TEST_FAILED: 0
 DEVICE_API_CHECKS: 152
 BLAS_ABI_CASES: 1007 passed, 0 xfailed, 0 failed, 0 xpassed, 0 stale XFAIL entries
@@ -49,7 +49,7 @@ STATUS: PASS
 ```
 
 - [ ] `make ci-local` completed successfully
-- [ ] All 155 tests passed
+- [ ] All 156 tests passed
 - [ ] Convergence study generated 7 data points (N ∈ {64, 128, 256, 512, 1024, 2048, 4096})
 - [ ] Review `build/convergence_data.csv` for expected error ranges (Frobenius ~10⁻¹⁴ to 5×10⁻¹⁴)
 

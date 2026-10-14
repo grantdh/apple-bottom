@@ -383,25 +383,25 @@ uninstall:
 # Sanitizer builds (for local debugging)
 .PHONY: test-asan test-ubsan
 
-test-asan: clean
-	@echo "Building with AddressSanitizer..."
-	$(OBJC) $(OBJCFLAGS) -fsanitize=address -g -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $(BUILD)/apple_bottom.o
-	$(CC) $(CFLAGS) -fsanitize=address -g -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $(BUILD)/blas_wrapper.o
-	$(CC) $(CFLAGS) -fsanitize=address -g -I$(INCLUDE) -c $(SRC)/fortran_bridge.c -o $(BUILD)/fortran_bridge.o
-	ar rcs $(BUILD)/libapplebottom.a $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o $(BUILD)/fortran_bridge.o
-	$(CC) $(CFLAGS) -fsanitize=address -g -I$(INCLUDE) tests/test_correctness.c -o $(BUILD)/test_correctness -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
-	@echo "Running tests with ASan..."
-	ASAN_OPTIONS=detect_leaks=1 ./$(BUILD)/test_correctness
+# Sanitizer builds: the whole library and test_correctness, built by the
+# normal rules with the sanitizer's flags into their own directory (so they
+# never mix with the normal objects).
+SAN_TARGET = $(MAKE) --no-print-directory BUILD=$(BUILD)/$(1) \
+	CFLAGS="$(CFLAGS) -fsanitize=$(2) -g" OBJCFLAGS="$(OBJCFLAGS) -fsanitize=$(2) -g" \
+	LDFLAGS="$(LDFLAGS) -fsanitize=$(2)" DYLIB_LDFLAGS="$(DYLIB_LDFLAGS) -fsanitize=$(2)" \
+	$(BUILD)/$(1)/test_correctness
 
-test-ubsan: clean
+test-asan:
+	@echo "Building with AddressSanitizer..."
+	$(call SAN_TARGET,asan,address)
+	@echo "Running tests with ASan..."
+	ASAN_OPTIONS=halt_on_error=1 ./$(BUILD)/asan/test_correctness
+
+test-ubsan:
 	@echo "Building with UndefinedBehaviorSanitizer..."
-	$(OBJC) $(OBJCFLAGS) -fsanitize=undefined -g -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $(BUILD)/apple_bottom.o
-	$(CC) $(CFLAGS) -fsanitize=undefined -g -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $(BUILD)/blas_wrapper.o
-	$(CC) $(CFLAGS) -fsanitize=undefined -g -I$(INCLUDE) -c $(SRC)/fortran_bridge.c -o $(BUILD)/fortran_bridge.o
-	ar rcs $(BUILD)/libapplebottom.a $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o $(BUILD)/fortran_bridge.o
-	$(CC) $(CFLAGS) -fsanitize=undefined -g -I$(INCLUDE) tests/test_correctness.c -o $(BUILD)/test_correctness -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	$(call SAN_TARGET,ubsan,undefined)
 	@echo "Running tests with UBSan..."
-	./$(BUILD)/test_correctness
+	UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./$(BUILD)/ubsan/test_correctness
 
 $(BUILD)/bench_dsyrk: benchmarks/bench_dsyrk.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)

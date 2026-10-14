@@ -33,21 +33,21 @@ It does **not** catch:
 - A test that segfaults — those are caught at OS level via the
   binary's non-zero exit code (CI flags via the same path).
 - A test that calls `exit()` mid-run — bypasses the dispatcher
-  entirely. PR-1 acceptance criterion #7 explicitly forbids `exit()`
-  in test bodies; `grep -n 'exit\s*(' tests/test_correctness.c
-  tests/test_chaos.c tests/test_device_api.c` must be empty.
+  entirely. Test bodies must not call `exit()`; `grep -n 'exit\s*('
+  tests/test_correctness.c tests/test_chaos.c tests/test_device_api.c`
+  must be empty.
 
 ## Coverage status
 
 Counting rule (README, `make ci-local`): a *test* is one `test_precision`
-case, one `TESTS[]` entry, or one BLAS-ABI suite. `make test` runs 128
-(14 precision + 72 correctness + 16 device-API + 9 routing + 26 BLAS-ABI)
-and `make ci-local` adds the 18 chaos tests, for a `TEST_TOTAL` of 155.
+case, one `TESTS[]` entry, or one BLAS-ABI suite. `make test` runs 138
+(14 precision + 73 correctness + 16 device-API + 9 routing + 26 BLAS-ABI)
+and `make ci-local` adds the 18 chaos tests, for a `TEST_TOTAL` of 156.
 Device-API `CHECK`s and BLAS-ABI cases are reported on their own
 `CI_REPORT.txt` lines and are not part of the total.
 
-- **Registry-migrated (PR-1, ghost-guarded):**
-  - `tests/test_correctness.c` — 72 tests
+- **Registry-based (ghost-guarded):**
+  - `tests/test_correctness.c` — 73 tests
   - `tests/test_chaos.c` — 18 tests
   - `tests/test_device_api.c` — 16 tests (152 `CHECK`s); the GEMM
     tests compare `ab_dev_dgemm` / `ab_dev_zgemm` with column-major
@@ -58,11 +58,23 @@ Device-API `CHECK`s and BLAS-ABI cases are reported on their own
     see below
   - `tests/test_blas_abi.c` — 26 suites (1007 cases), see below
 
-- **Pending PR-1.5 (still single-main, no ghost-guard):**
+- **Not yet registry-based (one `main`, no ghost guard):**
   - `tests/test_precision.c` — needs decomposition strategy
   - `tests/verification/test_convergence.c` — monolithic numerical
     V&V file; decomposition needs care because behavior changes are
     load-bearing
+
+## Targets outside `make test`
+
+| Target | What it runs |
+|---|---|
+| `make ci-local` | `make version-check`, every suite of `make test`, the 18 chaos tests and the V-2 convergence study; writes `build/CI_REPORT.txt` |
+| `make test-chaos` | pathological inputs, IEEE edge cases, concurrent threads |
+| `make test-verification` | the V-2 convergence study alone |
+| `make test-rectangular` | `test_rectangular.c`: tall, wide, thin-K and conjugate-transposed shapes up to 18277 × 150 × 18277, componentwise against cblas, then timings (peaks at ~21 GB) |
+| `make test-rectangular-diag` | eight rectangular patterns against cblas |
+| `make test-python` | the Python bindings (`tests/python/`) |
+| `make test-asan`, `make test-ubsan` | the library and `test_correctness` under AddressSanitizer / UndefinedBehaviorSanitizer, in `build/asan`, `build/ubsan`. On macOS 27.0.1 with Apple clang 17.0.0 the AddressSanitizer runtime hangs in its own initialization, before `main()`, even for an empty program; `test-ubsan` runs |
 
 ## BLAS-ABI conformance harness
 
