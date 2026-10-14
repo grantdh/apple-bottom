@@ -2,7 +2,7 @@
 
 This note documents the rationale for apple-bottom's default tile configuration (BM=BN=64, TM=TN=4, TK=16) and the tall-skinny variant (BM=128, BN=16) used for QE's Davidson eigensolver shapes. It is intended as a reference for future tile-size tuning on new Apple Silicon generations or workloads with different aspect ratios.
 
-DD precision bounds scale as O(√K)·2⁻⁴⁸ (Wilkinson) for all tested aspect ratios from 121:1 (tall-skinny) to 1:121 (short-wide). Verified in `test_rectangular.c` against QE Davidson shapes.
+DD error stays within its O(K)·2⁻⁴⁸ componentwise bound for all tested aspect ratios from 121:1 (tall-skinny) to 1:100 (short-wide); `test_rectangular.c` checks this on tall, wide and thin-K shapes up to 18277 × 150 × 18277.
 
 ---
 
@@ -20,15 +20,16 @@ Each threadgroup computes a BM×BN tile of C by iterating TK-wide slabs across t
 - BM = 128, BN = 16
 - TM = 4, TN = 2
 - Threadgroup layout 8×32 = 256 threads
-- Selected on `M >= 4 * N` (`use_ts` in `src/apple_bottom.m`)
+- Selected on `M >= 4 * N` (`use_ts` in `src/apple_bottom.m`) by `ab_dgemm_scaled` (and so the DGEMM BLAS ABI) and by ZGEMM's three real products; `ab_dgemm` always uses the 64 × 64 kernel
 
-The tall-skinny kernel reduces boundary waste on QE-shape workloads (M≈18K, N=150) from ~34% under BN=64 to ~4% under BN=16.
+The tall-skinny kernel reduces boundary waste for N = 150 from ~22% under BN=64 (3 tiles, 192 columns computed) to ~6% under BN=16 (10 tiles, 160 columns).
 
-**QE Davidson eigensolver shape:**
-- M = 18,277 (kdim — basis size)
-- N = 150 (nvec — number of eigenvectors)
-- K = 18,277 (kdim)
-- Aspect ratio: 121:1 (M:N) → routes to the tall-skinny kernel
+**Tall-skinny stress shape used by the tests:**
+- M = 18,277, N = 150, K = 18,277: synthetic. Quantum ESPRESSO's Davidson
+  GEMMs share the long M (plane waves) and short N (bands), but their K is a
+  few hundred, e.g. 17,846 × 160 × 320 in [VAL-1](../../tests/validation/VAL001_QE_Si64.md)'s
+  input C
+- Aspect ratio 121:1 (M:N), which selects the tall-skinny kernel where it applies
 
 **Dispatch utilization under the default 64×64 tile (pre-variant, illustrative):**
 ```
@@ -63,7 +64,7 @@ These are the conditions that motivated the tall-skinny variant above.
 **Validation:**
 - All tests validate against reference BLAS (cblas_dgemm, cblas_zgemm)
 - Error measure: componentwise, |C − C_ref| / (|op(A)| |B|), against 10·K·u² (u² = 2⁻⁴⁸); measured errors are about 1e-14
-- Tests exercise the tall-skinny dispatch path at QE Davidson dimensions
+- The DGEMM cases call `ab_dgemm`, so they run the 64 × 64 kernel; the ZGEMM cases run the tall-skinny kernel
 
 ### Performance Benchmarks
 
@@ -72,7 +73,7 @@ These are the conditions that motivated the tall-skinny variant above.
 2. Tall 4:1: 4096 × 1024 × 2048
 3. Tall 16:1: 8192 × 512 × 2048
 4. Tall 64:1: 16384 × 256 × 2048
-5. QE-like: 18277 × 150 × 18277
+5. QE-like (synthetic stress shape): 18277 × 150 × 18277
 6. Wide 1:4: 1024 × 4096 × 2048
 7. Wide 1:16: 512 × 8192 × 2048
 
@@ -90,13 +91,14 @@ Rectangular matrices meet DD precision bounds across the full aspect-ratio sweep
 
 - Gauss 3-multiply is dimension-agnostic.
 - Double-float arithmetic is dimension-agnostic.
-- For large K (>2000), max error approaches ~1e-13 consistent with O(√K)·2⁻⁴⁸ accumulation.
+- Componentwise error (relative to |A||B|) stays about 1e-14 up to K = 18277 in `test_rectangular`; normwise error grows like √K (5e-14 at K = 4096 in the V-2 study).
 
 ### Performance by Aspect Ratio
 
-`make test-rectangular` on an M2 Max, 2026-10-14 (native API, matrices
-uploaded once and the multiply timed; Accelerate `cblas_dgemm` on the same
-data; one run each, so treat differences under ~10% as noise):
+`make test-rectangular` on an M2 Max, 2026-10-14 (`ab_dgemm`, so the 64 × 64
+kernel for every shape; matrices uploaded once and the multiply timed;
+Accelerate `cblas_dgemm` on the same data; one run each, so treat
+differences under ~10% as noise):
 
 | Shape (M × N × K) | GPU (ms) | Accelerate (ms) | GPU speed vs Accelerate |
 |---|---:|---:|---:|
@@ -104,7 +106,7 @@ data; one run each, so treat differences under ~10% as noise):
 | Tall 4:1, 4096 × 1024 × 2048 | 35.9 | 26.8 | 0.75× |
 | Tall 16:1, 8192 × 512 × 2048 | 36.7 | 27.1 | 0.74× |
 | Tall 64:1, 16384 × 256 × 2048 | 36.7 | 33.0 | 0.90× |
-| QE-like, 18277 × 150 × 18277 | 233.8 | 189.1 | 0.81× |
+| Stress shape, 18277 × 150 × 18277 | 233.8 | 189.1 | 0.81× |
 | Wide 1:4, 1024 × 4096 × 2048 | 43.0 | 35.2 | 0.82× |
 | Wide 1:16, 512 × 8192 × 2048 | 32.0 | 32.0 | 1.00× |
 
@@ -112,7 +114,7 @@ data; one run each, so treat differences under ~10% as noise):
 
 1. **Threadgroup underutilization.** Under BN=64, N=150 creates only 3 threadgroups in N; many threads idle in partial blocks.
 
-2. **Transfers, when matrices are uploaded per call** (not in the resident timings above).
+2. **Transfers, when matrices are uploaded per call** (not in the resident timings above; stress shape).
    - A upload: 18277 × 18277 × 8 bytes = 2.5 GB
    - B upload: 18277 × 150 × 8 bytes = 21 MB
    - C download: 18277 × 150 × 8 bytes = 21 MB
@@ -120,7 +122,7 @@ data; one run each, so treat differences under ~10% as noise):
 
 3. **Cache locality (hypothesis).** B (150 columns) fits in cache; A (18277 rows) does not, so tall shapes walk long strides.
 
-The tall-skinny kernel addresses (1) directly: at BN=16, N=150 yields ceil(150/16) = 10 threadgroups in N rather than 3, and boundary waste drops from ~34% to ~4%. (2) and (3) are upload/download and stride concerns inherent to the per-call API and are the motivation for a future device-resident path.
+The tall-skinny kernel addresses (1) directly: at BN=16, N=150 yields ceil(150/16) = 10 threadgroups in N rather than 3, and boundary waste drops from ~22% to ~6%. (2) and (3) are upload/download and stride concerns inherent to the per-call API and are the motivation for a future device-resident path.
 
 **What this means for Quantum ESPRESSO.**
 

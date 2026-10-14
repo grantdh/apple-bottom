@@ -4,6 +4,14 @@
 **Validation Baseline**: Git tag `v1.0.2-bugfix` (SHA: f3e2fc1)
 **Test System**: Apple M2 Max, macOS 14.7, Metal 3
 
+> **Correction (2026-10-14).** The Quantum ESPRESSO result of §2.4 came from
+> runs that did not use the GPU (versions before 1.4.0 needed an `ab_init()`
+> that QE never called), and its timing compared a serial with an MPI QE
+> build; it is withdrawn and replaced by VAL-1 revision 2. The performance
+> thresholds of §5.1 are replaced by the 1.4.0 measurements. The precision
+> analysis and the V-2 convergence data are unaffected. Test counts are
+> those of v1.0.2; see `tests/README.md` for the current suite.
+
 ---
 
 ## Executive Summary
@@ -169,17 +177,17 @@ This `~N²·⁵` scaling means max element error grows **faster than the Frobeni
 
 ### 2.4 Production Validation (Quantum ESPRESSO)
 
-**Test Case**: Si64 SCF convergence (64-atom silicon crystal)
+*Revised 2026-10-14.* VAL-1 revision 2 (`tests/validation/VAL001_QE_Si64.md`)
+ran Quantum ESPRESSO (develop, 7.5) on 64-atom Si with PAW, with the GEMMs
+on Accelerate (`AB_MODE=cpu`) and on the GPU in DD (`AB_MODE=gpu`, the calls
+that make up 89–99% of the GEMM work). The total energy at every SCF
+iteration and every printed band energy agree in every printed digit
+(10⁻⁸ Ry, 10⁻⁴ eV), on the k-point (ZGEMM) and Γ-point (DGEMM) paths, with
+the same number of iterations.
 
-| Metric | OpenBLAS (FP64 Reference) | apple-bottom (DD) | Agreement |
-|--------|---------------------------|-------------------|-----------|
-| Total Energy | -2990.44276157 Ry | -2990.44276157 Ry | **11 decimal places** |
-| Wall Time | 2m28s (6 threads) | 2m01s (1 thread + GPU) | 1.22× speedup |
-| Final Convergence | `|ΔE| < 10⁻¹⁰ Ry` | `|ΔE| < 10⁻¹⁰ Ry` | Identical |
-
-**Implication**: DD precision is sufficient for production DFT calculations requiring `~10⁻¹⁰` energy convergence. DFT energy is a norm-averaged quantity (sum over occupied states), so Frobenius-class error is appropriate.
-
-**Data source**: `tests/validation/VAL001_QE_Si64.md`, QE v7.2 validation
+**Implication**: DD precision is sufficient for these SCF calculations. DFT
+energy is a norm-averaged quantity (sum over occupied states), so
+Frobenius-class error is appropriate.
 
 ---
 
@@ -258,26 +266,24 @@ The following conditions are **outside the validated envelope**. Results are und
 
 ### 5.1 GPU Crossover Point
 
-apple-bottom is **faster than CPU** when:
+*Revised 2026-10-14* (M2 Max, against Accelerate; data in
+`benchmarks/results/2026-10-14-3253a22-bench-paper/` and
+`benchmarks/results/2026-10-14-52f1880-calibrate/`):
 
-```
-FLOP_count ≥ 100M  (approximately N³ ≥ 100M for DGEMM)
-```
-
-**Practical thresholds**:
-- Square DGEMM: `N ≥ 2048` (1.10-1.29× speedup vs 6-thread OpenBLAS)
-- Complex ZGEMM: `N ≥ 1024` (1.18-1.29× speedup)
-- Iterative algorithms: **Always faster** (memory pool amortizes overhead)
-
-**For `N < 2048`**: GPU overhead (upload/download/dispatch) exceeds compute savings. Use CPU BLAS.
+- **Matrices resident on the GPU** (native API): DGEMM is faster from about
+  N = 1,500 (1.10–1.16× from N = 2,048); ZGEMM from about N = 1,000
+  (1.30–1.39× from N = 1,536).
+- **One call at a time from host memory** (BLAS ABI): slower for every
+  measured shape except ZGEMM with both operands transposed at N ≥ 4096
+  (1.11–1.20×). `AB_MODE=auto` routes by this measurement.
 
 ### 5.2 Precision vs. Performance
 
 | Approach | Frobenius Precision | Max Element (N=4096) | Performance (N=2048) | Use Case |
 |----------|---------------------|----------------------|----------------------|----------|
 | CPU FP64 (`cblas_dgemm`) | `~10⁻¹⁶` | `~10⁻¹⁶` | 1.0× (baseline) | Reference, κ > 10¹², pivoting |
-| apple-bottom DD | `~10⁻¹⁵` | `~10⁻⁶` | 1.10× | Iterative solvers, DFT, MD |
-| GPU FP32 (cuBLAS) | `~10⁻⁸` | `~10⁻⁸` | ~5× | Deep learning only |
+| apple-bottom DD | `~10⁻¹⁵` | `~10⁻⁶` | 1.15× (resident, 2026-10-14) | Iterative solvers, DFT, MD |
+| GPU FP32 (for comparison) | `~10⁻⁸` | `~10⁻⁸` | not measured here | Deep learning only |
 
 **Recommendation**: Use apple-bottom when:
 1. Problem requires Frobenius error `< 10⁻¹⁴` (rules out FP32)
@@ -294,7 +300,7 @@ FLOP_count ≥ 100M  (approximately N³ ≥ 100M for DGEMM)
 | Test ID | Description | Status | Source |
 |---------|-------------|--------|--------|
 | **V-2** | DGEMM convergence study (N ≤ 4096) | ✓ PASS | `tests/verification/test_convergence.c` |
-| **VAL-1** | QE Si64 production validation | ✓ PASS | `tests/validation/VAL001_QE_Si64.md` |
+| **VAL-1** | QE Si64 production validation | revision 1 withdrawn; revision 2 ✓ PASS (accuracy) | `tests/validation/VAL001_QE_Si64.md` |
 | **BUG-3** | Scaled DGEMM precision (α,β in DD) | ✓ PASS | `test_bug3_dgemm_scaled_precision` in `tests/test_correctness.c` |
 | **BUG-4** | Matrix scaling precision (α in DD) | ✓ PASS | `test_bug4_matrix_scale_precision` in `tests/test_correctness.c` |
 

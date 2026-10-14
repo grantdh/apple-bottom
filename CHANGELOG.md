@@ -205,8 +205,9 @@ All notable changes to this project will be documented in this file.
   slower shape of the same routine and TRANS class at least as large in M,
   N and K. Before, fixed FLOP thresholds (10⁸ complex, 5·10⁷ real, applied
   differently by the Fortran bridge and `ab_*gemm_blas`) sent most large
-  calls to the GPU, including Quantum ESPRESSO's Davidson ZGEMMs (si64 with
-  the GPU forced: ZGEMM time 28.2 → 69.3 s per rank). On the M2 Max calibration
+  calls to the GPU, including Quantum ESPRESSO's Davidson ZGEMMs (VAL-1
+  input A: ZGEMM time 57.9 s on Accelerate, 144.6 s with the old thresholds,
+  which sent the same 951 large ZGEMMs to the GPU). On the M2 Max calibration
   (`benchmarks/results/2026-10-14-52f1880-calibrate/`) the GPU was at least
   1.10× faster only for ZGEMM with both operands transposed or conjugated
   and M, N, K ≥ 4096 (1.11× at 4096, 1.20× at 6144), the table's one row.
@@ -273,15 +274,18 @@ support. They are withdrawn, and the documents now say what was measured:
   the GPU makes Si64 runs 1–17% slower on an M2 Max, and `AB_MODE=auto`
   keeps QE's GEMMs on Accelerate at no cost.
 - **"11 decimal places of agreement"** with QE. The March runs compared CPU
-  with CPU. With the large GEMMs on the GPU (97–100% of GEMM time), the
-  energies and band energies of VAL-1 revision 2 agree with the CPU run in
-  every printed digit (10⁻⁸ Ry, 10⁻⁴ eV).
+  with CPU. With the calls that make up 89–99% of the GEMM work on the GPU,
+  the energies and band energies of VAL-1 revision 2 agree with the CPU run
+  in every printed digit (10⁻⁸ Ry, 10⁻⁴ eV).
 - **"2.7× speedup"** (CITATION.cff, rectangular-tiling note). No measurement
   supports it.
 - **"618 GFLOP/s" / "643 GFLOP/s"** headline DGEMM figures. They were
   steady-state figures with matrices resident on the GPU, not BLAS-call
   throughput, and are replaced by dated measurements of both regimes in the
   README.
+- **"~24 GFLOP/s" for metal-float64 and "26× faster" than it** (README,
+  COMPARISON, blog). metal-float64 is an unfinished scalar library with no
+  GEMM; there is nothing to benchmark against.
 - **DSYRK through the Fortran ABI**, **SGEMM/TGEMM coverage** and
   **multi-GPU** claims (INTEGRATION, COMPARISON): the library exports only
   `dgemm_`/`zgemm_` (and `ab_dgemm_`/`ab_zgemm_`) to Fortran, and has no

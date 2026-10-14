@@ -37,7 +37,7 @@ and this revision checks that the calls did run where the mode says.
 |---|---|
 | Machine | MacBook Pro (Mac14,6), Apple M2 Max: 8 performance + 4 efficiency cores, 38-core GPU, 64 GB; on AC power, `caffeinate -is`, no other GPU work |
 | OS, toolchain | macOS 27.0.1 (26A434); Apple clang 17; GNU Fortran 15.2.0; Open MPI 5.0.9 |
-| Quantum ESPRESSO | develop at 5b7f8e1bc (2026-04-03, `qe-7.5CN-26`; reports 7.5), built with gfortran and Open MPI (`-O3 -fopenmp`), FFTW 3, ScaLAPACK, OpenBLAS 0.3.31; `cegterg`/`regterg` call `ab_zgemm`/`ab_dgemm`, all other code calls `ZGEMM`/`DGEMM` |
+| Quantum ESPRESSO | develop at 5b7f8e1bc (2026-04-03, `qe-7.5CN-26`; reports 7.5), built with gfortran and Open MPI (`-O3 -fopenmp`), FFTW 3, ScaLAPACK, OpenBLAS 0.3.31. In this build `cegterg`/`regterg` call `ab_zgemm`/`ab_dgemm` and all other code calls `ZGEMM`/`DGEMM`; both names forward to the same `ab_*gemm_blas`, so an unpatched QE linked as in the integration guide routes every GEMM the same way |
 | Linking | The link is flat-namespace (Open MPI's wrapper adds `-flat_namespace`). At run time `dgemm_`, `zgemm_`, `ab_dgemm_` and `ab_zgemm_` bind to libapplebottom and the other 66 BLAS/LAPACK symbols pw.x imports bind to OpenBLAS (checked with `DYLD_PRINT_BINDINGS`). apple-bottom's CPU route is Accelerate (`cblas_zgemm`/`cblas_dgemm`). |
 | Library under test | Each library was built once from a clean worktree of its commit and copied aside (libapplebottom.dylib SHA-256 `b8cd26bdaee1abb3…` for 1dbdb52, `7bbb86408ee571fb…` for eaad87e); pw.x loads it through its rpath, and every run's stderr records the dylib that was loaded |
 | Parallelism | `mpirun -np 1`, `OMP_NUM_THREADS=8` |
@@ -97,8 +97,8 @@ are below what the SCF output resolves. **PASS.**
 | C | `gpu` | DGEMM | 5624 | 263 | 98.8% | 0 |
 
 `auto` ran every GEMM of these inputs on Accelerate, as the calibrated
-table says it should; `gpu` sent the large calls (fewer than 5% of the
-calls, 97–100% of the GEMM time) to the GPU. No call fell back. **PASS.**
+table says it should; `gpu` sent the large calls to the GPU: fewer than 5%
+of the calls, but 89–99% of each routine's time on Accelerate (`cpu` mode). No call fell back. **PASS.**
 
 ### 5.3 Run time
 
@@ -108,53 +108,58 @@ calls, 97–100% of the GEMM time) to the GPU. No call fell back. **PASS.**
 | B | 1120.9 [1120.1–1121.7] | 1121.3 [1121.2–1121.3] | 1197.7 [1196.4–1199.1] | 1.069 | 30.5 | 107.0 | – |
 | C | 748.6 [748.6–748.6] | 748.6 [748.5–748.7] | 758.4 [758.4–758.5] | 1.013 | 2.5 | 12.1 | – |
 
-`auto` costs nothing: its median is within 0.1% of `cpu` for every input.
+`auto` costs nothing: its median is within 0.2% of `cpu` for every input.
 Forcing the GPU costs 17.3%, 6.9% and 1.3% of the run: the GEMMs take
-2.5×, 3.5× and 4.8× as long as on Accelerate, and they are 11%, 2.7% and
+2.5×, 3.5× and 4.9× as long as on Accelerate, and they are 11%, 2.7% and
 0.3% of the `cpu` run (input A is the BLAS-heavy one; in B and C the PAW
 routines dominate). The spread over repetitions is at most 0.7%. macOS
 background services (Spotlight, media analysis) were not stopped.
 
 ### 5.4 Where the GPU path spends its time
 
-| Input | Routine | GPU calls | init | alloc | pack | upload | kernel | download | epilogue | other | total | Accelerate, same routine (`cpu`) | kernel / Accelerate |
+| Input | Routine | GPU calls | init | alloc | pack | upload | kernel | download | epilogue | other | total | Accelerate, same calls (`cpu`) | kernel / Accelerate |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| A | ZGEMM | 951 | 0.00 | 0.17 | 48.12 | 13.80 | 55.01 | 1.77 | 10.62 | 11.62 | 141.16 | 57.92 | 0.95 |
-| A | DGEMM | 16 | 0.03 | 0.00 | 1.02 | 0.19 | 1.89 | 0.02 | 0.27 | 0.11 | 3.54 | 0.19 | 9.94 |
-| B | ZGEMM | 1090 | 0.00 | 0.18 | 38.08 | 12.69 | 32.13 | 0.83 | 4.65 | 9.01 | 97.58 | 29.63 | 1.08 |
-| B | DGEMM | 20 | 0.03 | 0.00 | 1.66 | 0.41 | 2.39 | 0.14 | 1.36 | 0.26 | 6.26 | 0.90 | 2.65 |
-| C | DGEMM | 263 | 0.03 | 0.03 | 4.67 | 1.76 | 3.84 | 0.13 | 0.73 | 0.77 | 11.95 | 2.45 | 1.57 |
+| A | ZGEMM | 951 | 0.00 | 0.17 | 48.12 | 13.80 | 55.01 | 1.77 | 10.62 | 11.62 | 141.16 | 54.80 | 1.00 |
+| A | DGEMM | 16 | 0.03 | 0.00 | 1.02 | 0.19 | 1.89 | 0.02 | 0.27 | 0.11 | 3.54 | 0.19 | 10.20 |
+| B | ZGEMM | 1090 | 0.00 | 0.18 | 38.08 | 12.69 | 32.13 | 0.83 | 4.65 | 9.01 | 97.58 | 26.44 | 1.22 |
+| B | DGEMM | 20 | 0.03 | 0.00 | 1.66 | 0.41 | 2.39 | 0.14 | 1.36 | 0.26 | 6.26 | 0.89 | 2.68 |
+| C | DGEMM | 263 | 0.03 | 0.03 | 4.67 | 1.76 | 3.84 | 0.13 | 0.73 | 0.77 | 11.95 | 2.30 | 1.67 |
 
 Stages, as `AB_REPORT` defines them: `pack` builds op(A) and op(B) in
 the layout the GPU expects and converts them to DD on the CPU, `upload`
 copies them, `kernel` is the command buffers' GPU execution time,
 `download` and `epilogue` bring C back and apply alpha and beta, and
 `other` is the rest of the kernel call (encoding, waiting, and for ZGEMM
-the per-call allocation of four temporary matrices). The last column
-divides the kernel time by Accelerate's time for all calls of the same
-routine in `cpu` mode, which includes the small calls that stay on the CPU
-in both modes, so it slightly favours the GPU.
+the per-call allocation of four temporary matrices). "Accelerate, same
+calls" is the routine's `cpu`-mode time minus the time of the calls that
+`gpu` mode also left on the CPU, i.e. what the GPU-routed calls cost on
+Accelerate. Input C's DGEMM row holds both its Davidson (`regterg`) calls
+and its PAW (`newq`, `addusdens`) calls; A's and B's DGEMM rows are PAW
+only.
 
-**For the Davidson GEMMs, which dominate, the GPU kernel alone takes
-0.95–1.57× as long as Accelerate needs for the whole routine** (ZGEMM in A
-and B, DGEMM in C); for the PAW DGEMMs of A and B, 2.7–9.9×. Removing every other stage would at best bring the
-GPU path level with Accelerate on these shapes, on this GPU. By the rule
+**The GPU kernels alone take as long as Accelerate needs for the same calls,
+or longer:** 1.00× and 1.22× for the ZGEMMs of A and B, 1.67× for C's
+DGEMMs, and 2.7–10× for the PAW DGEMMs of A and B. Removing every other
+stage would at best bring the GPU path level with Accelerate on these
+shapes, on this GPU. By the rule
 in the [roadmap](../../docs/ROADMAP.md), there is therefore no performance
 work on the BLAS-ABI path for M2-class GPUs.
 
 ### 5.5 What the calibrated routing changed
 
-With main before 1.4.0 (eaad87e), `AB_MODE=auto` used fixed FLOP
+With eaad87e (unreleased main after the correctness fixes that made the BLAS
+ABI initialize the GPU on first use, before calibrated routing), `AB_MODE=auto` used fixed FLOP
 thresholds and sent the same 951 large ZGEMMs of input A to the GPU as
 `gpu` mode does (its profile: 28,425 ZGEMM calls, 3.3% on the GPU, 144.6 s
 of ZGEMM time). Input A took 594.3 s [593.3–595.2] with it, against 509.3 s
 with the calibrated table: the default was 16.7% slower than it needed to
-be. eaad87e predates `AB_REPORT`; its reports are in the data directory.
+be. eaad87e predates `AB_REPORT`, so its figures come from its `AB_PROFILE`
+table, which has no time-by-route columns.
 
 ## 6. Conclusions
 
-1. **DD arithmetic is accurate enough for these SCF runs.** With 97–100% of
-   the GEMM time on the GPU, the energies and band energies agree with the
+1. **DD arithmetic is accurate enough for these SCF runs.** With the calls
+   that make up 89–99% of the GEMM work on the GPU, the energies and band energies agree with the
    FP64 CPU run in every printed digit, for the complex (k-point) and real
    (Γ-point) Davidson paths and the PAW DGEMMs.
 2. **The calibrated default is right for QE on an M2 Max.** It keeps every
@@ -189,7 +194,14 @@ EOF
 PW_X=/path/to/pw.x caffeinate -is benchmarks/qe/run_campaign.sh plan.txt out
 python3 benchmarks/qe/analyze.py out
 python3 benchmarks/qe/compare.py out
+python3 benchmarks/qe/tables.py out 1dbdb52 eaad87e
 ```
+
+The script sets `AB_REPORT=1` and `AB_PROFILE=1` and records the loaded
+library, as the 2026-10-14 runs did; those ran an earlier version of it
+with the same environment and output (later changes add CSV columns, make
+the time parser work with the Python 3.9 that ships with macOS, and fix the
+analysis scripts).
 
 ## 8. Limitations
 

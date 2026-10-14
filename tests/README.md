@@ -1,6 +1,6 @@
 # apple-bottom test suite
 
-## Adding a new test in a registry-migrated file
+## Adding a new test to a registry-based file
 
 The migrated test runners (`test_correctness.c`, `test_chaos.c`,
 `test_device_api.c`) dispatch via a `TESTS[]` registry array of
@@ -52,7 +52,7 @@ Device-API `CHECK`s and BLAS-ABI cases are reported on their own
   - `tests/test_device_api.c` — 16 tests (152 `CHECK`s); the GEMM
     tests compare `ab_dev_dgemm` / `ab_dev_zgemm` with column-major
     cblas over all trans pairs, non-square and tall-skinny shapes,
-    `ld > rows` and buffer offsets (K-P0-2 / H-P0-4), and check that
+    `ld > rows` and buffer offsets, and check that
     the device path is bitwise the host API on the transposed operands
   - `tests/test_dispatch.c` — 9 tests of the BLAS-ABI routing, no GPU,
     see below
@@ -68,7 +68,7 @@ Device-API `CHECK`s and BLAS-ABI cases are reported on their own
 
 | Target | What it runs |
 |---|---|
-| `make ci-local` | `make version-check`, every suite of `make test`, the 18 chaos tests and the V-2 convergence study; writes `build/CI_REPORT.txt` |
+| `make ci-local` | `make version-check`, every suite of `make test`, the 18 chaos tests and the V-2 convergence study (the DGEMM error-versus-N study of `docs/vv/VV_REPORT.md`, `tests/verification/test_convergence.c`); writes `build/CI_REPORT.txt` |
 | `make test-chaos` | pathological inputs, IEEE edge cases, concurrent threads |
 | `make test-verification` | the V-2 convergence study alone |
 | `make test-rectangular` | `test_rectangular.c`: tall, wide, thin-K and conjugate-transposed shapes up to 18277 × 150 × 18277, componentwise against cblas, then timings (peaks at ~21 GB) |
@@ -113,7 +113,7 @@ with audit IDs. An XFAIL that now passes (XPASS), or an entry that matches
 no case (STALE), fails the run: when a fix lands, delete its entries.
 `./build/test_blas_abi -v` lists every case. `make test-symbols` is the
 strict export check: the dylib and the static archive must each export
-exactly `_dgemm_` / `_zgemm_`, and not the `$NEWLAPACK` variants (H-P0-1).
+exactly `_dgemm_` / `_zgemm_`, and not the `$NEWLAPACK` variants (before 1.4.0 they exported only the latter, so Fortran calls bypassed the library).
 
 ## Routing unit tests
 

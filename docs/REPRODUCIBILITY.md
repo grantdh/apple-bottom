@@ -1,8 +1,8 @@
 # Reproducing apple-bottom measurements
 
-Every published number has a dated directory under `benchmarks/results/`
-that names the machine, OS, toolchain and library build it came from.
-The 1.4.0 measurements:
+The performance numbers in the README and VAL-1 each have a dated directory
+under `benchmarks/results/` that names the machine, OS, toolchain and
+library build they came from:
 
 | What | Command | Results |
 |---|---|---|

@@ -16,16 +16,19 @@
 > ZGEMM ran on the CPU; and the 1.22× timing compared a serial QE build
 > with an MPI build. VAL-1 therefore says nothing about DD arithmetic, and
 > its findings below (R-3, R-12, the production-validation and performance
-> rows, §4.2, the QE example in §9) are **withdrawn**. The deployment
+> rows, §4.2, the QE example in §9) are **withdrawn**, with the QE routing
+> advice of §2.4 and the performance expectations of §7.4, which are
+> replaced by the 1.4.0 measurements. The deployment
 > recommendations in §1.4 and §11.2 rest on the verification evidence
 > alone until application workloads are revalidated.
 >
 > VAL-1 was repeated for v1.4.0 with the GPU path exercised
 > ([`tests/validation/VAL001_QE_Si64.md`](../../tests/validation/VAL001_QE_Si64.md)):
-> with 97–100% of the GEMM time on the GPU, the energies and band energies
-> agree with the CPU run in every printed digit; the GPU path is 1.3–17%
-> slower than Accelerate for QE's shapes, so `AB_MODE=auto` keeps them on
-> Accelerate.
+> with the calls that make up 89–99% of the GEMM work on the GPU, the
+> energies and band energies agree with the CPU run in every printed
+> digit. Forcing the GPU makes the Si64 runs 1.3–17% slower (their GEMMs
+> take 2.5–4.9× as long as on Accelerate), so `AB_MODE=auto` keeps QE's
+> GEMMs on Accelerate.
 >
 > The verification evidence (V-2 and the unit suites) ran on the GPU and is
 > unaffected. Test counts in this report are those of v1.0.2; the current
@@ -155,15 +158,11 @@ EXTERNAL ab_dgemm, ab_zgemm
 CALL ab_dgemm(M, N, K, A, LDA, B, LDB, C, LDC)
 ```
 
-**Hybrid CPU/GPU Routing** (recommended for QE):
-```fortran
-flops = 8.0d0 * DBLE(M) * DBLE(N) * DBLE(K)
-IF (flops .GE. 100.0d6) THEN
-    CALL ab_zgemm(...)  ! GPU for large ops
-ELSE
-    CALL ZGEMM(...)     ! CPU for small ops
-END IF
-```
+**Hybrid CPU/GPU Routing**: *withdrawn in Revision 1.2.* The FLOP-threshold
+routing recommended here for QE sent its Davidson ZGEMMs to the GPU, which
+VAL-1 revision 2 measured as 17% slower on the BLAS-heavy input. Since 1.4.0,
+call `ZGEMM`/`DGEMM` unchanged and let `AB_MODE=auto` route each call from
+the calibrated table (`docs/INTEGRATION.md`).
 
 **Memory Pool** (for iterative solvers):
 ```c
@@ -528,15 +527,18 @@ diff <(grep "total energy" system_gpu.out) \
 
 ### 7.4 Performance Expectations
 
-| Matrix Size | Speedup vs 6-thread CPU | Use Case |
-|-------------|-------------------------|----------|
-| N < 512 | 0.5-0.8× (slower) | Use CPU BLAS |
-| N = 1024 | 0.9-1.1× (break-even) | Marginal |
-| N = 2048 | 1.10-1.29× | Good |
-| N ≥ 4096 | 1.3-1.5× (projected) | Excellent |
-| **Iterative (pool)** | 1.5-2.7× | Always faster |
+*Revised in Revision 1.2.* The table that stood here compared against a
+6-thread CPU BLAS, projected 1.3–1.5× for N ≥ 4096, claimed 1.5–2.7× for
+iterative (pool) use and a 40–50% CPU-usage reduction. None of these is
+supported by a measurement and they are withdrawn. The 1.4.0 measurements
+on the same M2 Max class, against Accelerate:
 
-**Energy Efficiency**: 40-50% CPU reduction while maintaining speedup (useful for battery-powered systems).
+| Regime | GPU vs Accelerate | Source |
+|---|---|---|
+| Native API, matrices resident, DGEMM | 0.13× (N = 256) to 1.04× (1536), 1.10–1.16× (2048–4096) | `benchmarks/results/2026-10-14-3253a22-bench-paper/` |
+| Native API, matrices resident, ZGEMM | 0.29× (N = 256) to 1.12× (1024), 1.30–1.39× (1536–3072) | same |
+| BLAS ABI (per call, conversion included) | 0.06–1.02×; ≥ 1.10× only for ZGEMM with both operands transposed at N ≥ 4096 (1.11–1.20×) | `benchmarks/results/2026-10-14-52f1880-calibrate/` |
+| Quantum ESPRESSO Si64, `AB_MODE=gpu` | 1.3–17.3% more wall time | VAL-1 revision 2 |
 
 ### 7.5 Integration Checklist
 

@@ -92,11 +92,12 @@ routing table from it.
 
 **Quantum ESPRESSO** (develop, 7.5), 64-atom Si, PAW
 ([VAL-1](tests/validation/VAL001_QE_Si64.md)): the total energy and every
-printed band energy are the same in every mode and run, with 97–100% of
-the GEMM time on the GPU in `gpu` mode.
+printed band energy are the same in every mode and run, also in `gpu` mode,
+where the calls that make up 89–99% of the GEMM work run on the GPU.
 `AB_MODE=auto` keeps all of QE's GEMMs on Accelerate and matches `cpu`
-mode within 0.1%; forcing the GPU makes the runs 1.3–17.3% slower, and the
-GPU kernels alone already take 0.95–1.57× as long as Accelerate does.
+mode within 0.2%; forcing the GPU makes the runs 1.3–17.3% slower, and the
+GPU kernels alone already take 1.00–1.67× as long as Accelerate needs for
+the same calls.
 
 ## Using it
 
@@ -120,6 +121,15 @@ ab_matrix_destroy(A); ab_matrix_destroy(B); ab_matrix_destroy(C);
 ab_shutdown();
 ```
 
+`ABMatrix` data is row-major (C order); the BLAS ABI below is
+column-major, as in BLAS. Compile against the in-tree build with
+
+```bash
+clang -I/path/to/apple-bottom/include my_prog.c \
+      -L/path/to/apple-bottom/build -Wl,-rpath,/path/to/apple-bottom/build -lapplebottom
+```
+
+(static linking and pkg-config: [Integration Guide](docs/INTEGRATION.md#building-your-program)).
 A runnable version is in [`examples/01_basic_dgemm`](examples/01_basic_dgemm/main.c)
 (`make examples`).
 
@@ -155,9 +165,10 @@ The [Integration Guide](docs/INTEGRATION.md) covers C, Fortran, Python
 
 ## How it works
 
-Each FP64 value is a pair `(hi, lo)` of FP32 values with `hi + lo` exact,
-kept normalized with Dekker/Knuth error-free transformations (TwoSum,
-FMA-based TwoProd). Products use the DWTimesDW2 algorithm of Joldes,
+Each value is stored as an unevaluated sum `hi + lo` of two FP32 numbers,
+normalized so that `|lo|` is at most half an ulp of `hi`; the pair holds
+about 48 significant bits of the FP64 value. Arithmetic keeps that form
+with Dekker/Knuth error-free transformations (TwoSum, FMA-based TwoProd). Products use the DWTimesDW2 algorithm of Joldes,
 Muller and Popescu (2017), with relative error below 5u² for u = 2⁻²⁴; the
 fused multiply-add of the GEMM inner loop has a conservative 8u² envelope
 ([derivation and scope](docs/vv/PRECISION_ENVELOPE.md)).

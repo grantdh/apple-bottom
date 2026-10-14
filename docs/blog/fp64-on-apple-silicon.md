@@ -1,6 +1,6 @@
 # How I Got FP64-Class Precision on Apple Silicon GPUs Without FP64 Hardware
 
-> **Correction (October 2026).** Three claims in this April post were wrong.
+> **Correction (October 2026).** Four claims in this April post were wrong.
 >
 > 1. The Quantum ESPRESSO results, "22% faster" and "11 decimal places",
 >    came from runs that never used the GPU: the library then needed an
@@ -13,6 +13,10 @@
 >    call, Accelerate is faster ([README](../../README.md#performance)).
 > 3. Double-float carries about 48 significant bits, ~10⁻¹⁵ relative error:
 >    close to FP64's 10⁻¹⁶, not "matching or exceeding" it.
+> 4. The metal-float64 figures (24 GFLOP/s, "~25× faster") have no
+>    reproducible source: metal-float64 is an unfinished library of scalar
+>    operations with no GEMM. Its README estimates 1/32 to 1/64 of FP32
+>    throughput.
 >
 > The triple-double figures came from research prototypes that are not part
 > of the library. The rest of the post is as published, apart from the

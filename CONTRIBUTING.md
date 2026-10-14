@@ -38,13 +38,18 @@ All changes must:
 1. Pass existing tests: `make test` (and `make ci-local` for changes to
    kernels, conversion or routing)
 2. Include new tests for new functionality
-3. Not regress performance: `make bench`
+3. Not regress performance: `make bench-baseline` on `main`, then
+   `make bench-regression` on your branch
 
 If you change the BLAS-ABI GPU path or the kernels, rerun `make calibrate`
 on an idle machine on AC power and commit the regenerated
 `src/dispatch_table.h` with its `benchmarks/results/` directory, so that
-`AB_MODE=auto` keeps following measurement. Calibrations from chips other
-than the M2 Max are welcome as their own pull requests.
+`AB_MODE=auto` keeps following measurement. Calibrations from other chips
+are welcome as their own pull requests: run
+`make calibrate CALIBRATE_SOURCE=/dev/null` so the built-in M2 Max table
+stays as it is, and submit the `benchmarks/results/<date>-<sha>-calibrate/`
+directory (its `dispatch_table.txt` can be used at once with
+`AB_DISPATCH_TABLE`).
 ## Pull Requests
 
 1. Create a feature branch
