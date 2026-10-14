@@ -26,3 +26,6 @@ __pycache__/
 dist/
 *.egg
 benchmarks/qe_yambo/
+
+# Pseudopotentials for benchmarks/qe (not redistributed)
+benchmarks/qe/pseudo/

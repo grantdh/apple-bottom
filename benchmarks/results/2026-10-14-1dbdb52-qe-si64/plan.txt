@@ -1,0 +1,4 @@
+1dbdb52 A_si64_500b_k222 1 8 3 cpu,auto,gpu
+eaad87e A_si64_500b_k222 1 8 2 auto
+1dbdb52 B_si64_160b_k222 1 8 2 cpu,auto,gpu
+1dbdb52 C_si64_160b_gamma 1 8 2 cpu,auto,gpu
