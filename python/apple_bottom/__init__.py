@@ -116,8 +116,8 @@ def _find_library() -> ctypes.CDLL:
     candidates = []
 
     # Try relative to this module
-    module_dir = Path(__file__).parent.parent.parent  # python/
-    build_dir = module_dir / "build"
+    repo_dir = Path(__file__).parent.parent.parent  # the apple-bottom checkout
+    build_dir = repo_dir / "build"
     for variant in [
         build_dir / "libapplebottom.dylib",
         build_dir / "libapplebottom.a",
@@ -140,8 +140,8 @@ def _find_library() -> ctypes.CDLL:
             continue
 
     raise AppleBottomError(
-        "Could not find libapplebottom. Install with 'make install' or "
-        "set LD_LIBRARY_PATH. Searched: " + ", ".join(candidates)
+        "Could not find libapplebottom. Build it with 'make' in the apple-bottom "
+        "checkout, or set AB_LIBRARY to its path. Searched: " + ", ".join(candidates)
     )
 
 
@@ -849,7 +849,7 @@ def dgemm(A: np.ndarray, B: np.ndarray, alpha: float = 1.0, beta: float = 0.0) -
     """
     Perform double-precision matrix multiplication with optional scaling.
 
-    Computes: C = alpha * (A @ B) + beta * C
+    Computes: C = alpha * (A @ B)
 
     This is a convenience function that handles allocation, upload, compute,
     and download in one call.
@@ -858,7 +858,7 @@ def dgemm(A: np.ndarray, B: np.ndarray, alpha: float = 1.0, beta: float = 0.0) -
         A: Left operand, shape (m, k), dtype float64 (or a sequence of rows)
         B: Right operand, shape (k, n), dtype float64 (or a sequence of rows)
         alpha: Scalar multiplier (default 1.0)
-        beta: Scalar for C accumulation (default 0.0)
+        beta: No effect: the result starts from zero (kept for compatibility)
 
     Returns:
         Result matrix, shape (m, n), dtype float64 (a list of rows if numpy
