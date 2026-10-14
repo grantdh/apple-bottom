@@ -376,10 +376,8 @@ uninstall:
 	rm -f $(PREFIX)/include/apple_bottom_device.h
 	rm -f $(PREFIX)/lib/pkgconfig/applebottom.pc
 	@echo "Uninstalled from $(PREFIX)"
-# =============================================================================
-# Add these targets to the end of your Makefile
-# =============================================================================
 
+# =============================================================================
 # Sanitizer builds (for local debugging)
 .PHONY: test-asan test-ubsan
 
@@ -393,13 +391,13 @@ SAN_TARGET = $(MAKE) --no-print-directory BUILD=$(BUILD)/$(1) \
 
 test-asan:
 	@echo "Building with AddressSanitizer..."
-	$(call SAN_TARGET,asan,address)
+	+$(call SAN_TARGET,asan,address)
 	@echo "Running tests with ASan..."
 	ASAN_OPTIONS=halt_on_error=1 ./$(BUILD)/asan/test_correctness
 
 test-ubsan:
 	@echo "Building with UndefinedBehaviorSanitizer..."
-	$(call SAN_TARGET,ubsan,undefined)
+	+$(call SAN_TARGET,ubsan,undefined)
 	@echo "Running tests with UBSan..."
 	UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./$(BUILD)/ubsan/test_correctness
 
@@ -446,7 +444,7 @@ bench-rect: $(BUILD)/bench_rect_dgemm $(BUILD)/bench_rect_zgemm
 bench-paper: $(BUILD)/bench_paper
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
-	@echo "HPEC 2026 Paper Benchmark Suite"
+	@echo "Native-API benchmark suite (square, tall-skinny, batched, ZHERK, precision)"
 	@echo "═══════════════════════════════════════════════════════════════════"
 	./$(BUILD)/bench_paper
 
