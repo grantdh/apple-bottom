@@ -271,7 +271,8 @@ support. They are withdrawn, and the documents now say what was measured:
   1.0–1.3 needed an explicit `ab_init()`, which no QE build called, so those
   runs never used the GPU, and the 22% compared a serial QE build with an
   MPI build. Repeated with the GPU path working (VAL-1, revision 2), forcing
-  the GPU makes Si64 runs 1–17% slower on an M2 Max, and `AB_MODE=auto`
+  the GPU makes Si64 runs 1–17% slower on an M2 Max (QE itself compiled at
+  `-O0`), and `AB_MODE=auto`
   keeps QE's GEMMs on Accelerate at no cost.
 - **"11 decimal places of agreement"** with QE. The March runs compared CPU
   with CPU. With the calls that make up 89–99% of the GEMM work on the GPU,

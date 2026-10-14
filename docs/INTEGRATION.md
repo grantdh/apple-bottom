@@ -342,8 +342,8 @@ are the same in all three modes. `AB_MODE=auto` keeps every GEMM of these
 runs on Accelerate, because the calibrated table has no GPU row for QE's
 shapes, so its run time is that of `AB_MODE=cpu` (within 0.2%).
 `AB_MODE=gpu` forces the GEMMs onto the GPU and is slower:
-1.3–17.3% more wall time on the three inputs, because its GEMMs take
-2.5–4.9× as long. On this hardware, linking apple-bottom into QE gives you
+1.3–17.3% more wall time on the three inputs (with QE itself compiled at
+`-O0`; more with an optimized QE), because its GEMMs take 2.5–4.9× as long. On this hardware, linking apple-bottom into QE gives you
 the `AB_REPORT` accounting and a routing that follows measurement, not a
 speed-up.
 

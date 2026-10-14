@@ -37,7 +37,7 @@ and this revision checks that the calls did run where the mode says.
 |---|---|
 | Machine | MacBook Pro (Mac14,6), Apple M2 Max: 8 performance + 4 efficiency cores, 38-core GPU, 64 GB; on AC power, `caffeinate -is`, no other GPU work |
 | OS, toolchain | macOS 27.0.1 (26A434); Apple clang 17; GNU Fortran 15.2.0; Open MPI 5.0.9 |
-| Quantum ESPRESSO | develop at 5b7f8e1bc (2026-04-03, `qe-7.5CN-26`; reports 7.5), built with gfortran and Open MPI (`-O3 -fopenmp`), FFTW 3, ScaLAPACK, OpenBLAS 0.3.31. In this build `cegterg`/`regterg` call `ab_zgemm`/`ab_dgemm` and all other code calls `ZGEMM`/`DGEMM`; both names forward to the same `ab_*gemm_blas`, so an unpatched QE linked as in the integration guide routes every GEMM the same way |
+| Quantum ESPRESSO | develop at 5b7f8e1bc (2026-04-03, `qe-7.5CN-26`; reports 7.5), built with gfortran 15.2 and Open MPI. **QE's own Fortran was compiled `-O0 -g -fbounds-check`** (all objects in PW, FFTXlib, Modules, upflib, XClib, LAXlib and UtilXlib, built 2026-04-04 before `make.inc` was changed to `-O3`), except the two patched Davidson files, `cegterg` and `regterg` (`-O3 -fopenmp`). The libraries it calls (Accelerate, OpenBLAS 0.3.31, FFTW 3 without threads, ScaLAPACK) are optimized. In this build `cegterg`/`regterg` call `ab_zgemm`/`ab_dgemm` and all other code calls `ZGEMM`/`DGEMM`; both names forward to the same `ab_*gemm_blas`, so an unpatched QE linked as in the integration guide routes every GEMM the same way |
 | Linking | The link is flat-namespace (Open MPI's wrapper adds `-flat_namespace`). At run time `dgemm_`, `zgemm_`, `ab_dgemm_` and `ab_zgemm_` bind to libapplebottom and the other 66 BLAS/LAPACK symbols pw.x imports bind to OpenBLAS (checked with `DYLD_PRINT_BINDINGS`). apple-bottom's CPU route is Accelerate (`cblas_zgemm`/`cblas_dgemm`). |
 | Library under test | Each library was built once from a clean worktree of its commit and copied aside (libapplebottom.dylib SHA-256 `b8cd26bdaee1abb3…` for 1dbdb52, `7bbb86408ee571fb…` for eaad87e); pw.x loads it through its rpath, and every run's stderr records the dylib that was loaded |
 | Parallelism | `mpirun -np 1`, `OMP_NUM_THREADS=8` |
@@ -112,8 +112,16 @@ of the calls, but 89–99% of each routine's time on Accelerate (`cpu` mode). No
 Forcing the GPU costs 17.3%, 6.9% and 1.3% of the run: the GEMMs take
 2.5×, 3.5× and 4.9× as long as on Accelerate, and they are 11%, 2.7% and
 0.3% of the `cpu` run (input A is the BLAS-heavy one; in B and C the PAW
-routines dominate). The spread over repetitions is at most 0.7%. macOS
+routines dominate in this unoptimized build). The spread over repetitions is at most 0.7%. macOS
 background services (Spotlight, media analysis) were not stopped.
+
+**These run times belong to this build.** QE's own code was compiled
+without optimization and with bounds checking (§3), while the GEMMs run in
+optimized libraries. With an optimized QE the rest of the run shrinks, so
+the GEMMs take a larger share and forcing the GPU costs a larger fraction
+of the run than the 1.3–17.3% above. The accuracy results (§5.1), the
+routing (§5.2) and the per-call comparisons (§5.4), which involve only
+library code, do not depend on how QE was compiled.
 
 ### 5.4 Where the GPU path spends its time
 
@@ -213,6 +221,9 @@ analysis scripts).
   cutoff. Other chips, codes and systems are not covered.
 - `np = 1`. With more MPI ranks each rank's GEMMs are smaller, which favours
   Accelerate further.
+- QE's own code was compiled at `-O0` with bounds checking (§3), so the
+  whole-run times and shares are those of an unoptimized QE; a repetition
+  with an optimized build is planned.
 - Printed precision bounds the comparison: QE prints total energies to
   10⁻⁸ Ry and band energies to 10⁻⁴ eV.
 

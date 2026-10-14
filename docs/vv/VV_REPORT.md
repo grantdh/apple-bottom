@@ -26,8 +26,8 @@
 > ([`tests/validation/VAL001_QE_Si64.md`](../../tests/validation/VAL001_QE_Si64.md)):
 > with the calls that make up 89–99% of the GEMM work on the GPU, the
 > energies and band energies agree with the CPU run in every printed
-> digit. Forcing the GPU makes the Si64 runs 1.3–17% slower (their GEMMs
-> take 2.5–4.9× as long as on Accelerate), so `AB_MODE=auto` keeps QE's
+> digit. Forcing the GPU makes the Si64 runs 1.3–17% slower with QE itself
+> compiled at `-O0` (their GEMMs take 2.5–4.9× as long as on Accelerate), so `AB_MODE=auto` keeps QE's
 > GEMMs on Accelerate.
 >
 > The verification evidence (V-2 and the unit suites) ran on the GPU and is

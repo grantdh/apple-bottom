@@ -96,7 +96,8 @@ routing table: rebuild to compile it in, or point `AB_DISPATCH_TABLE` at its
 printed band energy are the same in every mode and run, also in `gpu` mode,
 where the calls that make up 89–99% of the GEMM work run on the GPU.
 `AB_MODE=auto` keeps all of QE's GEMMs on Accelerate and matches `cpu`
-mode within 0.2%; forcing the GPU makes the runs 1.3–17.3% slower, and the
+mode within 0.2%; forcing the GPU makes the runs 1.3–17.3% slower (with QE
+itself compiled at `-O0`; VAL-1 explains), and the
 GPU kernels alone already take 1.00–1.67× as long as Accelerate needs for
 the same calls (2.7–10× for the PAW DGEMMs).
 

@@ -6,7 +6,7 @@ revision 2. Inputs and scripts: [`benchmarks/qe/`](../../qe/).
 | | |
 |---|---|
 | Machine | MacBook Pro (Mac14,6), M2 Max, 38-core GPU, 64 GB, macOS 27.0.1 (26A434), AC power, `caffeinate -is` |
-| QE | develop 5b7f8e1bc (reports 7.5), gfortran 15.2.0, Open MPI 5.0.9; `np = 1`, `OMP_NUM_THREADS=8` |
+| QE | develop 5b7f8e1bc (reports 7.5), gfortran 15.2.0, Open MPI 5.0.9; QE's own Fortran compiled `-O0 -g -fbounds-check` except `cegterg`/`regterg` (`-O3 -fopenmp`); `np = 1`, `OMP_NUM_THREADS=8` |
 | Libraries | `1dbdb52` (the 1.4.0 candidate; reports `1.3.1-dev (1dbdb52abeec)`, the version string before the 1.4.0 bump) and `eaad87e` (main before 1.4.0), each built from a clean worktree |
 | Plan | [`plan.txt`](plan.txt): `<label> <input> <np> <omp> <repetitions> <modes>`; mode order rotated per repetition |
 | Date | 01:14–06:06 local time; the baseline, B and C lines ran from 02:36 (the first launch stopped after line 1) |
