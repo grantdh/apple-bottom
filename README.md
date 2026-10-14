@@ -1,192 +1,246 @@
-<p align="center">
-  <h1 align="center">apple-bottom</h1>
-  <p align="center"><strong>FP64-class BLAS on Apple Silicon GPU — 618 GFLOP/s, ~10⁻¹⁵ precision, zero CUDA dependency</strong></p>
-</p>
+<h1 align="center">apple-bottom</h1>
+
+<p align="center"><strong>FP64-class BLAS for Apple Silicon GPUs — because two floats are better than no doubles.</strong></p>
 
 <p align="center">
-  <a href="https://github.com/grantdh/apple-bottom/actions"><img src="https://github.com/grantdh/apple-bottom/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="tests/"><img src="https://img.shields.io/badge/tests-127%20passing-brightgreen" alt="Tests"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"></a>
-  <a href="#requirements"><img src="https://img.shields.io/badge/platform-Apple%20Silicon-orange" alt="Platform"></a>
-  <a href="#architecture"><img src="https://img.shields.io/badge/precision-~10⁻¹⁵-yellow" alt="Precision"></a>
+  <a href="https://github.com/grantdh/apple-bottom/actions/workflows/ci.yml"><img src="https://github.com/grantdh/apple-bottom/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
+  <a href="#requirements"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Apple%20Silicon-lightgrey" alt="Platform: macOS on Apple Silicon"></a>
 </p>
 
----
+Apple Silicon GPUs have no FP64 units. apple-bottom stores each double as
+the unevaluated sum of two floats (double-float, "DD") and does the
+arithmetic in Metal compute shaders, on the GPU's FP32 ALUs. That gives
+about 48 significant bits, ~10⁻¹⁵ relative error per element: close to
+IEEE FP64 (53 bits), not the same.
 
-Apple Silicon GPUs have no native FP64. `apple-bottom` fixes that — double-float (DD) arithmetic on Metal compute shaders gives you FP64-class matrix operations at GPU throughput. Production-validated with Quantum ESPRESSO (22% faster, 11 decimal places of agreement).
+You get DGEMM, ZGEMM and DSYRK, plus batched, asynchronous and
+triangular-solve helpers, three ways:
+
+- a **C API** on matrices that stay on the GPU between calls,
+- a **device-buffer API** for codes that manage their own GPU memory,
+- a drop-in **BLAS ABI** (`dgemm_`, `zgemm_`) for Fortran codes such as
+  Quantum ESPRESSO, which sends each call to the GPU or to Accelerate
+  according to measured timings.
+
+## Is it faster than Accelerate?
+
+It depends on where the matrices live.
+
+- **Matrices kept on the GPU** (C API): for large GEMMs, yes, modestly.
+  On an M2 Max the GPU overtakes Accelerate from about N = 1,500 for DGEMM
+  and N = 1,000 for ZGEMM, and from N = 2,048 runs at 1.10–1.16×
+  Accelerate's speed for DGEMM and 1.37–1.39× for ZGEMM.
+- **One BLAS call at a time from host memory** (`dgemm_`/`zgemm_`): almost
+  never on an M2 Max. Each call converts FP64 to DD and back, and
+  Accelerate is faster for every DGEMM and every Quantum ESPRESSO shape
+  measured. The default routing (`AB_MODE=auto`) therefore keeps those
+  calls on Accelerate, so linking apple-bottom is safe but, on this
+  hardware, not a speed-up.
+
+The measurements are below, each with the data it came from.
+
+## Quick start
 
 ```bash
 git clone https://github.com/grantdh/apple-bottom.git
 cd apple-bottom
-make && make test   # 137/137 tests pass
+make && make test
 ```
+
+Needs macOS 14 or later on Apple Silicon and the Xcode command-line tools;
+see [Requirements](#requirements).
 
 ## Performance
 
-Benchmarked on M2 Max (38-core GPU, 64 GB unified memory):
+M2 Max (38-core GPU, 8P+4E CPU cores, 64 GB), macOS 27.0.1, on AC power;
+Accelerate is Apple's `cblas_*gemm` on the CPU (AMX).
 
-| Operation | GPU (apple-bottom) | CPU (Accelerate AMX) | Speedup | Precision |
-|-----------|-------------------|---------------------|---------|-----------|
-| DGEMM 2048² | 552 GFLOP/s | 468 GFLOP/s | **+18%** | ~10⁻¹⁵ |
-| DGEMM 4096² | 643 GFLOP/s | 566 GFLOP/s | **+14%** | ~10⁻¹⁵ |
-| ZGEMM (QE Si64) | — | — | **+22% wall** | 11 decimal places |
-| ZGEMM (QE Si128) | — | — | **+12% wall** | exact energy match |
+**Matrices resident on the GPU** (native API: upload once, time
+`ab_dgemm`/`ab_zgemm` only), GFLOP/s, median of three runs of
+`bench_paper`, each one warm-up then the mean of 3–10 calls
+([data](benchmarks/results/2026-10-14-3253a22-bench-paper/)):
 
-**Quantum ESPRESSO production benchmark (Si64, 64 atoms, DFT):**
+| N | DGEMM, GPU | DGEMM, Accelerate | GPU vs Accelerate | ZGEMM, GPU | ZGEMM, Accelerate | GPU vs Accelerate |
+|---:|---:|---:|---:|---:|---:|---:|
+| 512 | 284 | 634 | 0.45× | 502 | 705 | 0.71× |
+| 1024 | 535 | 606 | 0.88× | 683 | 611 | 1.12× |
+| 1536 | 640 | 615 | 1.04× | 806 | 622 | 1.30× |
+| 2048 | 664 | 580 | 1.15× | 844 | 619 | 1.37× |
+| 3072 | 683 | 625 | 1.10× | 868 | 625 | 1.39× |
+| 4096 | 699 | 604 | 1.16× | – | – | – |
 
-```
-Configuration          Wall Time    CPU Usage    Energy (Ry)
-──────────────────────────────────────────────────────────────
-OpenBLAS 6-thread         2:28        5.3×       -2990.44276157
-apple-bottom GPU          2:01        3.4×       -2990.44276157  ✓
-```
+ZGEMM rates count 8N³ operations for both; the GPU uses Gauss's
+three-multiplication form, which performs 25% fewer. Normwise relative
+error of the GPU result: 1.8×10⁻¹⁴ at N = 512 to 5.1×10⁻¹⁴ at N = 4096.
 
-22% faster wall time, 47% less CPU usage, bit-identical energy.
+**Through the BLAS ABI** (`ab_*gemm_blas`, i.e. `dgemm_`/`zgemm_`:
+conversion and transfer included), Accelerate time ÷ GPU time, median of
+7 after 3 warm-ups ([data](benchmarks/results/2026-10-14-52f1880-calibrate/)):
 
-### When to Use apple-bottom
+| Shapes | GPU vs Accelerate | `AB_MODE=auto` |
+|--------|------------------:|----------------|
+| DGEMM, square and transposed, 256–6144 | 0.06–0.84× | Accelerate |
+| ZGEMM, square, 256–6144 | 0.17–0.89× | Accelerate |
+| ZGEMM, one operand transposed, ≤ 6144 | 0.45–1.02× | Accelerate |
+| ZGEMM, both operands transposed, ≥ 4096 | 1.11–1.20× | **GPU** |
+| Quantum ESPRESSO si64 Davidson ZGEMMs | 0.14–0.76× | Accelerate |
+| Quantum ESPRESSO si64 PAW DGEMMs | 0.09–0.15× | Accelerate |
 
-**Use it for:** iterative solvers (SCF, CG, GMRES, Lanczos), large matrices (N ≥ 2048), repeated GEMM in loops — anywhere GPU upload/download overhead amortizes across iterations.
+`make calibrate` repeats this measurement on your machine and rebuilds the
+routing table from it.
 
-**Don't use it for:** single small GEMM calls (N < 1024), element-sensitive algorithms (pivoted LU, eigensolvers), or when IEEE 754 bit-exact FP64 is required.
+**Quantum ESPRESSO** (develop, 7.5), 64-atom Si, PAW
+([VAL-1](tests/validation/VAL001_QE_Si64.md)): the total energy and every
+printed band energy are the same in every mode and run, with 97–100% of
+the GEMM time on the GPU in `gpu` mode.
+`AB_MODE=auto` keeps all of QE's GEMMs on Accelerate and matches `cpu`
+mode within 0.1%; forcing the GPU makes the runs 1.3–17.3% slower, and the
+GPU kernels alone already take 0.95–1.57× as long as Accelerate does.
 
-## API
+## Using it
+
+### From C
 
 ```c
 #include "apple_bottom.h"
 
 ab_init();
 
-// Create and upload matrices
 ABMatrix A = ab_matrix_create(2048, 2048);
 ABMatrix B = ab_matrix_create(2048, 2048);
 ABMatrix C = ab_matrix_create(2048, 2048);
-ab_matrix_upload(A, data_A, true);
+ab_matrix_upload(A, data_A, true);   // FP64 -> DD, once
 ab_matrix_upload(B, data_B, true);
 
-// C = A × B  (FP64-class precision on GPU)
-ab_dgemm(A, B, C);
+ab_dgemm(A, B, C);                   // C = A * B on the GPU, FP64-class
 
-// Download result
-ab_matrix_download(C, result, true);
-
-// Cleanup
-ab_matrix_destroy(A);
-ab_matrix_destroy(B);
-ab_matrix_destroy(C);
+ab_matrix_download(C, result, true); // DD -> FP64
+ab_matrix_destroy(A); ab_matrix_destroy(B); ab_matrix_destroy(C);
 ab_shutdown();
 ```
 
-### Full API Surface
+A runnable version is in [`examples/01_basic_dgemm`](examples/01_basic_dgemm/main.c)
+(`make examples`).
 
 | Category | Functions |
 |----------|-----------|
-| **BLAS** | `ab_dgemm`, `ab_dgemm_scaled`, `ab_zgemm`, `ab_zgemm_ex`, `ab_dsyrk` |
-| **Matrix** | `ab_matrix_create`, `ab_matrix_upload`, `ab_matrix_download`, `ab_matrix_zero`, `ab_matrix_copy` |
-| **Element-wise** | `ab_matrix_add`, `ab_matrix_sub`, `ab_matrix_scale` |
-| **Async** | `ab_dgemm_async`, `ab_zgemm_async`, `ab_future_wait` |
-| **Pool** | `ab_pool_create`, `ab_pool_get_matrix`, `ab_pool_reset` (reduces allocation overhead in iterative codes) |
-| **Session** | `ab_session_create`, `ab_session_dgemm`, `ab_session_zgemm` (named matrix management) |
-| **Device** | `ab_dev_malloc`, `ab_dev_free`, `ab_dev_memcpy_h2d/d2h/d2d`, `ab_dev_dgemm`, `ab_dev_zgemm` (DevXlib-compatible buffer API) |
+| GEMM and friends | `ab_dgemm`, `ab_dgemm_scaled`, `ab_zgemm`, `ab_zgemm_ex`, `ab_dsyrk`, `ab_zherk`, `ab_dtrsm`, `ab_dgesv_mpir` |
+| Matrices | `ab_matrix_create`, `ab_matrix_upload`, `ab_matrix_download`, `ab_matrix_zero`, `ab_matrix_copy`, `ab_matrix_add`, `ab_matrix_sub`, `ab_matrix_scale` |
+| Batches and async | `ab_batch_*`, `ab_dgemm_batched`, `ab_zgemm_batched`, `ab_dgemm_async`, `ab_zgemm_async`, `ab_future_*` |
+| Pools and sessions | `ab_pool_*`, `ab_session_*` (fewer allocations in iterative codes) |
+| Device buffers | `ab_dev_malloc`, `ab_dev_memcpy_*`, `ab_dev_dgemm`, `ab_dev_zgemm`, … ([`apple_bottom_device.h`](include/apple_bottom_device.h)) |
+| BLAS ABI | `ab_dgemm_blas`, `ab_zgemm_blas` (column-major, BLAS arguments), `ab_get_last_dispatch_path` |
 
-### Fortran Integration (Quantum ESPRESSO)
+### From Fortran (and other BLAS hosts)
 
-Drop-in replacement via EXTERNAL declaration — no module dependencies:
+The library exports `dgemm_` and `zgemm_`. Link it ahead of your BLAS and
+the existing `CALL DGEMM` / `CALL ZGEMM` reach it, with reference-BLAS
+argument checking; everything else still comes from your BLAS library:
 
-```fortran
-EXTERNAL :: ab_zgemm
-CALL ab_zgemm('N', 'C', m, n, k, alpha, A, lda, B, ldb, beta, C, ldc)
+```makefile
+LIBS = -L/path/to/apple-bottom/build -Wl,-rpath,/path/to/apple-bottom/build -lapplebottom $(BLAS_LIBS)
 ```
 
-By default (`AB_MODE=auto`) each BLAS-ABI call runs on the GPU only for shapes where the GPU was measured at least 1.10× faster than Accelerate end to end (`make calibrate`); everything else runs on Accelerate. On the M2 Max that is only ZGEMM with both operands transposed and all dimensions ≥ 4096. `AB_MODE=gpu` forces the GPU. See the [Integration Guide](docs/INTEGRATION.md#routing-ab_modeauto) for C, Python, and Fortran setup and routing.
+| Variable | Effect |
+|----------|--------|
+| `AB_MODE=auto` (default) | GPU only for shapes measured ≥ 1.10× faster there (`src/dispatch_table.h`) |
+| `AB_MODE=cpu` / `AB_MODE=gpu` | everything on Accelerate / everything above `AB_MIN_GPU_DIM` on the GPU |
+| `AB_REPORT=1` | at exit: calls and time by route, GPU stage costs, fallbacks |
+| `AB_DISPATCH_TABLE=<file>` | route from another calibration, e.g. one from your own machine |
 
-## Architecture
+The [Integration Guide](docs/INTEGRATION.md) covers C, Fortran, Python
+(experimental bindings in [`python/`](python/)) and a Quantum ESPRESSO
+`make.inc`.
 
-### Double-Float (DD) Arithmetic
+## How it works
 
-Each FP64 value is stored as two FP32 values `(hi, lo)` using Dekker/Knuth error-free transformations. This gives ~48-bit effective mantissa (~10⁻¹⁵ relative error) — not full IEEE 754 FP64 (53-bit, ~10⁻¹⁶), but sufficient for scientific computing where accumulated solver errors dominate.
+Each FP64 value is a pair `(hi, lo)` of FP32 values with `hi + lo` exact,
+kept normalized with Dekker/Knuth error-free transformations (TwoSum,
+FMA-based TwoProd). Products use the DWTimesDW2 algorithm of Joldes,
+Muller and Popescu (2017), with relative error below 5u² for u = 2⁻²⁴; the
+fused multiply-add of the GEMM inner loop has a conservative 8u² envelope
+([derivation and scope](docs/vv/PRECISION_ENVELOPE.md)).
 
-Key implementation details: `MTLMathModeSafe` prevents the Metal compiler from reordering FMA operations that would destroy DD precision. Complex GEMM uses Gauss's 3-multiply algorithm (3 real GEMM instead of 4, 25% compute reduction). The GPU kernel uses 4×4 register blocking with BM=BN=64 tiling, optimized for Apple Silicon GPU occupancy.
+- The shaders are compiled without fast math (`MTLMathModeSafe`, or
+  `fastMathEnabled = NO` before macOS 15). Fast math lets the compiler
+  reassociate the error-free transformations and costs about seven
+  decimal digits.
+- GEMM tiles are 64 × 64 with 4 × 4 outputs per thread and a 128 × 16
+  variant for tall-skinny shapes (M ≥ 4N); long dot products are
+  renormalized every 128 terms.
+- ZGEMM uses Gauss's three-multiplication form: three real DD GEMMs
+  instead of four.
 
-### Precision Guarantees
+## Accuracy and testing
 
-Per-element DD precision is ~10⁻¹⁵. DGEMM Frobenius error scales as ~√N×10⁻¹⁵ (statistical cancellation in random matrices). For N=4096, empirical Frobenius error is ~5×10⁻¹⁴. Full analysis in [Precision Envelope](docs/vv/PRECISION_ENVELOPE.md).
+DGEMM's normwise relative error grows like √N·10⁻¹⁵ on random matrices,
+about 5 × 10⁻¹⁴ at N = 4096 (V-2 convergence study). `make test` runs 138
+tests: precision against a compensated FP64 reference, correctness of
+every API against Accelerate, the device-buffer API, the routing rules,
+and a BLAS-ABI conformance harness of 1,007 cases. `make ci-local` adds
+adversarial inputs and the convergence study (156 tests);
+[tests/README.md](tests/README.md) explains the count.
 
-### Fortran Bridge Architecture
-
-```
-Fortran (QE)  →  fortran_bridge.c  →  < 100M FLOPs? → cblas (OpenBLAS/Accelerate)
-                                    →  ≥ 100M FLOPs? → blas_wrapper.c → Metal GPU
-```
-
-## Verification & Validation
-
-Production-validated following NASA-STD-7009A methodology:
-
-- **V-2 Convergence Study**: Frobenius error 6.5×10⁻¹⁵ to 5.1×10⁻¹⁴ for N ∈ {64, 128, ..., 4096}
-- **VAL-1 Production**: Quantum ESPRESSO Si64 DFT — 11 decimal place agreement (-2990.44276157 Ry)
-- **137/137 tests** in `make test`: 14 precision + 72 correctness + 16 device-API + 9 routing tests + 26 BLAS-ABI suites; `make ci-local` adds 18 adversarial tests (155). A test is one precision case, registry entry or BLAS-ABI suite; the 152 device-API `CHECK`s and 1007 BLAS-ABI cases are reported separately (see [tests/README.md](tests/README.md#coverage-status))
-
-Documentation: [V&V Report](docs/vv/VV_REPORT.md) · [Precision Envelope](docs/vv/PRECISION_ENVELOPE.md) · [QE Validation](tests/validation/VAL001_QE_Si64.md)
+[V&V report](docs/vv/VV_REPORT.md) · [precision envelope](docs/vv/PRECISION_ENVELOPE.md) ·
+[limitations and scope](docs/vv/LIMITATIONS.md) ·
+[Quantum ESPRESSO validation](tests/validation/VAL001_QE_Si64.md)
 
 ## Requirements
 
-- **macOS 14+** (Sonoma) with **Xcode 16+** SDK (for `MTLMathModeSafe`)
-- **Apple Silicon** (M1, M2, M3, M4 — any variant)
-- On macOS 14, or with an SDK older than macOS 15, the shaders are compiled with `fastMathEnabled = NO` instead, which gives the same full DD precision
-
-## Build Options
-
-- `make DWTIMESDW3=1` — opt in to the tighter-bound DD multiplication variant (JMP 2017 Alg 12 / MR 2022 Thm 2.8, error bound < 4u² vs the default Alg 11's < 5u²). Trades one additional multiply, one FMA, and one add per `dd_mul`/`dd_fma`. The default algorithm's bound derivation lives in [`docs/vv/PRECISION_ENVELOPE.md`](docs/vv/PRECISION_ENVELOPE.md).
-
-## Prior Art
-
-| Project | Approach | Throughput | Status |
-|---------|----------|------------|--------|
-| [metal-float64](https://github.com/philipturner/metal-float64) (Turner) | Integer FP64 emulation via SoftFloat/LLVM | ~24 GFLOP/s | Archived 2024 |
-| [AppleNumericalComputing](https://github.com/ShoYamanishi/AppleNumericalComputing) (Yamanishi) | Educational benchmarks, FP32 GPU | N/A | Research |
-| [MLX](https://github.com/ml-explore/mlx) (Apple) | ML framework, FP64 on CPU only | N/A | Active, no GPU FP64 |
-| Accelerate (Apple) | AMX hardware, IEEE FP64 | 536 GFLOP/s | CPU-only, thread-hostile |
-| **apple-bottom** | **DD arithmetic on Metal FP32 ALUs** | **643 GFLOP/s** | **Active, production-validated** |
-
-`apple-bottom` takes a fundamentally different approach from `metal-float64`: native FP32 ALU arithmetic with error-free transformations (Dekker 1971) instead of integer bit manipulation. This trades strict IEEE 754 compliance for ~25× higher throughput at the BLAS level, which is the right tradeoff for scientific iterative solvers where norm-averaged convergence dominates.
+- Apple Silicon (M1 or later) with macOS 14 or later
+- Xcode or the Command Line Tools (clang); gfortran only for the Fortran tests
+- Measured on an M2 Max; other chips are expected to work but have no
+  calibration or validation yet
 
 ## Limitations
 
-- **Single GEMM calls**: ~100 μs GPU overhead dominates for one-shot operations
-- **ZHERK**: deprecated (20× slower than CPU AMX) — use `cblas_zherk` instead
-- **Thread safety**: Metal command queue serializes; use separate contexts for concurrency (planned)
-- **Max matrix size**: rows × cols ≤ 2³¹ − 1 elements per matrix (`AB_MAX_MATRIX_ELEMENTS`), and the DD buffer within the GPU's `maxBufferLength`. Any shape fits, e.g. 143,666 × 171
+- **Not IEEE FP64.** About 48 significant bits instead of 53, FP32's
+  exponent range (about 10⁻³⁸ to 10³⁸) instead of FP64's, and no
+  bit-for-bit agreement with CPU BLAS.
+- **Per-call overhead.** Converting and transferring operands dominates
+  small and medium calls through the BLAS ABI; see the table above.
+- **Threads.** Calls on different matrices may come from different
+  threads; one matrix, pool or session must not be used by two threads at
+  once. All work shares one Metal command queue.
+- **Size.** rows × cols ≤ 2³¹ − 1 per matrix and within the GPU's
+  `maxBufferLength`; larger BLAS-ABI operands run on Accelerate.
+- **ZHERK on the GPU is slower than Accelerate**; call `cblas_zherk`.
 
-## Project Structure
+## Project layout
 
 ```
-apple-bottom/
-├── src/apple_bottom.m          # Core Metal GPU implementation (DD kernels)
-├── src/device_api.m            # Device-buffer API for DevXlib backends
-├── src/blas_wrapper.c          # BLAS-compatible C API
-├── src/fortran_bridge.c        # Fortran ABI bridge for QE/VASP/CP2K
-├── include/apple_bottom.h      # Public API header (v1.4.0)
-├── include/apple_bottom_device.h  # Device-buffer API header
-├── tests/                      # 137 tests (precision, correctness, device-API, routing, BLAS-ABI)
-├── benchmarks/                 # DGEMM, ZGEMM, DSYRK, pool, async benchmarks
-├── examples/01_basic_dgemm/    # Runnable example
-└── docs/                       # Integration guide + V&V documentation
+include/apple_bottom.h          public API (and apple_bottom_device.h)
+src/apple_bottom.m              Metal context and DD kernels
+src/blas_wrapper.c              BLAS ABI: packing, conversion, fallbacks
+src/dispatch.c, dispatch_table.h  AB_MODE routing and the calibrated table
+src/fortran_bridge.c            dgemm_ / zgemm_ / ab_*gemm_ entry points
+src/profiling/                  AB_PROFILE / AB_REPORT accounting
+tests/                          test suites (tests/README.md)
+benchmarks/                     benchmarks, calibration and their results
+docs/                           integration guide, V&V package, design notes
+python/                         experimental ctypes bindings
 ```
 
-## Ecosystem
+## Related projects
 
-apple-bottom powers GPU acceleration across a family of scientific computing tools:
+By the same author:
+[Quantum-Espressivo](https://github.com/grantdh/Quantum-Espressivo) (Quantum ESPRESSO on Apple Silicon),
+[YAMBOrghini](https://github.com/grantdh/YAMBOrghini) (Yambo GW/BSE on Apple Silicon),
+[MEEPhistopheles](https://github.com/grantdh/MEEPhistopheles) (Metal FDTD kernels for MEEP, FP32) and
+[rainbow-connection](https://github.com/grantdh/rainbow-connection) (QE → Yambo → MEEP pipelines).
 
-| Project | What it does |
-|---------|-------------|
-| [Quantum-Espressivo](https://github.com/grantdh/Quantum-Espressivo) | Quantum ESPRESSO + Metal GPU acceleration (22% speedup, 11 decimal place agreement) |
-| [YAMBOrghini](https://github.com/grantdh/YAMBOrghini) | Yambo GW/BSE + Metal GPU acceleration |
-| [MEEPhistopheles](https://github.com/grantdh/MEEPhistopheles) | Metal FDTD kernels for electromagnetic simulation (3200+ Mcells/s) |
-| [rainbow-connection](https://github.com/grantdh/rainbow-connection) | Multi-physics pipeline orchestrator (QE → Yambo → MEEP) |
+Prior art: [metal-float64](https://github.com/philipturner/metal-float64)
+set out to emulate IEEE FP64 in software on Metal (unfinished, archived);
+apple-bottom gives up exact IEEE semantics to run on the FP32 units
+directly.
+[MLX](https://github.com/ml-explore/mlx) runs FP64 on the CPU only.
+[docs/COMPARISON.md](docs/COMPARISON.md) has more.
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md). Bug reports and feature requests welcome via [Issues](https://github.com/grantdh/apple-bottom/issues).
+Bug reports, calibration results from other chips (`make calibrate`) and
+pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Citation
 
@@ -202,4 +256,4 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md). Bug reports and feature requests welco
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT — see [LICENSE](LICENSE).
