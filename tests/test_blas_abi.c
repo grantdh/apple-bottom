@@ -1031,7 +1031,7 @@ typedef struct {
     unsigned long long calls, gpu, cpu, fallbacks, reasons[4];
     double calls_pct, total, gpu_ms, cpu_ms, time_pct, stages[8];   // [7]: other
     unsigned long long prof_calls, prof_gpu, prof_fallbacks;
-    double prof_time_pct;
+    double prof_time_pct, prof_total, prof_gpu_ms;
 } RoutineReport;
 
 typedef struct {
@@ -1101,7 +1101,7 @@ static bool parse_report_line(const char *line, const char *build, ProcessReport
                            &end) == 9 && end && (r = routine_of(*section, name))) {
         r->prof_rows++;
         r->prof_calls = calls; r->prof_gpu = gpu; r->prof_fallbacks = fb;
-        r->prof_time_pct = time_pct;
+        r->prof_time_pct = time_pct; r->prof_total = total; r->prof_gpu_ms = gpu_ms;
         return true;
     }
     // AB_PROFILE per-call lines: one per GPU call, its stages within its total.
@@ -1134,6 +1134,12 @@ static const char *check_routine(const RoutineReport *r, unsigned long long call
     if (!(r->time_pct >= 0.0 && r->time_pct <= 100.0) ||
         !(r->prof_time_pct >= 0.0 && r->prof_time_pct <= 100.0))
         return "gpu_time% outside [0, 100]";
+    // gpu_time% is the share of time, not of calls (the two differ by up to 30x in QE).
+    if (r->total > 0.0 && fabs(r->time_pct - 100.0 * r->gpu_ms / r->total) > 0.1)
+        return "AB_REPORT gpu_time% is not gpu_ms / total_ms";
+    if (r->prof_total > 0.0 &&
+        fabs(r->prof_time_pct - 100.0 * r->prof_gpu_ms / r->prof_total) > 0.1)
+        return "AB_PROFILE gpu_time% is not gpu_ms / total_ms";
     if (fabs(r->total - r->gpu_ms - r->cpu_ms) > 0.002) return "gpu_ms + cpu_ms != total_ms";
     if (!gpu && (r->gpu_ms != 0.0 || r->time_pct != 0.0)) return "GPU time without GPU calls";
     if (r->stage_rows != (gpu > 0)) return "GPU stage line missing or unexpected";
