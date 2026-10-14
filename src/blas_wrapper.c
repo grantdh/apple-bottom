@@ -158,13 +158,19 @@ static void prof_end(CallProf *p, const char *routine, int M, int N, int K) {
     ab_prof_record(routine, ns, M > 0 ? (size_t)M : 0, N > 0 ? (size_t)N : 0,
                    K > 0 ? (size_t)K : 0, gpu, gpu ? p->stage_ns : NULL, p->fallback);
     if (!gpu || !ab_prof_verbose()) return;
+    // One write per line, so lines from concurrent callers do not interleave.
+    char line[512];
+    size_t n = (size_t)snprintf(line, sizeof line, "AB_PROFILE %s M=%d N=%d K=%d ", routine, M, N, K);
     uint64_t named = 0;
-    fprintf(stderr, "AB_PROFILE %s M=%d N=%d K=%d ", routine, M, N, K);
-    for (int s = 0; s < AB_PROF_STAGE_COUNT; s++) {
+    for (int s = 0; s < AB_PROF_STAGE_COUNT && n < sizeof line; s++) {
         named += p->stage_ns[s];
-        fprintf(stderr, " %s=%.3f", ab_prof_stage_names[s], p->stage_ns[s] / 1e6);
+        n += (size_t)snprintf(line + n, sizeof line - n, " %s=%.3f", ab_prof_stage_names[s],
+                              p->stage_ns[s] / 1e6);
     }
-    fprintf(stderr, " other=%.3f  total=%.3f ms\n", (ns > named ? ns - named : 0) / 1e6, ns / 1e6);
+    if (n < sizeof line)
+        snprintf(line + n, sizeof line - n, " other=%.3f  total=%.3f ms\n",
+                 (ns > named ? ns - named : 0) / 1e6, ns / 1e6);
+    fputs(line, stderr);
 }
 
 // A GPU-routed call that has to run on cblas instead. The path record says
