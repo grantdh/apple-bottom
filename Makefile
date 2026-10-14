@@ -324,7 +324,7 @@ test-rectangular-diag: $(BUILD)/test_rectangular_diag
 	./$(BUILD)/test_rectangular_diag
 
 # Rectangular shapes up to 18277 x 150 x 18277 (correctness, then timings).
-# Not part of `make test`: the largest cases allocate several GB.
+# Not part of `make test`: it peaks at about 21 GB of memory (M2 Max: ~10 s).
 $(BUILD)/test_rectangular: tests/test_rectangular.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"

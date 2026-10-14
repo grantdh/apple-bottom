@@ -58,11 +58,11 @@ These are the conditions that motivated the tall-skinny variant above.
 
 **2. ZGEMM Rectangular Tests**
 - `test_zgemm_qe_dimensions()` — 18277 × 150 × 18277 × 150
-- `test_zgemm_conjugate_transpose_qe()` — 150 × 150 × 18277 × 150
+- `test_zgemm_conjugate_transpose_qe()` — 150 × 150 × 18277 × 150, through `ab_zgemm_ex`
 
 **Validation:**
 - All tests validate against reference BLAS (cblas_dgemm, cblas_zgemm)
-- Error threshold: < 1e-14 (within DD precision)
+- Error measure: componentwise, |C − C_ref| / (|op(A)| |B|), against 10·K·u² (u² = 2⁻⁴⁸); measured errors are about 1e-14
 - Tests exercise the tall-skinny dispatch path at QE Davidson dimensions
 
 ### Performance Benchmarks
@@ -94,29 +94,31 @@ Rectangular matrices meet DD precision bounds across the full aspect-ratio sweep
 
 ### Performance by Aspect Ratio
 
-**Square matrices (baseline):**
-```
-2048 × 2048 × 2048: GPU = 1.1-1.2× faster than BLAS
-```
+`make test-rectangular` on an M2 Max, 2026-10-14 (native API, matrices
+uploaded once and the multiply timed; Accelerate `cblas_dgemm` on the same
+data; one run each, so treat differences under ~10% as noise):
 
-**Tall matrices (M >> N), default tile:**
-```
-4096 × 1024 × 2048:  GPU ≈ 1.0× (neutral)
-8192 × 512 × 2048:   GPU ≈ 0.8×
-18277 × 150 × 18277: GPU ≈ 0.5-0.7×
-```
+| Shape (M × N × K) | GPU (ms) | Accelerate (ms) | GPU speed vs Accelerate |
+|---|---:|---:|---:|
+| Square 2048 × 2048 × 2048 | 27.9 | 31.2 | 1.12× |
+| Tall 4:1, 4096 × 1024 × 2048 | 35.9 | 26.8 | 0.75× |
+| Tall 16:1, 8192 × 512 × 2048 | 36.7 | 27.1 | 0.74× |
+| Tall 64:1, 16384 × 256 × 2048 | 36.7 | 33.0 | 0.90× |
+| QE-like, 18277 × 150 × 18277 | 233.8 | 189.1 | 0.81× |
+| Wide 1:4, 1024 × 4096 × 2048 | 43.0 | 35.2 | 0.82× |
+| Wide 1:16, 512 × 8192 × 2048 | 32.0 | 32.0 | 1.00× |
 
-**Why the default-tile slowdown on tall shapes:**
+**Why tall shapes were slow under the default 64 × 64 tile** (the reasoning behind the tall-skinny variant; these causes were not measured separately):
 
 1. **Threadgroup underutilization.** Under BN=64, N=150 creates only 3 threadgroups in N; many threads idle in partial blocks.
 
-2. **Memory traffic dominates.**
+2. **Transfers, when matrices are uploaded per call** (not in the resident timings above).
    - A upload: 18277 × 18277 × 8 bytes = 2.5 GB
    - B upload: 18277 × 150 × 8 bytes = 21 MB
    - C download: 18277 × 150 × 8 bytes = 21 MB
    - Total per call: 2.5 GB
 
-3. **Cache locality.** B (150 columns) fits in cache; A (18277 rows) does not. Tall shapes yield long stride walks.
+3. **Cache locality (hypothesis).** B (150 columns) fits in cache; A (18277 rows) does not, so tall shapes walk long strides.
 
 The tall-skinny kernel addresses (1) directly: at BN=16, N=150 yields ceil(150/16) = 10 threadgroups in N rather than 3, and boundary waste drops from ~34% to ~4%. (2) and (3) are upload/download and stride concerns inherent to the per-call API and are the motivation for a future device-resident path.
 
@@ -141,21 +143,21 @@ that keep matrices resident on the GPU.
 make test-rectangular
 ```
 
-Expected output (correctness part):
+Output on an M2 Max (correctness part):
 ```
 =============================================================================
 apple-bottom Rectangular Matrix Test Suite
 =============================================================================
 
 DGEMM Rectangular Tests:
-  DGEMM tall-skinny (10000 × 100 × 100 × 100)        ✓ PASS
-  DGEMM short-wide (100 × 10000 × 100 × 10000)       ✓ PASS
-  DGEMM QE-like (18277 × 150 × 18277 × 150)          ✓ PASS
-  DGEMM thin middle (5000 × 5000 × 10 × 5000)        ✓ PASS
+  DGEMM tall-skinny (10000 × 100 × 100 × 100)     (err 1.3e-14, bound 3.6e-12) ✓ PASS
+  DGEMM short-wide (100 × 10000 × 100 × 10000)    (err 1.3e-14, bound 3.6e-12) ✓ PASS
+  DGEMM QE-like (18277 × 150 × 18277 × 150)       (err 1.2e-14, bound 6.5e-10) ✓ PASS
+  DGEMM thin middle (5000 × 5000 × 10 × 5000)     (err 1.4e-14, bound 3.6e-13) ✓ PASS
 
 ZGEMM Rectangular Tests:
-  ZGEMM QE-like (18277 × 150 × 18277 × 150)          ✓ PASS
-  ZGEMM QE conjugate transpose (150 × 150 × ...)    (skipped) ✓ PASS
+  ZGEMM QE-like (18277 × 150 × 18277 × 150)       (err 1.4e-14, bound 6.5e-10) ✓ PASS
+  ZGEMM QE conjugate transpose (150 × 150 × 18277 × 150) (err 7.7e-15, bound 6.5e-10) ✓ PASS
 
 =============================================================================
 Summary: 6 passed, 0 failed
