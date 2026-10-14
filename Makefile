@@ -49,11 +49,13 @@ VERSION_NUM := $(firstword $(subst -, ,$(VERSION)))
 
 # Build identity reported by ab_build_info() and at the top of every
 # AB_PROFILE / AB_REPORT report: the git commit, with -dirty if tracked files
-# differ from it, or "unknown" outside a git checkout (override with
-# make AB_BUILD_SHA=...). The stamp file changes only when the identity does,
-# so a new commit or edit rebuilds just blas_profiler.o.
+# differ from it, or "unknown" outside a git checkout or when this directory is
+# not the top of its checkout, as for a copy vendored inside another repository
+# (override with make AB_BUILD_SHA=...). The stamp file changes only when the
+# identity does, so a new commit or edit rebuilds just blas_profiler.o.
 ifndef AB_BUILD_SHA
-AB_BUILD_SHA := $(shell sha=$$(git rev-parse --short=12 HEAD 2>/dev/null) \
+AB_BUILD_SHA := $(shell [ -z "$$(git rev-parse --show-prefix 2>/dev/null)" ] \
+                  && sha=$$(git rev-parse --short=12 HEAD 2>/dev/null) \
                   && { git diff --quiet HEAD -- 2>/dev/null || sha=$$sha-dirty; echo $$sha; } \
                   || echo unknown)
 endif
@@ -459,7 +461,8 @@ bench-paper-csv: $(BUILD)/bench_paper
 # CSVs and dispatch_table.txt (use it at once with AB_DISPATCH_TABLE=<path>)
 # under CALIBRATE_DIR, and regenerates CALIBRATE_SOURCE, the built-in table:
 # rebuild to compile it in, and commit it with CALIBRATE_DIR.
-# CALIBRATE_ARGS passes options, e.g. --only qe-paw for one part of the grid.
+# CALIBRATE_ARGS passes options, e.g. --only qe-paw for one part of the grid
+# (which leaves CALIBRATE_SOURCE unchanged).
 CALIBRATE_DIR ?= benchmarks/results/$(shell date +%Y-%m-%d)-$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)-calibrate
 CALIBRATE_SOURCE ?= $(SRC)/dispatch_table.h
 CALIBRATE_ARGS ?=

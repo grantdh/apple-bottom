@@ -424,6 +424,12 @@ int main(int argc, char **argv) {
                         "       [--warmup N>=3] [--runs N>=7] [--gpu-cores N]\n", argv[0]);
         return 2;
     }
+    // A table derived from part of the grid would drop the rows of the rest.
+    if (only && source) {
+        fprintf(stderr, "calibrate: --only %s measures part of the grid; %s is left unchanged\n",
+                only, source);
+        source = NULL;
+    }
 
     // ab_*gemm_blas read these at their first call: every call takes the GPU path.
     setenv("AB_MODE", "gpu", 1);

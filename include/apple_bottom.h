@@ -282,7 +282,8 @@ const char* ab_get_last_dispatch_path(void);
 
 // Library version and the git commit it was built from, "-dirty" if tracked
 // files differed from that commit, e.g. "apple-bottom 1.4.0 (428f1cc1a1d3)";
-// "unknown" in place of the commit when built outside a git checkout. Static string.
+// "unknown" in place of the commit when built outside a git checkout or from a copy
+// vendored inside another repository. Static string.
 const char* ab_build_info(void);
 
 // BLAS-ABI diagnostics (dgemm_, zgemm_, ab_*gemm_, ab_*gemm_blas), read once
