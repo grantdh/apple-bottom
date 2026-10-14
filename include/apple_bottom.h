@@ -25,13 +25,15 @@
 //
 // End-to-end regime — BLAS-ABI (ab_*_blas, raw pointers, no handle persistence; this is
 // the path Fortran host codes hit through dgemm_/zgemm_):
-//   No crossover in the measured grid through N=2048. AMX wins by 15-170x at all
-//   tested shapes, dominated by FP64<->DD conversion at ~140 MB/s effective bandwidth
-//   (root cause localized in commit 07c6a87 via AB_PROFILE=1).
-//   For Fortran host codes calling dgemm_/zgemm_ without handle caching: AB_MODE=cpu
-//   is the right default. Anchor: benchmarks/results/2026-04-24-0bfb147-rect/.
-//   DSYRK/ZHERK end-to-end behavior expected to be similar to GEMM (same conversion
-//   path); not directly measured.
+//   The GPU is >= 1.10x faster than Accelerate only for ZGEMM with both operands
+//   transposed or conjugated, M = N = K >= 4096 (1.11x at 4096, 1.20x at 6144). Every
+//   DGEMM through N=6144 and every Quantum ESPRESSO si64 shape is slower on the GPU
+//   (0.06-0.84x); other ZGEMMs reach at most 1.02x (6144, one operand transposed).
+//   Anchor: benchmarks/results/2026-10-14-52f1880-calibrate/
+//   (`make calibrate`). AB_MODE=auto, the default, follows that measurement
+//   (src/dispatch_table.h): a call goes to the GPU only where the GPU was >= 1.10x
+//   faster. DSYRK/ZHERK end-to-end behavior expected to be similar to GEMM (same
+//   conversion path); not directly measured.
 //
 // API Limits:
 //   - Matrix size: rows * cols <= AB_MAX_MATRIX_ELEMENTS (2^31 - 1) and the DD
@@ -256,7 +258,9 @@ void ab_print_stats(void);
 // Utility
 const char* ab_status_string(ABStatus status);
 
-// BLAS-compatible dispatch-aware entry points (respect AB_MODE + crossover thresholds).
+// BLAS-compatible dispatch-aware entry points: each call runs on the GPU or on
+// Accelerate as AB_MODE and, in the default AB_MODE=auto, the calibrated dispatch
+// table decide (docs/INTEGRATION.md, "Routing").
 // These are the entry points host codes reach via the dgemm_/zgemm_ Fortran symbols;
 // benchmarks use them directly to measure end-to-end dispatch behavior.
 // They create the Metal context on first GPU use, so callers need not call ab_init().

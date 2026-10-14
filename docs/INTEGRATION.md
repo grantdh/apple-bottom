@@ -542,35 +542,12 @@ Should show:
 
 ### Automatic Routing
 
-apple-bottom automatically routes calls based on problem size:
-
-```
-┌─────────────────────┐
-│  CALL ab_zgemm(...) │
-└──────────┬──────────┘
-           │
-           ▼
-   ┌───────────────┐
-   │ fortran_bridge│
-   │ FLOPs check   │
-   └───┬───────┬───┘
-       │       │
-  < 100M FLOPs │ ≥ 100M FLOPs
-       │       │
-       ▼       ▼
-   ┌─────┐ ┌──────┐
-   │BLAS │ │ GPU  │
-   │(CPU)│ │(Metal)│
-   └─────┘ └──────┘
-```
-
-**Threshold:** 100M FLOPs = M × N × K × 8
-
-**Examples:**
-- `M=2048, N=2048, K=2048` → 68.7B FLOPs → **GPU**
-- `M=512, N=512, K=512` → 1.1B FLOPs → **GPU**
-- `M=256, N=256, K=256` → 134M FLOPs → **GPU**
-- `M=128, N=128, K=128` → 16.8M FLOPs → **CPU**
+`dgemm_`, `zgemm_`, `ab_dgemm_` and `ab_zgemm_` forward each call to
+`ab_dgemm_blas` / `ab_zgemm_blas`, which route it. By default
+(`AB_MODE=auto`) a call goes to the GPU only for shapes where the GPU was
+measured at least 1.10× faster than Accelerate end to end; everything else
+runs on Accelerate. `AB_MODE=gpu` sends every call with all dimensions above
+`AB_MIN_GPU_DIM` to the GPU. See [Routing](#routing-ab_modeauto).
 
 ### API Reference
 
@@ -675,19 +652,17 @@ grep '!' si64_gpu.out  # Should show: -2990.44276157 Ry
 QE cegterg.f90:
   CALL ab_zgemm('N', 'N', m, n, k, ...)
            ↓
-fortran_bridge.c: ab_zgemm_()
+fortran_bridge.c: ab_zgemm_() → zgemm_()
   - Dereference pointers
-  - Calculate FLOPs = M × N × K × 8
-  - Check threshold
            ↓
-  ├─ < 100M FLOPs → zgemm_() (OpenBLAS, zero overhead)
-  └─ ≥ 100M FLOPs → ab_zgemm_blas() (GPU)
-           ↓
-blas_wrapper.c:
-  - Convert interleaved → split-complex
-  - Upload to GPU
-  - Dispatch Metal kernel
-  - Download + convert back
+blas_wrapper.c: ab_zgemm_blas()
+  - Route (dispatch.c): AB_MODE, AB_MIN_GPU_DIM, calibrated table
+  ├─ Accelerate → cblas_zgemm
+  └─ GPU:
+      - Convert interleaved → split-complex
+      - Upload to GPU
+      - Dispatch Metal kernel
+      - Download + convert back
            ↓
 apple_bottom.m:
   - DD arithmetic (~10⁻¹⁵ precision)
@@ -804,14 +779,61 @@ call. The native `ABMatrix` and device APIs do not use them.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `AB_MODE` | `auto` | `cpu`: every call on Accelerate. `gpu`: on the GPU unless a dimension is ≤ `AB_MIN_GPU_DIM`. `auto`: by the FLOP thresholds below. |
+| `AB_MODE` | `auto` | `cpu`: every call on Accelerate. `gpu`: on the GPU unless a dimension is ≤ `AB_MIN_GPU_DIM`. `auto` (or any other value): by the calibrated dispatch table, or by a FLOP threshold if one is set (see [Routing](#routing-ab_modeauto)). |
 | `AB_MIN_GPU_DIM` | `32` | Calls with M, N or K ≤ this run on Accelerate in every mode. |
-| `AB_CROSSOVER_FLOPS` | `100000000` | `auto`: FLOPs (2·M·N·K real, 8·M·N·K complex) a call needs for the GPU: every `dgemm_`, `zgemm_`, `ab_*gemm_` and `ab_zgemm_blas` call, and `ab_dgemm_blas` with a dimension < 64. |
-| `AB_CROSSOVER_FLOPS_REAL` | `50000000` | `auto`: the same for `ab_dgemm_blas` calls with every dimension ≥ 64. |
+| `AB_DISPATCH_TABLE` | unset | `auto`: read the dispatch table from this file (the `dispatch_table.txt` that `make calibrate` writes) instead of using the built-in one. A file that cannot be read or parsed is reported on stderr and the built-in table is used. |
+| `AB_CROSSOVER_FLOPS` | unset | `auto`: replaces the table by a FLOP threshold. Calls with at least this many FLOPs (2·M·N·K real, 8·M·N·K complex) go to the GPU: ZGEMM, and DGEMM unless `AB_CROSSOVER_FLOPS_REAL` is set. |
+| `AB_CROSSOVER_FLOPS_REAL` | unset | `auto`: the same for DGEMM only. |
 | `AB_REPORT` | off | `1`: a short summary on stderr at exit (below). |
 | `AB_PROFILE` | off | `1`: the same counts as a detailed table on stderr at exit, with a dimension histogram, plus one line per GPU call and per fallback. |
 | `AB_PROFILE_JSON` | unset | With `AB_PROFILE=1`: also write the profile as JSON to this path at exit. |
 | `AB_PROFILE_THRESHOLD_NS` | `0` | Count only calls that took at least this many ns, in both reports. |
+
+### Routing (AB_MODE=auto)
+
+One function (`src/dispatch.c`) decides where each BLAS-ABI call runs, in
+this order:
+
+1. Invalid arguments and `alpha == 0`: Accelerate (reference BLAS checks and
+   quick return), in every mode.
+2. `AB_MODE=cpu`: Accelerate.
+3. M, N or K ≤ `AB_MIN_GPU_DIM`: Accelerate, in every mode.
+4. `AB_MODE=gpu`: the GPU.
+5. `auto` with `AB_CROSSOVER_FLOPS_REAL` (DGEMM) or `AB_CROSSOVER_FLOPS`
+   (ZGEMM, and DGEMM without `AB_CROSSOVER_FLOPS_REAL`) set: the GPU if the
+   call has at least that many FLOPs.
+6. `auto`: the dispatch table, from the file `AB_DISPATCH_TABLE` names or
+   else the built-in `src/dispatch_table.h`. The GPU if a row of the call's
+   routine and TRANS class has min_M ≤ M, min_N ≤ N and min_K ≤ K, else
+   Accelerate.
+
+The table comes from measurements, not a model. `make calibrate` (about 15
+minutes) times each shape of a grid end to end, through `ab_*gemm_blas`
+with the GPU path forced and through Accelerate `cblas_*gemm` in the same
+process: the Quantum ESPRESSO si64 PAW DGEMMs and Davidson ZGEMMs, and
+square and transposed-square DGEMM and ZGEMM from 256 to 6144, with 3
+warmups, the median of 7 runs, and GPU results checked against cblas. A
+shape becomes a row if the GPU was at least 1.10× faster and no slower
+shape of its routine and TRANS class is at least as large in M, N and K.
+A table file has one row per line; `'T'` also covers `'C'`, and a file
+without rows keeps every `auto` call on Accelerate:
+
+```
+# routine transA transB min_M min_N min_K
+zgemm T T 4096 4096 4096
+```
+
+The built-in table was measured on an M2 Max (38-core GPU, macOS 27.0.1;
+data in `benchmarks/results/2026-10-14-52f1880-calibrate/`). The GPU path
+was at least 1.10× faster only for ZGEMM with both operands transposed or
+conjugated, from 4096 up (1.11× at 4096, 1.20× at 6144): that is the
+table's one row. Every QE si64 shape (0.09–0.76× Accelerate's speed) and
+every DGEMM (at most 0.84×) was slower on the GPU, and the other ZGEMMs
+reached at most 1.02× (6144, one operand transposed). So `auto` keeps QE's
+calls on Accelerate. To
+calibrate another machine, run `make calibrate` and set
+`AB_DISPATCH_TABLE` to the `dispatch_table.txt` it writes, or rebuild:
+it also rewrites `src/dispatch_table.h`.
 
 ### Reading a run report
 

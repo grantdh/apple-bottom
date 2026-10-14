@@ -41,8 +41,8 @@ It does **not** catch:
 
 Counting rule (README, `make ci-local`): a *test* is one `test_precision`
 case, one `TESTS[]` entry, or one BLAS-ABI suite. `make test` runs 128
-(14 precision + 72 correctness + 16 device-API + 26 BLAS-ABI) and
-`make ci-local` adds the 18 chaos tests, for a `TEST_TOTAL` of 146.
+(14 precision + 72 correctness + 16 device-API + 9 routing + 26 BLAS-ABI)
+and `make ci-local` adds the 18 chaos tests, for a `TEST_TOTAL` of 155.
 Device-API `CHECK`s and BLAS-ABI cases are reported on their own
 `CI_REPORT.txt` lines and are not part of the total.
 
@@ -54,7 +54,9 @@ Device-API `CHECK`s and BLAS-ABI cases are reported on their own
     cblas over all trans pairs, non-square and tall-skinny shapes,
     `ld > rows` and buffer offsets (K-P0-2 / H-P0-4), and check that
     the device path is bitwise the host API on the transposed operands
-  - `tests/test_blas_abi.c` — 26 suites (1000 cases), see below
+  - `tests/test_dispatch.c` — 9 tests of the BLAS-ABI routing, no GPU,
+    see below
+  - `tests/test_blas_abi.c` — 26 suites (1007 cases), see below
 
 - **Pending PR-1.5 (still single-main, no ghost-guard):**
   - `tests/test_precision.c` — needs decomposition strategy
@@ -87,6 +89,11 @@ DGEMM shapes that the old 46340-per-dimension limit kept on cblas (see
 `gen_qe`), plus a synthetic ZGEMM with K = 100000, through `dgemm_` /
 `zgemm_` without `ab_init()`; each must run on the GPU. It checks
 robustness only: those DGEMMs are memory-bound and faster on Accelerate.
+`test_auto_mode` runs `AB_MODE=auto` with the built-in calibrated table:
+the QE cegterg-like call and QE si64 PAW and Davidson shapes, which the GPU
+path was measured slower on, must stay on Accelerate through every entry
+point. `test_profile_path` runs `auto` with a test `AB_DISPATCH_TABLE`
+(every `'N','N'` call on the GPU), so the table file is exercised end to end.
 `test_exit_reports` runs `test_blas_abi --report-child` with `AB_REPORT=1`
 and `AB_PROFILE=1`: three GPU and three CPU calls through the six BLAS-ABI
 entry points, then a `fork()`ed child repeats a GPU call, which falls back
@@ -100,6 +107,20 @@ no case (STALE), fails the run: when a fix lands, delete its entries.
 `./build/test_blas_abi -v` lists every case. `make test-symbols` is the
 strict export check: the dylib and the static archive must each export
 exactly `_dgemm_` / `_zgemm_`, and not the `$NEWLAPACK` variants (H-P0-1).
+
+## Routing unit tests
+
+`tests/test_dispatch.c` tests the routing decision of the BLAS-ABI entry
+points (`src/dispatch.c`, see `dispatch.h`), built from that file alone,
+without the library or a GPU. It checks the built-in table
+(`src/dispatch_table.h`, written by `make calibrate`) against the
+`calibrate_summary.csv` it was derived from: every measured shape routes as
+recorded there, and no shape that was not at least 1.10x faster on the GPU
+goes there; each Quantum ESPRESSO si64 shape must have been measured. It
+also checks the precedence of `AB_MODE`, `AB_MIN_GPU_DIM` and
+`AB_CROSSOVER_FLOPS[_REAL]` over the table, the row bounds and TRANS
+classes (`'C'` is `'T'`), and the `AB_DISPATCH_TABLE` format: parsing,
+loading, malformed and missing files.
 
 ## Fortran binding probe
 

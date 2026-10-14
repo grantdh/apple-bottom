@@ -12,109 +12,20 @@
 #include <stdio.h>
 
 #include "blas_trans.h"
+#include "dispatch.h"
 #include "profiling/blas_profiler.h"
 
 // GPU execution time of the command buffers this thread completed since the
 // last call, in seconds; 0 if Metal reported none (apple_bottom.m).
 extern double ab_internal_take_gpu_seconds(void);
 
-// =============================================================================
-// AMX/GPU Heterogeneous Dispatch Heuristic
-// =============================================================================
-// GPU dispatch has ~50μs overhead (command buffer creation, encode, commit).
-// AMX (via Accelerate cblas) has near-zero dispatch overhead.
-// Crossover point: GPU wins when compute time dominates dispatch overhead.
-//
-// Rules:
-// 1. Any dimension ≤ 32: always CPU (AMX) — GPU threadgroups underutilized
-// 2. FLOP threshold: 100M FLOPs for complex (ZGEMM), 50M for real (DGEMM)
-//    Complex has 4x more arithmetic per element, so GPU wins at smaller N.
-// 3. Skinny matrices (any dim < 64): CPU unless total FLOPs are very large
-// =============================================================================
-
-#define DEFAULT_CROSSOVER_FLOPS      100000000ULL  // For complex (ZGEMM)
-#define DEFAULT_CROSSOVER_FLOPS_REAL  50000000ULL  // For real (DGEMM)
-#define DEFAULT_MIN_GPU_DIM           32           // Minimum dimension for GPU dispatch
-
-// Runtime-tunable thresholds (read once from env on first call, then cached).
-//   AB_MIN_GPU_DIM       — dim floor below which GPU is never used (default 32)
-//   AB_CROSSOVER_FLOPS   — FLOP threshold for complex routing (default 1e8)
-//   AB_CROSSOVER_FLOPS_REAL — FLOP threshold for real routing (default 5e7)
-// All negative/zero values are rejected and fall back to defaults.
-static int      _ab_min_dim   = -1;
-static uint64_t _ab_cross_z   = 0;  // 0 = uninitialized
-static uint64_t _ab_cross_d   = 0;
-static int ab_get_min_gpu_dim(void) {
-    if (_ab_min_dim >= 0) return _ab_min_dim;
-    const char* s = getenv("AB_MIN_GPU_DIM");
-    int v = (s && *s) ? atoi(s) : DEFAULT_MIN_GPU_DIM;
-    if (v < 0) v = DEFAULT_MIN_GPU_DIM;
-    _ab_min_dim = v;
-    return _ab_min_dim;
-}
-static uint64_t ab_get_crossover_flops(void) {
-    if (_ab_cross_z) return _ab_cross_z;
-    const char* s = getenv("AB_CROSSOVER_FLOPS");
-    unsigned long long v = (s && *s) ? strtoull(s, NULL, 10) : DEFAULT_CROSSOVER_FLOPS;
-    if (v == 0) v = DEFAULT_CROSSOVER_FLOPS;
-    _ab_cross_z = (uint64_t)v;
-    return _ab_cross_z;
-}
-static uint64_t ab_get_crossover_flops_real(void) {
-    if (_ab_cross_d) return _ab_cross_d;
-    const char* s = getenv("AB_CROSSOVER_FLOPS_REAL");
-    unsigned long long v = (s && *s) ? strtoull(s, NULL, 10) : DEFAULT_CROSSOVER_FLOPS_REAL;
-    if (v == 0) v = DEFAULT_CROSSOVER_FLOPS_REAL;
-    _ab_cross_d = (uint64_t)v;
-    return _ab_cross_d;
-}
-
-// AB_MODE runtime knob: cpu = force AMX/cblas, gpu = force GPU (above AB_MIN_GPU_DIM),
-// auto (default) = current heterogeneous heuristic.
-// Cached on first call; set AB_MODE env var before launching.
-enum { AB_MODE_AUTO = 0, AB_MODE_CPU = 1, AB_MODE_GPU = 2 };
-static int _ab_mode = -1;
-static int ab_get_mode(void) {
-    if (_ab_mode >= 0) return _ab_mode;
-    const char* s = getenv("AB_MODE");
-    if (s && (s[0] == 'c' || s[0] == 'C')) _ab_mode = AB_MODE_CPU;
-    else if (s && (s[0] == 'g' || s[0] == 'G')) _ab_mode = AB_MODE_GPU;
-    else _ab_mode = AB_MODE_AUTO;
-    return _ab_mode;
-}
-
 // Thread-local record of the path the last BLAS-ABI call on this thread
 // actually took, for bench harnesses and the profiler (prof_end). Only the
 // two places that produce C write it: "cpu" in ab_internal_*gemm_cpu, "gpu"
-// once the GPU result is in C (H-P1-2). The routing queries below never
-// touch it. Zero runtime cost.
+// once the GPU result is in C (H-P1-2). Routing (dispatch.c) never touches
+// it. Zero runtime cost.
 static __thread const char *_ab_last_path = "none";
 const char* ab_get_last_dispatch_path(void) { return _ab_last_path; }
-
-bool ab_use_gpu(int m, int n, int k) {
-    int mode = ab_get_mode();
-    if (mode == AB_MODE_CPU) return false;
-    int min_dim = ab_get_min_gpu_dim();
-    // Dims below GPU minimum are never profitable (threadgroups underutilized)
-    if (m <= min_dim || n <= min_dim || k <= min_dim) return false;
-    if (mode == AB_MODE_GPU) return true;
-    // AUTO: heterogeneous heuristic
-    uint64_t flops = 2ULL * m * n * k;
-    return (m < 64 || n < 64 || k < 64)
-           ? (flops >= ab_get_crossover_flops())
-           : (flops >= ab_get_crossover_flops_real());
-}
-
-// Complex version accounts for 4x arithmetic density
-static bool ab_use_gpu_complex(int m, int n, int k) {
-    int mode = ab_get_mode();
-    if (mode == AB_MODE_CPU) return false;
-    int min_dim = ab_get_min_gpu_dim();
-    if (m <= min_dim || n <= min_dim || k <= min_dim) return false;
-    if (mode == AB_MODE_GPU) return true;
-    uint64_t flops = 8ULL * m * n * k;
-    return flops >= ab_get_crossover_flops();
-}
 
 // =============================================================================
 // Host-side helpers shared by the BLAS-ABI entry points
@@ -176,10 +87,10 @@ static bool blas_args_valid(enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
            ldC >= 1 && ldC >= M;
 }
 
-// Whole-call CPU paths (Accelerate cblas, column-major). Used below the GPU
-// threshold, for BLAS quick returns and invalid arguments, for the calls the
-// Fortran bridge routes to the CPU, and as the fallback when any GPU step
-// fails before C is written, so C always gets a correct result.
+// Whole-call CPU paths (Accelerate cblas, column-major). Used for calls the
+// routing keeps on Accelerate, for BLAS quick returns and invalid arguments,
+// and as the fallback when any GPU step fails before C is written, so C
+// always gets a correct result.
 static void ab_internal_dgemm_cpu(enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
                                   int M, int N, int K, double alpha,
                                   const double* A, int ldA, const double* B, int ldB,
@@ -303,10 +214,10 @@ static void zgemm_blas(
     enum CBLAS_TRANSPOSE ta = ab_blas_trans(transA, true);
     enum CBLAS_TRANSPOSE tb = ab_blas_trans(transB, true);
 
-    // AMX path for small matrices (heterogeneous dispatch); also the BLAS
-    // quick return for alpha == 0 (A and B must not be read) and invalid arguments.
+    // Accelerate where the routing says so (dispatch.h); also the BLAS quick
+    // return for alpha == 0 (A and B must not be read) and invalid arguments.
     if (!blas_args_valid(ta, tb, M, N, K, ldA, ldB, ldC) || alpha == 0.0 ||
-        !ab_use_gpu_complex(M, N, K)) {
+        !ab_dispatch_route_gpu('z', transA, transB, M, N, K)) {
         ab_internal_zgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }
@@ -444,10 +355,10 @@ static void dgemm_blas(
     enum CBLAS_TRANSPOSE ta = ab_blas_trans(transA, false);
     enum CBLAS_TRANSPOSE tb = ab_blas_trans(transB, false);
 
-    // AMX path for small matrices (heterogeneous dispatch); also the BLAS
-    // quick return for alpha == 0 (A and B must not be read) and invalid arguments.
+    // Accelerate where the routing says so (dispatch.h); also the BLAS quick
+    // return for alpha == 0 (A and B must not be read) and invalid arguments.
     if (!blas_args_valid(ta, tb, M, N, K, ldA, ldB, ldC) || alpha == 0.0 ||
-        !ab_use_gpu(M, N, K)) {
+        !ab_dispatch_route_gpu('d', transA, transB, M, N, K)) {
         ab_internal_dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }
@@ -531,52 +442,28 @@ cleanup:
 }
 
 // =============================================================================
-// Profiled BLAS-ABI entry points
+// BLAS-ABI entry points
 // =============================================================================
-// ab_internal_*gemm run one call, timed and recorded for AB_PROFILE and
-// AB_REPORT. gpu != 0: the caller's routing allows the GPU, and the
-// ab_*gemm_blas path applies its own; gpu == 0: cblas. Internal, not in
-// apple_bottom.h: the Fortran bridge (fortran_bridge.c) passes its routing
-// decision, ab_*gemm_blas pass 1.
-
-void ab_internal_dgemm(int gpu, char transA, char transB, int M, int N, int K,
-                       double alpha, const double* A, int ldA,
-                       const double* B, int ldB,
-                       double beta, double* C, int ldC) {
-    CallProf prof, *p = prof_begin(&prof);
-    if (gpu)
-        dgemm_blas(p, transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
-    else
-        ab_internal_dgemm_cpu(ab_blas_trans(transA, false), ab_blas_trans(transB, false),
-                              M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
-    prof_end(p, "dgemm", M, N, K);
-}
-
-void ab_internal_zgemm(int gpu, char transA, char transB, int M, int N, int K,
-                       double complex alpha, const double complex* A, int ldA,
-                       const double complex* B, int ldB,
-                       double complex beta, double complex* C, int ldC) {
-    CallProf prof, *p = prof_begin(&prof);
-    if (gpu)
-        zgemm_blas(p, transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
-    else
-        ab_internal_zgemm_cpu(ab_blas_trans(transA, true), ab_blas_trans(transB, true),
-                              M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
-    prof_end(p, "zgemm", M, N, K);
-}
+// Every BLAS-ABI call ends here: dgemm_, zgemm_ and ab_*gemm_ forward to
+// these (fortran_bridge.c). Each call is timed and recorded for AB_PROFILE
+// and AB_REPORT.
 
 void ab_dgemm_blas(char transA, char transB, int M, int N, int K,
                    double alpha, const double* A, int ldA,
                    const double* B, int ldB,
                    double beta, double* C, int ldC) {
-    ab_internal_dgemm(1, transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+    CallProf prof, *p = prof_begin(&prof);
+    dgemm_blas(p, transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+    prof_end(p, "dgemm", M, N, K);
 }
 
 void ab_zgemm_blas(char transA, char transB, int M, int N, int K,
                    double complex alpha, const double complex* A, int ldA,
                    const double complex* B, int ldB,
                    double complex beta, double complex* C, int ldC) {
-    ab_internal_zgemm(1, transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+    CallProf prof, *p = prof_begin(&prof);
+    zgemm_blas(p, transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+    prof_end(p, "zgemm", M, N, K);
 }
 
 // Fortran-callable wrappers (ab_zgemm_, ab_dgemm_) are in fortran_bridge.c

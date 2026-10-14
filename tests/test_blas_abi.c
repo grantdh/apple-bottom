@@ -26,8 +26,8 @@
 //
 // Isolation: every suite runs in a child process (this binary re-executed
 // with --child lo hi), because
-//   - AB_MODE is read once and cached (ab_get_mode in blas_wrapper.c,
-//     fb_get_mode in fortran_bridge.c), so each mode needs a fresh process;
+//   - AB_MODE and the other routing settings are read once and cached
+//     (dispatch.c), so each mode needs a fresh process;
 //   - the gpu-noinit suites must run in processes that never called ab_init();
 //   - known-bad cases crash (SIGSEGV, Metal API-validation SIGABRT), and
 //     illegal-argument cases end the child on purpose (exit(255) from the
@@ -98,7 +98,7 @@ void ab_prof_dump(FILE *out);
 
 #define TOL             1e-11
 #define MAX_CASES       1024
-#define MIN_GPU_DIM     32      // DEFAULT_MIN_GPU_DIM in blas_wrapper.c
+#define MIN_GPU_DIM     32      // AB_DISPATCH_DEFAULT_MIN_DIM in dispatch.h
 #define OLD_MAX_DIM     46340   // v1.3 per-dimension limit, now a per-matrix one
 #define CASE_TIMEOUT_S  120
 
@@ -207,6 +207,7 @@ typedef struct Suite Suite;
 struct Suite {
     const char *label;          // mode segment of BLAS-ABI case names
     const char *ab_mode;        // AB_MODE for the child (NULL: unset)
+    bool test_table;            // AB_DISPATCH_TABLE=<TEST_TABLE in a temporary file>
     bool init;                  // call ab_init() before the first case
     bool debug_layer;           // MTL_DEBUG_LAYER=1 (Metal API validation)
     bool profile;               // AB_PROFILE=1
@@ -282,25 +283,41 @@ static void gen_blas(const Suite *s) {
     add_std(s, 'N', 'N', OLD_MAX_DIM + 1, 48, 48, 0, SC_GEN);       // past the v1.3 limit
 }
 
-// AB_MODE=auto: the QE cegterg call crosses both FLOP thresholds (3.6e8 >= 1e8).
+// AB_MODE=auto with the built-in table (dispatch_table.h, from `make
+// calibrate`). Through every BLAS-ABI entry point, calls the GPU path was
+// measured slower on stay on Accelerate: the QE cegterg-like call of the
+// gen_blas suites, which v1.3's FLOP thresholds sent to the GPU, and QE si64
+// PAW DGEMMs and Davidson ZGEMMs (calibrate_summary.csv; test_dispatch
+// checks the whole table against it).
 static void gen_auto(const Suite *s) {
-    add_blas(s, OP_ZGEMM_BLAS, 'C', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_GPU);
-    add_blas(s, OP_ZGEMM_F,    'C', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_GPU);
-    add_blas(s, OP_ZGEMM_SYM,  'C', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_GPU);
-    add_blas(s, OP_DGEMM_BLAS, 'T', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_GPU);
+    add_blas(s, OP_ZGEMM_BLAS, 'C', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_CPU);
+    add_blas(s, OP_ZGEMM_F,    'C', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_CPU);
+    add_blas(s, OP_ZGEMM_SYM,  'C', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_CPU);
+    add_blas(s, OP_DGEMM_BLAS, 'T', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_CPU);
+    add_blas(s, OP_DGEMM_F,    'T', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_CPU);
+    add_blas(s, OP_DGEMM_SYM,  'T', 'N', 171, 64, 143666, 0, SC_A2B0, ROUTE_CPU);
+    add_blas(s, OP_DGEMM_SYM,  'N', 'T', 143666, 171, 64, 0, SC_A2B0, ROUTE_CPU);
+    add_blas(s, OP_ZGEMM_SYM,  'C', 'N', 1000, 1000, 9000, 0, SC_A1B0, ROUTE_CPU);
+    add_blas(s, OP_ZGEMM_SYM,  'N', 'N', 9000, 500, 1000, 0, SC_A1B0, ROUTE_CPU);
 }
 
-// AB_MODE=auto and AB_PROFILE=1, no ab_init(). The bridge sends all three
-// shapes to ab_*gemm_blas, which keeps the second on cblas: K = 16 is below
-// AB_MIN_GPU_DIM (the audit's 2048x2048x16 call). The last is past the v1.3
-// limit and must run on the GPU. The profiler must report what ran; the fork
-// suite covers a GPU-routed call that falls back.
+// AB_DISPATCH_TABLE of the test_table suites: every 'N','N' call on the GPU.
+static const char TEST_TABLE[] = "# test_blas_abi\ndgemm N N 0 0 0\nzgemm N N 0 0 0\n";
+static char test_table_path[PATH_MAX];
+
+// AB_MODE=auto and AB_PROFILE=1, no ab_init(), with TEST_TABLE. The second
+// shape stays on cblas: K = 16 is below AB_MIN_GPU_DIM (the audit's
+// 2048x2048x16 call). The third is past the v1.3 limit and must run on the
+// GPU; the fourth has no table row for its TRANS class. The profiler must
+// report what ran; the fork suite covers a GPU-routed call that falls back.
 static void gen_profile(const Suite *s) {
     static const Op OPS[] = {OP_DGEMM_SYM, OP_ZGEMM_SYM};
     for (size_t o = 0; o < TEST_REGISTRY_SIZE(OPS); o++) {
         add_blas(s, OPS[o], 'N', 'N', 256, 256, 2048, 0, SC_GEN, ROUTE_GPU);
         add_blas(s, OPS[o], 'N', 'N', 2048, 2048, 16, 0, SC_GEN, ROUTE_CPU);
         add_blas(s, OPS[o], 'N', 'N', OLD_MAX_DIM + 1, 48, 48, 0, SC_GEN, ROUTE_GPU);
+        add_blas(s, OPS[o], op_is_complex(OPS[o]) ? 'C' : 'T', 'N', 256, 256, 2048, 0, SC_GEN,
+                 ROUTE_CPU);
     }
 }
 
@@ -343,7 +360,7 @@ static void gen_fork(const Suite *s) {
 // 'C','N' ZGEMM with K = 100000 is synthetic (cegterg's K is ~9000 per rank).
 // Through dgemm_/zgemm_ in AB_MODE=gpu without ab_init(), every case must
 // run on the GPU. This checks robustness only: these DGEMMs are memory-bound
-// and faster on Accelerate, where AB_MODE=auto should leave them.
+// and faster on Accelerate, where AB_MODE=auto keeps them (gen_auto).
 static void gen_qe(const Suite *s) {
     add_blas(s, OP_DGEMM_SYM, 'T', 'N', 171, 64, 71834, 0, SC_A2B0, ROUTE_GPU);
     add_blas(s, OP_DGEMM_SYM, 'T', 'N', 171, 64, 143666, 3, SC_A2B0, ROUTE_GPU);
@@ -442,8 +459,8 @@ static Suite SUITES[SU_COUNT] = {
     [SU_FORK]    = {.label = "gpu-noinit-fork", .ab_mode = "gpu", .profile = true,
                     .gen = gen_fork},
     [SU_QE]      = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_qe},
-    [SU_PROFILE] = {.label = "auto-profile", .ab_mode = "auto", .profile = true,
-                    .gen = gen_profile},
+    [SU_PROFILE] = {.label = "auto-table-profile", .ab_mode = "auto", .test_table = true,
+                    .profile = true, .gen = gen_profile},
     [SU_REPORT]  = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_report},
     [SU_NATIVE]  = {.init = true, .debug_layer = true, .gen = gen_native},
     [SU_SYMBOLS] = {.gen = gen_symbols},
@@ -1323,12 +1340,13 @@ static void record(const AbiCase *c, bool ok, const char *detail) {
 }
 
 // Child environment: the caller's, minus AB_* and MTL_DEBUG_LAYER, plus the suite's.
-static char **child_env(const Suite *s, char *mode_buf, size_t mode_len) {
+static char **child_env(const Suite *s, char *mode_buf, size_t mode_len,
+                        char *table_buf, size_t table_len) {
     static char debug_layer[] = "MTL_DEBUG_LAYER=1";
     static char profile[] = "AB_PROFILE=1";
     size_t n = 0;
     while (environ[n]) n++;
-    char **env = calloc(n + 4, sizeof *env);
+    char **env = calloc(n + 5, sizeof *env);
     size_t k = 0;
     for (size_t i = 0; i < n; i++)
         if (strncmp(environ[i], "AB_", 3) && strncmp(environ[i], "MTL_DEBUG_LAYER=", 16))
@@ -1336,6 +1354,10 @@ static char **child_env(const Suite *s, char *mode_buf, size_t mode_len) {
     if (s->ab_mode) {
         snprintf(mode_buf, mode_len, "AB_MODE=%s", s->ab_mode);
         env[k++] = mode_buf;
+    }
+    if (s->test_table) {
+        snprintf(table_buf, table_len, "AB_DISPATCH_TABLE=%s", test_table_path);
+        env[k++] = table_buf;
     }
     if (s->debug_layer) env[k++] = debug_layer;
     if (s->profile) env[k++] = profile;
@@ -1345,7 +1367,7 @@ static char **child_env(const Suite *s, char *mode_buf, size_t mode_len) {
 // Runs cases [lo, s->hi) in one child and records every reported case.
 // Returns the first unreported index; *why describes an abnormal exit.
 static int run_child(const Suite *s, int lo, char *why, size_t why_len) {
-    char mode_buf[32], lo_arg[16], hi_arg[16], child_flag[] = "--child";
+    char mode_buf[32], table_buf[PATH_MAX + 32], lo_arg[16], hi_arg[16], child_flag[] = "--child";
     char *argv[] = {self_path, child_flag, lo_arg, hi_arg, NULL};
     int next = lo;
     pid_t pid;
@@ -1353,7 +1375,7 @@ static int run_child(const Suite *s, int lo, char *why, size_t why_len) {
     why[0] = '\0';
     snprintf(lo_arg, sizeof lo_arg, "%d", lo);
     snprintf(hi_arg, sizeof hi_arg, "%d", s->hi);
-    char **env = child_env(s, mode_buf, sizeof mode_buf);
+    char **env = child_env(s, mode_buf, sizeof mode_buf, table_buf, sizeof table_buf);
     FILE *in = spawn_piped(argv, env, &pid, why, why_len);
     free(env);
     if (!in) return lo;
@@ -1510,6 +1532,16 @@ int main(int argc, char **argv) {
         fprintf(stderr, "test_blas_abi: cannot resolve executable path\n");
         return 1;
     }
+    const char *tmp = getenv("TMPDIR");
+    snprintf(test_table_path, sizeof test_table_path, "%s/test_blas_abi.XXXXXX",
+             tmp && *tmp ? tmp : "/tmp");
+    int table_fd = mkstemp(test_table_path);
+    if (table_fd < 0 || write(table_fd, TEST_TABLE, sizeof TEST_TABLE - 1) !=
+                            (ssize_t)(sizeof TEST_TABLE - 1)) {
+        fprintf(stderr, "test_blas_abi: cannot write %s: %s\n", test_table_path, strerror(errno));
+        return 1;
+    }
+    close(table_fd);
 
     printf("╔══════════════════════════════════════════════════════════════════╗\n");
     printf("║  apple-bottom BLAS-ABI Conformance (reference: Accelerate cblas) ║\n");
@@ -1529,6 +1561,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    unlink(test_table_path);
     int stale = 0;
     printf("\nXFAIL table (audit ID, cases matched, pattern):\n");
     for (size_t i = 0; i < TEST_REGISTRY_SIZE(XFAIL); i++) {

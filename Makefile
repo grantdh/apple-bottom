@@ -81,11 +81,15 @@ $(BUILD):
 $(BUILD)/apple_bottom.o: $(SRC)/apple_bottom.m $(INCLUDE)/apple_bottom.h | $(BUILD)
 	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $@
 
-$(BUILD)/blas_wrapper.o: $(SRC)/blas_wrapper.c $(SRC)/blas_trans.h $(INCLUDE)/apple_bottom.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
+$(BUILD)/blas_wrapper.o: $(SRC)/blas_wrapper.c $(SRC)/blas_trans.h $(SRC)/dispatch.h $(INCLUDE)/apple_bottom.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $@
 
-$(BUILD)/fortran_bridge.o: $(SRC)/fortran_bridge.c | $(BUILD)
+$(BUILD)/fortran_bridge.o: $(SRC)/fortran_bridge.c $(INCLUDE)/apple_bottom.h | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c $(SRC)/fortran_bridge.c -o $@
+
+# BLAS-ABI routing; dispatch_table.h is the built-in table `make calibrate` writes.
+$(BUILD)/dispatch.o: $(SRC)/dispatch.c $(SRC)/dispatch.h $(SRC)/dispatch_table.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $(SRC)/dispatch.c -o $@
 
 $(BUILD)/build_sha.stamp: FORCE | $(BUILD)
 	@echo '$(AB_BUILD_SHA)' | cmp -s - $@ || echo '$(AB_BUILD_SHA)' > $@
@@ -98,7 +102,7 @@ $(BUILD)/device_api.o: $(SRC)/device_api.m $(INCLUDE)/apple_bottom.h $(INCLUDE)/
 
 LIB_OBJS = $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o \
            $(BUILD)/fortran_bridge.o $(BUILD)/blas_profiler.o \
-           $(BUILD)/device_api.o
+           $(BUILD)/device_api.o $(BUILD)/dispatch.o
 
 $(BUILD)/libapplebottom.a: $(LIB_OBJS)
 	ar rcs $@ $^
@@ -195,7 +199,13 @@ $(BUILD)/test_convergence: tests/verification/test_convergence.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
-test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_blas_abi test-ghost-detection test-symbols test-fortran
+# Routing unit tests: dispatch.c alone, no library or GPU. They check the
+# built-in table against its calibration data, found under AB_SOURCE_ROOT.
+$(BUILD)/test_dispatch: tests/test_dispatch.c $(BUILD)/dispatch.o $(SRC)/dispatch.h $(SRC)/dispatch_table.h | $(BUILD)
+	$(CC) $(CFLAGS) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' $< $(BUILD)/dispatch.o -o $@
+	@echo "Built: $@"
+
+test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "Running Tests"
@@ -203,6 +213,7 @@ test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api
 	./$(BUILD)/test_precision
 	./$(BUILD)/test_correctness
 	./$(BUILD)/test_device_api
+	./$(BUILD)/test_dispatch
 	./$(BUILD)/test_blas_abi
 	@echo ""
 	@echo "✓ All tests passed!"
@@ -425,6 +436,31 @@ bench-paper: $(BUILD)/bench_paper
 bench-paper-csv: $(BUILD)/bench_paper
 	./$(BUILD)/bench_paper --csv
 
+# AB_MODE=auto calibration (about 15 minutes; run on an idle machine on AC
+# power). benchmarks/calibrate.c times every shape of its grid end to end
+# through ab_*gemm_blas with the GPU path forced and through Accelerate, in
+# one process, and derives the table that sends a BLAS-ABI call to the GPU
+# only where the GPU measured >= 1.10x faster. It writes the raw and summary
+# CSVs and dispatch_table.txt (use it at once with AB_DISPATCH_TABLE=<path>)
+# under CALIBRATE_DIR, and regenerates CALIBRATE_SOURCE, the built-in table:
+# rebuild to compile it in, and commit it with CALIBRATE_DIR.
+# CALIBRATE_ARGS passes options, e.g. --only qe-paw for one part of the grid.
+CALIBRATE_DIR ?= benchmarks/results/$(shell date +%Y-%m-%d)-$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)-calibrate
+CALIBRATE_SOURCE ?= $(SRC)/dispatch_table.h
+CALIBRATE_ARGS ?=
+GPU_CORES = $(shell ioreg -rc AGXAccelerator -d1 2>/dev/null | sed -nE 's/.*"gpu-core-count" = ([0-9]+).*/\1/p' | head -1)
+
+$(BUILD)/calibrate: benchmarks/calibrate.c $(SRC)/dispatch.h lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) '-DAB_CAL_SDK="$(shell xcrun --show-sdk-version 2>/dev/null)"' $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
+.PHONY: calibrate
+calibrate: $(BUILD)/calibrate
+	mkdir -p $(CALIBRATE_DIR)
+	caffeinate -is ./$(BUILD)/calibrate --out $(CALIBRATE_DIR) --source $(CALIBRATE_SOURCE) \
+	    --gpu-cores "$(GPU_CORES)" $(CALIBRATE_ARGS)
+	@echo "Use it now: export AB_DISPATCH_TABLE=$(abspath $(CALIBRATE_DIR))/dispatch_table.txt"
+
 # =============================================================================
 # CI Targets
 # =============================================================================
@@ -487,12 +523,18 @@ build-check: | $(BUILD)
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c $(SRC)/fortran_bridge.c -o $(BUILD)/fortran_bridge.o
 	@echo "Compiling blas_profiler.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c $(SRC)/profiling/blas_profiler.c -o $(BUILD)/blas_profiler.o
+	@echo "Compiling dispatch.c..."
+	@$(CC) $(CFLAGS) -c $(SRC)/dispatch.c -o $(BUILD)/dispatch.o
 	@echo "Compiling test_correctness.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_correctness.c -o $(BUILD)/test_correctness.o
 	@echo "Compiling test_precision.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_precision.c -o $(BUILD)/test_precision.o
 	@echo "Compiling test_blas_abi.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_blas_abi.c -o $(BUILD)/test_blas_abi.o
+	@echo "Compiling test_dispatch.c..."
+	@$(CC) $(CFLAGS) -I$(SRC) -c tests/test_dispatch.c -o $(BUILD)/test_dispatch.o
+	@echo "Compiling calibrate.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c benchmarks/calibrate.c -o $(BUILD)/calibrate.o
 	@echo "Compiling test_chaos.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_chaos.c -o $(BUILD)/test_chaos.o
 	@echo "Compiling test_convergence.c..."
@@ -506,11 +548,11 @@ build-check: | $(BUILD)
 #
 # Counting rule (also README.md, tests/README.md): TEST_TOTAL counts tests.
 # A test is one test_precision case, one TESTS[] registry entry of
-# test_correctness / test_chaos / test_device_api, or one test_blas_abi
-# suite. Device-API CHECKs and BLAS-ABI cases are reported on their own
-# lines and are not part of TEST_TOTAL. The report is written only after
-# every binary passed, so TEST_PASSED = TEST_TOTAL and TEST_FAILED = 0.
-ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_blas_abi $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
+# test_correctness / test_chaos / test_device_api / test_dispatch, or one
+# test_blas_abi suite. Device-API CHECKs and BLAS-ABI cases are reported on
+# their own lines and are not part of TEST_TOTAL. The report is written only
+# after every binary passed, so TEST_PASSED = TEST_TOTAL and TEST_FAILED = 0.
+ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "CI Local Validation"
@@ -521,6 +563,7 @@ ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos 
 	@./$(BUILD)/test_correctness > $(BUILD)/test_correctness.log 2>&1 && echo "✓ test_correctness: PASS" || (echo "✗ test_correctness: FAIL" && cat $(BUILD)/test_correctness.log && exit 1)
 	@./$(BUILD)/test_chaos > $(BUILD)/test_chaos.log 2>&1 && echo "✓ test_chaos: PASS" || (echo "✗ test_chaos: FAIL" && cat $(BUILD)/test_chaos.log && exit 1)
 	@./$(BUILD)/test_device_api > $(BUILD)/test_device_api.log 2>&1 && echo "✓ test_device_api: PASS" || (echo "✗ test_device_api: FAIL" && cat $(BUILD)/test_device_api.log && exit 1)
+	@./$(BUILD)/test_dispatch > $(BUILD)/test_dispatch.log 2>&1 && echo "✓ test_dispatch: PASS" || (echo "✗ test_dispatch: FAIL" && cat $(BUILD)/test_dispatch.log && exit 1)
 	@./$(BUILD)/test_blas_abi > $(BUILD)/test_blas_abi.log 2>&1 && echo "✓ test_blas_abi: PASS" || (echo "✗ test_blas_abi: FAIL" && cat $(BUILD)/test_blas_abi.log && exit 1)
 	@echo ""
 	@echo "Running convergence study (V-2)..."
@@ -534,11 +577,12 @@ ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos 
 		CHAOS=$$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_chaos.log); \
 		DEVICE_API=$$(sed -nE "s/^Summary: ([0-9]+) test.*/\1/p" $(BUILD)/test_device_api.log); \
 		DEVICE_API_CHECKS=$$(sed -nE "s/^Summary: .* ([0-9]+) CHECK.*/\1/p" $(BUILD)/test_device_api.log); \
+		DISPATCH=$$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_dispatch.log); \
 		BLAS_ABI=$$(grep -cE "^\[[0-9]+/[0-9]+\] " $(BUILD)/test_blas_abi.log); \
-		for n in "$$PRECISION" "$$CORRECTNESS" "$$CHAOS" "$$DEVICE_API" "$$DEVICE_API_CHECKS" "$$BLAS_ABI"; do \
+		for n in "$$PRECISION" "$$CORRECTNESS" "$$CHAOS" "$$DEVICE_API" "$$DEVICE_API_CHECKS" "$$DISPATCH" "$$BLAS_ABI"; do \
 			case "$$n" in ""|*[!0-9]*|0) echo "✗ CI report: could not read a test count from the logs"; exit 1;; esac; \
 		done; \
-		TOTAL=$$((PRECISION + CORRECTNESS + CHAOS + DEVICE_API + BLAS_ABI)); \
+		TOTAL=$$((PRECISION + CORRECTNESS + CHAOS + DEVICE_API + DISPATCH + BLAS_ABI)); \
 		echo "GIT_SHA: $$(git rev-parse HEAD)" > $(BUILD)/CI_REPORT.txt; \
 		echo "GIT_BRANCH: $$(git rev-parse --abbrev-ref HEAD)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "AB_BUILD_SHA: $(AB_BUILD_SHA)" >> $(BUILD)/CI_REPORT.txt; \
@@ -548,6 +592,7 @@ ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos 
 		echo "TEST_CORRECTNESS: PASS ($$CORRECTNESS tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_CHAOS: PASS ($$CHAOS tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_DEVICE_API: PASS ($$DEVICE_API tests)" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_DISPATCH: PASS ($$DISPATCH tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_BLAS_ABI: PASS ($$BLAS_ABI tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_CONVERGENCE: PASS" >> $(BUILD)/CI_REPORT.txt; \
 		echo "test-ghost-detection: PASS" >> $(BUILD)/CI_REPORT.txt; \

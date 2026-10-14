@@ -17,6 +17,21 @@ _TBD following Si64 benchmark campaign._
   command-buffer GPU time, download, epilogue, other) and fallbacks to cblas
   by reason (`no_device`, `too_large`, `gpu_failed`). See the environment
   variable table in `docs/INTEGRATION.md`.
+- **`make calibrate`** measures the BLAS-ABI GPU path against Accelerate and
+  derives the `AB_MODE=auto` dispatch table from the result.
+  `benchmarks/calibrate.c` times each shape of its grid end to end, through
+  `ab_*gemm_blas` with the GPU path forced and through Accelerate
+  `cblas_*gemm` in the same process, under `caffeinate -is` (3 warmups,
+  median of 7, GPU results checked against cblas). The grid holds the
+  Quantum ESPRESSO si64 PAW DGEMMs and Davidson ZGEMMs and square and
+  transposed-square DGEMM/ZGEMM from 256 to 6144. It writes the raw and
+  summary CSVs and `dispatch_table.txt` under
+  `benchmarks/results/<date>-<sha>-calibrate/` and regenerates the built-in
+  table, `src/dispatch_table.h`, whose header records the machine, OS, SDK,
+  library commit and date.
+- **`AB_DISPATCH_TABLE=<path>`** makes `AB_MODE=auto` use a table file, such
+  as the `dispatch_table.txt` of a calibration on another machine, instead
+  of the built-in table.
 
 ### Fixed
 - **Morton remap dropped output tiles on non-square power-of-two grids**
@@ -42,7 +57,7 @@ _TBD following Si64 benchmark campaign._
 - **Dispatch path and AB_PROFILE reported the routing decision, not the path
   taken** (H-P2-8). `ab_get_last_dispatch_path()` says `"gpu"` only
   once the GPU result is in C and `"cpu"` for every cblas run, including
-  calls the Fortran bridge keeps on the CPU; `ab_use_gpu()` no longer sets
+  calls the Fortran bridge keeps on the CPU; the routing no longer sets
   it. The AB_PROFILE table counts a `dgemm_`/`zgemm_` call as GPU only if it
   ran there, and a GPU failure that falls back to cblas prints its reason
   under AB_PROFILE.
@@ -148,6 +163,29 @@ _TBD following Si64 benchmark campaign._
   `MAX_DIMENSION` is now 2³¹ − 1.
 
 ### Changed
+- **`AB_MODE=auto`, the default, is calibrated from measured end-to-end
+  times.** A BLAS-ABI call (`dgemm_`, `zgemm_`, `ab_*gemm_`,
+  `ab_*gemm_blas`) now goes to the GPU only if a row of the dispatch table
+  covers it: a shape the GPU was measured at least 1.10× faster on, with no
+  slower shape of the same routine and TRANS class at least as large in M,
+  N and K. Before, fixed FLOP thresholds (10⁸ complex, 5·10⁷ real, applied
+  differently by the Fortran bridge and `ab_*gemm_blas`) sent most large
+  calls to the GPU, including Quantum ESPRESSO's Davidson ZGEMMs (si64 with
+  the GPU forced: ZGEMM time 28.2 → 69.3 s per rank). On the M2 Max calibration
+  (`benchmarks/results/2026-10-14-52f1880-calibrate/`) the GPU was at least
+  1.10× faster only for ZGEMM with both operands transposed or conjugated
+  and M, N, K ≥ 4096 (1.11× at 4096, 1.20× at 6144), the table's one row.
+  Every QE si64 shape (0.09–0.76× Accelerate's speed) and every DGEMM up to
+  6144 (at most 0.84×) is slower on the GPU and now stays on Accelerate.
+  One module (`src/dispatch.c`) routes every entry point; precedence is in
+  `docs/INTEGRATION.md`. `AB_MODE=cpu`/`gpu`, `AB_MIN_GPU_DIM` and the
+  native `ABMatrix` and device APIs are unchanged.
+- **`AB_CROSSOVER_FLOPS` and `AB_CROSSOVER_FLOPS_REAL` now replace the
+  table** and are unset by default. When set, `auto` sends a call with at
+  least that many FLOPs to the GPU: `AB_CROSSOVER_FLOPS` for ZGEMM, and for
+  DGEMM unless `AB_CROSSOVER_FLOPS_REAL` is set. Before, they adjusted
+  default thresholds, `AB_CROSSOVER_FLOPS_REAL` only for `ab_dgemm_blas`
+  calls with every dimension ≥ 64.
 - **The AB_PROFILE table separates call share from time share.** Its
   `gpu_pct` column was the share of calls that ran on the GPU, not of time,
   and was read as a time share. It is replaced by `gpu_calls`, `gpu_calls%`,
@@ -176,7 +214,7 @@ _TBD following Si64 benchmark campaign._
   Frobenius error exceeds √N·u². A build without safe math now fails both.
 - **`make ci-local` runs `test_device_api` and counts tests one way**
   (RH-P1-1). `TEST_TOTAL` counts tests (precision cases, `TESTS[]` entries
-  and BLAS-ABI suites: 146), with device-API `CHECK`s and BLAS-ABI cases on
+  and BLAS-ABI suites: 155), with device-API `CHECK`s and BLAS-ABI cases on
   their own lines. `test_convergence` takes its CSV path as `argv[1]`, so
   `make ci-local BUILD=...` reports the convergence data instead of
   `missing`.

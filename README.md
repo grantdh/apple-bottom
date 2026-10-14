@@ -18,7 +18,7 @@ Apple Silicon GPUs have no native FP64. `apple-bottom` fixes that — double-flo
 ```bash
 git clone https://github.com/grantdh/apple-bottom.git
 cd apple-bottom
-make && make test   # 128/128 tests pass
+make && make test   # 137/137 tests pass
 ```
 
 ## Performance
@@ -97,7 +97,7 @@ EXTERNAL :: ab_zgemm
 CALL ab_zgemm('N', 'C', m, n, k, alpha, A, lda, B, ldb, beta, C, ldc)
 ```
 
-The Fortran bridge auto-routes small calls (< 100M FLOPs) to OpenBLAS and large calls to GPU. See [Integration Guide](docs/INTEGRATION.md) for C, Python, and Fortran setup.
+By default (`AB_MODE=auto`) each BLAS-ABI call runs on the GPU only for shapes where the GPU was measured at least 1.10× faster than Accelerate end to end (`make calibrate`); everything else runs on Accelerate. On the M2 Max that is only ZGEMM with both operands transposed and all dimensions ≥ 4096. `AB_MODE=gpu` forces the GPU. See the [Integration Guide](docs/INTEGRATION.md#routing-ab_modeauto) for C, Python, and Fortran setup and routing.
 
 ## Architecture
 
@@ -124,7 +124,7 @@ Production-validated following NASA-STD-7009A methodology:
 
 - **V-2 Convergence Study**: Frobenius error 6.5×10⁻¹⁵ to 5.1×10⁻¹⁴ for N ∈ {64, 128, ..., 4096}
 - **VAL-1 Production**: Quantum ESPRESSO Si64 DFT — 11 decimal place agreement (-2990.44276157 Ry)
-- **128/128 tests** in `make test`: 14 precision + 72 correctness + 16 device-API tests + 26 BLAS-ABI suites; `make ci-local` adds 18 adversarial tests (146). A test is one precision case, registry entry or BLAS-ABI suite; the 152 device-API `CHECK`s and 1000 BLAS-ABI cases are reported separately (see [tests/README.md](tests/README.md#coverage-status))
+- **137/137 tests** in `make test`: 14 precision + 72 correctness + 16 device-API + 9 routing tests + 26 BLAS-ABI suites; `make ci-local` adds 18 adversarial tests (155). A test is one precision case, registry entry or BLAS-ABI suite; the 152 device-API `CHECK`s and 1007 BLAS-ABI cases are reported separately (see [tests/README.md](tests/README.md#coverage-status))
 
 Documentation: [V&V Report](docs/vv/VV_REPORT.md) · [Precision Envelope](docs/vv/PRECISION_ENVELOPE.md) · [QE Validation](tests/validation/VAL001_QE_Si64.md)
 
@@ -167,7 +167,7 @@ apple-bottom/
 ├── src/fortran_bridge.c        # Fortran ABI bridge for QE/VASP/CP2K
 ├── include/apple_bottom.h      # Public API header (v1.3.1-dev)
 ├── include/apple_bottom_device.h  # Device-buffer API header
-├── tests/                      # 127 tests (precision, correctness, device-API, BLAS-ABI)
+├── tests/                      # 137 tests (precision, correctness, device-API, routing, BLAS-ABI)
 ├── benchmarks/                 # DGEMM, ZGEMM, DSYRK, pool, async benchmarks
 ├── examples/01_basic_dgemm/    # Runnable example
 └── docs/                       # Integration guide + V&V documentation
