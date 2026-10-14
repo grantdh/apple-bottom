@@ -143,8 +143,8 @@ int main(int argc, char** argv) {
            handle_ms, handle_ms / ITERATIONS);
     printf("Delta:               %+8.1f ms (%+.1f ms/call)\n",
            dev_ms - handle_ms, (dev_ms - handle_ms) / ITERATIONS);
-    printf("\nNote: Week-2 device-buffer path still does FP64<->DD conversion\n");
-    printf("per call. Month-2 DD-native storage will eliminate this overhead.\n");
+    printf("\nNote: the device-buffer path converts FP64<->DD on every call;\n");
+    printf("DD-native device storage, which would remove that, is not implemented.\n");
 
     free(A_cplx); free(B_cplx); free(C_cplx);
     free(Ar); free(Ai); free(Br); free(Bi); free(Cr); free(Ci);
