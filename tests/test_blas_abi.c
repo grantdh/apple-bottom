@@ -17,7 +17,7 @@
 // A and B are bitwise unchanged, C outside its M x N block is bitwise
 // unchanged, ab_get_last_dispatch_path() names what computed C ("gpu" if the
 // GEMM counters in ab_get_stats() advanced, "cpu" otherwise), under
-// AB_PROFILE the profiler counts dgemm_/zgemm_ calls the same way, and the
+// AB_PROFILE the profiler counts the calls the same way, and the
 // case's routing expectation holds (ROUTE_GPU: the counters advanced;
 // ROUTE_CPU: they did not). Leading-dimension padding is filled with NaN so
 // that reading it shows up in the result. An illegal-argument case passes
@@ -35,6 +35,10 @@
 //     parent restarts the child at the next case.
 // posix_spawn is used rather than a bare fork(): Metal cannot reach
 // MTLCompilerService from a forked child that did not exec.
+//
+// The report suite checks the AB_REPORT and AB_PROFILE exit reports of a
+// grandchild process (this binary with --report-child) that makes GPU and
+// CPU calls and forks.
 //
 // Known failures live in the XFAIL table below, tagged with audit IDs. An
 // XFAIL does not fail the run; an XFAIL case that passes (XPASS), an XFAIL
@@ -108,6 +112,7 @@ typedef enum {
     OP_DGEMM_SYM,  OP_ZGEMM_SYM,        // plain dgemm_ / zgemm_
     OP_DGEMM, OP_DGEMM_SCALED, OP_ZGEMM, OP_BATCH_DGEMM, OP_DGEMM_ASYNC,
     OP_SYMBOL,                          // which image a symbol binds to
+    OP_REPORT,                          // AB_REPORT / AB_PROFILE exit reports
 } Op;
 
 static const char *const OP_NAME[] = {
@@ -117,6 +122,7 @@ static const char *const OP_NAME[] = {
     [OP_DGEMM] = "ab_dgemm",           [OP_DGEMM_SCALED] = "ab_dgemm_scaled",
     [OP_ZGEMM] = "ab_zgemm",           [OP_BATCH_DGEMM] = "ab_batch_dgemm",
     [OP_DGEMM_ASYNC] = "ab_dgemm_async", [OP_SYMBOL] = "symbol",
+    [OP_REPORT] = "report",
 };
 
 typedef enum { ROUTE_ANY, ROUTE_GPU, ROUTE_CPU } Route;
@@ -378,6 +384,13 @@ static void add_symbol(const char *sym, const void *addr) {
     c->sym = addr;
 }
 
+static void gen_report(const Suite *s) {
+    (void)s;
+    AbiCase *c = new_case();
+    snprintf(c->name, sizeof c->name, "report/gpu-noinit/exit-reports");
+    c->op = OP_REPORT;
+}
+
 // The Fortran symbols must bind to libapplebottom; ab_*gemm_ are controls.
 static void gen_symbols(const Suite *s) {
     (void)s;
@@ -394,7 +407,7 @@ enum {
     SU_AUTO,
     SU_DGEMM_BLAS_NOINIT, SU_ZGEMM_BLAS_NOINIT, SU_DGEMM_F_NOINIT, SU_ZGEMM_F_NOINIT,
     SU_DGEMM_SYM_NOINIT, SU_ZGEMM_SYM_NOINIT, SU_ILLEGAL, SU_FORK, SU_QE,
-    SU_PROFILE, SU_NATIVE, SU_SYMBOLS, SU_COUNT
+    SU_PROFILE, SU_REPORT, SU_NATIVE, SU_SYMBOLS, SU_COUNT
 };
 
 #define BLAS_SUITE(entry, mode) \
@@ -431,6 +444,7 @@ static Suite SUITES[SU_COUNT] = {
     [SU_QE]      = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_qe},
     [SU_PROFILE] = {.label = "auto-profile", .ab_mode = "auto", .profile = true,
                     .gen = gen_profile},
+    [SU_REPORT]  = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_report},
     [SU_NATIVE]  = {.init = true, .debug_layer = true, .gen = gen_native},
     [SU_SYMBOLS] = {.gen = gen_symbols},
 };
@@ -577,16 +591,17 @@ static uint64_t gpu_gemm_count(void) {
     return s.dgemm_count + s.zgemm_count;
 }
 
-// Under AB_PROFILE, after every dgemm_/zgemm_ call (bridge entry points;
-// ab_*gemm_blas are not profiled) the profiler row for the routine must hold
-// all calls so far, with a GPU share equal to the calls that ran on the GPU.
+// Under AB_PROFILE, after every BLAS-ABI call the profiler row for the
+// routine must hold all calls so far, gpu_calls the calls that ran on the
+// GPU, and gpu_calls% their share. A fork()ed child starts from zero
+// (run_fork resets these).
+static unsigned long long prof_calls[2], prof_gpu[2];
+
 static bool profile_ok(const AbiCase *c, uint64_t gpu_gemms) {
-    static unsigned long long calls[2], gpu[2];
-    if (!getenv("AB_PROFILE") || c->op == OP_DGEMM_BLAS || c->op == OP_ZGEMM_BLAS)
-        return true;
+    if (!getenv("AB_PROFILE")) return true;
     const int z = op_is_complex(c->op);
-    calls[z]++;
-    gpu[z] += gpu_gemms > 0;
+    prof_calls[z]++;
+    prof_gpu[z] += gpu_gemms > 0;
 
     char *table = NULL;
     size_t len = 0;
@@ -597,11 +612,13 @@ static bool profile_ok(const AbiCase *c, uint64_t gpu_gemms) {
     char *save = NULL;
     for (char *line = strtok_r(table, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
         char name[32];
-        unsigned long long n;
-        double ms, pct;
-        if (sscanf(line, "%31s %llu %lf %lf%%", name, &n, &ms, &pct) == 4 &&
+        unsigned long long n, g;
+        double pct;
+        int end = 0;
+        if (sscanf(line, "%31s %llu %llu %lf%%%n", name, &n, &g, &pct, &end) == 4 && end &&
             !strcmp(name, z ? "zgemm" : "dgemm"))
-            ok = n == calls[z] && fabs(pct - 100.0 * gpu[z] / calls[z]) < 0.051;
+            ok = n == prof_calls[z] && g == prof_gpu[z] &&
+                 fabs(pct - 100.0 * g / n) < 0.051;
     }
     free(table);
     return ok;
@@ -626,7 +643,7 @@ static bool blas_verdict(const AbiCase *c, double err, bool inputs_ok, bool outs
              inputs_ok ? "" : " [A or B modified]",
              outside_ok ? "" : " [C outside MxN modified]",
              path_ok ? "" : " [path record does not match]",
-             prof_ok ? "" : " [AB_PROFILE GPU share does not match]",
+             prof_ok ? "" : " [AB_PROFILE counts do not match]",
              routed ? "" : c->route == ROUTE_GPU ? " [GPU path not taken]"
                                                  : " [GPU used, expected cblas]");
     return err <= TOL && inputs_ok && outside_ok && path_ok && prof_ok && routed;
@@ -789,6 +806,8 @@ static bool run_fork(const AbiCase *c, char *detail, size_t n) {
     if (pid == 0) {
         AbiCase in_child = *c;
         in_child.route = ROUTE_CPU;
+        memset(prof_calls, 0, sizeof prof_calls);
+        memset(prof_gpu, 0, sizeof prof_gpu);
         _exit(run(&in_child, after, page) ? 0 : 1);
     }
     int status = 0;
@@ -932,6 +951,298 @@ static bool run_symbol(const AbiCase *c, char *detail, size_t n) {
     return strstr(base, "libapplebottom") != NULL;
 }
 
+// =============================================================================
+// Exit reports (AB_REPORT, AB_PROFILE)
+// =============================================================================
+
+// The calls the --report-child process makes, in AB_MODE=gpu without
+// ab_init(): three run on the GPU and three stay on cblas by routing (a
+// dimension <= AB_MIN_GPU_DIM, or alpha == 0). It then fork()s; the child
+// repeats the first call, which falls back to cblas (no Metal context after
+// fork()), and ends with exit() so that its exit reports run.
+static const struct { Op op; int M, N, K; double alpha; bool gpu; } REPORT_CALLS[] = {
+    {OP_DGEMM_SYM,  96, 80, 72, 1.25, true},
+    {OP_DGEMM_BLAS, 96, 80, 72, 1.25, true},
+    {OP_DGEMM_F,    96, 80, 16, 1.25, false},
+    {OP_ZGEMM_SYM,  96, 80, 72, 1.25, true},
+    {OP_ZGEMM_F,    64, 48, 16, 1.25, false},
+    {OP_ZGEMM_BLAS, 96, 80, 72, 0.0,  false},
+};
+
+// One 'N','N' call with tight leading dimensions; M, N, K <= 96, 80, 72.
+static void report_call(Op op, int M, int N, int K, double alpha) {
+    static double complex A[96 * 80], B[96 * 80], C[96 * 80];
+    const char t = 'N';
+    const double beta = 0.0;
+    const double complex za = alpha, zb = 0.0;
+    double *a = (double *)A, *b = (double *)B, *c = (double *)C;
+    for (size_t i = 0; i < 96 * 80; i++) A[i] = B[i] = CMPLX(1.0 / (i + 1), 0.5);
+    switch (op) {
+    case OP_DGEMM_SYM:  fortran_dgemm(&t, &t, &M, &N, &K, &alpha, a, &M, b, &K, &beta, c, &M); break;
+    case OP_DGEMM_F:    ab_dgemm_(&t, &t, &M, &N, &K, &alpha, a, &M, b, &K, &beta, c, &M); break;
+    case OP_DGEMM_BLAS: ab_dgemm_blas(t, t, M, N, K, alpha, a, M, b, K, beta, c, M); break;
+    case OP_ZGEMM_SYM:  fortran_zgemm(&t, &t, &M, &N, &K, &za, A, &M, B, &K, &zb, C, &M); break;
+    case OP_ZGEMM_F:    ab_zgemm_(&t, &t, &M, &N, &K, &za, A, &M, B, &K, &zb, C, &M); break;
+    default:            ab_zgemm_blas(t, t, M, N, K, za, A, M, B, K, zb, C, M); break;
+    }
+}
+
+// --report-child: REPORT_CALLS, then the fork()ed repeat; prints
+// "child <pid> <wait status>".
+static int report_child_main(void) {
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(REPORT_CALLS); i++)
+        report_call(REPORT_CALLS[i].op, REPORT_CALLS[i].M, REPORT_CALLS[i].N,
+                    REPORT_CALLS[i].K, REPORT_CALLS[i].alpha);
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid == 0) {
+        report_call(REPORT_CALLS[0].op, REPORT_CALLS[0].M, REPORT_CALLS[0].N,
+                    REPORT_CALLS[0].K, REPORT_CALLS[0].alpha);
+        exit(0);
+    }
+    int status = -1;
+    if (pid > 0)
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    printf("child %d %d\n", (int)pid, status);
+    return 0;
+}
+
+// What one process's reports say about one routine (times in ms).
+typedef struct {
+    int rows, stage_rows, fallback_rows, prof_rows;
+    unsigned long long calls, gpu, cpu, fallbacks, reasons[4];
+    double calls_pct, total, gpu_ms, cpu_ms, time_pct, stages[8];   // [7]: other
+    unsigned long long prof_calls, prof_gpu, prof_fallbacks;
+    double prof_time_pct;
+} RoutineReport;
+
+typedef struct {
+    int pid;
+    int headers, prof_headers;       // first lines naming ab_build_info()
+    RoutineReport r[2];              // dgemm, zgemm
+} ProcessReport;
+
+static RoutineReport *routine_of(ProcessReport *p, const char *name) {
+    return !strcmp(name, "dgemm") ? &p->r[0] : !strcmp(name, "zgemm") ? &p->r[1] : NULL;
+}
+
+// The report child's process, or the first other pid seen: its fork()ed child.
+static ProcessReport *process_of(ProcessReport proc[2], int pid) {
+    if (proc[0].pid == pid) return &proc[0];
+    if (proc[1].pid == -1) proc[1].pid = pid;
+    return proc[1].pid == pid ? &proc[1] : NULL;
+}
+
+// Parses one line of the report child's output. Returns false for an
+// AB_REPORT line it cannot read.
+static bool parse_report_line(const char *line, const char *build, ProcessReport proc[2],
+                              ProcessReport **section, int *gpu_lines, int *fallback_lines) {
+    char name[16], head[256];
+    int pid, off = 0, end = 0;
+    RoutineReport *r;
+    double st[8], total;
+    if (sscanf(line, "AB_REPORT[%d] %n", &pid, &off) == 1 && off) {
+        ProcessReport *p = process_of(proc, pid);
+        const char *rest = line + off;
+        snprintf(head, sizeof head, "%s AB_MODE=gpu", build);
+        if (!p) return false;
+        if (!strcmp(rest, head)) {
+            p->headers++;
+            return true;
+        }
+        if (sscanf(rest, "%15s %n", name, &end) != 1 || !(r = routine_of(p, name))) return false;
+        rest += end;
+        if (sscanf(rest, "calls=%llu gpu_calls=%llu cpu_calls=%llu gpu_calls%%=%lf total_ms=%lf "
+                         "gpu_ms=%lf cpu_ms=%lf gpu_time%%=%lf fallbacks=%llu",
+                   &r->calls, &r->gpu, &r->cpu, &r->calls_pct, &r->total, &r->gpu_ms,
+                   &r->cpu_ms, &r->time_pct, &r->fallbacks) == 9)
+            r->rows++;
+        else if (sscanf(rest, "gpu_stages_ms init=%lf alloc=%lf pack=%lf upload=%lf kernel=%lf "
+                              "download=%lf epilogue=%lf other=%lf",
+                        &r->stages[0], &r->stages[1], &r->stages[2], &r->stages[3],
+                        &r->stages[4], &r->stages[5], &r->stages[6], &r->stages[7]) == 8)
+            r->stage_rows++;
+        else if (sscanf(rest, "fallbacks no_device=%llu too_large=%llu gpu_failed=%llu other=%llu",
+                        &r->reasons[0], &r->reasons[1], &r->reasons[2], &r->reasons[3]) == 4)
+            r->fallback_rows++;
+        else
+            return false;
+        return true;
+    }
+    // AB_PROFILE table: its first line names the build and the pid; rows follow.
+    snprintf(head, sizeof head, "=== %s BLAS profile, pid %%d ===", build);
+    if (sscanf(line, head, &pid) == 1) {
+        *section = process_of(proc, pid);
+        if (*section) (*section)->prof_headers++;
+        return *section != NULL;
+    }
+    unsigned long long calls, gpu, fb;
+    double calls_pct, gpu_ms, cpu_ms, time_pct;
+    if (*section && sscanf(line, "%15s %llu %llu %lf%% %lf %lf %lf %lf%% %llu%n", name, &calls,
+                           &gpu, &calls_pct, &total, &gpu_ms, &cpu_ms, &time_pct, &fb,
+                           &end) == 9 && end && (r = routine_of(*section, name))) {
+        r->prof_rows++;
+        r->prof_calls = calls; r->prof_gpu = gpu; r->prof_fallbacks = fb;
+        r->prof_time_pct = time_pct;
+        return true;
+    }
+    // AB_PROFILE per-call lines: one per GPU call, its stages within its total.
+    if (sscanf(line, "AB_PROFILE %15s M=%*d N=%*d K=%*d init=%lf alloc=%lf pack=%lf upload=%lf "
+                     "kernel=%lf download=%lf epilogue=%lf other=%lf total=%lf ms",
+               name, &st[0], &st[1], &st[2], &st[3], &st[4], &st[5], &st[6], &st[7],
+               &total) == 10) {
+        double sum = 0.0;
+        for (int i = 0; i < 8; i++) sum += st[i] >= 0.0 ? st[i] : INFINITY;
+        if (sum <= total + 0.005) ++*gpu_lines;
+        return true;
+    }
+    if (strstr(line, "AB_PROFILE ") == line && strstr(line, "GPU fallback to cblas: "))
+        ++*fallback_lines;
+    return true;
+}
+
+// The AB_REPORT and AB_PROFILE lines of one process for one routine against
+// the calls it made. NULL if they agree.
+static const char *check_routine(const RoutineReport *r, unsigned long long calls,
+                                 unsigned long long gpu, unsigned long long no_device) {
+    if (!calls)
+        return r->rows || r->prof_rows ? "a routine without calls is reported" : NULL;
+    if (r->rows != 1 || r->prof_rows != 1) return "routine missing from a report";
+    if (r->calls != calls || r->gpu != gpu || r->cpu != calls - gpu)
+        return "AB_REPORT call counts do not match the calls made";
+    if (r->prof_calls != calls || r->prof_gpu != gpu || r->prof_fallbacks != no_device)
+        return "AB_PROFILE counts do not match the calls made";
+    if (fabs(r->calls_pct - 100.0 * gpu / calls) > 0.051) return "gpu_calls% is not the call share";
+    if (!(r->time_pct >= 0.0 && r->time_pct <= 100.0) ||
+        !(r->prof_time_pct >= 0.0 && r->prof_time_pct <= 100.0))
+        return "gpu_time% outside [0, 100]";
+    if (fabs(r->total - r->gpu_ms - r->cpu_ms) > 0.002) return "gpu_ms + cpu_ms != total_ms";
+    if (!gpu && (r->gpu_ms != 0.0 || r->time_pct != 0.0)) return "GPU time without GPU calls";
+    if (r->stage_rows != (gpu > 0)) return "GPU stage line missing or unexpected";
+    if (gpu) {
+        double sum = 0.0;                    // the named stages; [7] is the remainder
+        for (int i = 0; i < 8; i++)
+            if (r->stages[i] < 0.0) return "negative stage time";
+        for (int i = 0; i < 7; i++) sum += r->stages[i];
+        if (r->stages[4] <= 0.0) return "no kernel time";
+        if (sum > r->gpu_ms + 0.004) return "GPU stages exceed gpu_ms";
+        if (fabs(sum + r->stages[7] - r->gpu_ms) > 0.005) return "stages + other != gpu_ms";
+    }
+    if (r->fallbacks != no_device || r->fallback_rows != (no_device > 0) ||
+        (no_device && (r->reasons[0] != no_device ||
+                       r->reasons[1] + r->reasons[2] + r->reasons[3] != 0)))
+        return "fallback counts do not match";
+    return NULL;
+}
+
+// Spawns argv[0] with env, its stdout and stderr on a pipe. Returns the read
+// end, or NULL with the failure in why.
+static FILE *spawn_piped(char *const argv[], char *const env[], pid_t *pid,
+                         char *why, size_t why_len) {
+    int fds[2];
+    if (pipe(fds) != 0) {
+        snprintf(why, why_len, "pipe: %s", strerror(errno));
+        return NULL;
+    }
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, fds[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&fa, fds[1], STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&fa, fds[0]);
+    posix_spawn_file_actions_addclose(&fa, fds[1]);
+    fflush(stdout);
+    int rc = posix_spawn(pid, argv[0], &fa, NULL, argv, env);
+    posix_spawn_file_actions_destroy(&fa);
+    close(fds[1]);
+    if (rc != 0) {
+        close(fds[0]);
+        snprintf(why, why_len, "posix_spawn: %s", strerror(rc));
+        return NULL;
+    }
+    return fdopen(fds[0], "r");
+}
+
+// Runs --report-child with AB_REPORT=1 and AB_PROFILE=1 and checks what both
+// of its processes report at exit: the build, call counts by route, time
+// shares and stage sums, and that the fork()ed child reports only its own call.
+static bool run_report(const AbiCase *c, char *detail, size_t n) {
+    (void)c;
+    static char report[] = "AB_REPORT=1", profile[] = "AB_PROFILE=1", flag[] = "--report-child";
+    char self[PATH_MAX];
+    uint32_t len = sizeof self;
+    if (_NSGetExecutablePath(self, &len) != 0) {
+        snprintf(detail, n, "cannot resolve executable path");
+        return false;
+    }
+    size_t ne = 0;
+    while (environ[ne]) ne++;
+    char **env = calloc(ne + 3, sizeof *env);
+    memcpy(env, environ, ne * sizeof *env);
+    env[ne] = report;
+    env[ne + 1] = profile;
+    char *argv[] = {self, flag, NULL};
+    pid_t pid;
+    FILE *in = spawn_piped(argv, env, &pid, detail, n);
+    free(env);
+    if (!in) return false;
+    char *out = NULL, buf[4096];
+    size_t out_len = 0;
+    FILE *mem = open_memstream(&out, &out_len);
+    for (size_t got; (got = fread(buf, 1, sizeof buf, in)) > 0; ) fwrite(buf, 1, got, mem);
+    fclose(in);
+    fclose(mem);
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+
+    // Expected counts: [0] the report child, [1] its fork()ed child.
+    unsigned long long calls[2][2] = {{0}}, gpu[2][2] = {{0}}, no_device[2][2] = {{0}};
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(REPORT_CALLS); i++) {
+        int z = op_is_complex(REPORT_CALLS[i].op);
+        calls[0][z]++;
+        gpu[0][z] += REPORT_CALLS[i].gpu;
+    }
+    calls[1][op_is_complex(REPORT_CALLS[0].op)] = 1;
+    no_device[1][op_is_complex(REPORT_CALLS[0].op)] = 1;
+
+    ProcessReport proc[2] = {{.pid = pid}, {.pid = -1}}, *section = NULL;
+    int fork_pid = 0, fork_status = -1, gpu_lines = 0, fallback_lines = 0;
+    const char *build = ab_build_info(), *why = NULL;
+    char bad[160] = "";
+    for (char *save = NULL, *line = strtok_r(out, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save))
+        if (sscanf(line, "child %d %d", &fork_pid, &fork_status) != 2 &&
+            !parse_report_line(line, build, proc, &section, &gpu_lines, &fallback_lines) &&
+            !bad[0])
+            snprintf(bad, sizeof bad, "%s", line);
+
+    unsigned long long gpu_calls = gpu[0][0] + gpu[0][1];
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) why = "report child failed";
+    else if (fork_pid <= 0 || !WIFEXITED(fork_status) || WEXITSTATUS(fork_status) != 0)
+        why = "forked child failed";
+    else if (proc[1].pid != fork_pid) why = "no report from the forked child";
+#ifdef AB_EXPECT_BUILD_SHA
+    else if (!strstr(build, "(" AB_EXPECT_BUILD_SHA ")")) why = "ab_build_info() lacks the build SHA";
+#endif
+    else if (bad[0]) why = "unrecognized report line";
+    else if (proc[0].headers != 1 || proc[1].headers != 1 ||
+             proc[0].prof_headers != 1 || proc[1].prof_headers != 1)
+        why = "each process must start each report once with ab_build_info()";
+    else if ((unsigned long long)gpu_lines != gpu_calls || fallback_lines != 1)
+        why = "AB_PROFILE per-call lines: wrong count, or stages exceed the call's total";
+    for (int p = 0; p < 2 && !why; p++)
+        for (int z = 0; z < 2 && !why; z++)
+            why = check_routine(&proc[p].r[z], calls[p][z], gpu[p][z], no_device[p][z]);
+
+    if (why)
+        snprintf(detail, n, "%s%s%s (status %d, fork status %d)", why, bad[0] ? ": " : "", bad,
+                 status, fork_status);
+    else
+        snprintf(detail, n, "%s; pid %d: %llu GPU of %llu calls; forked pid %d: 1 fallback",
+                 build, (int)pid, gpu_calls, calls[0][0] + calls[0][1], proc[1].pid);
+    free(out);
+    return !why;
+}
+
 static bool run_case(int idx, char *detail, size_t n) {
     const AbiCase *c = &CASES[idx];
     rng_state = 0x9E3779B97F4A7C15ULL * (uint64_t)(idx + 1);
@@ -945,6 +1256,8 @@ static bool run_case(int idx, char *detail, size_t n) {
         return run_native_complex(c, detail, n);
     case OP_SYMBOL:
         return run_symbol(c, detail, n);
+    case OP_REPORT:
+        return run_report(c, detail, n);
     default:
         return run_native_real(c, detail, n);
     }
@@ -1034,37 +1347,19 @@ static char **child_env(const Suite *s, char *mode_buf, size_t mode_len) {
 static int run_child(const Suite *s, int lo, char *why, size_t why_len) {
     char mode_buf[32], lo_arg[16], hi_arg[16], child_flag[] = "--child";
     char *argv[] = {self_path, child_flag, lo_arg, hi_arg, NULL};
-    int fds[2], next = lo;
+    int next = lo;
     pid_t pid;
 
     why[0] = '\0';
     snprintf(lo_arg, sizeof lo_arg, "%d", lo);
     snprintf(hi_arg, sizeof hi_arg, "%d", s->hi);
-    if (pipe(fds) != 0) {
-        snprintf(why, why_len, "pipe: %s", strerror(errno));
-        return lo;
-    }
-    posix_spawn_file_actions_t fa;
-    posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_adddup2(&fa, fds[1], STDOUT_FILENO);
-    posix_spawn_file_actions_adddup2(&fa, fds[1], STDERR_FILENO);
-    posix_spawn_file_actions_addclose(&fa, fds[0]);
-    posix_spawn_file_actions_addclose(&fa, fds[1]);
     char **env = child_env(s, mode_buf, sizeof mode_buf);
-    fflush(stdout);
-    int rc = posix_spawn(&pid, self_path, &fa, NULL, argv, env);
-    posix_spawn_file_actions_destroy(&fa);
+    FILE *in = spawn_piped(argv, env, &pid, why, why_len);
     free(env);
-    close(fds[1]);
-    if (rc != 0) {
-        close(fds[0]);
-        snprintf(why, why_len, "posix_spawn: %s", strerror(rc));
-        return lo;
-    }
+    if (!in) return lo;
 
     // Result lines advance `next`; anything else (library or Metal
     // diagnostics) is kept so a crash can be explained.
-    FILE *in = fdopen(fds[0], "r");
     char line[2048], last_noise[512] = "";
     while (fgets(line, sizeof line, in)) {
         line[strcspn(line, "\n")] = '\0';
@@ -1168,6 +1463,7 @@ static void test_illegal_args(void)     { run_suite(SU_ILLEGAL); }
 static void test_fork_after_gpu(void)   { run_suite(SU_FORK); }
 static void test_qe_shapes(void)        { run_suite(SU_QE); }
 static void test_profile_path(void)     { run_suite(SU_PROFILE); }
+static void test_exit_reports(void)     { run_suite(SU_REPORT); }
 static void test_native_morton(void)    { run_suite(SU_NATIVE); }
 static void test_fortran_symbols(void)  { run_suite(SU_SYMBOLS); }
 
@@ -1195,6 +1491,7 @@ static const TestCase TESTS[] = {
     {"test_fork_after_gpu",   test_fork_after_gpu},
     {"test_qe_shapes",        test_qe_shapes},
     {"test_profile_path",     test_profile_path},
+    {"test_exit_reports",     test_exit_reports},
     {"test_native_morton",    test_native_morton},
     {"test_fortran_symbols",  test_fortran_symbols},
 };
@@ -1204,6 +1501,8 @@ int main(int argc, char **argv) {
     build_cases();
     if (argc == 4 && !strcmp(argv[1], "--child"))
         return child_main(atoi(argv[2]), atoi(argv[3]));
+    if (argc == 2 && !strcmp(argv[1], "--report-child"))
+        return report_child_main();
     verbose = argc > 1 && !strcmp(argv[1], "-v");
 
     uint32_t len = sizeof self_path;

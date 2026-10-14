@@ -18,7 +18,7 @@ Apple Silicon GPUs have no native FP64. `apple-bottom` fixes that — double-flo
 ```bash
 git clone https://github.com/grantdh/apple-bottom.git
 cd apple-bottom
-make && make test   # 127/127 tests pass
+make && make test   # 128/128 tests pass
 ```
 
 ## Performance
@@ -124,7 +124,7 @@ Production-validated following NASA-STD-7009A methodology:
 
 - **V-2 Convergence Study**: Frobenius error 6.5×10⁻¹⁵ to 5.1×10⁻¹⁴ for N ∈ {64, 128, ..., 4096}
 - **VAL-1 Production**: Quantum ESPRESSO Si64 DFT — 11 decimal place agreement (-2990.44276157 Ry)
-- **127/127 tests** in `make test`: 14 precision + 72 correctness + 16 device-API tests + 25 BLAS-ABI suites; `make ci-local` adds 18 adversarial tests (145). A test is one precision case, registry entry or BLAS-ABI suite; the 152 device-API `CHECK`s and 999 BLAS-ABI cases are reported separately (see [tests/README.md](tests/README.md#coverage-status))
+- **128/128 tests** in `make test`: 14 precision + 72 correctness + 16 device-API tests + 26 BLAS-ABI suites; `make ci-local` adds 18 adversarial tests (146). A test is one precision case, registry entry or BLAS-ABI suite; the 152 device-API `CHECK`s and 1000 BLAS-ABI cases are reported separately (see [tests/README.md](tests/README.md#coverage-status))
 
 Documentation: [V&V Report](docs/vv/VV_REPORT.md) · [Precision Envelope](docs/vv/PRECISION_ENVELOPE.md) · [QE Validation](tests/validation/VAL001_QE_Si64.md)
 

@@ -40,9 +40,9 @@ It does **not** catch:
 ## Coverage status
 
 Counting rule (README, `make ci-local`): a *test* is one `test_precision`
-case, one `TESTS[]` entry, or one BLAS-ABI suite. `make test` runs 127
-(14 precision + 72 correctness + 16 device-API + 25 BLAS-ABI) and
-`make ci-local` adds the 18 chaos tests, for a `TEST_TOTAL` of 145.
+case, one `TESTS[]` entry, or one BLAS-ABI suite. `make test` runs 128
+(14 precision + 72 correctness + 16 device-API + 26 BLAS-ABI) and
+`make ci-local` adds the 18 chaos tests, for a `TEST_TOTAL` of 146.
 Device-API `CHECK`s and BLAS-ABI cases are reported on their own
 `CI_REPORT.txt` lines and are not part of the total.
 
@@ -54,7 +54,7 @@ Device-API `CHECK`s and BLAS-ABI cases are reported on their own
     cblas over all trans pairs, non-square and tall-skinny shapes,
     `ld > rows` and buffer offsets (K-P0-2 / H-P0-4), and check that
     the device path is bitwise the host API on the transposed operands
-  - `tests/test_blas_abi.c` — 25 suites (999 cases), see below
+  - `tests/test_blas_abi.c` — 26 suites (1000 cases), see below
 
 - **Pending PR-1.5 (still single-main, no ghost-guard):**
   - `tests/test_precision.c` — needs decomposition strategy
@@ -87,6 +87,13 @@ DGEMM shapes that the old 46340-per-dimension limit kept on cblas (see
 `gen_qe`), plus a synthetic ZGEMM with K = 100000, through `dgemm_` /
 `zgemm_` without `ab_init()`; each must run on the GPU. It checks
 robustness only: those DGEMMs are memory-bound and faster on Accelerate.
+`test_exit_reports` runs `test_blas_abi --report-child` with `AB_REPORT=1`
+and `AB_PROFILE=1`: three GPU and three CPU calls through the six BLAS-ABI
+entry points, then a `fork()`ed child repeats a GPU call, which falls back
+to cblas. Both processes' exit reports must start with `ab_build_info()`
+(naming the Makefile's `AB_BUILD_SHA`) and give the calls made by route,
+`gpu_time%` within [0, 100], GPU stages that sum to at most `gpu_ms`, one
+`AB_PROFILE` line per GPU call, and the child only its own fallback.
 Known failures live in the file's `XFAIL` table, tagged
 with audit IDs. An XFAIL that now passes (XPASS), or an entry that matches
 no case (STALE), fails the run: when a fix lands, delete its entries.

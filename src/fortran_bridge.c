@@ -26,33 +26,19 @@
 #include <Accelerate/Accelerate.h>
 #include <complex.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
-#include "blas_trans.h"
-#include "profiling/blas_profiler.h"
-
-/* Forward declarations — GPU-path DD kernels live in blas_wrapper.c */
-extern void ab_dgemm_blas(char transA, char transB, int M, int N, int K,
-                          double alpha, const double* A, int ldA,
-                          const double* B, int ldB,
-                          double beta, double* C, int ldC);
-extern void ab_zgemm_blas(char transA, char transB, int M, int N, int K,
-                          double complex alpha, const double complex* A, int ldA,
-                          const double complex* B, int ldB,
-                          double complex beta, double complex* C, int ldC);
-/* cblas paths that also record "cpu" as the dispatch path (blas_wrapper.c) */
-extern void ab_internal_dgemm_cpu(enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
-                                  int M, int N, int K, double alpha,
-                                  const double* A, int ldA, const double* B, int ldB,
-                                  double beta, double* C, int ldC);
-extern void ab_internal_zgemm_cpu(enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
-                                  int M, int N, int K, double complex alpha,
-                                  const double complex* A, int ldA,
-                                  const double complex* B, int ldB,
-                                  double complex beta, double complex* C, int ldC);
-extern const char* ab_get_last_dispatch_path(void);
+/* One BLAS-ABI call, timed and recorded for AB_PROFILE / AB_REPORT
+ * (blas_wrapper.c): gpu = 0 runs cblas, gpu = 1 the ab_*gemm_blas path,
+ * which applies its own routing and falls back to cblas if the GPU fails. */
+extern void ab_internal_dgemm(int gpu, char transA, char transB, int M, int N, int K,
+                              double alpha, const double* A, int ldA,
+                              const double* B, int ldB,
+                              double beta, double* C, int ldC);
+extern void ab_internal_zgemm(int gpu, char transA, char transB, int M, int N, int K,
+                              double complex alpha, const double complex* A, int ldA,
+                              const double complex* B, int ldB,
+                              double complex beta, double complex* C, int ldC);
 
 #define DEFAULT_CROSSOVER_FLOPS 100000000ULL
 
@@ -76,14 +62,6 @@ static uint64_t fb_get_crossover(void) {
     if (v == 0) v = DEFAULT_CROSSOVER_FLOPS;
     _fb_cross = (uint64_t)v;
     return _fb_cross;
-}
-
-/* Whether the call just made really ran on the GPU, for the profiler. A
- * GPU-routed call can still end up on cblas (dims <= AB_MIN_GPU_DIM, GPU
- * failure), so this reads the path blas_wrapper.c recorded instead of the
- * routing decision (H-P1-2, H-P2-8). */
-static int fb_ran_on_gpu(void) {
-    return strcmp(ab_get_last_dispatch_path(), "gpu") == 0;
 }
 
 /* =============================================================================
@@ -110,21 +88,8 @@ void fortran_dgemm(
             : (mode == FB_GPU) ? 1
             : (flops >= fb_get_crossover());
 
-    uint64_t t0 = ab_prof_enabled() ? ab_prof_now_ticks() : 0;
-
-    if (gpu) {
-        ab_dgemm_blas(*transA, *transB, *M, *N, *K,
+    ab_internal_dgemm(gpu, *transA, *transB, *M, *N, *K,
                       *alpha, A, *ldA, B, *ldB, *beta, C, *ldC);
-    } else {
-        ab_internal_dgemm_cpu(ab_blas_trans(*transA, false), ab_blas_trans(*transB, false),
-                              *M, *N, *K,
-                              *alpha, A, *ldA, B, *ldB, *beta, C, *ldC);
-    }
-
-    if (ab_prof_enabled()) {
-        uint64_t ns = ab_prof_ticks_to_ns(ab_prof_now_ticks() - t0);
-        ab_prof_record("dgemm", ns, (size_t)*M, (size_t)*N, (size_t)*K, fb_ran_on_gpu());
-    }
 }
 
 /* =============================================================================
@@ -151,21 +116,8 @@ void fortran_zgemm(
             : (mode == FB_GPU) ? 1
             : (flops >= fb_get_crossover());
 
-    uint64_t t0 = ab_prof_enabled() ? ab_prof_now_ticks() : 0;
-
-    if (gpu) {
-        ab_zgemm_blas(*transA, *transB, *M, *N, *K,
+    ab_internal_zgemm(gpu, *transA, *transB, *M, *N, *K,
                       *alpha, A, *ldA, B, *ldB, *beta, C, *ldC);
-    } else {
-        ab_internal_zgemm_cpu(ab_blas_trans(*transA, true), ab_blas_trans(*transB, true),
-                              *M, *N, *K,
-                              *alpha, A, *ldA, B, *ldB, *beta, C, *ldC);
-    }
-
-    if (ab_prof_enabled()) {
-        uint64_t ns = ab_prof_ticks_to_ns(ab_prof_now_ticks() - t0);
-        ab_prof_record("zgemm", ns, (size_t)*M, (size_t)*N, (size_t)*K, fb_ran_on_gpu());
-    }
 }
 
 /* =============================================================================

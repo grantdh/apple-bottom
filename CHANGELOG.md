@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file.
 
 _TBD following Si64 benchmark campaign._
 
+### Added
+- **`ab_build_info()`** returns the library version and the git commit it
+  was built from, with `-dirty` if tracked files differed from it (the
+  Makefile passes `AB_BUILD_SHA`; `unknown` outside a git checkout). Every
+  `AB_PROFILE` and `AB_REPORT` report starts with it.
+- **`AB_REPORT=1`**: a short summary on stderr at exit, once per process
+  and tagged with the pid. Per routine: calls and wall time by where C was
+  computed, the GPU calls' stage costs (init, alloc, pack, upload, kernel as
+  command-buffer GPU time, download, epilogue, other) and fallbacks to cblas
+  by reason (`no_device`, `too_large`, `gpu_failed`). See the environment
+  variable table in `docs/INTEGRATION.md`.
+
 ### Fixed
 - **Morton remap dropped output tiles on non-square power-of-two grids**
   (K-P0-1). The remap is now applied only when it is a bijection
@@ -136,6 +148,18 @@ _TBD following Si64 benchmark campaign._
   `MAX_DIMENSION` is now 2³¹ − 1.
 
 ### Changed
+- **The AB_PROFILE table separates call share from time share.** Its
+  `gpu_pct` column was the share of calls that ran on the GPU, not of time,
+  and was read as a time share. It is replaced by `gpu_calls`, `gpu_calls%`,
+  `gpu_ms`, `cpu_ms`, `gpu_time%` and `fallbacks`, followed by tables of the
+  GPU stage costs and of the fallbacks by reason. Every GPU call now prints
+  a stage line, DGEMM included (it was ZGEMM only), with the stages named as
+  in `AB_REPORT`. Direct `ab_dgemm_blas` / `ab_zgemm_blas` calls are now
+  counted too (only `dgemm_`, `zgemm_` and `ab_*gemm_` were). A `fork()`ed
+  child starts with empty counters, so it no longer reports the parent's
+  calls as its own. In the `AB_PROFILE_JSON` file, `gpu_dispatch_count` and
+  `amx_fallback_count` are now `gpu_calls` and `cpu_calls`, next to
+  `gpu_ns`, `cpu_ns`, `gpu_stage_ns`, `fallbacks` and the top-level `build`.
 - **`_dgemm$NEWLAPACK` / `_zgemm$NEWLAPACK` are no longer exported.** C code
   that calls `dgemm_`/`zgemm_` through the `ACCELERATE_NEW_LAPACK` headers
   now gets Accelerate, not apple-bottom; call `ab_dgemm_blas` /
@@ -152,7 +176,7 @@ _TBD following Si64 benchmark campaign._
   Frobenius error exceeds √N·u². A build without safe math now fails both.
 - **`make ci-local` runs `test_device_api` and counts tests one way**
   (RH-P1-1). `TEST_TOTAL` counts tests (precision cases, `TESTS[]` entries
-  and BLAS-ABI suites: 145), with device-API `CHECK`s and BLAS-ABI cases on
+  and BLAS-ABI suites: 146), with device-API `CHECK`s and BLAS-ABI cases on
   their own lines. `test_convergence` takes its CSV path as `argv[1]`, so
   `make ci-local BUILD=...` reports the convergence data instead of
   `missing`.

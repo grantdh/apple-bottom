@@ -91,6 +91,21 @@ static void stats_add_zgemm(void) {
     os_unfair_lock_unlock(&g_stats_lock);
 }
 
+// GPU execution time of the command buffers this thread completed, for the
+// kernel stage of the BLAS-ABI profile (blas_wrapper.c), which takes it per call.
+static thread_local double t_gpu_seconds = 0;
+
+static void note_gpu_time(id<MTLCommandBuffer> cmdBuf) {
+    CFTimeInterval start = cmdBuf.GPUStartTime, end = cmdBuf.GPUEndTime;
+    if (start > 0 && end > start) t_gpu_seconds += end - start;
+}
+
+extern "C" double ab_internal_take_gpu_seconds(void) {
+    double s = t_gpu_seconds;
+    t_gpu_seconds = 0;
+    return s;
+}
+
 // =============================================================================
 // Metal Shaders (Embedded MSL)
 // =============================================================================
@@ -1317,6 +1332,7 @@ ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMa
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
     if (cmdBuf.status == MTLCommandBufferStatusError) return AB_ERROR_KERNEL_FAILED;
+    note_gpu_time(cmdBuf);
 
     stats_add_kernel(get_time_ms() - t0);
     stats_add_dgemm();
@@ -1634,6 +1650,7 @@ static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatri
 
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
+    note_gpu_time(cmdBuf);
 
     stats_add_kernel(get_time_ms() - t0);
     stats_add_zgemm();

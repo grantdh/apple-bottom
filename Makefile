@@ -42,7 +42,18 @@ SRC = src
 INCLUDE = include
 EXAMPLES = examples
 
-.PHONY: all lib test bench bench-report bench-rect clean examples install uninstall
+# Build identity reported by ab_build_info() and at the top of every
+# AB_PROFILE / AB_REPORT report: the git commit, with -dirty if tracked files
+# differ from it, or "unknown" outside a git checkout (override with
+# make AB_BUILD_SHA=...). The stamp file changes only when the identity does,
+# so a new commit or edit rebuilds just blas_profiler.o.
+ifndef AB_BUILD_SHA
+AB_BUILD_SHA := $(shell sha=$$(git rev-parse --short=12 HEAD 2>/dev/null) \
+                  && { git diff --quiet HEAD -- 2>/dev/null || sha=$$sha-dirty; echo $$sha; } \
+                  || echo unknown)
+endif
+
+.PHONY: all lib test bench bench-report bench-rect clean examples install uninstall FORCE
 
 # =============================================================================
 # Main targets
@@ -70,14 +81,17 @@ $(BUILD):
 $(BUILD)/apple_bottom.o: $(SRC)/apple_bottom.m $(INCLUDE)/apple_bottom.h | $(BUILD)
 	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $@
 
-$(BUILD)/blas_wrapper.o: $(SRC)/blas_wrapper.c $(SRC)/blas_trans.h $(INCLUDE)/apple_bottom.h | $(BUILD)
+$(BUILD)/blas_wrapper.o: $(SRC)/blas_wrapper.c $(SRC)/blas_trans.h $(INCLUDE)/apple_bottom.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $@
 
-$(BUILD)/fortran_bridge.o: $(SRC)/fortran_bridge.c $(SRC)/blas_trans.h $(INCLUDE)/apple_bottom.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
+$(BUILD)/fortran_bridge.o: $(SRC)/fortran_bridge.c | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c $(SRC)/fortran_bridge.c -o $@
 
-$(BUILD)/blas_profiler.o: $(SRC)/profiling/blas_profiler.c $(SRC)/profiling/blas_profiler.h | $(BUILD)
-	$(CC) $(CFLAGS) -I$(SRC) -c $(SRC)/profiling/blas_profiler.c -o $@
+$(BUILD)/build_sha.stamp: FORCE | $(BUILD)
+	@echo '$(AB_BUILD_SHA)' | cmp -s - $@ || echo '$(AB_BUILD_SHA)' > $@
+
+$(BUILD)/blas_profiler.o: $(SRC)/profiling/blas_profiler.c $(SRC)/profiling/blas_profiler.h $(INCLUDE)/apple_bottom.h $(BUILD)/build_sha.stamp | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) '-DAB_BUILD_SHA="$(AB_BUILD_SHA)"' -c $(SRC)/profiling/blas_profiler.c -o $@
 
 $(BUILD)/device_api.o: $(SRC)/device_api.m $(INCLUDE)/apple_bottom.h $(INCLUDE)/apple_bottom_device.h | $(BUILD)
 	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/device_api.m -o $@
@@ -172,8 +186,9 @@ $(BUILD)/test_device_api: tests/test_device_api.c lib | $(BUILD)
 # BLAS-ABI conformance harness: column-major ab_*gemm_blas / ab_*gemm_ /
 # dgemm_ / zgemm_ vs Accelerate cblas. Known failures are tracked in the
 # XFAIL table in tests/test_blas_abi.c (XPASS and stale entries fail the run).
+# AB_EXPECT_BUILD_SHA: the exit-report suite checks ab_build_info() names it.
 $(BUILD)/test_blas_abi: tests/test_blas_abi.c lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	$(CC) $(CFLAGS) -I$(INCLUDE) '-DAB_EXPECT_BUILD_SHA="$(AB_BUILD_SHA)"' $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
 $(BUILD)/test_convergence: tests/verification/test_convergence.c lib | $(BUILD)
@@ -471,7 +486,7 @@ build-check: | $(BUILD)
 	@echo "Compiling fortran_bridge.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c $(SRC)/fortran_bridge.c -o $(BUILD)/fortran_bridge.o
 	@echo "Compiling blas_profiler.c..."
-	@$(CC) $(CFLAGS) -I$(SRC) -c $(SRC)/profiling/blas_profiler.c -o $(BUILD)/blas_profiler.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c $(SRC)/profiling/blas_profiler.c -o $(BUILD)/blas_profiler.o
 	@echo "Compiling test_correctness.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_correctness.c -o $(BUILD)/test_correctness.o
 	@echo "Compiling test_precision.c..."
@@ -526,6 +541,7 @@ ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos 
 		TOTAL=$$((PRECISION + CORRECTNESS + CHAOS + DEVICE_API + BLAS_ABI)); \
 		echo "GIT_SHA: $$(git rev-parse HEAD)" > $(BUILD)/CI_REPORT.txt; \
 		echo "GIT_BRANCH: $$(git rev-parse --abbrev-ref HEAD)" >> $(BUILD)/CI_REPORT.txt; \
+		echo "AB_BUILD_SHA: $(AB_BUILD_SHA)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TIMESTAMP: $$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $(BUILD)/CI_REPORT.txt; \
 		echo "HOSTNAME: $$(hostname)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_PRECISION: PASS ($$PRECISION tests)" >> $(BUILD)/CI_REPORT.txt; \

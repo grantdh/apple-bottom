@@ -276,6 +276,29 @@ void ab_zgemm_blas(char transA, char transB, int M, int N, int K,
 // (including a fallback after a GPU failure), or "none" before any call. Thread-local.
 const char* ab_get_last_dispatch_path(void);
 
+// Library version and the git commit it was built from, "-dirty" if tracked
+// files differed from that commit, e.g. "apple-bottom 1.3.1-dev (428f1cc1a1d3)";
+// "unknown" in place of the commit when built outside a git checkout. Static string.
+const char* ab_build_info(void);
+
+// BLAS-ABI diagnostics (dgemm_, zgemm_, ab_*gemm_, ab_*gemm_blas), read once
+// per process from the environment; both reports start with ab_build_info():
+//   AB_REPORT=1   at exit, a short summary on stderr, one "AB_REPORT[pid]" line
+//                 per item: per routine the calls and wall time by where C was
+//                 computed (gpu_calls% is a share of calls, gpu_time% a share
+//                 of time), the GPU calls' stage costs (init, alloc, pack,
+//                 upload, kernel = command-buffer GPU time, download,
+//                 epilogue, other) and fallbacks to cblas by reason
+//                 (no_device, too_large, gpu_failed, other).
+//   AB_PROFILE=1  the same counts as a detailed table with dimension
+//                 histograms at exit, plus a stderr line per GPU call and per
+//                 fallback. AB_PROFILE_JSON=path also writes JSON at exit.
+//   AB_PROFILE_THRESHOLD_NS=n  count only calls of at least n ns (both reports).
+// A call that falls back counts as a CPU call, its wall time including the
+// failed GPU attempt. A fork()ed child starts with empty counters and reports
+// only calls of its own. The native ABMatrix API is not counted. Formats and
+// the routing variables (AB_MODE, ...): docs/INTEGRATION.md.
+
 #ifdef __cplusplus
 }
 #endif

@@ -11,6 +11,7 @@ Complete guide for integrating apple-bottom into scientific computing codes.
 - [Python Integration](#python-integration)
 - [Fortran Integration](#fortran-integration)
 - [Quantum ESPRESSO Integration](#quantum-espresso-integration)
+- [Environment Variables and Run Reports](#environment-variables-and-run-reports)
 
 ---
 
@@ -778,11 +779,13 @@ git status
 **Slow performance**
 
 ```bash
-# Enable stats
-export AB_PRINT_STATS=1
-/path/to/q-e-qe-7.4.1/bin/pw.x < si64.in > si64.out 2>&1
-grep "ab_zgemm" si64.out
+# At exit: calls and time by route, GPU stage costs, fallbacks (stderr)
+export AB_REPORT=1
+/path/to/q-e-qe-7.4.1/bin/pw.x < si64.in > si64.out 2> si64.err
+grep AB_REPORT si64.err
 ```
+
+See [Environment Variables and Run Reports](#environment-variables-and-run-reports).
 
 ### Files Changed
 
@@ -790,6 +793,72 @@ grep "ab_zgemm" si64.out
 
 - `KS_Solvers/Davidson/cegterg.f90` — 13 lines (1 EXTERNAL + 12 replacements)
 - `make.inc` — 2 lines (DFLAGS + BLAS_LIBS)
+
+---
+
+## Environment Variables and Run Reports
+
+The BLAS-ABI entry points (`dgemm_`, `zgemm_`, `ab_dgemm_`, `ab_zgemm_`,
+`ab_dgemm_blas`, `ab_zgemm_blas`) read these once per process, at their first
+call. The native `ABMatrix` and device APIs do not use them.
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `AB_MODE` | `auto` | `cpu`: every call on Accelerate. `gpu`: on the GPU unless a dimension is ≤ `AB_MIN_GPU_DIM`. `auto`: by the FLOP thresholds below. |
+| `AB_MIN_GPU_DIM` | `32` | Calls with M, N or K ≤ this run on Accelerate in every mode. |
+| `AB_CROSSOVER_FLOPS` | `100000000` | `auto`: FLOPs (2·M·N·K real, 8·M·N·K complex) a call needs for the GPU: every `dgemm_`, `zgemm_`, `ab_*gemm_` and `ab_zgemm_blas` call, and `ab_dgemm_blas` with a dimension < 64. |
+| `AB_CROSSOVER_FLOPS_REAL` | `50000000` | `auto`: the same for `ab_dgemm_blas` calls with every dimension ≥ 64. |
+| `AB_REPORT` | off | `1`: a short summary on stderr at exit (below). |
+| `AB_PROFILE` | off | `1`: the same counts as a detailed table on stderr at exit, with a dimension histogram, plus one line per GPU call and per fallback. |
+| `AB_PROFILE_JSON` | unset | With `AB_PROFILE=1`: also write the profile as JSON to this path at exit. |
+| `AB_PROFILE_THRESHOLD_NS` | `0` | Count only calls that took at least this many ns, in both reports. |
+
+### Reading a run report
+
+`AB_REPORT=1` prints, when the process exits:
+
+```
+AB_REPORT[<pid>] apple-bottom <version> (<commit>[-dirty]) AB_MODE=<mode|unset>
+AB_REPORT[<pid>] <routine> calls=… gpu_calls=… cpu_calls=… gpu_calls%=… total_ms=… gpu_ms=… cpu_ms=… gpu_time%=… fallbacks=…
+AB_REPORT[<pid>] <routine> gpu_stages_ms init=… alloc=… pack=… upload=… kernel=… download=… epilogue=… other=…
+AB_REPORT[<pid>] <routine> fallbacks no_device=… too_large=… gpu_failed=… other=…
+```
+
+- **The first line names the library build**, as `ab_build_info()` returns it:
+  the version and the git commit it was built from, `-dirty` if tracked
+  files differed from that commit, `unknown` if it was built outside a git
+  checkout. Keep it with any timing you quote. The `AB_PROFILE` table starts
+  with the same string.
+- **`gpu_calls%` is a share of calls, `gpu_time%` a share of time**: the
+  routine's BLAS wall time spent in calls that ran on the GPU. They can
+  differ widely, e.g. many small calls on Accelerate and a few large ones on
+  the GPU. A call counts as GPU only if the GPU computed C.
+- **The stage line** splits the GPU calls' `gpu_ms`: `init` (routing, size
+  checks, and creating the Metal context on the first GPU call), `alloc`
+  (GPU buffers and host scratch, allocation and release), `pack` (copying
+  column-major op(A), op(B) and C to row-major), `upload` (FP64 → DD),
+  `kernel` (command-buffer GPU execution time; wall time if Metal reports
+  none), `download` (DD → FP64), `epilogue` (the row-major result into
+  column-major C, with alpha and beta for ZGEMM) and `other`, the rest:
+  mostly command-buffer encode, submit and wait latency, and ZGEMM's GPU
+  temporaries.
+- **Fallbacks** are calls the routing sent to the GPU that ran on Accelerate
+  instead: `no_device` (no Metal context: no GPU, or a `fork()`ed child),
+  `too_large` (an operand beyond the size limits), `gpu_failed` (an
+  allocation, upload or kernel failed before C was written). They count as
+  CPU calls, and their `cpu_ms` includes the failed GPU attempt.
+- **Each process reports once**, tagged with its pid, so MPI ranks sharing
+  stderr stay apart. A `fork()`ed child starts with empty counters and
+  reports only its own calls (nothing if it made none). There is no report
+  after `_exit()` or a crash. Calls on several threads add up their wall
+  times.
+
+`AB_PROFILE=1` prints the same counts as a table (`calls`, `gpu_calls`,
+`gpu_calls%`, `total_ms`, `gpu_ms`, `cpu_ms`, `gpu_time%`, `fallbacks`),
+tables of the GPU stages and of the fallbacks, and the dimension histogram of
+the routine with the most time. During the run it prints an
+`AB_PROFILE <routine> M=… N=… K=…` line with the stages of each GPU call and
+one for each fallback, with its reason.
 
 ---
 
