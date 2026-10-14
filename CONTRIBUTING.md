@@ -3,7 +3,7 @@
 ## Setup
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/apple-bottom.git
+git clone https://github.com/<your-account>/apple-bottom.git   # your fork
 cd apple-bottom
 make && make test
 ```
@@ -13,6 +13,7 @@ make && make test
 - macOS 14+ (Sonoma)
 - Apple Silicon (M1/M2/M3/M4)
 - Xcode Command Line Tools
+- gfortran (optional, for `make test-fortran`)
 
 ## Code Style
 
@@ -34,16 +35,24 @@ make && make test
 
 All changes must:
 
-1. Pass existing tests: `make test`
+1. Pass existing tests: `make test` (and `make ci-local` for changes to
+   kernels, conversion or routing)
 2. Include new tests for new functionality
 3. Not regress performance: `make bench`
 
+If you change the BLAS-ABI GPU path or the kernels, rerun `make calibrate`
+on an idle machine on AC power and commit the regenerated
+`src/dispatch_table.h` with its `benchmarks/results/` directory, so that
+`AB_MODE=auto` keeps following measurement. Calibrations from chips other
+than the M2 Max are welcome as their own pull requests.
 ## Pull Requests
 
 1. Create a feature branch
-2. Make changes with clear commit messages
+2. Write [Conventional Commits](https://www.conventionalcommits.org/)
+   messages (`fix: …`, `feat: …`, `docs: …`), one change per commit
 3. Run tests and benchmarks
-4. Open PR with description of changes
+4. Open a PR describing the change and, for performance claims, the
+   machine, build (`ab_build_info()`) and data behind them
 
 ### Performance Changes
 
