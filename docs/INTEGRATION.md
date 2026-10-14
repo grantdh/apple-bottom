@@ -17,15 +17,22 @@ Complete guide for integrating apple-bottom into scientific computing codes.
 
 ## Quick Decision: Should You Use apple-bottom?
 
-**YES** if:
-- Your workload is **iterative** (CG, GMRES, SCF, eigensolvers)
-- Matrix sizes are **≥ 2048**
-- You're already on Apple Silicon
+**Yes**, if:
+- You multiply large matrices that can stay on the GPU between calls (the
+  native `ABMatrix` API or the device-buffer API). On an M2 Max the GPU
+  overtakes Accelerate from about N ≈ 1,500 (DGEMM) and N ≈ 1,000 (ZGEMM) with matrices
+  resident ([README](../README.md#performance)).
+- You want FP64-class (~10⁻¹⁵) GEMM results from the GPU, for example to
+  leave the CPU free for other work.
 
-**NO** if:
-- Single DGEMM calls scattered throughout code
-- Matrix sizes < 1024
-- You need cross-platform compatibility
+**Not yet**, if:
+- Your code calls `dgemm_`/`zgemm_` on matrices in host memory, one call at
+  a time. Each call then converts FP64 to DD and back, and on an M2 Max
+  Accelerate is faster for nearly every shape measured. `AB_MODE=auto` keeps
+  such calls on Accelerate, so linking apple-bottom costs little but gains
+  nothing there yet.
+- You need IEEE FP64 results bit for bit, or code that runs off Apple
+  Silicon.
 
 ---
 
@@ -281,18 +288,13 @@ ab_matrix_upload(m, data, true);   // true = parallel
 ab_matrix_upload(m, data, false);  // false = serial
 ```
 
-#### 4. Check Crossover Points
+#### 4. Let measurement decide the route
 
-```c
-// Route based on size
-void smart_dgemm(int N, double* A, double* B, double* C) {
-    if (N >= 2048) {
-        gpu_dgemm(A, B, C, N);  // GPU
-    } else {
-        cblas_dgemm(...);       // AMX
-    }
-}
-```
+For calls with host arrays, `ab_dgemm_blas` / `ab_zgemm_blas` route each
+call from the calibrated table (`AB_MODE=auto`), so a fixed size cut-off in
+your code is not needed. `make calibrate` measures the table on your own
+machine, and `AB_DISPATCH_TABLE=<file>` uses it without a rebuild
+([Routing](#routing-ab_modeauto)).
 
 ### Python Integration
 
@@ -368,13 +370,16 @@ def gpu_matmul(A, B):
 - Run `system_profiler SPDisplaysDataType` to verify GPU
 
 **Slow performance**
-1. Check matrix sizes (< 2048 will be slower than AMX)
+1. Check matrix sizes: on an M2 Max the GPU is slower than Accelerate
+   below about N = 1,500 (DGEMM) or N = 1,000 (ZGEMM) even with the
+   matrices resident ([README](../README.md#performance))
 2. Ensure you're not uploading/downloading every iteration
-3. Use `ab_print_stats()` to see time breakdown
+3. Use `ab_print_stats()` to see time breakdown; for BLAS-ABI calls,
+   `AB_REPORT=1`
 
 **Precision issues**
 - Double-float gives ~10⁻¹⁵ precision, not 10⁻¹⁶
-- For ~10⁻¹⁶, use native FP64 (AMX)
+- For ~10⁻¹⁶, use IEEE FP64 on the CPU (Accelerate)
 
 ---
 
@@ -382,163 +387,70 @@ def gpu_matmul(A, B):
 
 ### Overview
 
-apple-bottom provides a Fortran-callable BLAS API using the **EXTERNAL declaration** pattern for drop-in compatibility.
+libapplebottom exports the Fortran BLAS symbols `dgemm_` and `zgemm_`, and
+`ab_dgemm_` / `ab_zgemm_` with the same arguments. Link it ahead of your
+other BLAS library and the program's existing `CALL DGEMM` and `CALL ZGEMM`
+reach apple-bottom without a source change; every other BLAS and LAPACK
+routine still comes from that other library. Each call is then routed to
+the GPU or to Accelerate ([Automatic Routing](#automatic-routing)).
 
-### Supported Operations
+| Fortran call | Provided by apple-bottom |
+|--------------|--------------------------|
+| `CALL DGEMM(...)` | yes (`dgemm_`; also `CALL ab_dgemm(...)`) |
+| `CALL ZGEMM(...)` | yes (`zgemm_`; also `CALL ab_zgemm(...)`) |
+| any other BLAS or LAPACK routine | no: your BLAS/LAPACK library |
 
-| Fortran Call | apple-bottom Equivalent | Status |
-|--------------|------------------------|--------|
-| `CALL DGEMM(...)` | `CALL ab_dgemm(...)` | ✓ Production |
-| `CALL ZGEMM(...)` | `CALL ab_zgemm(...)` | ✓ Production |
-| `CALL DSYRK(...)` | `CALL ab_dsyrk(...)` | ✓ Production |
-| `CALL ZHERK(...)` | ⚠ Use cblas_zherk (AMX faster) | Not recommended |
+The arguments are those of reference BLAS, and so is the behaviour: TRANS
+is case-insensitive (`'N'`, `'T'`, `'C'`; `'C'` means `'T'` for DGEMM), an
+illegal argument is reported through `xerbla` and stops the program, and
+`alpha = 0` returns `C = beta*C` without reading A or B.
 
-### EXTERNAL Declaration Pattern
-
-```fortran
-SUBROUTINE your_solver(...)
-  IMPLICIT NONE
-  EXTERNAL :: ab_zgemm  ! Declare apple-bottom routine
-
-  ! Replace CALL ZGEMM( with CALL ab_zgemm(
-  CALL ab_zgemm('N', 'N', m, n, k, alpha, A, lda, B, ldb, beta, C, ldc)
-```
-
-**Why EXTERNAL works:**
-- Fortran passes addresses (sequence association)
-- No explicit interface → no array descriptors
-- Compatible with array slices: `A(1,istart)`, `B(i:j,k:l)`, etc.
-
-### Integration Patterns
-
-#### Pattern 1: Simple Replacement
-
-**Before:**
-```fortran
-SUBROUTINE matrix_multiply(A, B, C, N)
-  IMPLICIT NONE
-  INTEGER :: N
-  COMPLEX(8) :: A(N,N), B(N,N), C(N,N)
-  COMPLEX(8) :: alpha, beta
-
-  alpha = (1.d0, 0.d0)
-  beta = (0.d0, 0.d0)
-
-  CALL ZGEMM('N', 'N', N, N, N, alpha, A, N, B, N, beta, C, N)
-END SUBROUTINE
-```
-
-**After:**
-```fortran
-SUBROUTINE matrix_multiply(A, B, C, N)
-  IMPLICIT NONE
-  EXTERNAL :: ab_zgemm  ! Add this
-  INTEGER :: N
-  COMPLEX(8) :: A(N,N), B(N,N), C(N,N)
-  COMPLEX(8) :: alpha, beta
-
-  alpha = (1.d0, 0.d0)
-  beta = (0.d0, 0.d0)
-
-  CALL ab_zgemm('N', 'N', N, N, N, alpha, A, N, B, N, beta, C, N)  ! Change this
-END SUBROUTINE
-```
-
-#### Pattern 2: Davidson Eigensolver
+To send only some call sites to apple-bottom, call `ab_zgemm` / `ab_dgemm`
+there, declared `EXTERNAL` (not through a module, so array sections pass by
+address as with any BLAS call), and leave `-lapplebottom` after your BLAS
+library:
 
 ```fortran
-SUBROUTINE davidson_eigensolver(H, S, psi, eval, ndim, nvec, niter)
-  IMPLICIT NONE
-  EXTERNAL :: ab_zgemm
-
-  INTEGER :: ndim, nvec, niter, iter
-  COMPLEX(8) :: H(ndim,ndim), S(ndim,ndim)
-  COMPLEX(8) :: psi(ndim,nvec), hpsi(ndim,nvec), spsi(ndim,nvec)
-  REAL(8) :: eval(nvec)
-  COMPLEX(8) :: alpha, beta
-
-  alpha = (1.d0, 0.d0)
-  beta = (0.d0, 0.d0)
-
-  DO iter = 1, niter
-    ! Apply Hamiltonian: hpsi = H * psi
-    CALL ab_zgemm('N', 'N', ndim, nvec, ndim, &
-                  alpha, H, ndim, psi, ndim, beta, hpsi, ndim)
-
-    ! Apply overlap: spsi = S * psi
-    CALL ab_zgemm('N', 'N', ndim, nvec, ndim, &
-                  alpha, S, ndim, psi, ndim, beta, spsi, ndim)
-
-    ! ... diagonalize, update psi, check convergence ...
-  END DO
-END SUBROUTINE
+EXTERNAL :: ab_zgemm
+CALL ab_zgemm('C', 'N', nvec, nvec, ndim, alpha, psi, ndim, psi, ndim, beta, s, nvec)
 ```
-
-#### Pattern 3: Conjugate Transpose
-
-```fortran
-SUBROUTINE compute_overlap(psi, overlap, ndim, nvec)
-  IMPLICIT NONE
-  EXTERNAL :: ab_zgemm
-
-  INTEGER :: ndim, nvec
-  COMPLEX(8) :: psi(ndim,nvec), overlap(nvec,nvec)
-  COMPLEX(8) :: alpha, beta
-
-  alpha = (1.d0, 0.d0)
-  beta = (0.d0, 0.d0)
-
-  ! overlap = psi^H * psi (conjugate transpose)
-  CALL ab_zgemm('C', 'N', nvec, nvec, ndim, &
-                alpha, psi, ndim, psi, ndim, beta, overlap, nvec)
-END SUBROUTINE
-```
-
-**Supported transposes:**
-- `'N'` — No transpose
-- `'T'` — Transpose (real matrices)
-- `'C'` — Conjugate transpose (complex matrices)
 
 ### Build Integration
 
-#### Step 1: Build apple-bottom
-
-```bash
-cd /path/to/apple-bottom
-make
-make test
-```
-
-#### Step 2: Update Your Makefile
+Shared library (recommended; it carries its own Metal and C++ dependencies
+and re-exports Accelerate, so with no other BLAS library `-lapplebottom`
+also provides the rest of BLAS and LAPACK):
 
 ```makefile
-# Fortran compiler
-FC = gfortran
-
-# BLAS/LAPACK libraries
-# IMPORTANT: -lapplebottom must come BEFORE -framework Accelerate
-LIBS = -L/path/to/apple-bottom/build -lapplebottom \
-       -framework Accelerate -framework Metal -framework Foundation
-
-# Link your executable
-my_app: my_app.o solver.o
-	$(FC) -o my_app my_app.o solver.o $(LIBS)
+AB_LIBS = -L/path/to/apple-bottom/build -Wl,-rpath,/path/to/apple-bottom/build -lapplebottom
+LIBS    = $(AB_LIBS) $(OTHER_BLAS_LIBS)
 ```
 
-**Critical:** apple-bottom must be listed BEFORE Accelerate so the linker finds `ab_zgemm_()` before falling back to OpenBLAS.
+Static archive:
 
-#### Step 3: Verify Linking
+```makefile
+LIBS = /path/to/apple-bottom/build/libapplebottom.a \
+       -lc++ -framework Metal -framework Foundation -framework Accelerate
+```
+
+Keep apple-bottom first. The linker binds `dgemm_`/`zgemm_` to the first
+library on the command line that exports them, and in a flat namespace
+(`-Wl,-flat_namespace`, which Homebrew's Open MPI wrappers add) the first
+loaded library wins at run time. Without `-lc++`, a static link fails with
+an undefined `___gxx_personality_v0`.
+
+### Check that the calls arrive
 
 ```bash
-otool -L my_app | grep -E "applebottom|Metal|Accelerate"
+AB_REPORT=1 ./my_app 2> report.txt
+grep AB_REPORT report.txt
 ```
 
-Should show:
-```
-/System/Library/Frameworks/Accelerate.framework/Versions/A/Accelerate
-/System/Library/Frameworks/Metal.framework/Versions/A/Metal
-/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation
-```
+There is one `AB_REPORT[pid] zgemm calls=…` line per routine that reached
+apple-bottom, with the calls and time by route. No `AB_REPORT` lines: the
+program does not load libapplebottom (`otool -L my_app`). No line for a
+routine the program calls: that symbol is bound to another library; put
+apple-bottom first.
 
 ### Automatic Routing
 
@@ -547,58 +459,8 @@ Should show:
 (`AB_MODE=auto`) a call goes to the GPU only for shapes where the GPU was
 measured at least 1.10× faster than Accelerate end to end; everything else
 runs on Accelerate. `AB_MODE=gpu` sends every call with all dimensions above
-`AB_MIN_GPU_DIM` to the GPU. See [Routing](#routing-ab_modeauto).
-
-### API Reference
-
-#### ZGEMM (Complex Double Precision)
-
-```fortran
-EXTERNAL :: ab_zgemm
-
-CALL ab_zgemm(transA, transB, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc)
-```
-
-**Arguments:**
-- `transA`, `transB` : `CHARACTER` — `'N'`, `'T'`, or `'C'` (conjugate transpose)
-- `M`, `N`, `K` : `INTEGER` — matrix dimensions
-- `alpha` : `COMPLEX(8)` — scalar multiplier
-- `A` : `COMPLEX(8)` — matrix A
-- `lda` : `INTEGER` — leading dimension of A
-- `B` : `COMPLEX(8)` — matrix B
-- `ldb` : `INTEGER` — leading dimension of B
-- `beta` : `COMPLEX(8)` — scalar multiplier for C
-- `C` : `COMPLEX(8)` — matrix C, overwritten with result
-- `ldc` : `INTEGER` — leading dimension of C
-
-**Operation:** `C = alpha * op(A) * op(B) + beta * C`
-
-**Implementation:** Uses Gauss 3-multiply algorithm (25% compute reduction).
-
-### Common Issues
-
-**"undefined reference to `ab_zgemm_`"**
-
-```bash
-# Check library exists
-ls -la /path/to/apple-bottom/build/libapplebottom.a
-
-# Verify library has symbol
-nm /path/to/apple-bottom/build/libapplebottom.a | grep ab_zgemm_
-
-# Update Makefile
-LIBS = -L/path/to/apple-bottom/build -lapplebottom -framework Accelerate ...
-```
-
-**"S matrix not positive definite" or Wrong Results**
-
-```fortran
-! DON'T do this:
-USE apple_bottom_mod  ! ✗ Creates array descriptor issues
-
-! DO this:
-EXTERNAL :: ab_zgemm  ! ✓ Simple, works with array slices
-```
+`AB_MIN_GPU_DIM` to the GPU, `AB_MODE=cpu` none. See
+[Routing](#routing-ab_modeauto).
 
 ---
 
@@ -606,168 +468,61 @@ EXTERNAL :: ab_zgemm  ! ✓ Simple, works with array slices
 
 ### Overview
 
-Integration with Quantum ESPRESSO 7.4.1 to GPU-accelerate Davidson eigensolver.
+Quantum ESPRESSO calls ZGEMM and DGEMM through the Fortran BLAS ABI: the
+Davidson solvers (`cegterg` for k-points, `regterg` at the gamma point) and
+the PAW routines (`newq`, `addusdens`), among others. Linking apple-bottom
+ahead of the configured BLAS is all it takes; no QE source change is
+needed.
 
-**Performance:** 1.22× speedup vs 6-thread OpenBLAS on Si64 benchmark, 11 decimal place energy agreement.
+**What to expect on an M2 Max** ([VAL-1](../tests/validation/VAL001_QE_Si64.md),
+QE develop (7.5), 64-atom Si, PAW): the total energy and every printed band energy
+are the same in all three modes. `AB_MODE=auto` keeps every GEMM of these
+runs on Accelerate, because the calibrated table has no GPU row for QE's
+shapes, so its run time is that of `AB_MODE=cpu` (within 0.1%).
+`AB_MODE=gpu` forces the GEMMs onto the GPU and is slower:
+1.3–17.3% more wall time on the three inputs, because its GEMMs take
+2.5–4.8× as long. On this hardware, linking apple-bottom into QE gives you
+the `AB_REPORT` accounting and a routing that follows measurement, not a
+speed-up.
 
-### Prerequisites
+### make.inc
 
-- macOS 14+ with Apple Silicon
-- Quantum ESPRESSO 7.4.1 source
-- apple-bottom library built
-- gfortran (conda or Homebrew)
-
-### Quick Start
-
-```bash
-# 1. Build apple-bottom
-cd /path/to/apple-bottom
-make && make test
-
-# 2. Patch QE cegterg.f90
-cd /path/to/q-e-qe-7.4.1/KS_Solvers/Davidson
-# Add: EXTERNAL :: ab_zgemm
-# Replace: ZGEMM → ab_zgemm (12 calls)
-
-# 3. Update make.inc
-DFLAGS = -D__GFORTRAN -D__STD_F95 -D__FFTW3
-BLAS_LIBS = -L/path/to/apple-bottom/build -lapplebottom \
-            -framework Accelerate -framework Metal -framework Foundation
-
-# 4. Build QE
-cd /path/to/q-e-qe-7.4.1
-make clean && make pw -j8
-
-# 5. Run benchmark
-cd /path/to/benchmark
-time /path/to/q-e-qe-7.4.1/bin/pw.x < si64.in > si64_gpu.out 2>&1
-grep '!' si64_gpu.out  # Should show: -2990.44276157 Ry
-```
-
-### Integration Architecture
-
-#### Call Chain
-
-```
-QE cegterg.f90:
-  CALL ab_zgemm('N', 'N', m, n, k, ...)
-           ↓
-fortran_bridge.c: ab_zgemm_() → zgemm_()
-  - Dereference pointers
-           ↓
-blas_wrapper.c: ab_zgemm_blas()
-  - Route (dispatch.c): AB_MODE, AB_MIN_GPU_DIM, calibrated table
-  ├─ Accelerate → cblas_zgemm
-  └─ GPU:
-      - Convert interleaved → split-complex
-      - Upload to GPU
-      - Dispatch Metal kernel
-      - Download + convert back
-           ↓
-apple_bottom.m:
-  - DD arithmetic (~10⁻¹⁵ precision)
-  - Gauss 3-multiply algorithm
-```
-
-### Detailed Integration
-
-#### Step 1: Patch cegterg.f90
-
-**File:** `KS_Solvers/Davidson/cegterg.f90`
-
-Add after `IMPLICIT NONE` (line ~41):
-```fortran
-IMPLICIT NONE
-EXTERNAL :: ab_zgemm
-```
-
-Replace all 12 `CALL ZGEMM(` with `CALL ab_zgemm(` in the main subroutine.
-
-**Do NOT modify** `pcegterg` subroutine (different parallelization).
-
-#### Step 2: Update make.inc
+QE's `QELIBS` lists `$(LAPACK_LIBS)` before `$(BLAS_LIBS)`, so put
+apple-bottom at the front of both:
 
 ```makefile
-DFLAGS = -D__GFORTRAN -D__STD_F95 -D__FFTW3
-BLAS_LIBS = -L/path/to/apple-bottom/build -lapplebottom \
-            -framework Accelerate -framework Metal -framework Foundation
+AB_LIBS     = -L/path/to/apple-bottom/build -Wl,-rpath,/path/to/apple-bottom/build -lapplebottom
+LAPACK_LIBS := $(AB_LIBS) $(LAPACK_LIBS)
+BLAS_LIBS   := $(AB_LIBS) $(BLAS_LIBS)
 ```
 
-**Important:** `-lapplebottom` BEFORE `-framework Accelerate`.
+Then `make pw` as usual.
 
-#### Step 3: Build and Validate
-
-```bash
-cd /path/to/q-e-qe-7.4.1
-make clean && make pw -j8
-
-# Verify binary
-ls -la bin/pw.x
-
-# Run test
-cd /path/to/benchmark
-time /path/to/q-e-qe-7.4.1/bin/pw.x < si64.in > si64_gpu.out 2>&1
-
-# Verify correctness
-grep '!' si64_gpu.out
-# Expected: !    total energy              =   -2990.44276157 Ry
-```
-
-### Performance Results
-
-**Si64 Benchmark** (64-atom silicon, M2 Max):
-
-| Configuration | Wall Time | Energy (Ry) | Status |
-|--------------|-----------|-------------|--------|
-| OpenBLAS (6 threads) | 2m28s | -2990.44276157 | Baseline |
-| **apple-bottom GPU** | **2m01s** | **-2990.44276157** | ✓ 1.22× speedup |
-
-**Breakdown:**
-- cegterg: 112.3s → 86.5s (30% faster)
-- CPU usage: 600% → 340% (47% reduction)
-- **Numerical correctness:** 11 decimal place agreement
-
-### Troubleshooting
-
-**"undefined reference to `ab_zgemm_`"**
+### Run and read the report
 
 ```bash
-# Verify library
-ls -la /path/to/apple-bottom/build/libapplebottom.a
-nm /path/to/apple-bottom/build/libapplebottom.a | grep ab_zgemm_
-
-# Check make.inc
-grep "BLAS_LIBS" make.inc
-# Should have: -lapplebottom BEFORE -framework Accelerate
-```
-
-**Wrong energy**
-
-```bash
-# Verify EXTERNAL declaration (not module)
-grep "EXTERNAL :: ab_zgemm" KS_Solvers/Davidson/cegterg.f90
-
-# Ensure ONLY cegterg.f90 modified
-git status
-```
-
-**Slow performance**
-
-```bash
-# At exit: calls and time by route, GPU stage costs, fallbacks (stderr)
-export AB_REPORT=1
-/path/to/q-e-qe-7.4.1/bin/pw.x < si64.in > si64.out 2> si64.err
+AB_REPORT=1 mpirun -np 1 -x AB_REPORT -x AB_MODE pw.x -in si64.in > si64.out 2> si64.err
 grep AB_REPORT si64.err
 ```
 
-See [Environment Variables and Run Reports](#environment-variables-and-run-reports).
+Each rank prints its own report at exit (calls, time on the GPU and on
+Accelerate, the GPU calls' stage costs, fallbacks); see
+[Reading a run report](#reading-a-run-report). With `AB_MODE=auto` on an M2
+Max, expect `gpu_calls=0` for every routine.
 
-### Files Changed
+### Troubleshooting
 
-**Total:** 15 lines across 2 files
+**No `AB_REPORT` lines.** pw.x does not load libapplebottom: check
+`otool -L bin/pw.x` and the rpath.
 
-- `KS_Solvers/Davidson/cegterg.f90` — 13 lines (1 EXTERNAL + 12 replacements)
-- `make.inc` — 2 lines (DFLAGS + BLAS_LIBS)
+**A `zgemm` / `dgemm` line is missing.** The symbol is bound to another
+library. Put `$(AB_LIBS)` first in both `LAPACK_LIBS` and `BLAS_LIBS`. With
+a flat-namespace link, `DYLD_PRINT_BINDINGS=1 bin/pw.x -in /dev/null 2>&1 |
+grep -E '/_[dz]gemm_>'` shows where each one went.
+
+**Energies differ between `AB_MODE=cpu` and `AB_MODE=gpu` by more than
+`conv_thr`.** That is a bug; please open an issue with the input and both
+`AB_REPORT` outputs.
 
 ---
 

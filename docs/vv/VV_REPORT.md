@@ -6,8 +6,30 @@
 **Status**: Validated for Production Use
 **Validated Baseline**: Git tag `v1.0.2-bugfix` (SHA: f3e2fc1)
 **Revision 1.1**: Added §10 Clock-pin and Utilization Methodology; §10 Conclusions renumbered to §11, §11 References renumbered to §12.
+**Revision 1.2 (2026-10-14)**: Correction of VAL-1; see the notice below.
 **Test System**: Apple M2 Max, macOS 14.7, Metal 3
 **Validation Standard**: NASA-STD-7009A, ASME V&V 10-2006
+
+> **Correction (Revision 1.2, 2026-10-14).** The VAL-1 runs this report
+> cites (March 2026) did not exercise the GPU. Versions 1.0–1.3 needed an
+> explicit `ab_init()`, which no Quantum ESPRESSO build called, so every
+> ZGEMM ran on the CPU; and the 1.22× timing compared a serial QE build
+> with an MPI build. VAL-1 therefore says nothing about DD arithmetic, and
+> its findings below (R-3, R-12, the production-validation and performance
+> rows, §4.2, the QE example in §9) are **withdrawn**. The deployment
+> recommendations in §1.4 and §11.2 rest on the verification evidence
+> alone until application workloads are revalidated.
+>
+> VAL-1 was repeated for v1.4.0 with the GPU path exercised
+> ([`tests/validation/VAL001_QE_Si64.md`](../../tests/validation/VAL001_QE_Si64.md)):
+> with 97–100% of the GEMM time on the GPU, the energies and band energies
+> agree with the CPU run in every printed digit; the GPU path is 1.3–17%
+> slower than Accelerate for QE's shapes, so `AB_MODE=auto` keeps them on
+> Accelerate.
+>
+> The verification evidence (V-2 and the unit suites) ran on the GPU and is
+> unaffected. Test counts in this report are those of v1.0.2; the current
+> suite is described in [`tests/README.md`](../../tests/README.md).
 
 ---
 
@@ -61,11 +83,11 @@
 |--------|--------|----------|
 | **Precision (Frobenius)** | ~10⁻¹⁴ to 5×10⁻¹⁴ for N ≤ 4096 | V-2 convergence study |
 | **Precision (Max Element)** | ~10⁻¹¹ to 6×10⁻⁶ for N ≤ 4096 | V-2 convergence study |
-| **Production Validation** | 11 decimal place agreement | VAL-1 (QE Si64 DFT) |
-| **Performance** | 1.22× speedup vs 6-thread CPU | VAL-1 (QE Si64 benchmark) |
+| **Production Validation** | ~~11 decimal place agreement~~ withdrawn (GPU not exercised; see Revision 1.2) | VAL-1 (QE Si64 DFT) |
+| **Performance** | ~~1.22× speedup vs 6-thread CPU~~ withdrawn (serial vs MPI build; see Revision 1.2) | VAL-1 (QE Si64 benchmark) |
 | **Correctness** | 48/48 tests passing | Regression + unit + precision tests |
 
-**Bottom Line**: apple-bottom provides **sufficient precision for production DFT/MD** (10⁻¹⁰ convergence criteria) with **modest performance gains** (1.1-1.3× at N≥2048) and **significant energy efficiency** (47% CPU reduction).
+**Bottom Line**: apple-bottom provides **sufficient precision for production DFT/MD** (10⁻¹⁰ convergence criteria) with **modest performance gains** (1.1-1.3× at N≥2048, matrices resident on the GPU). *(The QE CPU-usage reduction quoted in Revision 1.1 is withdrawn; see Revision 1.2.)*
 
 ### 1.4 Recommendation
 
@@ -308,7 +330,7 @@ apple-bottom correctly implements DGEMM/ZGEMM to within DD precision bounds:
 - Dimensions: N ~ 200-400 (basis size)
 - Frequency: ~230 calls per SCF cycle, 14 cycles total
 
-#### 4.2.2 Results
+#### 4.2.2 Results (withdrawn in Revision 1.2: these runs did not use the GPU)
 
 | Configuration | Total Energy (Ry) | Wall Time | CPU Usage |
 |---------------|-------------------|-----------|-----------|
@@ -335,7 +357,7 @@ Single ZGEMM: ~N · 10⁻¹⁵ ≈ 400 · 10⁻¹⁵ = 4×10⁻¹³
 
 #### 4.2.4 Validation Statement
 
-✅ **VAL-1 PASSED**
+~~✅ **VAL-1 PASSED**~~ — withdrawn in Revision 1.2; see `tests/validation/VAL001_QE_Si64.md` for the repeated validation.
 
 apple-bottom demonstrates:
 1. **Numerical equivalence** to CPU FP64 for production DFT
@@ -535,7 +557,7 @@ diff <(grep "total energy" system_gpu.out) \
 |--------|-------------|---------|----------------|--------|----------|
 | **R-1** | Frobenius error `< N·10⁻¹⁴` | V-2, test_precision | `tests/verification/test_convergence.c`, `tests/test_precision.c` | ✓ PASS | `convergence_data.csv` |
 | **R-2** | Max element error documented | V-2 | `tests/verification/test_convergence.c` | ✓ PASS | Section 3.2.3 |
-| **R-3** | Production DFT accuracy (10⁻¹⁰ Ry) | VAL-1 | `tests/validation/VAL001_QE_Si64.md` | ✓ PASS | 11 decimal places |
+| **R-3** | Production DFT accuracy (10⁻¹⁰ Ry) | VAL-1 | `tests/validation/VAL001_QE_Si64.md` | withdrawn (Rev. 1.2) | March runs did not use the GPU; repeated for v1.4.0 |
 | **R-4** | Correctness vs CPU BLAS | test_correctness | `tests/test_correctness.c` | ✓ PASS | 42/42 tests |
 | **R-5** | ZGEMM complex arithmetic | test_zgemm | `tests/test_correctness.c:test_zgemm_vs_accelerate()` | ✓ PASS | Frobenius `< 10⁻¹⁴` |
 | **R-6** | Async API correctness | test_async | `tests/test_correctness.c:test_async_dgemm_basic()` | ✓ PASS | BUG-1/2 fixed |
@@ -544,7 +566,7 @@ diff <(grep "total energy" system_gpu.out) \
 | **R-9** | Reinit after shutdown (no UB) | BUG-5 regression | `tests/test_correctness.c:test_bug5_reinit_after_shutdown()` | ✓ PASS | Operations succeed |
 | **R-10** | Memory pool overflow safety | BUG-6 regression | `tests/test_correctness.c:test_bug6_pool_overflow()` | ✓ PASS | Returns NULL |
 | **R-11** | Pipeline creation error handling | BUG-7 fix | Implicit in init tests | ✓ PASS | No silent failures |
-| **R-12** | Performance ≥ 0.8× CPU (N≥1024) | VAL-1 benchmark | QE Si64 timing | ✓ PASS | 1.22× speedup |
+| **R-12** | Performance ≥ 0.8× CPU (N≥1024) | VAL-1 benchmark | QE Si64 timing | withdrawn (Rev. 1.2) | serial vs MPI build comparison |
 | **R-13** | Rectangular matrices (≤2:1) | test_rectangular_matrix | `tests/test_correctness.c:test_rectangular_matrix()` | ✓ PASS | 100×50 correct |
 | **R-14** | Edge cases (N=1, non-pow2) | test_small_matrix_n1, test_non_power_of_2 | `tests/test_correctness.c` | ✓ PASS | Correctness verified |
 
@@ -583,7 +605,7 @@ diff <(grep "total energy" system_gpu.out) \
 |--------|--------------|------------|
 | **DD representation** | `~2⁻⁴⁸` per operation | Error-free transformations (Dekker/Knuth) |
 | **K-term accumulation** | `~K·2⁻⁴⁸ = N·2⁻⁴⁸` | Documented in theoretical bound |
-| **Iteration accumulation** | `~√n_iter · single_step_error` | Validated in QE (14 iterations, 11 decimal places) |
+| **Iteration accumulation** | `~√n_iter · single_step_error` | Not validated: the QE evidence was withdrawn (Rev. 1.2) |
 | **Compiler optimizations** | Unknown | `-O3` with `MTLMathModeSafe` |
 | **Hardware variations** | Unknown | Validated on M2 Max only |
 
@@ -597,7 +619,7 @@ Total error ≈ √K · (N · 10⁻¹⁵)
 **Example** (QE Si64, N=400, K=14):
 ```
 Expected: √14 · (400 · 10⁻¹⁵) ≈ 1.5×10⁻¹²
-Measured: < 10⁻¹¹ (conservative)
+Measured: withdrawn (Rev. 1.2; the March QE runs did not use the GPU)
 ```
 
 ### 9.3 Confidence Intervals
@@ -673,7 +695,7 @@ boost-clock volatility directly.
 
 **Evidence Base**:
 1. **V-2 Convergence Study**: Frobenius error `~10⁻¹⁴` to `5×10⁻¹⁴` for N ∈ {64..4096}
-2. **VAL-1 QE DFT**: 11 decimal place agreement on production workload
+2. ~~**VAL-1 QE DFT**: 11 decimal place agreement on production workload~~ (withdrawn, Rev. 1.2)
 3. **Correctness Suite**: 48/48 tests passing
 4. **Bug Fixes**: 7 critical bugs fixed and regression-tested
 
