@@ -12,11 +12,11 @@
 #include <complex.h>
 #include <Accelerate/Accelerate.h>
 #include <fenv.h>
+#include <mach-o/dyld.h>
 #include <spawn.h>
 #include <sys/wait.h>
 
 extern char **environ;
-static const char *g_argv0;
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -493,7 +493,7 @@ static void test_zgemm_conj_tall(void) {
     double max_err = 0;
     for (size_t i = 0; i < nC; i++) {
         double e = cabs(Cr[i] + I * Ci[i] - Cz[i]) / absAB[i];
-        if (!(e <= max_err)) max_err = e;   // NaN propagates
+        if (isnan(e) || e > max_err) max_err = e;   // once NaN, stays NaN
     }
 
     ab_matrix_destroy(mAr); ab_matrix_destroy(mAi);
@@ -2218,28 +2218,33 @@ static void test_morton_dtrsm_panel(void) {
 // =============================================================================
 
 // Child of test_init_keeps_host_fp_flags: the first ab_init() in a fresh
-// process. Exit 0 if no overflow, invalid or divide-by-zero flag is raised,
-// 1 if one is, 2 without a device.
+// process, with one flag (FE_INEXACT) already raised by the "host". Exit 0
+// if the flags afterwards are exactly the host's, 1 if ab_init added or
+// cleared any, 2 without a device.
 static int init_fp_flags_child(void) {
     feclearexcept(FE_ALL_EXCEPT);
+    feraiseexcept(FE_INEXACT);
     ABStatus st = ab_init();
-    int raised = fetestexcept(FE_OVERFLOW | FE_INVALID | FE_DIVBYZERO);
-    return st != AB_OK ? 2 : raised ? 1 : 0;
+    int flags = fetestexcept(FE_ALL_EXCEPT);
+    return st != AB_OK ? 2 : flags != FE_INEXACT ? 1 : 0;
 }
 
 // Creating the Metal device raises FE_OVERFLOW on macOS 27; ab_init() must not
 // pass that on to the host (gfortran reports raised flags at exit).
 static void test_init_keeps_host_fp_flags(void) {
     TEST("ab_init leaves the host's FP exception flags alone");
+    char self[PATH_MAX];
+    uint32_t len = sizeof self;
     char flag[] = "--init-fp-flags-child";
-    char *argv[] = {(char *)g_argv0, flag, NULL};
+    char *argv[] = {self, flag, NULL};
     pid_t pid;
     int status = 0;
-    if (posix_spawn(&pid, g_argv0, NULL, NULL, argv, environ) != 0 ||
+    if (_NSGetExecutablePath(self, &len) != 0 ||
+        posix_spawn(&pid, self, NULL, NULL, argv, environ) != 0 ||
         waitpid(pid, &status, 0) != pid || !WIFEXITED(status)) {
         FAIL("could not run the child");
     } else if (WEXITSTATUS(status) == 1) {
-        FAIL("ab_init raised an FP exception flag in the caller");
+        FAIL("ab_init changed the caller's FP exception flags");
     } else if (WEXITSTATUS(status) != 0) {
         FAIL("ab_init failed in the child");
     } else {
@@ -2325,7 +2330,6 @@ static const TestCase TESTS[] = {
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
 
 int main(int argc, char **argv) {
-    g_argv0 = argv[0];
     if (argc > 1 && !strcmp(argv[1], "--init-fp-flags-child")) return init_fp_flags_child();
     printf("╔══════════════════════════════════════════════════════════════════╗\n");
     printf("║  apple-bottom Comprehensive Test Suite                           ║\n");

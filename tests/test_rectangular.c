@@ -57,9 +57,11 @@ static double componentwise_error(const double* got_re, const double* got_im,
                 M, N, K, 1.0, absA, transA ? M : K, absB, N, 0.0, scale, N);
     double worst = 0.0;
     for (size_t i = 0; i < (size_t)M * N; i++) {
-        double d = got_re[i] - ref_re[i];
+        double d = fabs(got_re[i] - ref_re[i]);
         if (got_im) d = hypot(d, got_im[i] - ref_im[i]);
-        if (scale[i] > 0.0 && d / scale[i] > worst) worst = d / scale[i];
+        if (!isfinite(d)) { worst = INFINITY; break; }       // NaN or Inf in the result
+        if (scale[i] > 0.0) { if (d / scale[i] > worst) worst = d / scale[i]; }
+        else if (d != 0.0) { worst = INFINITY; break; }      // nonzero where |A||B| is 0
     }
     free(scale);
     return worst;
@@ -193,7 +195,7 @@ static void test_dgemm_qe_dimensions(void) {
     TEST("DGEMM QE-like (18277 × 150 × 18277 × 150)");
     ab_init();
 
-    // Actual QE Davidson dimensions
+    // QE-like aspect (M, N as in a Davidson update); K is synthetic
     int M = 18277, N = 150, K = 18277;
 
     double* A = (double*)malloc(M * K * sizeof(double));
