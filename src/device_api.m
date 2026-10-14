@@ -3,19 +3,17 @@
 // Copyright (c) 2026 Grant Heileman, Technology Residue. MIT License.
 // =============================================================================
 //
-// Week-1 implementation: lifecycle + host↔device↔device memcpy + memset
-// + synchronous single-stream model. BLAS entry points are stubbed with
-// TODO markers so the DevXlib __METAL backend can link against the full
-// symbol set while we iterate on the kernels.
+// Lifecycle, host↔device↔device memcpy, memset, a synchronous single-stream
+// model, ab_dev_dgemm / ab_dev_zgemm and element-wise helpers.
 //
 // Design:
 //   - ab_dev_buffer_s wraps a single id<MTLBuffer> with shared storage mode.
 //     Shared storage is the right default on unified-memory Apple Silicon —
 //     the CPU pointer and GPU address point at the same physical page, so
 //     a "memcpy_h2d" is really just memcpy() into that page.
-//   - The "stream" abstraction currently exposes a singleton. QE's OpenACC
-//     residency only ever uses acc_stream(0), so this is sufficient for
-//     Month-1 integration work. Full multi-stream support is Month-3 scope.
+//   - The "stream" abstraction currently exposes a singleton, which is all
+//     a code that uses one device stream (e.g. OpenACC's acc_stream(0))
+//     needs. Multiple streams are not implemented.
 //   - We get our own MTLDevice + MTLCommandQueue here rather than reaching
 //     into apple_bottom.m's ABContextImpl. Metal returns the same system
 //     device each call, so memcpy_d2d between a matrix-handle buffer and a
@@ -147,8 +145,8 @@ ABStatus ab_dev_memcpy_d2h(void* dst, ab_dev_buffer_t src, size_t src_offset,
     if (nbytes == 0) return AB_OK;
 
     // Ensure any in-flight GPU work on this buffer has finished before the
-    // CPU reads it. Week-1 has no async pipeline so this is a no-op, but
-    // keeping the sync call here documents the contract for Month-2.
+    // CPU reads it. With no asynchronous work this is a no-op, but the
+    // call documents the contract for when there is.
     (void)ab_dev_stream_sync(NULL);
 
     const void* contents = [src->mtl contents];
@@ -167,8 +165,8 @@ ABStatus ab_dev_memcpy_d2d(ab_dev_buffer_t dst, size_t dst_offset,
 
     // Could use a blit encoder here, but with shared storage a direct
     // memcpy between the two backing pages is equivalent and faster for
-    // small transfers. Blit becomes preferable once we add private-storage
-    // buffers in Month-2.
+    // small transfers. Blit becomes preferable with private-storage
+    // buffers, which are not implemented.
     (void)ab_dev_stream_sync(NULL);
     void*       d = [dst->mtl contents];
     const void* s = [src->mtl contents];
@@ -181,8 +179,8 @@ ABStatus ab_dev_memcpy_h2d_async(ab_dev_buffer_t dst, size_t dst_offset,
                                  const void* src, size_t nbytes,
                                  ab_dev_stream_t stream) {
     (void)stream;
-    // Week-1: synchronous fallback. The DevXlib backend's _async macros
-    // will still work — they just won't overlap anything yet.
+    // Synchronous: callers of the _async variants work, but nothing
+    // overlaps yet.
     return ab_dev_memcpy_h2d(dst, dst_offset, src, nbytes);
 }
 
@@ -209,7 +207,7 @@ ABStatus ab_dev_memset(ab_dev_buffer_t buf, size_t offset,
 
 ab_dev_stream_t ab_dev_stream_create(void) {
     if (!dev_ensure_init()) return NULL;
-    // Singleton for Week-1. Multi-queue support is Month-3.
+    // One shared stream; multiple queues are not implemented.
     return &g_default_stream;
 }
 
@@ -220,14 +218,14 @@ void ab_dev_stream_destroy(ab_dev_stream_t stream) {
 ABStatus ab_dev_stream_sync(ab_dev_stream_t stream) {
     if (!dev_ensure_init()) return AB_ERROR_NO_DEVICE;
     (void)stream;
-    // No outstanding work in Week-1 — every op is synchronous on the CPU
+    // No outstanding work: every operation is synchronous on the CPU
     // side. When async memcpy / BLAS land, this will wait on the stream's
     // most recent command buffer.
     return AB_OK;
 }
 
 // -----------------------------------------------------------------------------
-// BLAS entry points — Week-2 dispatch via ABMatrix handle path
+// BLAS entry points — dispatch via the ABMatrix handle path
 // -----------------------------------------------------------------------------
 //
 // Strategy: device buffers hold raw FP64 in shared Metal storage.  GPU kernels
@@ -236,8 +234,8 @@ ABStatus ab_dev_stream_sync(ab_dev_stream_t stream) {
 // existing ab_dgemm_scaled / ab_zgemm_ex machinery, then downloading DD→FP64.
 //
 // The conversion is O(N²) per call vs O(N³) for GEMM — negligible overhead.
-// Month-2 will optimize to DD-native device buffers with stack-allocated
-// descriptors, eliminating the temp allocation entirely.
+// DD-native device buffers would remove the per-call conversion and the
+// temporary allocation; they are not implemented.
 //
 // For _offset variants: we offset into the raw FP64 data in shared memory
 // before uploading into the temp ABMatrix.  The Fortran offset is in elements
@@ -590,7 +588,7 @@ zgemm_cleanup:
     return s;
 }
 
-// ---- Element-wise operations (Week-2 stubs → real implementations) ---------
+// ---- Element-wise operations --------------------------------------------------
 
 ABStatus ab_dev_conjg_c(ab_dev_buffer_t buf, size_t offset, size_t n) {
     if (!buf) return AB_ERROR_INVALID_ARG;

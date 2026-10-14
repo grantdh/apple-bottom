@@ -2,14 +2,14 @@
 // test_device_api.c — Smoke tests for the device-buffer layer
 // =============================================================================
 //
-// Exercises the Week-1 surface:
+// Exercises:
 //   1. alloc → size → free
 //   2. H2D → D2H roundtrip, byte-identical
 //   3. D2D copy with source/destination offsets
 //   4. memset then D2H
 //   5. NULL / out-of-range error paths
 //   6. Stream create / sync / destroy doesn't crash
-// and the Week-2 BLAS: ab_dev_dgemm / ab_dev_zgemm against column-major
+// and the BLAS entry points: ab_dev_dgemm / ab_dev_zgemm against column-major
 // cblas, plus the element-wise ops.
 //
 // Pass criteria: all assertions hold. Exits non-zero on first failure.
@@ -153,7 +153,7 @@ static void test_streams(void) {
 }
 
 // =============================================================================
-// Week-2 BLAS validation tests
+// BLAS validation tests
 // =============================================================================
 //
 // ab_dev_dgemm / ab_dev_zgemm take column-major operands
@@ -571,7 +571,7 @@ static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
 
 int main(void) {
     printf("═══════════════════════════════════════════════════════════\n");
-    printf("apple-bottom device-API tests (Week-1 + Week-2 BLAS)\n");
+    printf("apple-bottom device-API tests\n");
     printf("═══════════════════════════════════════════════════════════\n");
 
     if (ab_init() != AB_OK) {

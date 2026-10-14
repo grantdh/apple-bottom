@@ -9,19 +9,24 @@
 //   - With the macOS 15 SDK (Xcode 16+) on macOS 15+, shaders use MTLMathModeSafe;
 //     otherwise they are compiled with fastMathEnabled = NO. Both keep full DD precision.
 //
+// Storage: ABMatrix data passed to ab_matrix_upload / ab_matrix_download is
+// row-major (C order). The BLAS ABI (ab_*gemm_blas, dgemm_/zgemm_) and the
+// device-buffer API (apple_bottom_device.h) are column-major, as in BLAS.
+//
 // Thread Safety:
-//   - ab_init/ab_shutdown: Safe to call from any thread (uses dispatch_once)
-//   - Matrix operations: NOT thread-safe — Metal command queue serializes
-//   - Use separate contexts for concurrent workloads (future feature)
+//   - ab_init/ab_shutdown: safe to call from any thread
+//   - Calls on different matrices may come from different threads; one matrix,
+//     pool or session must not be used by two threads at once. All work shares
+//     one Metal command queue.
 //
-// Performance notes — TWO regimes (README.md#performance has the measurements).
+// Performance on an M2 Max, against Accelerate (README.md#performance):
 //
-// Steady-state regime — native ABMatrix API, ABMatrix handles persisted across calls,
-// upload and FP64<->DD conversion amortized:
-//   DGEMM: GPU wins for N >= 2048   (anchor: benchmarks/results/2026-04-22-29dcc79/dgemm.csv)
-//   ZGEMM: GPU wins for N >= 1024   (anchor: benchmarks/results/2026-04-22-29dcc79/zgemm.csv)
-//   DSYRK: GPU wins for N >= 3072   (steady-state; prior measurement, not re-measured for end-to-end regime)
-//   ZHERK: GPU wins for N >= 1024   (steady-state; v1.4 introduced GPU-native transpose / no CPU roundtrip; not re-measured for end-to-end regime)
+// Native ABMatrix API, matrices resident (upload and FP64<->DD conversion
+// amortized; benchmarks/results/2026-10-14-3253a22-bench-paper/):
+//   DGEMM: faster from about N = 1536 (1.04x), 1.10-1.16x for N = 2048-4096
+//   ZGEMM: faster from about N = 1024 (1.12x), 1.30-1.39x for N = 1536-3072
+//   ZHERK: slower at every measured size (0.06-0.67x, N <= 2048); use cblas_zherk
+//   DSYRK: not re-measured for 1.4.0
 //
 // End-to-end regime — BLAS-ABI (ab_*_blas, raw pointers, no handle persistence; this is
 // the path Fortran host codes hit through dgemm_/zgemm_):

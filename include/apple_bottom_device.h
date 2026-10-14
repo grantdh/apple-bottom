@@ -3,10 +3,11 @@
 // Copyright (c) 2026 Grant Heileman, Technology Residue. MIT License.
 // =============================================================================
 //
-// This header defines the opaque device-buffer layer that the DevXlib __METAL
-// backend will call into. Unlike the matrix-handle API in apple_bottom.h,
-// this layer exposes *raw FP64 buffers* (interleaved real/imag for complex)
-// that mirror the memory model DevXlib, cuBLAS, and OpenACC expect:
+// This header defines a device-buffer layer: raw FP64 buffers (interleaved
+// real/imag for complex) that the caller allocates, fills and reuses, in the
+// memory model that cuBLAS-style device APIs and Fortran device-array codes
+// expect. Unlike the ABMatrix handles of apple_bottom.h, the data is FP64 and
+// column-major:
 //
 //     host_ptr  ──(ab_dev_memcpy_h2d)──►  ab_dev_buffer_t  ──►  ab_dev_zgemm
 //                                                 │
@@ -18,15 +19,17 @@
 //
 //     CALL DEV_ZGEMM('N','N', n,m,k, one, hpsi(1,n_start), ldhpsi, ...)
 //
-// and we cannot express `hpsi(1,n_start)` as pointer arithmetic on an opaque
-// buffer handle — the offset has to travel as an explicit argument.
+// and `hpsi(1,n_start)` cannot be expressed as pointer arithmetic on an
+// opaque buffer handle: the offset travels as an explicit argument.
 //
-// Week-1 scope:
-//   - Allocation / deallocation
-//   - Host↔device and device↔device memcpy
-//   - Memset, size query
-//   - Stream create / destroy / sync (single stream today, stub for future)
-//   - BLAS entry points declared but NOT implemented (TODO markers in .m)
+// What is implemented:
+//   - Allocation and deallocation, size query, memset
+//   - Host<->device and device<->device copies
+//   - One default stream; every operation is synchronous
+//   - ab_dev_dgemm / ab_dev_zgemm (column-major, transA/transB, ld, offsets).
+//     Each call converts its FP64 operands to DD and back, so it has the
+//     per-call costs of the BLAS ABI, not the resident speed of the ABMatrix
+//     API.
 //
 // Thread safety: functions are serialized through a single command queue,
 // same as the rest of apple-bottom. Concurrent callers from Fortran (OpenMP
@@ -48,8 +51,8 @@ extern "C" {
 typedef struct ab_dev_buffer_s* ab_dev_buffer_t;
 
 // Opaque handle to a command stream (maps to MTLCommandQueue + an ordering
-// mechanism). Reserved for future async use — Week-1 has a single default
-// stream and all operations are synchronous.
+// mechanism). Reserved for future asynchronous use: today there is a single
+// default stream and every operation is synchronous.
 typedef struct ab_dev_stream_s* ab_dev_stream_t;
 
 // -----------------------------------------------------------------------------
@@ -84,9 +87,8 @@ ABStatus ab_dev_memcpy_d2d(ab_dev_buffer_t dst, size_t dst_offset,
                            ab_dev_buffer_t src, size_t src_offset,
                            size_t nbytes);
 
-// Async variants — post-Week-1. Declared here so DevXlib templates can
-// include the header; implementations will return AB_ERROR_INVALID_ARG
-// until stream support lands.
+// Asynchronous variants. They take a stream for API compatibility but run
+// synchronously on the default stream.
 ABStatus ab_dev_memcpy_h2d_async(ab_dev_buffer_t dst, size_t dst_offset,
                                  const void* src, size_t nbytes,
                                  ab_dev_stream_t stream);
@@ -101,8 +103,8 @@ ABStatus ab_dev_memset(ab_dev_buffer_t buf, size_t offset,
 // Streams
 // -----------------------------------------------------------------------------
 
-// Create a new stream. Week-1 returns a shared singleton; close-enough for
-// DevXlib integration work since QE only uses acc_stream(0).
+// Create a stream. Returns the shared default stream: one stream is all a
+// code that uses a single device stream (e.g. OpenACC's acc_stream(0)) needs.
 ab_dev_stream_t ab_dev_stream_create(void);
 
 // Destroy a stream. No-op on the shared singleton.
@@ -167,8 +169,8 @@ ABStatus ab_dev_zgemm_offset(ABTranspose transA, ABTranspose transB,
                              const double beta[2],
                              ab_dev_buffer_t C, size_t c_offset, int ldc);
 
-// Elementwise utilities that DevXlib exposes via device_auxfunc.
-// These are direct analogues of the CUF kernels in devxlib.
+// Element-wise utilities of the kind GPU-resident Fortran codes need
+// (conjugate, scale, axpy on device buffers).
 ABStatus ab_dev_conjg_c(ab_dev_buffer_t buf, size_t offset, size_t n);
 ABStatus ab_dev_scale_z(ab_dev_buffer_t buf, size_t offset, size_t n,
                         const double alpha[2]);

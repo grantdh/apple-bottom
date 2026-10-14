@@ -262,7 +262,8 @@ inline DD dd_scale(DD a, float s) {
 #define NT ((BM/TM) * (BN/TN))
 
 // Tall-skinny tiling: 128×16 blocks, 256 threads
-// For M >> N (e.g., QE's 18277×150): boundary waste drops from ~30% to ~6%
+// For M >> N with N = 150: boundary waste in N drops from ~22% (3 tiles of 64)
+// to ~6% (10 tiles of 16)
 #define BM_TS 128
 #define BN_TS 16
 #define TM_TS 4
@@ -1188,7 +1189,7 @@ static void encode_dgemm_dispatch(id<MTLComputeCommandEncoder> encoder,
     uint32_t M = A->rows, N = B->cols, K = A->cols;
     // Route tall-skinny shapes (M >= 4*N) to BM=128/BN=16 kernel for better
     // boundary utilization and compensated accumulation on long dot products.
-    // Critical for QE workloads: M≈18K, N=150 → 34% waste with BN=64, ~4% with BN=16.
+    // For N = 150: ~22% of the computed columns are padding with BN=64, ~6% with BN=16.
     bool use_ts = (M >= 4 * N);
     if (use_ts) {
         // Reuse the scaled tall-skinny kernel with alpha=1, beta=0 (C = A*B).
@@ -1305,8 +1306,8 @@ ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMa
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
     // Select kernel based on aspect ratio: tall-skinny for M >= 4*N
-    // Paper §5: QE generates shapes like M=18277, N=150. With BN=64 the
-    // boundary threadgroups waste ~34% of ALU cycles; BN_TS=16 drops that to ~4%.
+    // For N = 150, BN=64 computes 192 columns (~22% padding); BN_TS=16
+    // computes 160 (~6%).
     // Pure aspect-ratio dispatch catches all domain-science tall-skinny shapes.
     bool use_ts = (M >= 4 * N);
     if (use_ts) {
