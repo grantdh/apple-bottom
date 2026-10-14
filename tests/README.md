@@ -2,7 +2,7 @@
 
 ## Adding a new test to a registry-based file
 
-The migrated test runners (`test_correctness.c`, `test_chaos.c`,
+The registry-based test runners (`test_correctness.c`, `test_chaos.c`,
 `test_device_api.c`) dispatch via a `TESTS[]` registry array of
 `{name, fn}` pairs declared just above `main()`. To add a test:
 
@@ -108,8 +108,8 @@ to cblas. Both processes' exit reports must start with `ab_build_info()`
 (naming the Makefile's `AB_BUILD_SHA`) and give the calls made by route,
 `gpu_time%` within [0, 100], GPU stages that sum to at most `gpu_ms`, one
 `AB_PROFILE` line per GPU call, and the child only its own fallback.
-Known failures live in the file's `XFAIL` table, tagged
-with audit IDs. An XFAIL that now passes (XPASS), or an entry that matches
+Known failures live in the file's `XFAIL` table, each with a short tag
+naming the defect. An XFAIL that now passes (XPASS), or an entry that matches
 no case (STALE), fails the run: when a fix lands, delete its entries.
 `./build/test_blas_abi -v` lists every case. `make test-symbols` is the
 strict export check: the dylib and the static archive must each export

@@ -41,8 +41,8 @@ Where it does not:
 
 - Bit-for-bit IEEE FP64 results, or values outside FP32's exponent range.
 - GEMMs issued one call at a time from host memory through the BLAS ABI:
-  on an M2 Max every measured shape is slower than on Accelerate except
-  ZGEMM with both operands transposed at N ≥ 4096. For Quantum ESPRESSO's
+  on an M2 Max no measured shape is more than 1.02× faster than Accelerate
+  except ZGEMM with both operands transposed at N ≥ 4096 (1.11–1.20×). For Quantum ESPRESSO's
   long-K shapes even the GPU kernel alone is no faster; conversion and
   transfers add to that. The device-buffer API converts on every call in
   the same way (it has not been benchmarked separately).

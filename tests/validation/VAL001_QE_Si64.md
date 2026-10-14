@@ -8,7 +8,7 @@
 | **Library** | apple-bottom 1dbdb52 (the 1.4.0 candidate; `ab_build_info()` reports `1dbdb52abeec`), and eaad87e (main before 1.4.0) for comparison |
 | **Status** | Accuracy: **PASS**. Routing: **PASS**. Performance: the GPU path is slower than Accelerate (reported, not a criterion) |
 | **Data** | [`benchmarks/results/2026-10-14-1dbdb52-qe-si64/`](../../benchmarks/results/2026-10-14-1dbdb52-qe-si64/) |
-| **Kit** | [`benchmarks/qe/`](../../benchmarks/qe/) (inputs, `run_campaign.sh`, `analyze.py`, `compare.py`) |
+| **Kit** | [`benchmarks/qe/`](../../benchmarks/qe/) (inputs, `run_campaign.sh`, `analyze.py`, `compare.py`, `tables.py`) |
 
 ## 1. Questions
 
@@ -194,8 +194,12 @@ EOF
 PW_X=/path/to/pw.x caffeinate -is benchmarks/qe/run_campaign.sh plan.txt out
 python3 benchmarks/qe/analyze.py out
 python3 benchmarks/qe/compare.py out
-python3 benchmarks/qe/tables.py out 1dbdb52 eaad87e
+python3 benchmarks/qe/tables.py out 1dbdb52
 ```
+
+The baseline column of §5.3 needs a second campaign into the same `out`,
+with a pw.x that loads the eaad87e build and the plan line
+`eaad87e A_si64_500b_k222 1 8 2 auto`; then run `tables.py out 1dbdb52 eaad87e`.
 
 The script sets `AB_REPORT=1` and `AB_PROFILE=1` and records the loaded
 library, as the 2026-10-14 runs did; those ran an earlier version of it

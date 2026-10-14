@@ -87,8 +87,9 @@ conversion and transfer included), Accelerate time ÷ GPU time, median of
 | Quantum ESPRESSO si64 Davidson ZGEMMs | 0.14–0.76× | Accelerate |
 | Quantum ESPRESSO si64 PAW DGEMMs | 0.09–0.15× | Accelerate |
 
-`make calibrate` repeats this measurement on your machine and rebuilds the
-routing table from it.
+`make calibrate` repeats this measurement on your machine and writes a new
+routing table: rebuild to compile it in, or point `AB_DISPATCH_TABLE` at its
+`dispatch_table.txt`.
 
 **Quantum ESPRESSO** (develop, 7.5), 64-atom Si, PAW
 ([VAL-1](tests/validation/VAL001_QE_Si64.md)): the total energy and every
@@ -97,7 +98,7 @@ where the calls that make up 89–99% of the GEMM work run on the GPU.
 `AB_MODE=auto` keeps all of QE's GEMMs on Accelerate and matches `cpu`
 mode within 0.2%; forcing the GPU makes the runs 1.3–17.3% slower, and the
 GPU kernels alone already take 1.00–1.67× as long as Accelerate needs for
-the same calls.
+the same calls (2.7–10× for the PAW DGEMMs).
 
 ## Using it
 
@@ -209,8 +210,9 @@ adversarial inputs and the convergence study (156 tests);
 - **Not IEEE FP64.** About 48 significant bits instead of 53, FP32's
   exponent range (about 10⁻³⁸ to 10³⁸) instead of FP64's, and no
   bit-for-bit agreement with CPU BLAS.
-- **Per-call overhead.** Converting and transferring operands dominates
-  small and medium calls through the BLAS ABI; see the table above.
+- **Per-call overhead.** Through the BLAS ABI every measured shape is
+  slower than Accelerate except ZGEMM with both operands transposed at
+  N ≥ 4096; see the table above.
 - **Threads.** Calls on different matrices may come from different
   threads; one matrix, pool or session must not be used by two threads at
   once. All work shares one Metal command queue.

@@ -225,7 +225,7 @@ Frobenius-class error is appropriate.
 | `ab_matrix_scale(α, A)` | `~10⁻¹⁵` | `~10⁻¹⁵` | ✓ BUG-4 fix | Element-wise A ← αA |
 | `ab_dsyrk(A, C)` | `~N·10⁻¹⁵` | `~N²·⁵·10⁻²¹` | ✓ Tested | C = A × Aᵀ (symmetric) |
 
-**DEPRECATED**: `ab_zherk` is 20× slower than CPU and not recommended for production.
+**DEPRECATED**: `ab_zherk` runs at 0.06–0.67× Accelerate's speed (N ≤ 2,048, 2026-10-14 measurement); use `cblas_zherk`.
 
 ---
 
@@ -288,7 +288,7 @@ The following conditions are **outside the validated envelope**. Results are und
 **Recommendation**: Use apple-bottom when:
 1. Problem requires Frobenius error `< 10⁻¹⁴` (rules out FP32)
 2. Matrices are square or moderately rectangular
-3. Iterative algorithm (QE, CG, eigensolver) can keep data GPU-resident
+3. The algorithm can keep its large matrices on the GPU between products (codes that call BLAS one call at a time, such as Quantum ESPRESSO, cannot)
 4. **Application is norm-averaged** (energies, residuals), not element-sensitive
 
 ---
@@ -334,13 +334,13 @@ For scientific computing on Apple Silicon:
 
 **✓ USE apple-bottom for**:
 - DFT, molecular dynamics, FEM iterative solvers (norm-averaged quantities)
-- Matrices `N ≥ 1024`, condition number `κ < 10⁶`
+- Large products on GPU-resident matrices (§5.1: DGEMM from about N = 1,500, ZGEMM from about N = 1,000 on an M2 Max), condition number `κ < 10⁶`
 - Applications requiring `10⁻¹⁴` to `10⁻¹⁰` Frobenius convergence
 
 **✗ DO NOT USE for**:
 - Algorithms requiring element-wise accuracy `< 10⁻⁶` (e.g., pivoting, eigensolvers)
 - Ill-conditioned systems (`κ > 10¹²`)
-- Matrices `N < 512` (CPU faster due to overhead)
+- Smaller products, and GEMMs issued one call at a time from host memory (§5.1)
 - Thread-unsafe contexts (add external locking)
 
 **Validation requirement**: For mission-critical calculations, perform cross-verification:

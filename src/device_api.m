@@ -233,8 +233,8 @@ ABStatus ab_dev_stream_sync(ab_dev_stream_t stream) {
 // temporary ABMatrix handles, uploading FP64→DD, dispatching through the
 // existing ab_dgemm_scaled / ab_zgemm_ex machinery, then downloading DD→FP64.
 //
-// The conversion is O(N²) per call vs O(N³) for GEMM — negligible overhead.
-// DD-native device buffers would remove the per-call conversion and the
+// Each call therefore converts and allocates, with the per-call costs of the
+// BLAS ABI. DD-native device buffers would remove the per-call conversion and the
 // temporary allocation; they are not implemented.
 //
 // For _offset variants: we offset into the raw FP64 data in shared memory

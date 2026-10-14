@@ -108,7 +108,6 @@ def _find_library() -> ctypes.CDLL:
     1. ../build/ relative to this file
     2. /usr/local/lib
     3. /opt/homebrew/lib
-    4. System library path via ctypes.util.find_library
     """
     if os.environ.get("AB_LIBRARY"):
         return ctypes.CDLL(os.environ["AB_LIBRARY"], use_errno=True)

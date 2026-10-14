@@ -64,7 +64,7 @@ These are the conditions that motivated the tall-skinny variant above.
 **Validation:**
 - All tests validate against reference BLAS (cblas_dgemm, cblas_zgemm)
 - Error measure: componentwise, |C − C_ref| / (|op(A)| |B|), against 10·K·u² (u² = 2⁻⁴⁸); measured errors are about 1e-14
-- The DGEMM cases call `ab_dgemm`, so they run the 64 × 64 kernel; the ZGEMM cases run the tall-skinny kernel
+- The DGEMM cases call `ab_dgemm`, so they run the 64 × 64 kernel; of the ZGEMM cases only the QE-like one (18277 × 150, M ≥ 4N) runs the tall-skinny kernel, and the conjugate-transpose case (150 × 150 × 18277) runs the 64 × 64 kernel
 
 ### Performance Benchmarks
 

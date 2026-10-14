@@ -24,7 +24,8 @@ pip install -e python/      # the package finds ../build/libapplebottom.dylib
 To use another copy of the library, set
 `AB_LIBRARY=/path/to/libapplebottom.dylib`. Without it the package also
 looks in `/usr/local/lib` and `/opt/homebrew/lib`, so `make install`
-(`PREFIX=$HOME/.local`, or `sudo` for the default `/usr/local`) is optional.
+(`sudo` for the default `/usr/local`) is optional; after an install to
+another prefix, point `AB_LIBRARY` at `<prefix>/lib/libapplebottom.dylib`.
 
 ## Quick Start
 

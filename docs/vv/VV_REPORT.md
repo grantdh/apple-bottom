@@ -3,7 +3,7 @@
 
 **Report Version**: 1.1
 **Date**: 2026-04-23
-**Status**: Validated for Production Use
+**Status**: Verification (V-2, unit suites) current; validation: VAL-1 revision 2 passes for accuracy on Quantum ESPRESSO Si64 (see Revision 1.2)
 **Validated Baseline**: Git tag `v1.0.2-bugfix` (SHA: f3e2fc1)
 **Revision 1.1**: Added §10 Clock-pin and Utilization Methodology; §10 Conclusions renumbered to §11, §11 References renumbered to §12.
 **Revision 1.2 (2026-10-14)**: Correction of VAL-1; see the notice below.
@@ -90,7 +90,7 @@
 | **Performance** | ~~1.22× speedup vs 6-thread CPU~~ withdrawn (serial vs MPI build; see Revision 1.2) | VAL-1 (QE Si64 benchmark) |
 | **Correctness** | 48/48 tests passing | Regression + unit + precision tests |
 
-**Bottom Line**: apple-bottom provides **sufficient precision for production DFT/MD** (10⁻¹⁰ convergence criteria) with **modest performance gains** (1.1-1.3× at N≥2048, matrices resident on the GPU). *(The QE CPU-usage reduction quoted in Revision 1.1 is withdrawn; see Revision 1.2.)*
+**Bottom Line**: apple-bottom's DD GEMMs reproduce a Quantum ESPRESSO Si64 SCF to every printed digit (10⁻⁸ Ry; VAL-1 revision 2), and are modestly faster than Accelerate for large products on GPU-resident matrices (1.10–1.16× DGEMM, 1.37–1.39× ZGEMM from N = 2,048; §7.4). *(The QE CPU-usage reduction quoted in Revision 1.1 is withdrawn; see Revision 1.2.)*
 
 ### 1.4 Recommendation
 
@@ -140,7 +140,7 @@ In practice, random matrices exhibit `~√N` scaling due to statistical cancella
 
 ### 2.3 Supported Operations
 
-| Operation | Precision | Performance (N=2048) | Notes |
+| Operation | Precision | Performance (N=2048; v1.0.2, superseded by §7.4) | Notes |
 |-----------|-----------|----------------------|-------|
 | `ab_dgemm(A, B, C)` | ~N·10⁻¹⁵ | 1.10× | C = A × B |
 | `ab_dgemm_scaled(α, A, B, β, C)` | ~N·10⁻¹⁵ | 1.10× | C = αAB + βC |
@@ -148,7 +148,7 @@ In practice, random matrices exhibit `~√N` scaling due to statistical cancella
 | `ab_dsyrk(A, C)` | ~N·10⁻¹⁵ | 0.9-1.1× | C = A × Aᵀ (symmetric) |
 | `ab_matrix_scale(α, A)` | ~10⁻¹⁵ | — | Element-wise scaling |
 
-**Deprecated**: `ab_zherk` (20× slower than CPU, not recommended)
+**Deprecated**: `ab_zherk` (0.06–0.67× Accelerate's speed at N ≤ 2,048 in the 1.4.0 measurement; use `cblas_zherk`)
 
 ### 2.4 Integration Patterns
 
@@ -490,7 +490,7 @@ apple-bottom is suitable for production use in:
 
 **Requirements**:
 - Application uses norm-averaged metrics (energies, residuals)
-- Matrices `N ≥ 1024` (GPU crossover point)
+- Large products on matrices kept on the GPU (on an M2 Max: DGEMM from about N = 1,500, ZGEMM from about N = 1,000; §7.4)
 - Condition number `κ < 10⁶`
 
 ### 7.2 When NOT to Use apple-bottom
@@ -498,7 +498,7 @@ apple-bottom is suitable for production use in:
 **Avoid for**:
 1. **Direct methods** requiring pivoting (LU, QR factorization)
 2. **Eigenvalue problems** (element-wise accuracy critical)
-3. **Small problems** (`N < 512`, CPU faster)
+3. **Small and medium problems**, and any GEMM issued one call at a time from host memory (§7.4)
 4. **Ill-conditioned systems** (`κ > 10¹²`)
 5. **High aspect ratio** rectangular matrices (`> 10:1`)
 
@@ -577,7 +577,7 @@ on the same M2 Max class, against Accelerate:
 | Req ID | Requirement | Test | Result | Documented In |
 |--------|-------------|------|--------|---------------|
 | **R-15** | Rectangular `aspect_ratio > 10:1` | test_skinny_matrix (10000×10) | ✗ FAIL | Known limitation |
-| **R-16** | ZHERK performance | bench_zherk | ⚠ WARN (20× slower) | `PRECISION_ENVELOPE.md` Section 3.3 |
+| **R-16** | ZHERK performance | bench_zherk | ⚠ WARN (0.06–0.67×, 1.4.0) | `PRECISION_ENVELOPE.md` Section 3.3 |
 
 ### 8.3 Test → Source Code Mapping
 
@@ -733,7 +733,7 @@ boost-clock volatility directly.
 
 **Known issues requiring resolution**:
 1. Rectangular matrices (`aspect_ratio > 10:1`) correctness failures
-2. ZHERK performance (20× slower than CPU)
+2. ZHERK performance (0.06–0.67× Accelerate's speed, 1.4.0)
 
 ### 11.4 Approval for Production Use
 
