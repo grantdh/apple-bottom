@@ -146,9 +146,9 @@ All notable changes to this project will be documented in this file.
   dense-grid G-vectors, complex values passed as real pairs. Those
   BLAS-ABI calls always ran on cblas; the Davidson GEMMs (`regterg`,
   `cegterg`; long dimension ≈ 9,000 per rank) were never affected. This
-  is a robustness fix, not a speed-up: the PAW DGEMMs are memory-bound
-  and slower on the GPU, and calibrated `AB_MODE=auto` routing keeps them
-  on Accelerate. The limit is now what actually overflows, for any shape:
+  is a robustness fix, not a speed-up: the PAW DGEMMs run at 0.09–0.15×
+  Accelerate's speed on the GPU, and calibrated `AB_MODE=auto` routing
+  keeps them on Accelerate. The limit is now what actually overflows, for any shape:
   rows × cols ≤ `AB_MAX_MATRIX_ELEMENTS` (2³¹ − 1; the kernels index in
   32-bit unsigned arithmetic) and the DD buffer within the device's
   `maxBufferLength`. Every kernel was checked bit-exact on matrices past

@@ -359,8 +359,9 @@ static void gen_fork(const Suite *s) {
 // as real pairs; QE's ld is 2*ngm_l, the ld > rows variants are extra. The
 // 'C','N' ZGEMM with K = 100000 is synthetic (cegterg's K is ~9000 per rank).
 // Through dgemm_/zgemm_ in AB_MODE=gpu without ab_init(), every case must
-// run on the GPU. This checks robustness only: these DGEMMs are memory-bound
-// and faster on Accelerate, where AB_MODE=auto keeps them (gen_auto).
+// run on the GPU. This checks robustness only: these DGEMMs are faster on
+// Accelerate (0.09-0.15x on the GPU in make calibrate), where AB_MODE=auto
+// keeps them (gen_auto).
 static void gen_qe(const Suite *s) {
     add_blas(s, OP_DGEMM_SYM, 'T', 'N', 171, 64, 71834, 0, SC_A2B0, ROUTE_GPU);
     add_blas(s, OP_DGEMM_SYM, 'T', 'N', 171, 64, 143666, 3, SC_A2B0, ROUTE_GPU);

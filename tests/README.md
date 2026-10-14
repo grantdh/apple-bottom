@@ -82,7 +82,8 @@ profiled as a CPU call. `test_qe_shapes` runs the Quantum ESPRESSO PAW
 DGEMM shapes that the old 46340-per-dimension limit kept on cblas (see
 `gen_qe`), plus a synthetic ZGEMM with K = 100000, through `dgemm_` /
 `zgemm_` without `ab_init()`; each must run on the GPU. It checks
-robustness only: those DGEMMs are memory-bound and faster on Accelerate.
+robustness only: those DGEMMs are faster on Accelerate (the GPU ran them
+at 0.09–0.15× in `make calibrate`).
 `test_auto_mode` runs `AB_MODE=auto` with the built-in calibrated table:
 the QE cegterg-like call and QE si64 PAW and Davidson shapes, which the GPU
 path was measured slower on, must stay on Accelerate through every entry
