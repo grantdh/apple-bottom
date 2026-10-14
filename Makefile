@@ -316,6 +316,16 @@ test-rectangular-diag: $(BUILD)/test_rectangular_diag
 	@echo "═══════════════════════════════════════════════════════════════════"
 	./$(BUILD)/test_rectangular_diag
 
+# Rectangular shapes up to 18277 x 150 x 18277 (correctness, then timings).
+# Not part of `make test`: the largest cases allocate several GB.
+$(BUILD)/test_rectangular: tests/test_rectangular.c lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
+.PHONY: test-rectangular test-rectangular-diag
+test-rectangular: $(BUILD)/test_rectangular
+	./$(BUILD)/test_rectangular
+
 # Performance regression: save baseline or compare
 bench-baseline: lib
 	@echo "Saving performance baseline..."

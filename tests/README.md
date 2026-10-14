@@ -64,12 +64,6 @@ Device-API `CHECK`s and BLAS-ABI cases are reported on their own
     V&V file; decomposition needs care because behavior changes are
     load-bearing
 
-- **Orphan files (not in any Makefile build target — separate
-  delete-or-wire-up decision):**
-  - `tests/test_rectangular.c`
-  - `tests/test_original_rectangular.c`
-  - `tests/test_rectangle_debug.c`
-
 ## BLAS-ABI conformance harness
 
 `tests/test_blas_abi.c` checks `ab_dgemm_blas` / `ab_zgemm_blas`,

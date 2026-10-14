@@ -5,16 +5,16 @@
 
 // =============================================================================
 // Requirements:
-//   - macOS 14+ with Xcode 16+ SDK (required for MTLMathModeSafe)
-//   - Without Xcode 16+ SDK: compiles but achieves only ~10⁻⁸ precision
+//   - macOS 14+ on Apple Silicon
+//   - With the macOS 15 SDK (Xcode 16+) on macOS 15+, shaders use MTLMathModeSafe;
+//     otherwise they are compiled with fastMathEnabled = NO. Both keep full DD precision.
 //
 // Thread Safety:
 //   - ab_init/ab_shutdown: Safe to call from any thread (uses dispatch_once)
 //   - Matrix operations: NOT thread-safe — Metal command queue serializes
 //   - Use separate contexts for concurrent workloads (future feature)
 //
-// Performance notes — TWO regimes (see docs/review/REVIEW_04_TRANCHE_A_2026-04-24.md
-// and the apple-bottom-qe skill §0 for the full distinction).
+// Performance notes — TWO regimes (README.md#performance has the measurements).
 //
 // Steady-state regime — native ABMatrix API, ABMatrix handles persisted across calls,
 // upload and FP64<->DD conversion amortized:
