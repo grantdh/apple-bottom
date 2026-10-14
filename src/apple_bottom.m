@@ -20,6 +20,7 @@
 #import <Accelerate/Accelerate.h>
 #import <dispatch/dispatch.h>
 #import <os/lock.h>
+#include <fenv.h>
 #include <mach/mach_time.h>
 #include <pthread.h>
 #include "apple_bottom.h"
@@ -988,7 +989,14 @@ ABStatus ab_init(void) {
     }
 
     init_timing();
+    // Creating the Metal device can raise the CPU's floating-point exception
+    // flags (MTLCreateSystemDefaultDevice sets FE_OVERFLOW on its first call
+    // in a process on macOS 27). They are Metal's, not the host's: restore
+    // the host's flags so Fortran runtimes do not report them at exit.
+    fenv_t host_fenv;
+    feholdexcept(&host_fenv);
     g_context = [[ABContextImpl alloc] init];
+    fesetenv(&host_fenv);
     ABStatus status = g_context ? AB_OK : AB_ERROR_NO_DEVICE;
 
     if (status == AB_OK) {

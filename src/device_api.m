@@ -25,6 +25,7 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <fenv.h>
 #include <os/lock.h>
 #include <string.h>
 #include <stdlib.h>
@@ -65,7 +66,10 @@ static bool dev_ensure_init(void) {
         // share a Metal context.
         (void)ab_init();
 
+        fenv_t host_fenv;                 // see ab_init(): keep Metal's FP flags out
+        feholdexcept(&host_fenv);
         g_dev_device = MTLCreateSystemDefaultDevice();
+        fesetenv(&host_fenv);
         if (g_dev_device) {
             g_dev_queue = [g_dev_device newCommandQueue];
             g_default_stream.queue = g_dev_queue;

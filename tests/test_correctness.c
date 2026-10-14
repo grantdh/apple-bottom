@@ -11,6 +11,12 @@
 #include <math.h>
 #include <complex.h>
 #include <Accelerate/Accelerate.h>
+#include <fenv.h>
+#include <spawn.h>
+#include <sys/wait.h>
+
+extern char **environ;
+static const char *g_argv0;
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -2211,6 +2217,36 @@ static void test_morton_dtrsm_panel(void) {
 // Main
 // =============================================================================
 
+// Child of test_init_keeps_host_fp_flags: the first ab_init() in a fresh
+// process. Exit 0 if no overflow, invalid or divide-by-zero flag is raised,
+// 1 if one is, 2 without a device.
+static int init_fp_flags_child(void) {
+    feclearexcept(FE_ALL_EXCEPT);
+    ABStatus st = ab_init();
+    int raised = fetestexcept(FE_OVERFLOW | FE_INVALID | FE_DIVBYZERO);
+    return st != AB_OK ? 2 : raised ? 1 : 0;
+}
+
+// Creating the Metal device raises FE_OVERFLOW on macOS 27; ab_init() must not
+// pass that on to the host (gfortran reports raised flags at exit).
+static void test_init_keeps_host_fp_flags(void) {
+    TEST("ab_init leaves the host's FP exception flags alone");
+    char flag[] = "--init-fp-flags-child";
+    char *argv[] = {(char *)g_argv0, flag, NULL};
+    pid_t pid;
+    int status = 0;
+    if (posix_spawn(&pid, g_argv0, NULL, NULL, argv, environ) != 0 ||
+        waitpid(pid, &status, 0) != pid || !WIFEXITED(status)) {
+        FAIL("could not run the child");
+    } else if (WEXITSTATUS(status) == 1) {
+        FAIL("ab_init raised an FP exception flag in the caller");
+    } else if (WEXITSTATUS(status) != 0) {
+        FAIL("ab_init failed in the child");
+    } else {
+        PASS();
+    }
+}
+
 static const TestCase TESTS[] = {
     {"test_init_shutdown",                    test_init_shutdown},
     {"test_double_init",                      test_double_init},
@@ -2233,6 +2269,7 @@ static const TestCase TESTS[] = {
     {"test_zgemm_vs_accelerate",              test_zgemm_vs_accelerate},
     {"test_zgemm_conj_transpose",             test_zgemm_conj_transpose},
     {"test_zgemm_conj_tall",                  test_zgemm_conj_tall},
+    {"test_init_keeps_host_fp_flags",         test_init_keeps_host_fp_flags},
     {"test_session_basic",                    test_session_basic},
     {"test_session_destroy_null",             test_session_destroy_null},
     {"test_session_dgemm",                    test_session_dgemm},
@@ -2287,7 +2324,9 @@ static const TestCase TESTS[] = {
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
 
-int main(void) {
+int main(int argc, char **argv) {
+    g_argv0 = argv[0];
+    if (argc > 1 && !strcmp(argv[1], "--init-fp-flags-child")) return init_fp_flags_child();
     printf("╔══════════════════════════════════════════════════════════════════╗\n");
     printf("║  apple-bottom Comprehensive Test Suite                           ║\n");
     printf("╚══════════════════════════════════════════════════════════════════╝\n");
