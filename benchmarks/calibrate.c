@@ -38,6 +38,8 @@
 #include <string.h>
 #include <sys/sysctl.h>
 #include <time.h>
+#include <limits.h>
+#include <unistd.h>
 
 #ifndef AB_CAL_SDK
 #define AB_CAL_SDK "unknown"
@@ -293,7 +295,17 @@ static void collect_meta(Meta *m, const char *out, int gpu_cores, int warmup, in
     snprintf(m->os, sizeof m->os, "macOS %s (%s)", ver, build);
     snprintf(m->sdk, sizeof m->sdk, "macOS SDK %s, clang %s", AB_CAL_SDK, __clang_version__);
     snprintf(m->library, sizeof m->library, "%s", ab_build_info());
-    snprintf(m->data, sizeof m->data, "%s/calibrate_summary.csv", out);
+    // The data path is compiled into dispatch_table.h and read by
+    // test_dispatch from the source root, so keep it relative to the root
+    // (make runs this from there) when the results are inside the tree.
+    char cwd[PATH_MAX];
+    const char *rel = out;
+    size_t nc = getcwd(cwd, sizeof cwd) ? strlen(cwd) : 0;
+    if (out[0] == '/' && nc && !strncmp(out, cwd, nc) && out[nc] == '/') rel = out + nc + 1;
+    else if (out[0] == '/')
+        fprintf(stderr, "calibrate: %s is outside the source tree; a table generated from it "
+                        "names an absolute path that other checkouts cannot read\n", out);
+    snprintf(m->data, sizeof m->data, "%s/calibrate_summary.csv", rel);
     m->warmup = warmup;
     m->runs = runs;
 }
@@ -422,6 +434,11 @@ int main(int argc, char **argv) {
     if (!out || warmup < 3 || runs < 7) {
         fprintf(stderr, "usage: %s --out DIR [--source dispatch_table.h] [--only SOURCE_TAG]\n"
                         "       [--warmup N>=3] [--runs N>=7] [--gpu-cores N]\n", argv[0]);
+        return 2;
+    }
+    // The results path is written into a C string literal in --source.
+    if (source && (strchr(out, '"') || strchr(out, '\\'))) {
+        fprintf(stderr, "calibrate: --out must not contain '\"' or '\\' when --source is given\n");
         return 2;
     }
     // A table derived from part of the grid would drop the rows of the rest.
