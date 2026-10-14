@@ -6,6 +6,7 @@
 
 #include <mach/mach_time.h>
 #include <os/lock.h>
+#include <stdarg.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -323,18 +324,42 @@ void ab_prof_dump(FILE* out) {
 // Exit summary (AB_REPORT)
 // =============================================================================
 
+// One report line, built in a buffer and written with a single call, so the
+// lines of MPI ranks that share stderr do not interleave mid-line.
+typedef struct { char buf[512]; size_t n; } report_line_t;
+
+static void line_add(report_line_t* l, const char* fmt, ...) {
+    if (l->n >= sizeof l->buf - 1) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int k = vsnprintf(l->buf + l->n, sizeof l->buf - l->n, fmt, ap);
+    va_end(ap);
+    if (k > 0) l->n += (size_t)k;
+    if (l->n > sizeof l->buf - 1) l->n = sizeof l->buf - 1;
+}
+
+static void line_emit(report_line_t* l, FILE* out) {
+    fputs(l->buf, out);
+    l->n = 0;
+    l->buf[0] = '\0';
+}
+
 // Line-oriented key=value lines, each tagged with the pid so MPI ranks that
 // share stderr stay apart.
 void ab_prof_report(FILE* out) {
     const char* mode = getenv("AB_MODE");
     int pid = (int)getpid();
-    fprintf(out, "AB_REPORT[%d] %s AB_MODE=%s", pid, ab_build_info(),
-            mode && *mode ? mode : "unset");
+    report_line_t l = { .n = 0 };
+    l.buf[0] = '\0';
+    line_add(&l, "AB_REPORT[%d] %s AB_MODE=%s", pid, ab_build_info(),
+             mode && *mode ? mode : "unset");
     if (g_threshold_ns)
-        fprintf(out, " AB_PROFILE_THRESHOLD_NS=%llu", (unsigned long long)g_threshold_ns);
-    fprintf(out, "\n");
+        line_add(&l, " AB_PROFILE_THRESHOLD_NS=%llu", (unsigned long long)g_threshold_ns);
+    line_add(&l, "\n");
+    line_emit(&l, out);
     if (g_entry_count == 0) {
-        fprintf(out, "AB_REPORT[%d] no BLAS-ABI calls recorded\n", pid);
+        line_add(&l, "AB_REPORT[%d] no BLAS-ABI calls recorded\n", pid);
+        line_emit(&l, out);
         return;
     }
 
@@ -343,28 +368,31 @@ void ab_prof_report(FILE* out) {
     for (int i = 0; i < g_entry_count; i++) {
         ab_prof_entry_t* e = &g_entries[idx[i]];
         if (e->call_count == 0) continue;
-        fprintf(out, "AB_REPORT[%d] %s calls=%llu gpu_calls=%llu cpu_calls=%llu "
+        line_add(&l, "AB_REPORT[%d] %s calls=%llu gpu_calls=%llu cpu_calls=%llu "
                      "gpu_calls%%=%.1f total_ms=%.3f gpu_ms=%.3f cpu_ms=%.3f "
                      "gpu_time%%=%.1f fallbacks=%llu\n",
-                pid, e->name,
-                (unsigned long long)e->call_count,
-                (unsigned long long)e->gpu_calls,
-                (unsigned long long)e->cpu_calls,
-                pct(e->gpu_calls, e->call_count),
-                e->total_ns / 1e6, e->gpu_ns / 1e6, e->cpu_ns / 1e6,
-                pct(e->gpu_ns, e->total_ns),
-                (unsigned long long)fallback_total(e));
+                 pid, e->name,
+                 (unsigned long long)e->call_count,
+                 (unsigned long long)e->gpu_calls,
+                 (unsigned long long)e->cpu_calls,
+                 pct(e->gpu_calls, e->call_count),
+                 e->total_ns / 1e6, e->gpu_ns / 1e6, e->cpu_ns / 1e6,
+                 pct(e->gpu_ns, e->total_ns),
+                 (unsigned long long)fallback_total(e));
+        line_emit(&l, out);
         if (e->gpu_calls) {
-            fprintf(out, "AB_REPORT[%d] %s gpu_stages_ms", pid, e->name);
+            line_add(&l, "AB_REPORT[%d] %s gpu_stages_ms", pid, e->name);
             for (int s = 0; s < AB_PROF_STAGE_COUNT; s++)
-                fprintf(out, " %s=%.3f", ab_prof_stage_names[s], e->stage_ns[s] / 1e6);
-            fprintf(out, " other=%.3f\n", stage_other(e) / 1e6);
+                line_add(&l, " %s=%.3f", ab_prof_stage_names[s], e->stage_ns[s] / 1e6);
+            line_add(&l, " other=%.3f\n", stage_other(e) / 1e6);
+            line_emit(&l, out);
         }
         if (fallback_total(e)) {
-            fprintf(out, "AB_REPORT[%d] %s fallbacks", pid, e->name);
+            line_add(&l, "AB_REPORT[%d] %s fallbacks", pid, e->name);
             for (int r = 0; r < AB_PROF_FB_COUNT; r++)
-                fprintf(out, " %s=%llu", fallback_names[r], (unsigned long long)e->fallbacks[r]);
-            fprintf(out, "\n");
+                line_add(&l, " %s=%llu", fallback_names[r], (unsigned long long)e->fallbacks[r]);
+            line_add(&l, "\n");
+            line_emit(&l, out);
         }
     }
 }
