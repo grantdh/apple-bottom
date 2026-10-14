@@ -2,86 +2,124 @@
 """Summarize a run_campaign.sh directory: results.csv plus each run's AB_REPORT.
 
 Usage: python3 analyze.py <out-dir>
+
+Prints every run, every configuration (median and range over repetitions),
+and for each input the ratio of the GPU kernel time (gpu mode) to the time
+Accelerate needs for the same calls (cpu mode).
 """
 import csv, re, statistics as st, sys
 from collections import defaultdict
 from pathlib import Path
 
+COUNTS = ("calls", "gpu_calls", "cpu_calls", "total_ms", "gpu_ms", "cpu_ms", "fallbacks")
+
 
 def report(run_dir):
-    """AB_REPORT fields per routine from the run's stderr."""
-    out = {}
+    """AB_REPORT fields per routine from the run's stderr, summed over MPI ranks.
+
+    Keys: the AB_REPORT counters, st_<stage> (GPU stage ms), fb_<reason>,
+    ranks, and gpu_time% / gpu_calls% recomputed from the sums.
+    """
     err = Path(run_dir) / "err.txt"
     if not err.exists():
-        return out
+        return {}
+    per_pid = defaultdict(dict)                       # (pid, routine) -> fields
     for line in err.read_text(errors="replace").splitlines():
-        m = re.match(r"AB_REPORT\[\d+\] (\w+) (calls=.*)", line)
-        if m:
-            out.setdefault(m[1], {}).update({k: float(v) for k, v in re.findall(r"(\w+%?)=([-0-9.]+)", m[2])})
+        m = re.match(r"AB_REPORT\[(\d+)\] (\w+) (calls=.*|gpu_stages_ms .*|fallbacks .*)", line)
+        if not m:
             continue
-        m = re.match(r"AB_REPORT\[\d+\] (\w+) gpu_stages_ms (.*)", line)
-        if m:
-            out.setdefault(m[1], {}).update({"st_" + k: float(v) for k, v in re.findall(r"(\w+)=([-0-9.]+)", m[2])})
-            continue
-        m = re.match(r"AB_REPORT\[\d+\] (\w+) fallbacks (.*)", line)
-        if m:
-            out.setdefault(m[1], {}).update({"fb_" + k: float(v) for k, v in re.findall(r"(\w+)=([-0-9.]+)", m[2])})
+        pid, name, rest = m[1], m[2], m[3]
+        prefix = "st_" if rest.startswith("gpu_stages_ms") else "fb_" if rest.startswith("fallbacks") else ""
+        for k, v in re.findall(r"(\w+%?)=([-0-9.]+)", rest):
+            if not k.endswith("%"):
+                per_pid[(pid, name)][prefix + k] = float(v)
+    out = {}
+    for (pid, name), fields in per_pid.items():
+        r = out.setdefault(name, {"ranks": 0})
+        r["ranks"] += 1
+        for k, v in fields.items():
+            r[k] = r.get(k, 0.0) + v
+    for r in out.values():
+        r["gpu_time%"] = 100.0 * r.get("gpu_ms", 0) / r["total_ms"] if r.get("total_ms") else 0.0
+        r["gpu_calls%"] = 100.0 * r.get("gpu_calls", 0) / r["calls"] if r.get("calls") else 0.0
     return out
+
+
+def load(out_dir):
+    """results.csv rows, with "label" set (early campaigns wrote "libtag")."""
+    rows = list(csv.DictReader(open(Path(out_dir) / "results.csv")))
+    for r in rows:
+        r["label"] = r.get("label") or r.get("libtag", "")
+    return rows
+
+
+def run_path(out_dir, r):
+    """The run's directory: the recorded run_dir, else the default name."""
+    if r.get("run_dir"):
+        return Path(out_dir) / r["run_dir"]
+    return Path(out_dir) / "runs" / r["label"] / r["input"] / f'{r["mode"]}_r{r["rep"]}'
+
+
+def wall(r):
+    return float(r["wall_s"]) if r.get("wall_s") else None
+
+
+def same_calls(cpu_reports, gpu_reports, name):
+    """(kernel s, Accelerate s for the same calls): the GPU-routed calls'
+    kernel time in gpu mode, and their time on Accelerate in cpu mode (the
+    routine's cpu-mode time minus the calls gpu mode also left on the CPU)."""
+    g = [z[name] for z in gpu_reports if z.get(name, {}).get("gpu_calls")]
+    c = [z[name] for z in cpu_reports if name in z]
+    if not g or not c:
+        return None
+    kernel = st.median(z.get("st_kernel", 0) for z in g) / 1e3
+    accel = (st.median(z["total_ms"] for z in c) - st.median(z.get("cpu_ms", 0) for z in g)) / 1e3
+    return kernel, accel
+
 
 def main():
     C = Path(sys.argv[1])
-    rows = list(csv.DictReader(open(C / "results.csv")))
-    for r in rows:  # run_campaign.sh writes "label"; early campaigns wrote "libtag"
-        r.setdefault("libtag", r.get("label", ""))
-
-    def run_dir(r):
-        d = C / "runs" / r["libtag"] / r["input"] / f'{r["mode"]}_r{r["rep"]}'
-        return d
-
-    per = []
-    for r in rows:
-        rep = report(run_dir(r))
-        z, d = rep.get("zgemm", {}), rep.get("dgemm", {})
-        per.append(dict(r, z=z, d=d))
+    rows = load(C)
 
     def f(x, nd=1):
         return "-" if x is None else f"{x:.{nd}f}"
 
     print("== per run")
-    print("lib      input              mode rep   wall_s  iters  energy_Ry          zgemm_s  z_gpu%  z_kern_s z_other_s  dgemm_s  d_gpu%  fb  load")
-    for p in per:
-        z, d = p["z"], p["d"]
-        fb = sum(v for k, v in {**z, **d}.items() if k.startswith("fb_"))
-        print(f'{p["libtag"]:8} {p["input"]:18} {p["mode"]:4} {p["rep"]:>3} {float(p["wall_s"] or "nan"):8.1f} {p["scf_iters"]:>5}  {p["energy_Ry"]:18} '
-              f'{z.get("total_ms",0)/1e3:8.2f} {z.get("gpu_time%",0):6.1f} {z.get("st_kernel",0)/1e3:8.2f} {z.get("st_other",0)/1e3:9.2f} '
-              f'{d.get("total_ms",0)/1e3:8.2f} {d.get("gpu_time%",0):6.1f} {fb:3.0f}  {p["load1"]}')
+    print("label    input              mode rep   wall_s  iters  energy_Ry          zgemm_s  z_gpu%  z_kern_s z_other_s  dgemm_s  d_gpu%  fb  load")
+    reports = {}
+    for r in rows:
+        rep = reports[id(r)] = report(run_path(C, r))
+        z, d = rep.get("zgemm", {}), rep.get("dgemm", {})
+        fb = z.get("fallbacks", 0) + d.get("fallbacks", 0)
+        print(f'{r["label"]:8} {r["input"]:18} {r["mode"]:4} {r["rep"]:>3} {f(wall(r)):>8} {r["scf_iters"]:>5}  {r["energy_Ry"]:18} '
+              f'{z.get("total_ms", 0)/1e3:8.2f} {z.get("gpu_time%", 0):6.1f} {z.get("st_kernel", 0)/1e3:8.2f} {z.get("st_other", 0)/1e3:9.2f} '
+              f'{d.get("total_ms", 0)/1e3:8.2f} {d.get("gpu_time%", 0):6.1f} {fb:3.0f}  {r["load1"]}')
 
     print("\n== per configuration (median [min-max])")
-    g = defaultdict(list)
-    for p in per:
-        g[(p["libtag"], p["input"], p["mode"])].append(p)
-    summ = {}
-    for k, ps in sorted(g.items()):
-        w = [float(p["wall_s"]) for p in ps if p["wall_s"]]
-        zs = [p["z"].get("total_ms", 0) / 1e3 for p in ps]
-        kern = [p["z"].get("st_kernel", 0) / 1e3 for p in ps]
-        ds = [p["d"].get("total_ms", 0) / 1e3 for p in ps]
-        dk = [p["d"].get("st_kernel", 0) / 1e3 for p in ps]
-        en = sorted({p["energy_Ry"] for p in ps}); it = sorted({p["scf_iters"] for p in ps})
-        summ[k] = dict(wall=st.median(w) if w else None, z=st.median(zs), kern=st.median(kern), d=st.median(ds), dk=st.median(dk))
-        print(f"{k[0]:8} {k[1]:18} {k[2]:4} n={len(ps)} wall {f(st.median(w))} [{f(min(w))}-{f(max(w))}]  zgemm {f(st.median(zs),2)}  z_kernel {f(st.median(kern),2)}  dgemm {f(st.median(ds),2)}  d_kernel {f(st.median(dk),2)}  E={en} iters={it}")
+    groups = defaultdict(list)
+    for r in rows:
+        groups[(r["label"], r["input"], r["mode"])].append(r)
+    for (label, inp, mode), rs in sorted(groups.items()):
+        w = [x for x in map(wall, rs) if x is not None]
+        wtxt = f"{f(st.median(w))} [{f(min(w))}-{f(max(w))}]" if w else "-"
+        zs = [reports[id(r)].get("zgemm", {}).get("total_ms", 0) / 1e3 for r in rs]
+        ds = [reports[id(r)].get("dgemm", {}).get("total_ms", 0) / 1e3 for r in rs]
+        en = sorted({r["energy_Ry"] for r in rs}); it = sorted({r["scf_iters"] for r in rs})
+        print(f"{label:8} {inp:18} {mode:4} n={len(rs)} wall {wtxt}  zgemm {f(st.median(zs), 2)}  dgemm {f(st.median(ds), 2)}  E={en} iters={it}")
 
-    print("\n== decision metric: GPU kernel time alone (gpu mode) / Accelerate time of the same routine (cpu mode)")
-    for (lib, inp, mode), s in sorted(summ.items()):
-        if mode != "gpu": continue
-        cpu = summ.get((lib, inp, "cpu"))
-        if not cpu: continue
-        for name, kk, cc in (("zgemm", s["kern"], cpu["z"]), ("dgemm", s["dk"], cpu["d"])):
-            if cc > 0.05 and kk > 0:
-                print(f"{lib} {inp} {name}: kernel {kk:.2f} s / Accelerate {cc:.2f} s = {kk/cc:.2f}")
-        if cpu["wall"] and s["wall"]:
-            print(f"{lib} {inp} wall gpu/cpu = {s['wall']/cpu['wall']:.3f}; auto/cpu = "
-                  f"{(summ.get((lib, inp, 'auto'), {}).get('wall') or float('nan'))/cpu['wall']:.3f}")
+    print("\n== GPU kernel time (gpu mode) / Accelerate time for the same calls (cpu mode)")
+    for label, inp in sorted({(r["label"], r["input"]) for r in rows}):
+        cpu = [reports[id(r)] for r in groups.get((label, inp, "cpu"), [])]
+        gpu = [reports[id(r)] for r in groups.get((label, inp, "gpu"), [])]
+        for name in ("zgemm", "dgemm"):
+            sc = same_calls(cpu, gpu, name)
+            if sc and sc[1] > 0:
+                print(f"{label} {inp} {name}: kernel {sc[0]:.2f} s / Accelerate {sc[1]:.2f} s = {sc[0] / sc[1]:.2f}")
+        wc = [x for x in map(wall, groups.get((label, inp, "cpu"), [])) if x]
+        for mode in ("auto", "gpu"):
+            wm = [x for x in map(wall, groups.get((label, inp, mode), [])) if x]
+            if wc and wm:
+                print(f"{label} {inp} wall {mode}/cpu = {st.median(wm) / st.median(wc):.3f}")
 
 
 if __name__ == "__main__":

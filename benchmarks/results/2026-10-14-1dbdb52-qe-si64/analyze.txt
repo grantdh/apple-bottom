@@ -1,5 +1,5 @@
 == per run
-lib      input              mode rep   wall_s  iters  energy_Ry          zgemm_s  z_gpu%  z_kern_s z_other_s  dgemm_s  d_gpu%  fb  load
+label    input              mode rep   wall_s  iters  energy_Ry          zgemm_s  z_gpu%  z_kern_s z_other_s  dgemm_s  d_gpu%  fb  load
 1dbdb52  A_si64_500b_k222   cpu    1    506.5     7  -2990.44276149        57.30    0.0     0.00      0.00     0.17    0.0   0  2.30
 1dbdb52  A_si64_500b_k222   auto   1    508.0     7  -2990.44276149        56.92    0.0     0.00      0.00     0.16    0.0   0  3.01
 1dbdb52  A_si64_500b_k222   gpu    1    597.7     7  -2990.44276149       143.77   97.8    55.01     11.37     3.54   99.9   0  2.88
@@ -25,23 +25,26 @@ eaad87e  A_si64_500b_k222   auto   2    593.3     7  -2990.44276149         0.00
 1dbdb52  C_si64_160b_gamma  cpu    2    748.6     8  -2989.94060060         0.00    0.0     0.00      0.00     2.49    0.0   0  1.84
 
 == per configuration (median [min-max])
-1dbdb52  A_si64_500b_k222   auto n=3 wall 509.3 [508.0-509.3]  zgemm 57.96  z_kernel 0.00  dgemm 0.20  d_kernel 0.00  E=['-2990.44276149'] iters=['7']
-1dbdb52  A_si64_500b_k222   cpu  n=3 wall 509.9 [506.5-510.1]  zgemm 57.92  z_kernel 0.00  dgemm 0.19  d_kernel 0.00  E=['-2990.44276149'] iters=['7']
-1dbdb52  A_si64_500b_k222   gpu  n=3 wall 598.0 [597.7-598.1]  zgemm 144.28  z_kernel 55.01  dgemm 3.54  d_kernel 1.89  E=['-2990.44276149'] iters=['7']
-1dbdb52  B_si64_160b_k222   auto n=2 wall 1121.3 [1121.2-1121.3]  zgemm 29.45  z_kernel 0.00  dgemm 0.87  d_kernel 0.00  E=['-2990.44093535'] iters=['9']
-1dbdb52  B_si64_160b_k222   cpu  n=2 wall 1120.9 [1120.1-1121.7]  zgemm 29.63  z_kernel 0.00  dgemm 0.90  d_kernel 0.00  E=['-2990.44093535'] iters=['9']
-1dbdb52  B_si64_160b_k222   gpu  n=2 wall 1197.7 [1196.4-1199.1]  zgemm 100.76  z_kernel 32.13  dgemm 6.27  d_kernel 2.39  E=['-2990.44093535'] iters=['9']
-1dbdb52  C_si64_160b_gamma  auto n=2 wall 748.6 [748.5-748.7]  zgemm 0.00  z_kernel 0.00  dgemm 2.48  d_kernel 0.00  E=['-2989.94060060'] iters=['8']
-1dbdb52  C_si64_160b_gamma  cpu  n=2 wall 748.6 [748.6-748.6]  zgemm 0.00  z_kernel 0.00  dgemm 2.45  d_kernel 0.00  E=['-2989.94060060'] iters=['8']
-1dbdb52  C_si64_160b_gamma  gpu  n=2 wall 758.4 [758.4-758.5]  zgemm 0.00  z_kernel 0.00  dgemm 12.10  d_kernel 3.84  E=['-2989.94060060'] iters=['8']
-eaad87e  A_si64_500b_k222   auto n=2 wall 594.3 [593.3-595.2]  zgemm 0.00  z_kernel 0.00  dgemm 0.00  d_kernel 0.00  E=['-2990.44276149'] iters=['7']
+1dbdb52  A_si64_500b_k222   auto n=3 wall 509.3 [508.0-509.3]  zgemm 57.96  dgemm 0.20  E=['-2990.44276149'] iters=['7']
+1dbdb52  A_si64_500b_k222   cpu  n=3 wall 509.9 [506.5-510.1]  zgemm 57.92  dgemm 0.19  E=['-2990.44276149'] iters=['7']
+1dbdb52  A_si64_500b_k222   gpu  n=3 wall 598.0 [597.7-598.1]  zgemm 144.28  dgemm 3.54  E=['-2990.44276149'] iters=['7']
+1dbdb52  B_si64_160b_k222   auto n=2 wall 1121.3 [1121.2-1121.3]  zgemm 29.45  dgemm 0.87  E=['-2990.44093535'] iters=['9']
+1dbdb52  B_si64_160b_k222   cpu  n=2 wall 1120.9 [1120.1-1121.7]  zgemm 29.63  dgemm 0.90  E=['-2990.44093535'] iters=['9']
+1dbdb52  B_si64_160b_k222   gpu  n=2 wall 1197.7 [1196.4-1199.1]  zgemm 100.76  dgemm 6.27  E=['-2990.44093535'] iters=['9']
+1dbdb52  C_si64_160b_gamma  auto n=2 wall 748.6 [748.5-748.7]  zgemm 0.00  dgemm 2.48  E=['-2989.94060060'] iters=['8']
+1dbdb52  C_si64_160b_gamma  cpu  n=2 wall 748.6 [748.6-748.6]  zgemm 0.00  dgemm 2.45  E=['-2989.94060060'] iters=['8']
+1dbdb52  C_si64_160b_gamma  gpu  n=2 wall 758.4 [758.4-758.5]  zgemm 0.00  dgemm 12.10  E=['-2989.94060060'] iters=['8']
+eaad87e  A_si64_500b_k222   auto n=2 wall 594.3 [593.3-595.2]  zgemm 0.00  dgemm 0.00  E=['-2990.44276149'] iters=['7']
 
-== decision metric: GPU kernel time alone (gpu mode) / Accelerate time of the same routine (cpu mode)
-1dbdb52 A_si64_500b_k222 zgemm: kernel 55.01 s / Accelerate 57.92 s = 0.95
-1dbdb52 A_si64_500b_k222 dgemm: kernel 1.89 s / Accelerate 0.19 s = 9.94
-1dbdb52 A_si64_500b_k222 wall gpu/cpu = 1.173; auto/cpu = 0.999
-1dbdb52 B_si64_160b_k222 zgemm: kernel 32.13 s / Accelerate 29.63 s = 1.08
-1dbdb52 B_si64_160b_k222 dgemm: kernel 2.39 s / Accelerate 0.90 s = 2.65
-1dbdb52 B_si64_160b_k222 wall gpu/cpu = 1.069; auto/cpu = 1.000
-1dbdb52 C_si64_160b_gamma dgemm: kernel 3.84 s / Accelerate 2.45 s = 1.57
-1dbdb52 C_si64_160b_gamma wall gpu/cpu = 1.013; auto/cpu = 1.000
+== GPU kernel time (gpu mode) / Accelerate time for the same calls (cpu mode)
+1dbdb52 A_si64_500b_k222 zgemm: kernel 55.01 s / Accelerate 54.80 s = 1.00
+1dbdb52 A_si64_500b_k222 dgemm: kernel 1.89 s / Accelerate 0.19 s = 10.20
+1dbdb52 A_si64_500b_k222 wall auto/cpu = 0.999
+1dbdb52 A_si64_500b_k222 wall gpu/cpu = 1.173
+1dbdb52 B_si64_160b_k222 zgemm: kernel 32.13 s / Accelerate 26.44 s = 1.22
+1dbdb52 B_si64_160b_k222 dgemm: kernel 2.39 s / Accelerate 0.89 s = 2.68
+1dbdb52 B_si64_160b_k222 wall auto/cpu = 1.000
+1dbdb52 B_si64_160b_k222 wall gpu/cpu = 1.069
+1dbdb52 C_si64_160b_gamma dgemm: kernel 3.84 s / Accelerate 2.30 s = 1.67
+1dbdb52 C_si64_160b_gamma wall auto/cpu = 1.000
+1dbdb52 C_si64_160b_gamma wall gpu/cpu = 1.013

@@ -8,8 +8,9 @@ with the energies, the QE timers and apple-bottom's `AB_REPORT` of every run.
 |---|---|
 | `inputs/*.in` | the three si64 inputs (placeholders `OUTDIR` and `PSEUDO_DIR` are filled in per run) |
 | `run_campaign.sh` | runs a plan of inputs × modes × repetitions and writes `results.csv` |
-| `analyze.py` | per-run and per-configuration summary: wall time, BLAS time by route, GPU stage costs, and the ratio of GPU kernel time to Accelerate time |
+| `analyze.py` | per-run and per-configuration summary: wall time, BLAS time by route (summed over MPI ranks), GPU stage costs, and the ratio of GPU kernel time to Accelerate's time for the same calls |
 | `compare.py` | compares every run with the `cpu` run of the same input: final and per-iteration energies, every printed band energy |
+| `tables.py` | the VAL-1 tables (accuracy, routing, run time, GPU stages) in Markdown |
 
 ## Inputs
 
@@ -46,7 +47,10 @@ EOF
 PW_X=/path/to/pw.x caffeinate -is benchmarks/qe/run_campaign.sh plan.txt /path/to/out
 python3 benchmarks/qe/analyze.py /path/to/out
 python3 benchmarks/qe/compare.py /path/to/out
+python3 benchmarks/qe/tables.py /path/to/out 1.4.0
 ```
+
+The scripts need only the Python 3 that ships with macOS (3.9 or later).
 
 Input A takes about 8.5 minutes per run on an M2 Max with `np = 1` and 8
 OpenMP threads (`AB_MODE=cpu`).

@@ -17,7 +17,7 @@ revision 2. Inputs and scripts: [`benchmarks/qe/`](../../qe/).
 |---|---|
 | `results.csv` | one row per run: label (`libtag`), input, np, OpenMP threads, mode, repetition, start/end (Unix time), exit status, power source, 1-minute load at start, final energy, SCF iterations, wall and CPU time, QE timers, and the libapplebottom.dylib the run loaded (`<campaign>` = the campaign directory) |
 | `reports/` | each run's stderr without dyld lines and without the per-call `AB_PROFILE` lines: the library path it loaded, `AB_REPORT` and the `AB_PROFILE` tables (`eaad87e` predates `AB_REPORT` and the time columns) |
-| `analyze.txt` | `benchmarks/qe/analyze.py` output: per run, per configuration, and GPU kernel time ÷ Accelerate time |
+| `analyze.txt` | `benchmarks/qe/analyze.py` output: per run, per configuration, and GPU kernel time ÷ Accelerate time for the same calls |
 | `compare.txt` | `benchmarks/qe/compare.py` output: every run against the `cpu` run of its input |
 | `tables.md` | `benchmarks/qe/tables.py` output, the tables of VAL-1 |
 
