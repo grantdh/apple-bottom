@@ -11,7 +11,7 @@ the DD-DGEMM benchmark CSVs to the utilization figure anchored in
 
 | Symbol    | Description                          | Value          | Source                                                      |
 |-----------|--------------------------------------|----------------|-------------------------------------------------------------|
-| G_DD      | DD-DGEMM throughput (DP GFLOP/s)     | 654–672        | `benchmarks/results/2026-04-22-6b5447a/dgemm.csv` (N≥2048) + `benchmarks/results/2026-04-23-2c76e39/bench_paper.csv` (N=4096) |
+| G_DD      | DD-DGEMM throughput (DP GFLOP/s)     | 654–672        | `benchmarks/results/2026-04-22-29dcc79/dgemm.csv` (N≥2048) + `benchmarks/results/2026-04-23-5bc07c8/bench_paper.csv` (N=4096) |
 | k         | FP32 FLOPs per dd_fma call           | 18             | `src/apple_bottom.m:209-218` (DWTimesDW2, default path)     |
 | k'        | FP32 FLOPs per DP FLOP               | 9              | = k/2; each dd_fma delivers 1 DP mul + 1 DP add = 2 DP FLOPs |
 | f_boost   | GPU boost clock                      | 1.398 GHz      | Apple M2 Max GPU specification                              |
@@ -90,7 +90,7 @@ additional uncertainty from the denominator (boost clock reachability
 
 ## References
 
-- Benchmark data: `benchmarks/results/2026-04-22-6b5447a/dgemm.csv`
+- Benchmark data: `benchmarks/results/2026-04-22-29dcc79/dgemm.csv`
 - Clock-pin methodology: `docs/vv/VV_REPORT.md §10`
 - DD arithmetic precision envelope: `docs/vv/PRECISION_ENVELOPE.md`
 - Reproducibility: `docs/REPRODUCIBILITY.md`

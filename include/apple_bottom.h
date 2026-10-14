@@ -18,8 +18,8 @@
 //
 // Steady-state regime — native ABMatrix API, ABMatrix handles persisted across calls,
 // upload and FP64<->DD conversion amortized:
-//   DGEMM: GPU wins for N >= 2048   (anchor: benchmarks/results/2026-04-22-6b5447a/dgemm.csv)
-//   ZGEMM: GPU wins for N >= 1024   (anchor: benchmarks/results/2026-04-22-6b5447a/zgemm.csv)
+//   DGEMM: GPU wins for N >= 2048   (anchor: benchmarks/results/2026-04-22-29dcc79/dgemm.csv)
+//   ZGEMM: GPU wins for N >= 1024   (anchor: benchmarks/results/2026-04-22-29dcc79/zgemm.csv)
 //   DSYRK: GPU wins for N >= 3072   (steady-state; prior measurement, not re-measured for end-to-end regime)
 //   ZHERK: GPU wins for N >= 1024   (steady-state; v1.4 introduced GPU-native transpose / no CPU roundtrip; not re-measured for end-to-end regime)
 //
