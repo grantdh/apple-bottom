@@ -1,0 +1,52 @@
+name: CI
+
+# GitHub-hosted macOS runners do not give jobs a usable Metal GPU, so CI runs
+# every check that needs no GPU: version consistency, a compile of every
+# source file, both libraries, their exported BLAS symbols and the routing
+# unit tests. The GPU suites run locally with `make ci-local` before a release
+# (docs/RELEASING.md). The two images can carry different SDKs, which select
+# different shader compile options (MTLMathModeSafe needs the macOS 15 SDK); the
+# Toolchain step prints which one each job used.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and routing tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ macos-14, macos-15 ]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Toolchain
+      run: |
+        sw_vers
+        echo "SDK $(xcrun --show-sdk-version)"
+        clang --version | head -1
+
+    - name: Version consistency
+      run: make version-check
+
+    - name: Compile every source file
+      run: make build-check
+
+    - name: Build static and shared libraries
+      run: make lib
+
+    - name: Exported BLAS symbols
+      run: make test-symbols
+
+    - name: Routing unit tests (no GPU)
+      run: make build/test_dispatch && ./build/test_dispatch

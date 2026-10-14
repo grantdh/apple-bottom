@@ -529,35 +529,44 @@ test-symbols: $(BUILD)/libapplebottom.dylib $(BUILD)/libapplebottom.a
 
 # Build check: compile all source files to .o without linking
 # Used by GitHub Actions to verify syntax and compilation (fast check)
-build-check: | $(BUILD)
+# Objects go to build/check/ so they never replace the library's own objects
+# (blas_profiler.o there carries the build SHA).
+$(BUILD)/check:
+	mkdir -p $@
+
+build-check: | $(BUILD)/check
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "Build Check (compile only, no linking)"
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "Compiling apple_bottom.m..."
-	@$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $(BUILD)/apple_bottom.o
+	@$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $(BUILD)/check/apple_bottom.o
 	@echo "Compiling blas_wrapper.c..."
-	@$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $(BUILD)/blas_wrapper.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $(BUILD)/check/blas_wrapper.o
 	@echo "Compiling fortran_bridge.c..."
-	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c $(SRC)/fortran_bridge.c -o $(BUILD)/fortran_bridge.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c $(SRC)/fortran_bridge.c -o $(BUILD)/check/fortran_bridge.o
 	@echo "Compiling blas_profiler.c..."
-	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c $(SRC)/profiling/blas_profiler.c -o $(BUILD)/blas_profiler.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c $(SRC)/profiling/blas_profiler.c -o $(BUILD)/check/blas_profiler.o
 	@echo "Compiling dispatch.c..."
-	@$(CC) $(CFLAGS) -c $(SRC)/dispatch.c -o $(BUILD)/dispatch.o
+	@$(CC) $(CFLAGS) -c $(SRC)/dispatch.c -o $(BUILD)/check/dispatch.o
+	@echo "Compiling device_api.m..."
+	@$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/device_api.m -o $(BUILD)/check/device_api.o
 	@echo "Compiling test_correctness.c..."
-	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_correctness.c -o $(BUILD)/test_correctness.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_correctness.c -o $(BUILD)/check/test_correctness.o
 	@echo "Compiling test_precision.c..."
-	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_precision.c -o $(BUILD)/test_precision.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_precision.c -o $(BUILD)/check/test_precision.o
 	@echo "Compiling test_blas_abi.c..."
-	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_blas_abi.c -o $(BUILD)/test_blas_abi.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_blas_abi.c -o $(BUILD)/check/test_blas_abi.o
 	@echo "Compiling test_dispatch.c..."
-	@$(CC) $(CFLAGS) -I$(SRC) -c tests/test_dispatch.c -o $(BUILD)/test_dispatch.o
+	@$(CC) $(CFLAGS) -I$(SRC) -c tests/test_dispatch.c -o $(BUILD)/check/test_dispatch.o
+	@echo "Compiling test_device_api.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_device_api.c -o $(BUILD)/check/test_device_api.o
 	@echo "Compiling calibrate.c..."
-	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c benchmarks/calibrate.c -o $(BUILD)/calibrate.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c benchmarks/calibrate.c -o $(BUILD)/check/calibrate.o
 	@echo "Compiling test_chaos.c..."
-	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_chaos.c -o $(BUILD)/test_chaos.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_chaos.c -o $(BUILD)/check/test_chaos.o
 	@echo "Compiling test_convergence.c..."
-	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/verification/test_convergence.c -o $(BUILD)/test_convergence.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/verification/test_convergence.c -o $(BUILD)/check/test_convergence.o
 	@echo ""
 	@echo "✓ All source files compile successfully"
 	@echo ""

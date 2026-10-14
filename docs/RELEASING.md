@@ -57,11 +57,11 @@ STATUS: PASS
 
 Check that CI passed on the latest commit:
 
-- [ ] GitHub Actions: `build-check` job passed (compile-time verification)
+- [ ] GitHub Actions: the `CI` workflow passed on macos-14 and macos-15
 
 **Check at:** `https://github.com/grantdh/apple-bottom/actions`
 
-**Note:** GitHub Actions runners don't expose Metal GPU access, so CI only verifies compile-time correctness. Full GPU validation (155 tests + convergence study) must be run locally via `make ci-local` (see step 2 above).
+**Note:** GitHub-hosted runners don't give jobs a usable Metal GPU, so CI runs only the checks that need none: `make version-check`, `make build-check`, `make lib`, `make test-symbols` and the routing unit tests (`build/test_dispatch`). The GPU suites and the convergence study run locally via `make ci-local` (step 2 above).
 
 ### 4. Documentation Review
 
@@ -76,10 +76,15 @@ Check that CI passed on the latest commit:
 
 ### 5. Version Update
 
-Update version numbers in:
+The version lives in `include/apple_bottom.h` (`APPLE_BOTTOM_VERSION_MAJOR`,
+`_MINOR`, `_PATCH` and `_STRING`); the Makefile reads it from there for the
+dylib and the pkg-config file. Set it, then bring the other copies in line:
 
-- [ ] `CHANGELOG.md` — Add release date to `[Unreleased]` section
-- [ ] (Optional) `include/apple_bottom.h` — Update version comment if present
+- [ ] `python/apple_bottom/__init__.py` (`__version__`) and `python/setup.py`
+- [ ] `CITATION.cff` (`version`, and add `date-released: YYYY-MM-DD`)
+- [ ] The citation block at the end of `README.md`
+- [ ] `CHANGELOG.md` — rename the top `[X.Y.Z] - Unreleased` entry to the release date
+- [ ] `make version-check` passes (it is also the first step of `make ci-local` and of CI)
 
 Example CHANGELOG update:
 ```markdown
