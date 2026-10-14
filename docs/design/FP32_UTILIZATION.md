@@ -12,7 +12,7 @@ the DD-DGEMM benchmark CSVs to the utilization figure anchored in
 | Symbol    | Description                          | Value          | Source                                                      |
 |-----------|--------------------------------------|----------------|-------------------------------------------------------------|
 | G_DD      | DD-DGEMM throughput (DP GFLOP/s)     | 654–672        | `benchmarks/results/2026-04-22-29dcc79/dgemm.csv` (N≥2048) + `benchmarks/results/2026-04-23-5bc07c8/bench_paper.csv` (N=4096) |
-| k         | FP32 FLOPs per dd_fma call           | 18             | `src/apple_bottom.m:209-218` (DWTimesDW2, default path)     |
+| k         | FP32 FLOPs per dd_fma call           | 18             | `dd_fma`, DWTimesDW2 branch of `src/apple_bottom.m` |
 | k'        | FP32 FLOPs per DP FLOP               | 9              | = k/2; each dd_fma delivers 1 DP mul + 1 DP add = 2 DP FLOPs |
 | f_boost   | GPU boost clock                      | 1.398 GHz      | Apple M2 Max GPU specification                              |
 | N_cores   | GPU cores                            | 38             | M2 Max 38-core SKU                                          |
@@ -23,7 +23,7 @@ the DD-DGEMM benchmark CSVs to the utilization figure anchored in
 
 Each dd_fma call computes one double-float multiply-add. Expanding the
 double-float arithmetic into FP32 operations gives k FP32 ops per call
-(see `src/apple_bottom.m:209-218` for the explicit sequence).
+(see the default `dd_fma` in `src/apple_bottom.m` for the explicit sequence).
 
 Each dd_fma call produces 2 double-precision FLOPs (one multiply and
 one add in double-float arithmetic). Therefore the FP32 cost per DP
@@ -78,12 +78,12 @@ additional uncertainty from the denominator (boost clock reachability
    shifting the point estimate to 45.7% (654 × 9.5 / 13_600).
 
 6. **Renormalization overhead excluded.** Periodic renormalization
-   (`RENORM_INTERVAL`, `src/apple_bottom.m:262`) adds approximately 1%
+   (`RENORM_INTERVAL` in `src/apple_bottom.m`) adds approximately 1%
    amortized FP32 overhead across full GEMM kernels. Not included in
    the 18-op-per-call count; would shift the point estimate by <0.5%.
 
 7. **Variant kernel not covered.** The `DWTimesDW3` variant
-   (`src/apple_bottom.m:184-196`) is opt-in and has a different FP32 op
+   (`-DAPPLEBOTTOM_USE_DWTIMESDW3`) is opt-in and has a different FP32 op
    count. The default path analyzed here is `DWTimesDW2`. Any
    utilization figure for the alternate variant requires a separate
    derivation.
@@ -94,4 +94,4 @@ additional uncertainty from the denominator (boost clock reachability
 - Clock-pin methodology: `docs/vv/VV_REPORT.md §10`
 - DD arithmetic precision envelope: `docs/vv/PRECISION_ENVELOPE.md`
 - Reproducibility: `docs/REPRODUCIBILITY.md`
-- dd_fma source: `src/apple_bottom.m:209-218`
+- dd_fma source: the default (DWTimesDW2) `dd_fma` in `src/apple_bottom.m`

@@ -16,11 +16,11 @@ DD precision bounds scale as O(√K)·2⁻⁴⁸ (Wilkinson) for all tested aspe
 
 Each threadgroup computes a BM×BN tile of C by iterating TK-wide slabs across the K dimension. The grid dimension is `ceil(M/BM) × ceil(N/BN)` threadgroups; threads within a threadgroup cooperatively load A and B tiles into threadgroup memory before the TK-wide inner product.
 
-**Tall-skinny variant** (deployed; see `src/apple_bottom.m:249-250`):
+**Tall-skinny variant** (deployed; `BM_TS`/`BN_TS` in `src/apple_bottom.m`):
 - BM = 128, BN = 16
 - TM = 4, TN = 2
-- Threadgroup layout 8×32 = 256 threads (`src/apple_bottom.m:1211`)
-- Selected on `M >= 4 * N` (`src/apple_bottom.m:1055`)
+- Threadgroup layout 8×32 = 256 threads
+- Selected on `M >= 4 * N` (`use_ts` in `src/apple_bottom.m`)
 
 The tall-skinny kernel reduces boundary waste on QE-shape workloads (M≈18K, N=150) from ~34% under BN=64 to ~4% under BN=16.
 
@@ -118,37 +118,30 @@ Rectangular matrices meet DD precision bounds across the full aspect-ratio sweep
 
 3. **Cache locality.** B (150 columns) fits in cache; A (18277 rows) does not. Tall shapes yield long stride walks.
 
-The tall-skinny kernel addresses (1) directly: at BN=16, N=150 yields ceil(150/16) = 10 threadgroups in N rather than 3, and boundary waste drops from ~34% to ~4% per `src/apple_bottom.m:1056`. (2) and (3) are upload/download and stride concerns inherent to the per-call API and are the motivation for a future device-resident path.
+The tall-skinny kernel addresses (1) directly: at BN=16, N=150 yields ceil(150/16) = 10 threadgroups in N rather than 3, and boundary waste drops from ~34% to ~4%. (2) and (3) are upload/download and stride concerns inherent to the per-call API and are the motivation for a future device-resident path.
 
-**Net QE-level speedup.**
+**What this means for Quantum ESPRESSO.**
 
-QE shows a net 2.7× speedup end-to-end despite per-call characteristics on individual shapes:
-- QE issues 12 ZGEMM calls per Davidson iteration
-- Calls below the 100M-FLOP threshold route to OpenBLAS
-- Large `hpsi = H * psi` calls hit the GPU, dispatched to the tall-skinny kernel on M ≥ 4N
-- GPU wins on the large calls; BLAS handles the small ones
+The numbers above are for the native `ABMatrix` API with one call per
+upload. Through the BLAS ABI (`dgemm_`/`zgemm_`, which is what QE
+calls) every operand is also converted FP64 → DD and back on each
+call, and every QE si64 Davidson and PAW shape measured by
+`make calibrate` is slower on the GPU than on Accelerate (0.09–0.76×,
+[`benchmarks/results/2026-10-14-52f1880-calibrate/`](../../benchmarks/results/2026-10-14-52f1880-calibrate/)).
+`AB_MODE=auto` therefore keeps those calls on Accelerate. The
+tall-skinny kernel still matters for `AB_MODE=gpu` and for callers
+that keep matrices resident on the GPU.
 
 ---
 
 ## Running the Tests
 
-### Build
+### Build and run
 ```bash
-cd ~/Dev/Claude/apple-bottom
-make  # Build library first
-
-# Compile test
-clang -O3 -I include -L build -lapplebottom \
-  -framework Accelerate -framework Metal -framework Foundation \
-  -o tests/test_rectangular tests/test_rectangular.c
+make test-rectangular
 ```
 
-### Run Correctness Tests
-```bash
-./tests/test_rectangular
-```
-
-Expected output:
+Expected output (correctness part):
 ```
 =============================================================================
 apple-bottom Rectangular Matrix Test Suite
@@ -173,8 +166,7 @@ Summary: 6 passed, 0 failed
 
 ## References
 
-- Tall-skinny kernel parameters: `src/apple_bottom.m:249-250`
-- Dispatch rule (`M >= 4 * N`): `src/apple_bottom.m:1055`
-- Tall-skinny threadgroup layout: `src/apple_bottom.m:1211`
+- Tall-skinny kernel parameters: `BM_TS`, `BN_TS`, `TM_TS`, `TN_TS` in `src/apple_bottom.m`
+- Dispatch rule: `use_ts = (M >= 4 * N)` in `src/apple_bottom.m`
 - QE integration: [`docs/INTEGRATION.md`](../INTEGRATION.md)
 - Main benchmarks: [`benchmarks/`](../../benchmarks/)

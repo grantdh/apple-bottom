@@ -179,7 +179,7 @@ This `~N²·⁵` scaling means max element error grows **faster than the Frobeni
 
 **Implication**: DD precision is sufficient for production DFT calculations requiring `~10⁻¹⁰` energy convergence. DFT energy is a norm-averaged quantity (sum over occupied states), so Frobenius-class error is appropriate.
 
-**Data source**: `docs/BENCHMARK_SUMMARY.md`, QE v7.2 validation
+**Data source**: `tests/validation/VAL001_QE_Si64.md`, QE v7.2 validation
 
 ---
 
@@ -294,9 +294,9 @@ FLOP_count ≥ 100M  (approximately N³ ≥ 100M for DGEMM)
 | Test ID | Description | Status | Source |
 |---------|-------------|--------|--------|
 | **V-2** | DGEMM convergence study (N ≤ 4096) | ✓ PASS | `tests/verification/test_convergence.c` |
-| **VAL-1** | QE Si64 production validation | ✓ PASS | `docs/BENCHMARK_SUMMARY.md` |
-| **BUG-3** | Scaled DGEMM precision (α,β in DD) | ✓ PASS | `tests/test_correctness.c:786` |
-| **BUG-4** | Matrix scaling precision (α in DD) | ✓ PASS | `tests/test_correctness.c:819` |
+| **VAL-1** | QE Si64 production validation | ✓ PASS | `tests/validation/VAL001_QE_Si64.md` |
+| **BUG-3** | Scaled DGEMM precision (α,β in DD) | ✓ PASS | `test_bug3_dgemm_scaled_precision` in `tests/test_correctness.c` |
+| **BUG-4** | Matrix scaling precision (α in DD) | ✓ PASS | `test_bug4_matrix_scale_precision` in `tests/test_correctness.c` |
 
 ### 6.2 Regression Testing
 

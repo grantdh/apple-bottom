@@ -21,7 +21,7 @@ DWTimesDW2.
 
 ### 1.1 Default: DWTimesDW2 (Alg 11 / Thm 2.7)
 
-Source: `src/apple_bottom.m:198-216` (inside the `#else` branch at line 196).
+Source: `dd_mul` / `dd_fma` in the `#else  // DWTimesDW2 (default)` branch of `src/apple_bottom.m`.
 
 ```metal
 inline DD dd_mul(DD a, DD b) {
@@ -64,8 +64,8 @@ roundoff — Muller–Rideau 2022 Theorem 2.7, tightened from JMP 2017's origina
 
 ### 1.2 Opt-in: DWTimesDW3 (Alg 12 / Thm 2.8)
 
-Source: `src/apple_bottom.m:168-194` (inside the `#ifdef APPLEBOTTOM_USE_DWTIMESDW3`
-branch at line 168). Landed as `feat: add DWTimesDW3 compile-time variant (opt-in)`
+Source: `dd_mul` / `dd_fma` in `src/apple_bottom.m` (inside the `#ifdef APPLEBOTTOM_USE_DWTIMESDW3`
+branch). Landed as `feat: add DWTimesDW3 compile-time variant (opt-in)`
 in commit `8c18ef3`.
 
 ```metal
@@ -180,6 +180,6 @@ The open v1.3.0 question is not "how do we tighten the bound further" but
   DOI: 10.1145/3484514
 - `docs/vv/PRECISION_ENVELOPE.md` §1.2 — per-operation DD bound derivation
   for the default (DWTimesDW2) path.
-- `src/apple_bottom.m:157-218` — the gated implementations themselves.
+- `src/apple_bottom.m`, the `#ifdef APPLEBOTTOM_USE_DWTIMESDW3` … `#endif` block — the gated implementations themselves.
 - `Makefile:20-27` — the `DWTIMESDW3=1` build flag and `-DAPPLEBOTTOM_USE_DWTIMESDW3`
   propagation.
