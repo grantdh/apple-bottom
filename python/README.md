@@ -1,6 +1,6 @@
 # apple-bottom — Python Wrapper
 
-High-performance FP64-class BLAS for Apple Silicon GPUs, from Python.
+FP64-class BLAS for Apple Silicon GPUs, from Python.
 
 > **Experimental:** the bindings are not covered by `make test`; check them against your build with `make test-python`.
 
@@ -20,7 +20,7 @@ Ensure the C library is built first:
 ```bash
 cd /path/to/apple-bottom
 make clean && make
-make install  # Installs libapplebottom to /usr/local/lib or /opt/homebrew/lib
+make install  # Installs libapplebottom under PREFIX (default /usr/local)
 ```
 
 Then install the Python package:
@@ -268,7 +268,7 @@ except ab.AppleBottomError as e:
 - Apple Silicon Mac (M1, M2, M3, etc.)
 - Python 3.9+
 - numpy 1.20+
-- Xcode 16+ SDK recommended (for ~10⁻¹⁵ precision; ~10⁻⁸ without)
+- macOS 14+ (full DD precision with any supported SDK)
 
 ## Library Limits
 
@@ -282,7 +282,8 @@ except ab.AppleBottomError as e:
 ```bash
 cd /path/to/apple-bottom
 make clean
-make test  # Verify 48/48 tests pass
+make test         # the C library's test suite
+make test-python  # these bindings
 make install
 ```
 

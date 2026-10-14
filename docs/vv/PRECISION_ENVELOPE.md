@@ -313,10 +313,10 @@ FLOP_count ≥ 100M  (approximately N³ ≥ 100M for DGEMM)
 |------|-------|-------|
 | **Validated version** | v1.0.2-bugfix | Git tag `v1.0.2-bugfix` (SHA: f3e2fc1) |
 | **Compiler** | clang 15.0.0 (Apple) | `-O3 -std=c11` |
-| **Metal SDK** | macOS 15.0+ SDK (Xcode 16+) | **`MTLMathModeSafe` is CRITICAL** - without it precision degrades from ~10⁻¹⁵ to ~10⁻⁸ |
+| **Metal SDK** | macOS 15.0+ SDK (Xcode 16+) | **Fast math must be off** (`MTLMathModeSafe`, or `fastMathEnabled = NO` before macOS 15 / SDK 15) - with Metal's default fast math, precision degrades from ~10⁻¹⁵ to ~10⁻⁸ |
 | **Test system** | M2 Max, 64GB RAM | 12 CPU cores, 38 GPU cores |
 
-**CRITICAL**: `MTLMathModeSafe` is a hard requirement, not optional. Without it (SDK < 15.0), DD precision degrades by 8 orders of magnitude (~10⁻⁸ instead of ~10⁻¹⁵). Do not modify validated code without re-running V&V tests. Tag validated states in Git.
+**CRITICAL**: the shaders must be compiled without fast math. Metal's default fast math lets the compiler reorder and fuse the error-free transformations, and DD precision degrades by about 7 orders of magnitude (~10⁻⁸ instead of ~10⁻¹⁵). The validated v1.0.2 baseline required `MTLMathModeSafe` (SDK 15+). Since 1.4.0 the library uses `MTLMathModeSafe` where the SDK and OS provide it and `fastMathEnabled = NO` otherwise, which keeps full DD precision; `test_precision` and the V-2 study fail if precision is lost. Do not modify validated code without re-running V&V tests. Tag validated states in Git.
 
 ---
 
