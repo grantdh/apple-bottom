@@ -559,7 +559,6 @@ int main(int argc, char** argv) {
 
     printf("\n═══════════════════════════════════════════════════════════════════\n");
     printf("Benchmark complete.\n");
-    if (g_csv) printf("# CSV output above can be parsed with scripts/analyze_bench_paper.py\n");
 
     ab_shutdown();
     return 0;
