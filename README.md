@@ -192,12 +192,14 @@ fused multiply-add of the GEMM inner loop has a conservative 8u² envelope
 ## Accuracy and testing
 
 DGEMM's normwise relative error grows like √N·10⁻¹⁵ on random matrices,
-about 5 × 10⁻¹⁴ at N = 4096 (V-2 convergence study). `make test` runs 138
-tests: precision against a compensated FP64 reference, correctness of
-every API against Accelerate, the device-buffer API, the routing rules,
-and a BLAS-ABI conformance harness of 1,007 cases. `make ci-local` adds
-adversarial inputs and the convergence study (156 tests);
-[tests/README.md](tests/README.md) explains the count.
+about 5 × 10⁻¹⁴ at N = 4096 (V-2 convergence study). `make test` checks
+precision against a compensated FP64 reference, correctness of every API
+against Accelerate, the device-buffer API, the routing rules, and the
+BLAS-ABI entry points in a conformance harness (with long-K precision,
+determinism, concurrency, memory and fork checks); it also holds
+GPU-routed BLAS results to the bits 1.4.0 produced. `make ci-local` adds
+adversarial inputs and the convergence study;
+[tests/README.md](tests/README.md) gives the test counts.
 
 [V&V report](docs/vv/VV_REPORT.md) · [precision envelope](docs/vv/PRECISION_ENVELOPE.md) ·
 [limitations and scope](docs/vv/LIMITATIONS.md) ·

@@ -39,12 +39,16 @@ It does **not** catch:
 
 ## Coverage status
 
-Counting rule (README, `make ci-local`): a *test* is one `test_precision`
-case, one `TESTS[]` entry, or one BLAS-ABI suite. `make test` runs 138
-(14 precision + 73 correctness + 16 device-API + 9 routing + 26 BLAS-ABI)
-and `make ci-local` adds the 18 chaos tests, for a `TEST_TOTAL` of 156.
-Device-API `CHECK`s and BLAS-ABI cases are reported on their own
-`CI_REPORT.txt` lines and are not part of the total.
+The test counts live here only (the README, `docs/RELEASING.md` and
+`docs/REPRODUCIBILITY.md` point here): update them with any change of
+count. Counting rule (as `make ci-local` counts): a *test* is one
+`test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
+count of each file is listed below. `make test` runs 143, every test but
+the chaos ones, and `make ci-local` all 161 (`TEST_TOTAL` in
+`build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
+reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
+`BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
+(its `TEST_QE_GOLDEN` line says `PASS`, or `SKIP` on another device).
 
 - **Registry-based (ghost-guarded):**
   - `tests/test_correctness.c` — 73 tests
@@ -56,10 +60,11 @@ Device-API `CHECK`s and BLAS-ABI cases are reported on their own
     the device path is bitwise the host API on the transposed operands
   - `tests/test_dispatch.c` — 9 tests of the BLAS-ABI routing, no GPU,
     see below
-  - `tests/test_blas_abi.c` — 26 suites (1007 cases), see below
+  - `tests/test_blas_abi.c` — 31 suites (1028 cases), see below
 
 - **Not yet registry-based (one `main`, no ghost guard):**
-  - `tests/test_precision.c` — needs decomposition strategy
+  - `tests/test_precision.c` — 14 tests; needs decomposition strategy
+  - `tests/test_qe_golden.c` — 32 golden-bits cases, see below
   - `tests/verification/test_convergence.c` — monolithic numerical
     V&V file; decomposition needs care because behavior changes are
     load-bearing
@@ -68,7 +73,7 @@ Device-API `CHECK`s and BLAS-ABI cases are reported on their own
 
 | Target | What it runs |
 |---|---|
-| `make ci-local` | `make version-check`, every suite of `make test`, the 18 chaos tests and the V-2 convergence study (the DGEMM error-versus-N study of `docs/vv/VV_REPORT.md`, `tests/verification/test_convergence.c`); writes `build/CI_REPORT.txt` |
+| `make ci-local` | `make version-check`, every suite of `make test`, the chaos tests and the V-2 convergence study (the DGEMM error-versus-N study of `docs/vv/VV_REPORT.md`, `tests/verification/test_convergence.c`); writes `build/CI_REPORT.txt` |
 | `make test-chaos` | pathological inputs, IEEE edge cases, concurrent threads |
 | `make test-verification` | the V-2 convergence study alone |
 | `make test-rectangular` | `test_rectangular.c`: tall, wide, thin-K and conjugate-transposed shapes up to 18277 × 150 × 18277, componentwise against cblas, then timings (peaks at ~21 GB) |
@@ -108,12 +113,83 @@ to cblas. Both processes' exit reports must start with `ab_build_info()`
 (naming the Makefile's `AB_BUILD_SHA`) and give the calls made by route,
 `gpu_time%` within [0, 100], GPU stages that sum to at most `gpu_ms`, one
 `AB_PROFILE` line per GPU call, and the child only its own fallback.
+
+Five suites guard what a faster GPU path must keep, all through `dgemm_` /
+`zgemm_` in `AB_MODE=gpu` without `ab_init()`; the long-K, concurrency and
+memory suites print their measured values on every run:
+- `test_long_k_precision`: dgemm ('T','N' on the square-tile kernel,
+  'N','N' on the tall-skinny one) and zgemm ('C','N') with small M, N and
+  K up to 143666 (QE's 2*ngm_l per rank), against a compensated Dot2
+  reference (`test_dot2.h`, shared with `test_precision.c`). The error is
+  max |C − R| / (|A||B|), componentwise, in units of the DD unit roundoff
+  u² = 2⁻⁴⁸; for these random-sign inputs it does not grow with K, and must
+  stay within `LONG_K_BOUND`. `gen_long_k` derives the bound and records
+  what 1.4.0 measures.
+- `test_determinism`: a call repeated from the same C0, and again after GPU
+  calls of other shapes and routines, gives memcmp-equal C.
+- `test_concurrency`: 8 threads, released together, each make 3 dgemm_ and
+  3 zgemm_ calls on their own data: first each with its own shapes, before
+  the Metal context exists, then all with the same shapes, so that state
+  kept per shape is shared between threads. Every result must be bitwise
+  the same call made single-threaded afterwards, and that within 1e-11 of
+  cblas.
+- `test_memory_growth`: GPU calls after a warm-up may grow the bytes
+  malloc has handed out by less than `MEM_MALLOC_LIMIT_KB`, which catches
+  small leaks, and `phys_footprint` (`task_info`) by less than
+  `MEM_FOOTPRINT_LIMIT_KB`, which catches a leaked operand or GPU buffer.
+  `gen_memory` records what 1.4.0 measures, what planted leaks cost, and
+  how the limits follow.
+- `test_fork_exit`: as `test_fork_after_gpu` without `AB_PROFILE`, but the
+  forked child ends with `exit()` (atexit handlers and static destructors
+  run, as at a Fortran `STOP`), not `_exit()`; it must exit with status 0
+  within 30 s (an alarm ends it then, and the case fails).
+
 Known failures live in the file's `XFAIL` table, each with a short tag
 naming the defect. An XFAIL that now passes (XPASS), or an entry that matches
 no case (STALE), fails the run: when a fix lands, delete its entries.
 `./build/test_blas_abi -v` lists every case. `make test-symbols` is the
 strict export check: the dylib and the static archive must each export
 exactly `_dgemm_` / `_zgemm_`, and not the `$NEWLAPACK` variants (before 1.4.0 they exported only the latter, so Fortran calls bypassed the library).
+
+## Golden bits
+
+`tests/test_qe_golden.c` makes one call per case through `dgemm_` /
+`zgemm_` in `AB_MODE=gpu` and hashes each whole C array, leading-dimension
+padding included, with 64-bit FNV-1a. `tests/golden/qe_golden.txt` holds
+the hashes apple-bottom 1.4.0 produced, so every later change must keep the
+results bit for bit. The cases: zgemm for every (transA, transB) in
+{N,T,C}², dgemm for {N,T}² and 'C' (read as 'T'); alpha 1 or not, beta 0,
+1 or neither; ld > rows with NaN in the padding of A, B and C; both GEMM
+kernels; mixed magnitudes; beta = 0 with NaN and Inf in C; cancellation
+(Ai close to −Ar, rows of op(A) that sum to zero); signed zeros; and
+Quantum ESPRESSO shapes (zgemm 'C','N' 160×160×9140 and 'N','N'
+9140×160×160, dgemm 'T','N' 36×64×73062 with alpha = 2, dgemm 'N','T'
+4000×171×64). Inputs come from splitmix64 seeded with the case name. Every
+case also checks that the GPU computed C, that A, B and C's padding are
+unchanged, and that C is within 1e-11 of cblas, so a golden file cannot
+freeze a wrong result.
+
+The bits depend on the GPU and the Metal compiler: the file's header
+records `ab_device_name()`, the macOS build (`sysctl kern.osversion`) and,
+on its `library:` line, the `ab_build_info()` of the library that wrote it
+(version and commit, `-dirty` for a modified tree). On another device the
+hashes are not compared and the test prints `SKIP` with the reason (the
+cblas checks still run); `AB_GOLDEN_STRICT=1` makes that a failure. On
+another macOS build they are compared all the same, and a mismatch fails
+naming both builds.
+
+Re-baseline (a new device, or a macOS update that changed the bits) only
+from the library the file names, never from the tree under test, which
+must then match the new file:
+`DYLD_LIBRARY_PATH=<directory of its libapplebottom.dylib> ./build/test_qe_golden --generate`
+(`--file PATH` reads or writes another file). Start the binary directly,
+not through `make` or `sh -c`: macOS drops `DYLD_*` variables when it
+starts a system binary. Check that the `library:` it prints is the one the
+file names. The tree's own library replaces the file only for an intended
+change of results, said in the commit; the file's `library:` line then
+names the tree's commit. The committed file was generated by the 1.4.0
+build of the QE si64 release check (`apple-bottom 1.4.0 (c5a1fa6a8166)`);
+this tree's 1.4.0 library gives the same bits.
 
 ## Routing unit tests
 

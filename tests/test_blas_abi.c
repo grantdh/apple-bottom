@@ -40,6 +40,10 @@
 // grandchild process (this binary with --report-child) that makes GPU and
 // CPU calls and forks.
 //
+// The long-K, determinism, concurrency, memory and fork-exit suites guard
+// properties a faster GPU path must keep (Kind, and the gen_* function of
+// each); the bit-for-bit results themselves are test_qe_golden.c's job.
+//
 // Known failures live in the XFAIL table below, tagged with audit IDs. An
 // XFAIL does not fail the run; an XFAIL case that passes (XPASS), an XFAIL
 // entry that matches no case (STALE) and any other failure do. Run with -v
@@ -47,6 +51,8 @@
 // =============================================================================
 
 #include "apple_bottom.h"
+#include "test_blas_check.h"
+#include "test_dot2.h"
 #include "test_registry.h"
 #include <Accelerate/Accelerate.h>
 #include <complex.h>
@@ -56,7 +62,10 @@
 #include <float.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
+#include <mach/mach.h>
+#include <malloc/malloc.h>
 #include <math.h>
+#include <pthread.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,42 +74,23 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-extern char **environ;
-
-// Exported by fortran_bridge.c but not declared in apple_bottom.h.
-void ab_dgemm_(const char *transA, const char *transB,
-               const int *M, const int *N, const int *K,
-               const double *alpha, const double *A, const int *ldA,
-               const double *B, const int *ldB,
-               const double *beta, double *C, const int *ldC);
-void ab_zgemm_(const char *transA, const char *transB,
-               const int *M, const int *N, const int *K,
-               const double complex *alpha, const double complex *A, const int *ldA,
-               const double complex *B, const int *ldB,
-               const double complex *beta, double complex *C, const int *ldC);
-
-// The plain Fortran BLAS symbols, bound by their exact Mach-O names. Under
-// ACCELERATE_NEW_LAPACK a C reference to dgemm_ becomes _dgemm$NEWLAPACK,
-// which is not the symbol a gfortran call site links against.
-void fortran_dgemm(const char *transA, const char *transB,
-                   const int *M, const int *N, const int *K,
-                   const double *alpha, const double *A, const int *ldA,
-                   const double *B, const int *ldB,
-                   const double *beta, double *C, const int *ldC) __asm__("_dgemm_");
-void fortran_zgemm(const char *transA, const char *transB,
-                   const int *M, const int *N, const int *K,
-                   const double complex *alpha, const double complex *A, const int *ldA,
-                   const double complex *B, const int *ldB,
-                   const double complex *beta, double complex *C, const int *ldC) __asm__("_zgemm_");
-
 // AB_PROFILE table writer, exported by blas_profiler.c (internal header).
 void ab_prof_dump(FILE *out);
 
-#define TOL             1e-11
-#define MAX_CASES       1024
+#define MAX_CASES       1280
 #define MIN_GPU_DIM     32      // AB_DISPATCH_DEFAULT_MIN_DIM in dispatch.h
 #define OLD_MAX_DIM     46340   // v1.3 per-dimension limit, now a per-matrix one
 #define CASE_TIMEOUT_S  120
+#define FORK_WAIT_S     30      // a fork()ed child still running then is ended by SIGALRM
+
+#define U2              0x1p-48 // u² = 2⁻⁴⁸, DD unit roundoff (u = 2⁻²⁴, FP32)
+#define LONG_K_BOUND    8.0     // long-K error bound, units of u² (see gen_long_k)
+#define N_THREADS       8
+#define THREAD_REPS     3       // calls per routine and thread
+#define MEM_WARMUP_CALLS 200
+#define MEM_CALLS       2000
+#define MEM_FOOTPRINT_LIMIT_KB 32768 // growth over MEM_CALLS (see gen_memory)
+#define MEM_MALLOC_LIMIT_KB    128
 
 // =============================================================================
 // Case model
@@ -127,6 +117,20 @@ static const char *const OP_NAME[] = {
 
 typedef enum { ROUTE_ANY, ROUTE_GPU, ROUTE_CPU } Route;
 typedef enum { POISON_NONE, POISON_AB, POISON_C } Poison;
+
+// What a BLAS-ABI case checks.
+typedef enum {
+    KIND_CALL,          // one call against cblas (blas_verdict); with fork, again in a child
+    KIND_LONG_K,        // one call against a Dot2 reference, error in units of u²
+    KIND_REPEAT,        // bitwise the same when repeated, also after other GPU calls
+    KIND_THREADS,       // N_THREADS threads at once, each bitwise its single-threaded result
+    KIND_MEMORY,        // footprint growth over MEM_CALLS GPU calls
+} Kind;
+
+static const char *const KIND_TAG[] = {
+    [KIND_CALL] = "call", [KIND_LONG_K] = "long-k", [KIND_REPEAT] = "repeat",
+    [KIND_THREADS] = "threads", [KIND_MEMORY] = "memory",
+};
 
 typedef struct {
     const char *tag;
@@ -168,6 +172,9 @@ typedef struct {
     Route route;
     int bad;                            // BAD_*: pass this argument illegal
     bool fork;                          // repeat the call in a fork()ed child
+    bool child_exit;                    // that child ends with exit(), not _exit()
+    bool same_shape;                    // KIND_THREADS: every thread makes thread 0's calls
+    Kind kind;
     const void *sym;                    // OP_SYMBOL only
 } AbiCase;
 
@@ -211,12 +218,11 @@ struct Suite {
     bool init;                  // call ab_init() before the first case
     bool debug_layer;           // MTL_DEBUG_LAYER=1 (Metal API validation)
     bool profile;               // AB_PROFILE=1
+    bool show;                  // print every case's detail (measured values), not only failures
     Op op;                      // entry point (gen_blas suites only)
     void (*gen)(const Suite *s);
     int lo, hi;                 // case range, set by build_cases()
 };
-
-static int imax(int a, int b) { return a > b ? a : b; }
 
 static bool op_is_complex(Op op) {
     return op == OP_ZGEMM_BLAS || op == OP_ZGEMM_F || op == OP_ZGEMM_SYM;
@@ -351,6 +357,19 @@ static void gen_fork(const Suite *s) {
     add_blas(s, OP_ZGEMM_SYM, 'N', 'N', 96, 80, 72, 3, SC_GEN, ROUTE_GPU)->fork = true;
 }
 
+// As gen_fork without AB_PROFILE, but the fork()ed child ends with exit(), as a
+// Fortran program does at STOP: atexit handlers and static destructors run in
+// a process whose Metal objects did not survive fork(). The child must exit
+// with status 0; one that crashes, or is still running after FORK_WAIT_S
+// (its alarm ends it), fails the case.
+static void gen_fork_exit(const Suite *s) {
+    static const Op OPS[] = {OP_DGEMM_SYM, OP_ZGEMM_SYM};
+    for (size_t o = 0; o < TEST_REGISTRY_SIZE(OPS); o++) {
+        AbiCase *c = add_blas(s, OPS[o], 'N', 'N', 96, 80, 72, 3, SC_GEN, ROUTE_GPU);
+        c->fork = c->child_exit = true;
+    }
+}
+
 // The only QE Si64 calls the v1.3 per-dimension limit (46340) kept off the
 // GPU: the PAW DGEMMs of newq ('T','N', 171 x 64 x 2*ngm_l, alpha = 2 at the
 // gamma point) and addusdens (2*ngm_l x 171 x 64; QE passes 'N','T'). 171 =
@@ -368,6 +387,88 @@ static void gen_qe(const Suite *s) {
     add_blas(s, OP_DGEMM_SYM, 'N', 'N', 71834, 171, 64, 0, SC_A2B0, ROUTE_GPU);
     add_blas(s, OP_DGEMM_SYM, 'N', 'N', 143666, 171, 64, 3, SC_A2B0, ROUTE_GPU);
     add_blas(s, OP_ZGEMM_SYM, 'C', 'N', 171, 64, 100000, 0, SC_A1B0, ROUTE_GPU);
+}
+
+// A case of one of the kinds below, named <entry>/<mode>/<transA><transB>/<M>x<N>x<K>/<kind>.
+static AbiCase *add_kind(const Suite *s, Kind kind, Op op, char ta, char tb, int M, int N, int K,
+                         int pad, int scalars) {
+    AbiCase *c = add_blas(s, op, ta, tb, M, N, K, pad, scalars, ROUTE_GPU);
+    c->kind = kind;
+    snprintf(c->name, sizeof c->name, "%s/%s/%c%c/%dx%dx%d/%s", OP_NAME[op], s->label, ta, tb,
+             M, N, K, KIND_TAG[kind]);
+    return c;
+}
+
+// Long K: QE's PAW and Davidson reductions run over K up to 2*ngm_l =
+// 143666 per rank. C = op(A) op(B) (alpha = 1, beta = 0) with inputs uniform
+// in [-1, 1) is compared with a compensated FP64 reference (Dot2, as in
+// test_precision.c, accurate to ~u64 = u²/32). dgemm_ runs once on each
+// kernel (square tiles; tall-skinny for M >= 4N), zgemm_ ('C','N') on the
+// Gauss 3M product. The error is max_ij |C - R|_ij / (|op(A)||op(B)|)_ij
+// (moduli for complex), printed in units of u² = 2⁻⁴⁸ and of √K·u².
+//
+// Bound: per term, converting both inputs to DD costs ≤ 2u² and the DD
+// product (DWTimesDW2) < 5u², at most 7u² of (|A||B|)_ij in all whatever K.
+// The K DD additions each round a partial sum of size ~√k by ≤ c·u² of it;
+// with random signs these add up like u²·(Σk)^½ ~ u²·K, while (|A||B|)_ij
+// grows like K, so they too stay O(u²) as K grows. Measured on 1.4.0 (M2 Max):
+// 1.6-2.9 u² for every K and kernel (zgemm_ 1.7-2.0 u²). LONG_K_BOUND = 8 u²
+// is 2.8x the largest. The BLAS-ABI tolerance TOL = 1e-11 is ~2800 u², and one
+// FP32 rounding in the sum would cost ~u = 2²⁴ u².
+static const int LONG_K[] = {4096, 18277, 73062, 143666};
+
+static void gen_long_k(const Suite *s) {
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(LONG_K); i++) {
+        add_kind(s, KIND_LONG_K, OP_DGEMM_SYM, 'T', 'N', 40, 36, LONG_K[i], 0, SC_A1B0);
+        add_kind(s, KIND_LONG_K, OP_DGEMM_SYM, 'N', 'N', 144, 36, LONG_K[i], 0, SC_A1B0);
+        add_kind(s, KIND_LONG_K, OP_ZGEMM_SYM, 'C', 'N', 40, 36, LONG_K[i], 0, SC_A1B0);
+    }
+}
+
+// Determinism: each call, run three times from the same C0 (the third after
+// REPEAT_OTHERS, GPU calls of other shapes and both routines), must give
+// bitwise the same C, within TOL of cblas.
+static void gen_repeat(const Suite *s) {
+    add_kind(s, KIND_REPEAT, OP_DGEMM_SYM, 'T', 'N', 150, 150, 2000, 3, SC_GEN);   // cegterg-like
+    add_kind(s, KIND_REPEAT, OP_ZGEMM_SYM, 'C', 'N', 150, 150, 2000, 3, SC_GEN);
+    add_kind(s, KIND_REPEAT, OP_DGEMM_SYM, 'N', 'N', 600, 48, 40, 3, SC_GEN);      // tall-skinny
+    add_kind(s, KIND_REPEAT, OP_ZGEMM_SYM, 'N', 'T', 96, 80, 72, 3, SC_B1);
+}
+
+// Concurrency: N_THREADS threads, released together, each make THREAD_REPS
+// dgemm_ and zgemm_ calls on their own data. In the first case each thread
+// has its own shapes (thread_calls) and the process has not created the Metal
+// context yet; in the second every thread makes thread 0's calls, so state
+// the library keeps per shape (a buffer pool, say) is shared between threads.
+// Every result must be bitwise the same call made single-threaded afterwards,
+// and that within TOL of cblas.
+static void gen_threads(const Suite *s) {
+    for (int same = 0; same < 2; same++) {
+        AbiCase *c = new_case();
+        snprintf(c->name, sizeof c->name, "dgemm_+zgemm_/%s/%d-threads/%s", s->label, N_THREADS,
+                 same ? "same-shapes" : "own-shapes");
+        c->kind = KIND_THREADS;
+        c->same_shape = same;
+    }
+}
+
+// Memory: MEM_CALLS GPU calls (MEM_SHAPES in turn) after MEM_WARMUP_CALLS
+// must grow the process's phys_footprint (task_info TASK_VM_INFO; it counts
+// the Metal buffers the calls write) by less than MEM_FOOTPRINT_LIMIT_KB and
+// the bytes malloc has handed out (malloc_zone_statistics, all zones) by less
+// than MEM_MALLOC_LIMIT_KB. Measured on 1.4.0 (M2 Max), ~90 runs: footprint
+// -912 to +608 KB, and once +11.1 MB (a region Metal maps at some point);
+// malloc -1.5 to +11.5 KB. Leaks planted in a probe making the same kind of
+// calls: 170 B per call (what the autoreleased command buffers and encoders
+// cost before ABAutoreleaseScope, apple_bottom.m) +375 KB malloc, which the
+// footprint (+400-656 KB) cannot tell from noise; an unwritten 64x64 ABMatrix
+// per call +1.4 MB malloc, +1.9-2.2 MB footprint. So malloc catches small
+// leaks, and the footprint limit (~3x the outlier) the large ones: a leaked
+// packed operand or written GPU buffer costs >= 30 KB per call, >= 60 MB.
+static void gen_memory(const Suite *s) {
+    AbiCase *c = new_case();
+    snprintf(c->name, sizeof c->name, "dgemm_+zgemm_/%s/%d-calls/footprint", s->label, MEM_CALLS);
+    c->kind = KIND_MEMORY;
 }
 
 static void add_native(Op op, int M, int N, int K) {
@@ -424,7 +525,8 @@ enum {
     SU_DGEMM_SYM_GPU, SU_DGEMM_SYM_CPU, SU_ZGEMM_SYM_GPU, SU_ZGEMM_SYM_CPU,
     SU_AUTO,
     SU_DGEMM_BLAS_NOINIT, SU_ZGEMM_BLAS_NOINIT, SU_DGEMM_F_NOINIT, SU_ZGEMM_F_NOINIT,
-    SU_DGEMM_SYM_NOINIT, SU_ZGEMM_SYM_NOINIT, SU_ILLEGAL, SU_FORK, SU_QE,
+    SU_DGEMM_SYM_NOINIT, SU_ZGEMM_SYM_NOINIT, SU_ILLEGAL, SU_FORK, SU_FORK_EXIT, SU_QE,
+    SU_LONG_K, SU_REPEAT, SU_THREADS, SU_MEMORY,
     SU_PROFILE, SU_REPORT, SU_NATIVE, SU_SYMBOLS, SU_COUNT
 };
 
@@ -459,7 +561,12 @@ static Suite SUITES[SU_COUNT] = {
     [SU_ILLEGAL] = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_illegal},
     [SU_FORK]    = {.label = "gpu-noinit-fork", .ab_mode = "gpu", .profile = true,
                     .gen = gen_fork},
+    [SU_FORK_EXIT] = {.label = "gpu-noinit-fork-exit", .ab_mode = "gpu", .gen = gen_fork_exit},
     [SU_QE]      = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_qe},
+    [SU_LONG_K]  = {.label = "gpu-noinit", .ab_mode = "gpu", .show = true, .gen = gen_long_k},
+    [SU_REPEAT]  = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_repeat},
+    [SU_THREADS] = {.label = "gpu-noinit", .ab_mode = "gpu", .show = true, .gen = gen_threads},
+    [SU_MEMORY]  = {.label = "gpu-noinit", .ab_mode = "gpu", .show = true, .gen = gen_memory},
     [SU_PROFILE] = {.label = "auto-table-profile", .ab_mode = "auto", .test_table = true,
                     .profile = true, .gen = gen_profile},
     [SU_REPORT]  = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_report},
@@ -478,30 +585,6 @@ static void build_cases(void) {
 // =============================================================================
 // Child side: data, reference, metric
 // =============================================================================
-
-typedef struct { int rows, cols, ld; } Layout;   // column-major storage
-
-static bool is_notrans(char t) { return t == 'N' || t == 'n'; }
-
-// Storage of an operand whose op() is op_rows x op_cols.
-static Layout stored(char t, int op_rows, int op_cols, int pad) {
-    Layout l = {is_notrans(t) ? op_rows : op_cols, is_notrans(t) ? op_cols : op_rows, 0};
-    l.ld = imax(1, l.rows + pad);
-    return l;
-}
-
-static size_t nelem(Layout l) {
-    size_t n = (size_t)l.ld * l.cols;
-    return n ? n : 1;
-}
-
-static enum CBLAS_TRANSPOSE ref_trans(char t, bool cplx) {
-    switch (t) {
-    case 'N': case 'n': return CblasNoTrans;
-    case 'T': case 't': return CblasTrans;
-    default:            return cplx ? CblasConjTrans : CblasTrans;   // 'C', 'c'
-    }
-}
 
 static uint64_t rng_state;
 static double rnd(void) {
@@ -527,86 +610,6 @@ static void fill_complex(double complex *X, Layout l, bool all_nan) {
             double re = rnd();
             X[(size_t)j * l.ld + i] = CMPLX(re, rnd());
         }
-}
-
-// True if X equals X0 bitwise everywhere outside the rows x cols block.
-static bool outside_block_unchanged(const void *X, const void *X0, size_t total,
-                                    Layout l, size_t es) {
-    const char *x = X, *x0 = X0;
-    size_t pos = 0;
-    for (int j = 0; j < l.cols; j++) {
-        size_t start = (size_t)j * l.ld;
-        if (memcmp(x + pos * es, x0 + pos * es, (start - pos) * es)) return false;
-        pos = start + l.rows;
-    }
-    return !memcmp(x + pos * es, x0 + pos * es, (total - pos) * es);
-}
-
-// out (rows x cols, ld rows) = |op(X)| elementwise.
-static void abs_op(const double *X, Layout l, char t, int rows, int cols, double *out) {
-    for (int j = 0; j < cols; j++)
-        for (int i = 0; i < rows; i++)
-            out[(size_t)j * rows + i] = fabs(is_notrans(t) ? X[(size_t)j * l.ld + i]
-                                                           : X[(size_t)i * l.ld + j]);
-}
-
-// out (M x N, ld M) = |op(A)| |op(B)|; M, N, K > 0. Complex operands are
-// passed as their elementwise moduli (see moduli()).
-static void abs_product(const double *A, Layout la, char ta,
-                        const double *B, Layout lb, char tb,
-                        int M, int N, int K, double *out) {
-    double *pa = malloc((size_t)M * K * sizeof *pa), *pb = malloc((size_t)K * N * sizeof *pb);
-    abs_op(A, la, ta, M, K, pa);
-    abs_op(B, lb, tb, K, N, pb);
-    cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, M, N, K,
-                1.0, pa, M, pb, K, 0.0, out, M);
-    free(pa); free(pb);
-}
-
-static double *moduli(const double complex *z, size_t count) {
-    double *m = malloc(count * sizeof *m);
-    for (size_t k = 0; k < count; k++) m[k] = cabs(z[k]);
-    return m;
-}
-
-// Componentwise error over the M x N block; NaN if any entry is NaN.
-static double err_real(int M, int N, const double *C, const double *Cref, int ldc,
-                       const double *absAB, int ldab, const double *C0,
-                       double alpha, double beta) {
-    double worst = 0.0;
-    for (int j = 0; j < N; j++)
-        for (int i = 0; i < M; i++) {
-            size_t k = (size_t)j * ldc + i;
-            double d = DBL_MIN;
-            if (alpha != 0.0) d += fabs(alpha) * absAB[(size_t)j * ldab + i];
-            if (beta != 0.0) d += fabs(beta) * fabs(C0[k]);
-            double e = fabs(C[k] - Cref[k]) / d;
-            if (isnan(e)) return NAN;
-            if (e > worst) worst = e;
-        }
-    return worst;
-}
-
-static double err_complex(int M, int N, const double complex *C, const double complex *Cref,
-                          int ldc, const double *absAB, int ldab, const double complex *C0,
-                          double complex alpha, double complex beta) {
-    double worst = 0.0;
-    for (int j = 0; j < N; j++)
-        for (int i = 0; i < M; i++) {
-            size_t k = (size_t)j * ldc + i;
-            double d = DBL_MIN;
-            if (alpha != 0.0) d += cabs(alpha) * absAB[(size_t)j * ldab + i];
-            if (beta != 0.0) d += cabs(beta) * cabs(C0[k]);
-            double e = cabs(C[k] - Cref[k]) / d;
-            if (isnan(e)) return NAN;
-            if (e > worst) worst = e;
-        }
-    return worst;
-}
-
-static uint64_t gpu_gemm_count(void) {
-    ABStats s = ab_get_stats();
-    return s.dgemm_count + s.zgemm_count;
 }
 
 // Under AB_PROFILE, after every BLAS-ABI call the profiler row for the
@@ -686,6 +689,42 @@ static BlasArgs blas_args(const AbiCase *c, Layout la, Layout lb, Layout lc) {
     return a;
 }
 
+// One call through the real entry point op.
+static void call_real(Op op, const BlasArgs *a, double alpha, const double *A, const double *B,
+                      double beta, double *C) {
+    switch (op) {
+    case OP_DGEMM_BLAS:
+        ab_dgemm_blas(a->ta, a->tb, a->M, a->N, a->K, alpha, A, a->lda, B, a->ldb, beta, C, a->ldc);
+        break;
+    case OP_DGEMM_F:
+        ab_dgemm_(&a->ta, &a->tb, &a->M, &a->N, &a->K, &alpha, A, &a->lda, B, &a->ldb, &beta, C,
+                  &a->ldc);
+        break;
+    default:
+        fortran_dgemm(&a->ta, &a->tb, &a->M, &a->N, &a->K, &alpha, A, &a->lda, B, &a->ldb, &beta,
+                      C, &a->ldc);
+        break;
+    }
+}
+
+// One call through the complex entry point op.
+static void call_complex(Op op, const BlasArgs *a, double complex alpha, const double complex *A,
+                         const double complex *B, double complex beta, double complex *C) {
+    switch (op) {
+    case OP_ZGEMM_BLAS:
+        ab_zgemm_blas(a->ta, a->tb, a->M, a->N, a->K, alpha, A, a->lda, B, a->ldb, beta, C, a->ldc);
+        break;
+    case OP_ZGEMM_F:
+        ab_zgemm_(&a->ta, &a->tb, &a->M, &a->N, &a->K, &alpha, A, &a->lda, B, &a->ldb, &beta, C,
+                  &a->ldc);
+        break;
+    default:
+        fortran_zgemm(&a->ta, &a->tb, &a->M, &a->N, &a->K, &alpha, A, &a->lda, B, &a->ldb, &beta,
+                      C, &a->ldc);
+        break;
+    }
+}
+
 static bool run_blas_real(const AbiCase *c, char *detail, size_t n) {
     const int M = c->M, N = c->N, K = c->K;
     const double alpha = creal(c->alpha), beta = creal(c->beta);
@@ -706,32 +745,12 @@ static bool run_blas_real(const AbiCase *c, char *detail, size_t n) {
     memcpy(C, C0, nc * sizeof *C);
     memcpy(Cref, C0, nc * sizeof *Cref);
 
-    if (M > 0 && N > 0) {
-        for (int j = 0; j < N; j++)
-            for (int i = 0; i < M; i++) {
-                size_t k = (size_t)j * lc.ld + i;
-                Cref[k] = beta == 0.0 ? 0.0 : beta * C0[k];
-            }
-        if (alpha != 0.0 && K > 0) {
-            cblas_dgemm(CblasColMajor, ref_trans(c->ta, false), ref_trans(c->tb, false),
-                        M, N, K, alpha, A, la.ld, B, lb.ld, 1.0, Cref, lc.ld);
-            abs_product(A, la, c->ta, B, lb, c->tb, M, N, K, absAB);
-        }
-    }
+    blas_reference(false, c->ta, c->tb, M, N, K, alpha, beta, A, la, B, lb, C0, lc.ld, Cref,
+                   absAB);
 
     const BlasArgs a = blas_args(c, la, lb, lc);
     uint64_t g0 = gpu_gemm_count();
-    switch (c->op) {
-    case OP_DGEMM_BLAS:
-        ab_dgemm_blas(a.ta, a.tb, a.M, a.N, a.K, alpha, A, a.lda, B, a.ldb, beta, C, a.ldc);
-        break;
-    case OP_DGEMM_F:
-        ab_dgemm_(&a.ta, &a.tb, &a.M, &a.N, &a.K, &alpha, A, &a.lda, B, &a.ldb, &beta, C, &a.ldc);
-        break;
-    default:
-        fortran_dgemm(&a.ta, &a.tb, &a.M, &a.N, &a.K, &alpha, A, &a.lda, B, &a.ldb, &beta, C, &a.ldc);
-        break;
-    }
+    call_real(c->op, &a, alpha, A, B, beta, C);
     uint64_t gpu_gemms = gpu_gemm_count() - g0;
 
     double err = err_real(M, N, C, Cref, lc.ld, absAB, imax(1, M), C0, alpha, beta);
@@ -763,35 +782,12 @@ static bool run_blas_complex(const AbiCase *c, char *detail, size_t n) {
     memcpy(C, C0, nc * sizeof *C);
     memcpy(Cref, C0, nc * sizeof *Cref);
 
-    if (M > 0 && N > 0) {
-        for (int j = 0; j < N; j++)
-            for (int i = 0; i < M; i++) {
-                size_t k = (size_t)j * lc.ld + i;
-                Cref[k] = beta == 0.0 ? 0.0 : beta * C0[k];
-            }
-        if (alpha != 0.0 && K > 0) {
-            const double complex one = 1.0;
-            cblas_zgemm(CblasColMajor, ref_trans(c->ta, true), ref_trans(c->tb, true),
-                        M, N, K, &alpha, A, la.ld, B, lb.ld, &one, Cref, lc.ld);
-            double *mA = moduli(A, na), *mB = moduli(B, nb);
-            abs_product(mA, la, c->ta, mB, lb, c->tb, M, N, K, absAB);
-            free(mA); free(mB);
-        }
-    }
+    blas_reference(true, c->ta, c->tb, M, N, K, alpha, beta, A, la, B, lb, C0, lc.ld, Cref,
+                   absAB);
 
     const BlasArgs a = blas_args(c, la, lb, lc);
     uint64_t g0 = gpu_gemm_count();
-    switch (c->op) {
-    case OP_ZGEMM_BLAS:
-        ab_zgemm_blas(a.ta, a.tb, a.M, a.N, a.K, alpha, A, a.lda, B, a.ldb, beta, C, a.ldc);
-        break;
-    case OP_ZGEMM_F:
-        ab_zgemm_(&a.ta, &a.tb, &a.M, &a.N, &a.K, &alpha, A, &a.lda, B, &a.ldb, &beta, C, &a.ldc);
-        break;
-    default:
-        fortran_zgemm(&a.ta, &a.tb, &a.M, &a.N, &a.K, &alpha, A, &a.lda, B, &a.ldb, &beta, C, &a.ldc);
-        break;
-    }
+    call_complex(c->op, &a, alpha, A, B, beta, C);
     uint64_t gpu_gemms = gpu_gemm_count() - g0;
 
     double err = err_complex(M, N, C, Cref, lc.ld, absAB, imax(1, M), C0, alpha, beta);
@@ -804,8 +800,9 @@ static bool run_blas_complex(const AbiCase *c, char *detail, size_t n) {
 }
 
 // Runs c on the GPU, then fork()s; the child repeats c, which must now run
-// on cblas (ROUTE_CPU) and pass the same checks. It reports through a shared
-// page and its exit status.
+// on cblas (ROUTE_CPU) and pass the same checks, and ends with _exit(), or
+// exit() for c->child_exit. It reports through a shared page and its exit
+// status; an alarm ends it (SIGALRM) if it is still running after FORK_WAIT_S.
 static bool run_fork(const AbiCase *c, char *detail, size_t n) {
     bool (*run)(const AbiCase *, char *, size_t) =
         op_is_complex(c->op) ? run_blas_complex : run_blas_real;
@@ -822,11 +819,14 @@ static bool run_fork(const AbiCase *c, char *detail, size_t n) {
     fflush(NULL);
     pid_t pid = fork();
     if (pid == 0) {
+        alarm(FORK_WAIT_S);             // fork() cleared the parent's CASE_TIMEOUT_S alarm
         AbiCase in_child = *c;
         in_child.route = ROUTE_CPU;
         memset(prof_calls, 0, sizeof prof_calls);
         memset(prof_gpu, 0, sizeof prof_gpu);
-        _exit(run(&in_child, after, page) ? 0 : 1);
+        bool child_ok = run(&in_child, after, page);
+        if (c->child_exit) exit(child_ok ? 0 : 1);
+        _exit(child_ok ? 0 : 1);
     }
     int status = 0;
     if (pid < 0)
@@ -834,7 +834,10 @@ static bool run_fork(const AbiCase *c, char *detail, size_t n) {
     else
         while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
     if (pid > 0 && WIFSIGNALED(status))
-        snprintf(how, sizeof how, " [killed by signal %d]", WTERMSIG(status));
+        snprintf(how, sizeof how, " [killed by signal %d (%s)]", WTERMSIG(status),
+                 strsignal(WTERMSIG(status)));
+    else if (pid > 0 && WIFEXITED(status) && WEXITSTATUS(status) != 0)
+        snprintf(how, sizeof how, " [exit status %d]", WEXITSTATUS(status));
     ok = ok && pid > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
     snprintf(detail, n, "parent: %s; forked child: %s%s", before, after, how);
     munmap(after, page);
@@ -886,7 +889,7 @@ static bool run_native_real(const AbiCase *c, char *detail, size_t n) {
     memcpy(Cref, C0, nelem(lc) * sizeof *Cref);
     cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, N, M, K,
                 alpha, B, N, A, K, beta, Cref, N);
-    abs_product(B, lb, 'N', A, la, 'N', N, M, K, absAB);
+    abs_product(false, B, lb, 'N', A, la, 'N', N, M, K, absAB);
 
     ABMatrix mA = ab_matrix_create(M, K), mB = ab_matrix_create(K, N);
     ABMatrix mC = ab_matrix_create(M, N);
@@ -930,9 +933,7 @@ static bool run_native_complex(const AbiCase *c, char *detail, size_t n) {
     fill_complex(C0, lc, false);
     cblas_zgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, N, M, K,
                 &one, B, N, A, K, &zero, Cref, N);
-    double *mA = moduli(A, na), *mB = moduli(B, nb);
-    abs_product(mB, lb, 'N', mA, la, 'N', N, M, K, absAB);
-    free(mA); free(mB);
+    abs_product(true, B, lb, 'N', A, la, 'N', N, M, K, absAB);
 
     ABMatrix mAr = ab_matrix_create(M, K), mAi = ab_matrix_create(M, K);
     ABMatrix mBr = ab_matrix_create(K, N), mBi = ab_matrix_create(K, N);
@@ -967,6 +968,340 @@ static bool run_symbol(const AbiCase *c, char *detail, size_t n) {
     base = base ? base + 1 : info.dli_fname;
     snprintf(detail, n, "bound to %s", base);
     return strstr(base, "libapplebottom") != NULL;
+}
+
+// =============================================================================
+// Long K, determinism, concurrency, memory
+// =============================================================================
+
+// A BLAS-ABI call's entry point, TRANS pair and dimensions.
+typedef struct { Op op; char ta, tb; int M, N, K; } Shape;
+
+// A BLAS-ABI call set up for repeated use: A, B and C0 filled as in
+// run_blas_real / run_blas_complex (NaN in the padding); every run starts
+// from C0.
+typedef struct {
+    AbiCase c;
+    bool cplx;
+    Layout la, lb, lc;
+    size_t es, nc;                      // element size, elements of C
+    void *A, *B, *C0;
+} Call;
+
+static void call_init(Call *k, Shape s, int pad, const Scalars *sc) {
+    memset(k, 0, sizeof *k);
+    k->c.op = s.op; k->c.ta = s.ta; k->c.tb = s.tb;
+    k->c.M = s.M; k->c.N = s.N; k->c.K = s.K; k->c.pad = pad;
+    k->c.alpha = sc->alpha; k->c.beta = sc->beta;
+    k->cplx = op_is_complex(s.op);
+    k->es = k->cplx ? sizeof(double complex) : sizeof(double);
+    k->la = stored(s.ta, s.M, s.K, pad);
+    k->lb = stored(s.tb, s.K, s.N, pad);
+    k->lc = (Layout){s.M, s.N, imax(1, s.M + pad)};
+    k->nc = nelem(k->lc);
+    k->A = malloc(nelem(k->la) * k->es);
+    k->B = malloc(nelem(k->lb) * k->es);
+    k->C0 = malloc(k->nc * k->es);
+    if (k->cplx) {
+        fill_complex(k->A, k->la, false);
+        fill_complex(k->B, k->lb, false);
+        fill_complex(k->C0, k->lc, false);
+    } else {
+        fill_real(k->A, k->la, false);
+        fill_real(k->B, k->lb, false);
+        fill_real(k->C0, k->lc, false);
+    }
+}
+
+static void call_init_case(Call *k, const AbiCase *c) {
+    const Scalars sc = {.alpha = c->alpha, .beta = c->beta};
+    call_init(k, (Shape){c->op, c->ta, c->tb, c->M, c->N, c->K}, c->pad, &sc);
+}
+
+static void call_free(Call *k) {
+    free(k->A); free(k->B); free(k->C0);
+}
+
+// Runs the call into out, reset from C0 first. True if the GPU computed it
+// (the calling thread's path record).
+static bool call_run(const Call *k, void *out) {
+    const AbiCase *c = &k->c;
+    const BlasArgs a = blas_args(c, k->la, k->lb, k->lc);
+    memcpy(out, k->C0, k->nc * k->es);
+    if (k->cplx)
+        call_complex(c->op, &a, c->alpha, k->A, k->B, c->beta, out);
+    else
+        call_real(c->op, &a, creal(c->alpha), k->A, k->B, creal(c->beta), out);
+    return !strcmp(ab_get_last_dispatch_path(), "gpu");
+}
+
+// out's componentwise error against cblas, as blas_verdict measures it, in
+// *err; true if it is within TOL and C outside its M x N block is unchanged.
+static bool call_check(const Call *k, const void *out, double *err) {
+    const AbiCase *c = &k->c;
+    *err = blas_error(k->cplx, c->ta, c->tb, c->M, c->N, c->K, c->alpha, c->beta, k->A, k->la,
+                      k->B, k->lb, k->C0, k->lc, out);
+    return *err <= TOL && outside_block_unchanged(out, k->C0, k->nc, k->lc, k->es);
+}
+
+// --- Long K -------------------------------------------------------------------
+
+// op(X), rows x cols, as row-major real and imaginary parts (im NULL for a
+// real X); 'C' conjugates.
+static void pack_rows(const void *X, Layout l, char t, bool cplx, int rows, int cols,
+                      double *re, double *im) {
+    for (int i = 0; i < rows; i++)
+        for (int j = 0; j < cols; j++) {
+            size_t x = is_notrans(t) ? (size_t)j * l.ld + i : (size_t)i * l.ld + j;
+            size_t y = (size_t)i * cols + j;
+            if (!cplx) {
+                re[y] = ((const double *)X)[x];
+            } else {
+                double complex v = ((const double complex *)X)[x];
+                re[y] = creal(v);
+                im[y] = t == 'C' || t == 'c' ? -cimag(v) : cimag(v);
+            }
+        }
+}
+
+static bool run_long_k(const AbiCase *c, char *detail, size_t n) {
+    const int M = c->M, N = c->N, K = c->K;
+    Call k;
+    call_init_case(&k, c);
+    void *C = malloc(k.nc * k.es);
+    uint64_t g0 = gpu_gemm_count();
+    bool gpu = call_run(&k, C) && gpu_gemm_count() > g0;
+
+    // R = op(A) op(B) in Dot2: Re = Ar Br - Ai Bi, Im = Ar Bi + Ai Br.
+    const size_t na = (size_t)M * K, nb = (size_t)K * N, nr = (size_t)M * N;
+    double *Ar = malloc(na * sizeof *Ar), *Ai = k.cplx ? malloc(na * sizeof *Ai) : NULL;
+    double *Br = malloc(nb * sizeof *Br), *Bi = k.cplx ? malloc(nb * sizeof *Bi) : NULL;
+    double *S[2] = {calloc(nr, sizeof(double)), calloc(nr, sizeof(double))};
+    double *E[2] = {calloc(nr, sizeof(double)), calloc(nr, sizeof(double))};
+    pack_rows(k.A, k.la, c->ta, k.cplx, M, K, Ar, Ai);
+    pack_rows(k.B, k.lb, c->tb, k.cplx, K, N, Br, Bi);
+    dot2_gemm_acc(M, N, K, 1.0, Ar, Br, S[0], E[0]);
+    if (k.cplx) {
+        dot2_gemm_acc(M, N, K, -1.0, Ai, Bi, S[0], E[0]);
+        dot2_gemm_acc(M, N, K, 1.0, Ar, Bi, S[1], E[1]);
+        dot2_gemm_acc(M, N, K, 1.0, Ai, Br, S[1], E[1]);
+    }
+    free(Ar); free(Ai); free(Br); free(Bi);
+
+    // R = S + E in C's layout (re, im pairs for complex), and the error
+    // against |op(A)||op(B)| (moduli for complex).
+    const int w = k.cplx ? 2 : 1;
+    double *R = malloc(k.nc * k.es), *absAB = malloc(nr * sizeof *absAB);
+    for (int j = 0; j < N; j++)
+        for (int i = 0; i < M; i++)
+            for (int p = 0; p < w; p++) {
+                size_t y = (size_t)i * N + j;
+                R[((size_t)j * k.lc.ld + i) * w + p] = S[p][y] + E[p][y];
+            }
+    abs_product(k.cplx, k.A, k.la, c->ta, k.B, k.lb, c->tb, M, N, K, absAB);
+    double err = k.cplx ? err_complex(M, N, C, (double complex *)R, k.lc.ld, absAB, M, k.C0,
+                                      1.0, 0.0)
+                        : err_real(M, N, C, R, k.lc.ld, absAB, M, k.C0, 1.0, 0.0);
+    bool outside_ok = outside_block_unchanged(C, k.C0, k.nc, k.lc, k.es);
+    snprintf(detail, n, "max |C-R|/(|A||B|) = %.2f u² = %.4f √K·u² (bound %.0f u²) path=%s%s",
+             err / U2, err / (sqrt((double)K) * U2), LONG_K_BOUND, ab_get_last_dispatch_path(),
+             outside_ok ? "" : " [C outside MxN modified]");
+
+    free(S[0]); free(S[1]); free(E[0]); free(E[1]); free(absAB); free(R); free(C);
+    call_free(&k);
+    return gpu && outside_ok && err <= LONG_K_BOUND * U2;
+}
+
+// --- Determinism ----------------------------------------------------------------
+
+// The GPU calls a KIND_REPEAT case makes between its second and third run.
+static const Shape REPEAT_OTHERS[] = {
+    {OP_ZGEMM_SYM, 'N', 'T', 200, 120, 300},
+    {OP_DGEMM_SYM, 'N', 'N', 1024, 64, 64},     // tall-skinny kernel
+    {OP_DGEMM_SYM, 'T', 'N', 512, 256, 64},
+    {OP_ZGEMM_SYM, 'C', 'N', 64, 64, 4096},
+};
+
+static bool run_repeat(const AbiCase *c, char *detail, size_t n) {
+    Call k;
+    call_init_case(&k, c);
+    const size_t bytes = k.nc * k.es;
+    void *C[3] = {malloc(bytes), malloc(bytes), malloc(bytes)};
+    bool gpu = call_run(&k, C[0]);
+    gpu = call_run(&k, C[1]) && gpu;
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(REPEAT_OTHERS); i++) {
+        Call o;
+        call_init(&o, REPEAT_OTHERS[i], 1, &SCALARS[SC_GEN]);
+        void *out = malloc(o.nc * o.es);
+        gpu = call_run(&o, out) && gpu;
+        free(out);
+        call_free(&o);
+    }
+    gpu = call_run(&k, C[2]) && gpu;
+
+    bool same2 = !memcmp(C[0], C[1], bytes), same3 = !memcmp(C[0], C[2], bytes);
+    double err;
+    bool ok = call_check(&k, C[0], &err);
+    snprintf(detail, n, "err=%.1e%s%s%s%s", err, gpu ? "" : " [a call did not run on the GPU]",
+             ok ? "" : " [C outside tolerance or outside MxN modified]",
+             same2 ? "" : " [second run differs]",
+             same3 ? "" : " [run after other GPU calls differs]");
+    free(C[0]); free(C[1]); free(C[2]);
+    call_free(&k);
+    return gpu && ok && same2 && same3;
+}
+
+// --- Concurrency ----------------------------------------------------------------
+
+// Thread t's calls: its own TRANS pair, shape and leading-dimension padding.
+static void thread_calls(int t, Call call[2]) {
+    static const char DT[][3] = {"NN", "TN", "NT", "TT"}, ZT[][3] = {"CN", "NN", "NC", "TC"};
+    const int sd = t % 2 ? SC_B1 : SC_GEN, sz = t % 2 ? SC_GEN : SC_B1;
+    call_init(&call[0], (Shape){OP_DGEMM_SYM, DT[t % 4][0], DT[t % 4][1],
+                                64 + 24 * t, 48 + 16 * t, 80 + 40 * t},
+              t % 4, &SCALARS[sd]);
+    call_init(&call[1], (Shape){OP_ZGEMM_SYM, ZT[t % 4][0], ZT[t % 4][1],
+                                56 + 16 * t, 40 + 24 * t, 96 + 32 * t},
+              (t + 1) % 4, &SCALARS[sz]);
+}
+
+typedef struct {
+    Call call[2];                       // dgemm_, zgemm_
+    void *out[2][THREAD_REPS];
+    bool gpu[2][THREAD_REPS];
+} ThreadJob;
+
+static pthread_mutex_t go_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t go_cond = PTHREAD_COND_INITIALIZER;
+static bool threads_go;
+
+static void *thread_main(void *arg) {
+    ThreadJob *job = arg;
+    pthread_mutex_lock(&go_mutex);
+    while (!threads_go) pthread_cond_wait(&go_cond, &go_mutex);
+    pthread_mutex_unlock(&go_mutex);
+    for (int r = 0; r < THREAD_REPS; r++)
+        for (int z = 0; z < 2; z++)
+            job->gpu[z][r] = call_run(&job->call[z], job->out[z][r]);
+    return NULL;
+}
+
+static bool run_threads(const AbiCase *c, char *detail, size_t n) {
+    ThreadJob *jobs = calloc(N_THREADS, sizeof *jobs);
+    for (int t = 0; t < N_THREADS; t++) {
+        thread_calls(c->same_shape ? 0 : t, jobs[t].call);
+        for (int z = 0; z < 2; z++)
+            for (int r = 0; r < THREAD_REPS; r++)
+                jobs[t].out[z][r] = malloc(jobs[t].call[z].nc * jobs[t].call[z].es);
+    }
+
+    pthread_t th[N_THREADS];
+    int started = 0;
+    threads_go = false;
+    while (started < N_THREADS && pthread_create(&th[started], NULL, thread_main, &jobs[started]) == 0)
+        started++;
+    pthread_mutex_lock(&go_mutex);
+    threads_go = true;
+    pthread_cond_broadcast(&go_cond);
+    pthread_mutex_unlock(&go_mutex);
+    for (int t = 0; t < started; t++) pthread_join(th[t], NULL);
+
+    // The same calls single-threaded, after the concurrent ones.
+    int not_gpu = 0, differ = 0, bad = 0;
+    double worst = 0.0;
+    for (int t = 0; t < started; t++)
+        for (int z = 0; z < 2; z++) {
+            const Call *k = &jobs[t].call[z];
+            void *ref = malloc(k->nc * k->es);
+            not_gpu += !call_run(k, ref);
+            double err;
+            bad += !call_check(k, ref, &err);
+            if (!(err <= worst)) worst = err;
+            for (int r = 0; r < THREAD_REPS; r++) {
+                not_gpu += !jobs[t].gpu[z][r];
+                differ += memcmp(jobs[t].out[z][r], ref, k->nc * k->es) != 0;
+            }
+            free(ref);
+        }
+    snprintf(detail, n, "%d threads x %d dgemm_ + %d zgemm_ calls: %d not on the GPU, "
+             "%d differ from the single-threaded result, %d of %d single-threaded results "
+             "outside tolerance (worst err=%.1e)",
+             started, THREAD_REPS, THREAD_REPS, not_gpu, differ, bad, 2 * started, worst);
+
+    for (int t = 0; t < N_THREADS; t++)
+        for (int z = 0; z < 2; z++) {
+            for (int r = 0; r < THREAD_REPS; r++) free(jobs[t].out[z][r]);
+            call_free(&jobs[t].call[z]);
+        }
+    free(jobs);
+    return started == N_THREADS && !not_gpu && !differ && !bad;
+}
+
+// --- Memory -------------------------------------------------------------------
+
+// The calls of the memory case, in turn.
+static const Shape MEM_SHAPES[] = {
+    {OP_DGEMM_SYM, 'N', 'N', 64, 64, 64},
+    {OP_ZGEMM_SYM, 'C', 'N', 48, 40, 300},
+    {OP_DGEMM_SYM, 'T', 'N', 96, 40, 200},
+    {OP_ZGEMM_SYM, 'N', 'N', 160, 40, 48},      // tall-skinny kernel
+};
+#define N_MEM_SHAPES ((int)TEST_REGISTRY_SIZE(MEM_SHAPES))
+
+typedef struct { uint64_t phys, resident, malloced; } MemUse;
+
+// The process's physical footprint and resident size, and the bytes malloc
+// has handed out (all zones).
+static bool mem_use(MemUse *m) {
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) != KERN_SUCCESS)
+        return false;
+    malloc_statistics_t st;
+    malloc_zone_statistics(NULL, &st);
+    m->phys = info.phys_footprint;
+    m->resident = info.resident_size;
+    m->malloced = st.size_in_use;
+    return true;
+}
+
+static double kb_change(uint64_t before, uint64_t after) {
+    return ((double)after - (double)before) / 1024.0;
+}
+
+static bool run_memory(const AbiCase *c, char *detail, size_t n) {
+    (void)c;
+    Call calls[N_MEM_SHAPES];
+    void *out[N_MEM_SHAPES];
+    for (int i = 0; i < N_MEM_SHAPES; i++) {
+        call_init(&calls[i], MEM_SHAPES[i], 2, &SCALARS[SC_GEN]);
+        out[i] = malloc(calls[i].nc * calls[i].es);
+    }
+    int not_gpu = 0;
+    for (int i = 0; i < MEM_WARMUP_CALLS; i++)
+        not_gpu += !call_run(&calls[i % N_MEM_SHAPES], out[i % N_MEM_SHAPES]);
+    MemUse m0 = {0}, m1 = {0};
+    bool measured = mem_use(&m0);
+    uint64_t g0 = gpu_gemm_count();
+    for (int i = 0; i < MEM_CALLS; i++)
+        not_gpu += !call_run(&calls[i % N_MEM_SHAPES], out[i % N_MEM_SHAPES]);
+    uint64_t gpu_calls = gpu_gemm_count() - g0;
+    measured = mem_use(&m1) && measured;
+
+    const double phys = kb_change(m0.phys, m1.phys), mall = kb_change(m0.malloced, m1.malloced);
+    snprintf(detail, n, "%llu GPU calls after %d warm-up calls: phys_footprint %+.0f KB "
+             "(limit %d KB; %.1f MB in all), malloc in use %+.1f KB (limit %d KB), "
+             "resident %+.0f KB%s%s",
+             (unsigned long long)gpu_calls, MEM_WARMUP_CALLS, phys, MEM_FOOTPRINT_LIMIT_KB,
+             m1.phys / 1048576.0, mall, MEM_MALLOC_LIMIT_KB, kb_change(m0.resident, m1.resident),
+             measured ? "" : " [task_info failed]",
+             not_gpu ? " [a call did not run on the GPU]" : "");
+    for (int i = 0; i < N_MEM_SHAPES; i++) {
+        free(out[i]);
+        call_free(&calls[i]);
+    }
+    return measured && !not_gpu && gpu_calls == MEM_CALLS && phys < MEM_FOOTPRINT_LIMIT_KB &&
+           mall < MEM_MALLOC_LIMIT_KB;
 }
 
 // =============================================================================
@@ -1270,6 +1605,13 @@ static bool run_report(const AbiCase *c, char *detail, size_t n) {
 static bool run_case(int idx, char *detail, size_t n) {
     const AbiCase *c = &CASES[idx];
     rng_state = 0x9E3779B97F4A7C15ULL * (uint64_t)(idx + 1);
+    switch (c->kind) {
+    case KIND_LONG_K:  return run_long_k(c, detail, n);
+    case KIND_REPEAT:  return run_repeat(c, detail, n);
+    case KIND_THREADS: return run_threads(c, detail, n);
+    case KIND_MEMORY:  return run_memory(c, detail, n);
+    case KIND_CALL:    break;
+    }
     if (c->fork) return run_fork(c, detail, n);
     switch (c->op) {
     case OP_DGEMM_BLAS: case OP_DGEMM_F: case OP_DGEMM_SYM:
@@ -1323,6 +1665,7 @@ static int tests_failed = 0;
 static int tests_xfailed = 0;
 static int tests_xpassed = 0;
 static bool verbose = false;
+static bool show_passes = false;     // the current suite prints its passing cases too
 static FILE *suite_log;              // detail lines, printed after the suite summary
 static char self_path[PATH_MAX];
 
@@ -1332,7 +1675,7 @@ static void record(const AbiCase *c, bool ok, const char *detail) {
     if (x) xfail_hits[xi]++;
     if (ok && !x) {
         tests_passed++;
-        if (verbose) fprintf(suite_log, "      PASS  %s  %s\n", c->name, detail);
+        if (verbose || show_passes) fprintf(suite_log, "      PASS  %s  %s\n", c->name, detail);
     } else if (ok) {
         tests_xpassed++;
         fprintf(suite_log, "      XPASS %s  [%s] %s -- remove it from the XFAIL table\n",
@@ -1356,8 +1699,7 @@ static char **child_env(const Suite *s, char *mode_buf, size_t mode_len,
     char **env = calloc(n + 5, sizeof *env);
     size_t k = 0;
     for (size_t i = 0; i < n; i++)
-        if (strncmp(environ[i], "AB_", 3) && strncmp(environ[i], "MTL_DEBUG_LAYER=", 16))
-            env[k++] = environ[i];
+        if (!is_ab_env(environ[i])) env[k++] = environ[i];
     if (s->ab_mode) {
         snprintf(mode_buf, mode_len, "AB_MODE=%s", s->ab_mode);
         env[k++] = mode_buf;
@@ -1436,6 +1778,7 @@ static void run_suite(int si) {
     char *log_buf = NULL;
     size_t log_len = 0;
 
+    show_passes = s->show;
     suite_log = open_memstream(&log_buf, &log_len);
     for (int next = s->lo; next < s->hi; ) {
         char why[640];
@@ -1490,7 +1833,12 @@ static void test_dgemm_sym_noinit(void)  { run_suite(SU_DGEMM_SYM_NOINIT); }
 static void test_zgemm_sym_noinit(void)  { run_suite(SU_ZGEMM_SYM_NOINIT); }
 static void test_illegal_args(void)     { run_suite(SU_ILLEGAL); }
 static void test_fork_after_gpu(void)   { run_suite(SU_FORK); }
+static void test_fork_exit(void)        { run_suite(SU_FORK_EXIT); }
 static void test_qe_shapes(void)        { run_suite(SU_QE); }
+static void test_long_k_precision(void) { run_suite(SU_LONG_K); }
+static void test_determinism(void)      { run_suite(SU_REPEAT); }
+static void test_concurrency(void)      { run_suite(SU_THREADS); }
+static void test_memory_growth(void)    { run_suite(SU_MEMORY); }
 static void test_profile_path(void)     { run_suite(SU_PROFILE); }
 static void test_exit_reports(void)     { run_suite(SU_REPORT); }
 static void test_native_morton(void)    { run_suite(SU_NATIVE); }
@@ -1518,7 +1866,12 @@ static const TestCase TESTS[] = {
     {"test_zgemm_sym_noinit",  test_zgemm_sym_noinit},
     {"test_illegal_args",     test_illegal_args},
     {"test_fork_after_gpu",   test_fork_after_gpu},
+    {"test_fork_exit",        test_fork_exit},
     {"test_qe_shapes",        test_qe_shapes},
+    {"test_long_k_precision", test_long_k_precision},
+    {"test_determinism",      test_determinism},
+    {"test_concurrency",      test_concurrency},
+    {"test_memory_growth",    test_memory_growth},
     {"test_profile_path",     test_profile_path},
     {"test_exit_reports",     test_exit_reports},
     {"test_native_morton",    test_native_morton},

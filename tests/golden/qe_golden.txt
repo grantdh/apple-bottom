@@ -1,0 +1,42 @@
+# apple-bottom golden bits (tests/test_qe_golden.c): 64-bit FNV-1a of the whole
+# C array, ld padding included, after one GPU-routed dgemm_ / zgemm_ call.
+# library: ab_build_info() of the library that wrote the hashes. Regenerate
+# (new device or macOS build) only from that library, never from the tree under
+# test (tests/README.md, Golden bits):
+#   DYLD_LIBRARY_PATH=<its directory> build/test_qe_golden --generate
+# The tree's own library replaces it only for an intended change of results.
+device: Apple M2 Max
+os_build: 26A434
+library: apple-bottom 1.4.0 (c5a1fa6a8166)
+02c38d9587a09d43 zgemm_/NN/75x53x47/ld+3/a1b0/uniform
+db935952990c8ff1 zgemm_/NT/75x53x47/ld+3/axb1/uniform
+59d219437ec341d9 zgemm_/NC/75x53x47/ld+3/a1bx/uniform
+e0a43e3f6b755146 zgemm_/TN/75x53x47/ld+3/axb0/uniform
+6a9dfa166ad60f36 zgemm_/TT/75x53x47/ld+3/a1b1/uniform
+54e26a2e97a869af zgemm_/TC/75x53x47/ld+3/axbx/uniform
+0055d3728bcc3678 zgemm_/CN/75x53x47/ld+3/a1b0/uniform
+eeb2a69158ce56ef zgemm_/CT/75x53x47/ld+3/axb1/uniform
+e3d4cede460ff43d zgemm_/CC/75x53x47/ld+3/axbx/uniform
+af9c1ed7eb70f4be dgemm_/NN/75x53x47/ld+3/a1b0/uniform
+794bb8e4078ca6b4 dgemm_/NT/75x53x47/ld+3/axb1/uniform
+edb9b37d66314de1 dgemm_/TN/75x53x47/ld+3/a1bx/uniform
+dcfcc65aeb2d9c54 dgemm_/TT/75x53x47/ld+3/axb0/uniform
+8cf4caec6ecfd077 dgemm_/CN/75x53x47/ld+3/axbx/uniform
+87632617b252ad0f dgemm_/NC/75x53x47/ld+3/a1b1/uniform
+c3900d173071709d dgemm_/CC/75x53x47/ld+3/a1b0/uniform
+ef8038e1dcf6de18 dgemm_/NT/513x257x129/ld+2/axbx/uniform
+eb06004886dda5ac dgemm_/NN/600x48x40/ld+3/axbx/uniform
+19ec248ed4171a8a zgemm_/NN/600x48x40/ld+3/axbx/uniform
+83b383d476060928 dgemm_/TN/96x80x72/ld+1/axbx/mixed
+8ed22733537b6a08 zgemm_/CN/96x80x72/ld+1/axbx/mixed
+b30195acf1db0a58 dgemm_/NN/75x53x47/ld+3/axb0/naninfC
+fc5f1c8fcd8f5213 zgemm_/CN/75x53x47/ld+3/axb0/naninfC
+c3daefd575888ca1 zgemm_/CN/96x80x72/ld+3/a1b0/AiNegAr
+dc047ab06b641fda dgemm_/NN/96x80x72/ld+3/a1b0/zerosum
+7f4cce0f0795a2d4 zgemm_/TN/96x80x72/ld+3/a1bx/zerosum
+2633e760338a3e90 dgemm_/TN/75x53x47/ld+3/am1b1/signedzero
+b7dcf53f329ef21a zgemm_/NC/75x53x47/ld+3/am1b1/signedzero
+1b1dd5df40596c4c zgemm_/CN/160x160x9140/ld+7/a1b0/uniform
+b6c2191755898100 zgemm_/NN/9140x160x160/ld+7/a1b1/uniform
+3f534b782346190b dgemm_/TN/36x64x73062/ld+0/a2b0/uniform
+a3422c2b252dabe2 dgemm_/NT/4000x171x64/ld+0/a1b0/uniform

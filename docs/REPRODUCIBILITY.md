@@ -19,8 +19,8 @@ the library version and commit, `-dirty` if tracked files had changed).
 ## Build
 
 ```bash
-make clean && make test   # 138 tests
-make ci-local             # 156 tests + the V-2 convergence study
+make clean && make test   # every test but the chaos ones (counts: tests/README.md)
+make ci-local             # every test + the V-2 convergence study
 make bench                # builds and runs the bench_* binaries
 ```
 

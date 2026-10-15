@@ -23,7 +23,7 @@ make ci-local
 ```
 
 This will:
-- Run all 156 tests (precision, correctness, chaos, device-API, routing, BLAS-ABI; see the counting rule in `tests/README.md`) plus the ghost-detection, symbol and Fortran checks
+- Run every test (precision, correctness, chaos, device-API, routing, BLAS-ABI; `tests/README.md`, Coverage status, gives the counts and the counting rule) plus the golden-bits, ghost-detection, symbol and Fortran checks
 - Run convergence study (V-2)
 - Generate `build/CI_REPORT.txt` with test results and convergence data hash
 
@@ -35,21 +35,30 @@ This will:
 ✓ test_device_api: PASS
 ✓ test_dispatch: PASS
 ✓ test_blas_abi: PASS
+✓ test_qe_golden: PASS
 ✓ test_convergence: PASS
 
 GIT_SHA: <current-commit-sha>
 AB_BUILD_SHA: <12-digit commit; a release build must not end in -dirty>
-TEST_TOTAL: 156
-TEST_PASSED: 156
+TEST_QE_GOLDEN: PASS (<n> cases bitwise equal to <the golden file's library>)
+TEST_TOTAL: <the total in tests/README.md>
+TEST_PASSED: <the same>
 TEST_FAILED: 0
-DEVICE_API_CHECKS: 152
-BLAS_ABI_CASES: 1007 passed, 0 xfailed, 0 failed, 0 xpassed, 0 stale XFAIL entries
+DEVICE_API_CHECKS: <the CHECK count in tests/README.md>
+BLAS_ABI_CASES: <the case count in tests/README.md> passed, 0 xfailed, 0 failed, 0 xpassed, 0 stale XFAIL entries
 CONVERGENCE_POINTS: 7
 STATUS: PASS
 ```
 
 - [ ] `make ci-local` completed successfully
-- [ ] All 156 tests passed
+- [ ] All tests passed: `TEST_PASSED` = `TEST_TOTAL`, and that total, `DEVICE_API_CHECKS`
+      and `BLAS_ABI_CASES` are the counts in `tests/README.md` (a lower count means tests
+      stopped running; a change that adds or removes tests updates `tests/README.md`)
+- [ ] `TEST_QE_GOLDEN: PASS`, not `SKIP`: the GPU-routed results are bitwise
+      those of the library named in `tests/golden/qe_golden.txt`. A `SKIP`
+      means the file comes from another device: re-baseline it on this
+      machine from that library (`tests/README.md`, Golden bits) and rerun
+      `make ci-local`
 - [ ] Convergence study generated 7 data points (N ∈ {64, 128, 256, 512, 1024, 2048, 4096})
 - [ ] Review `build/convergence_data.csv` for expected error ranges (Frobenius ~10⁻¹⁴ to 5×10⁻¹⁴)
 
