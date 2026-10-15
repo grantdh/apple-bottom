@@ -77,7 +77,7 @@ while read -r label stem np omp reps modes args || [ -n "${label:-}" ]; do
       iters=$(grep -E 'convergence has been achieved in' "$o" | awk '{print $(NF-1)}')
       pw=$(grep -E 'PWSCF +:' "$o" | tail -1)
       wall=$(echo "$pw" | sed -E 's/.*CPU +(.*) WALL.*/\1/'); cpu=$(echo "$pw" | sed -E 's/.*: +(.*) CPU.*/\1/')
-      build=$(sed -nE 's/^AB_REPORT\[[0-9]+\] apple-bottom [^ ]+ \(([^)]*)\).*/\1/p' "$d/err.txt" | head -1)
+      build=$(sed -nE 's/.*AB_REPORT\[[0-9]+\] apple-bottom [^ ]+ \(([^)]*)\).*/\1/p' "$d/err.txt" | head -1)
       lib=$(grep -m1 -oE '/[^ ]*libapplebottom[^ ]*\.dylib' "$d/err.txt")
       echo "$label,$stem,$np,$omp,$mode,$r,$start,$end,$rc,$power,$load1,$energy,$iters,$(to_s "$wall"),$(to_s "$cpu"),$(timer "$o" cegterg),$(timer "$o" regterg),$(timer "$o" h_psi),$(timer "$o" calbec),$(timer "$o" PAW_pot),$(timer "$o" newd),$(timer "$o" addusdens),$build,$lib,${d#$OUT/},${args:-}" >> "$CSV"
       echo "   rc=$rc E=$energy iters=$iters wall=$(to_s "$wall")s build=$build"

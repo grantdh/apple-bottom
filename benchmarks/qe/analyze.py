@@ -12,6 +12,9 @@ from collections import defaultdict
 from pathlib import Path
 
 COUNTS = ("calls", "gpu_calls", "cpu_calls", "total_ms", "gpu_ms", "cpu_ms", "fallbacks")
+# Searched, not matched: in merged multi-rank stderr another rank's partial line can precede one.
+AB_LINE = re.compile(r"AB_REPORT\[(\d+)\] (\w+) (calls=.*|gpu_stages_ms .*|fallbacks .*)")
+AB_HEADER = re.compile(r"AB_REPORT\[(\d+)\] apple-bottom ")
 
 
 def report(run_dir):
@@ -24,8 +27,12 @@ def report(run_dir):
     if not err.exists():
         return {}
     per_pid = defaultdict(dict)                       # (pid, routine) -> fields
+    headers = set()                                   # pids that printed an AB_REPORT header
     for line in err.read_text(errors="replace").splitlines():
-        m = re.match(r"AB_REPORT\[(\d+)\] (\w+) (calls=.*|gpu_stages_ms .*|fallbacks .*)", line)
+        h = AB_HEADER.search(line)
+        if h:
+            headers.add(h[1])
+        m = AB_LINE.search(line)
         if not m:
             continue
         pid, name, rest = m[1], m[2], m[3]
@@ -39,7 +46,9 @@ def report(run_dir):
         r["ranks"] += 1
         for k, v in fields.items():
             r[k] = r.get(k, 0.0) + v
-    for r in out.values():
+    for name, r in out.items():
+        if r["ranks"] < len(headers):
+            print(f"analyze.py: {err}: {name} reported by {r['ranks']} of {len(headers)} ranks", file=sys.stderr)
         r["gpu_time%"] = 100.0 * r.get("gpu_ms", 0) / r["total_ms"] if r.get("total_ms") else 0.0
         r["gpu_calls%"] = 100.0 * r.get("gpu_calls", 0) / r["calls"] if r.get("calls") else 0.0
     return out
