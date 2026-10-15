@@ -1,6 +1,6 @@
-// bench_paper.c — Comprehensive benchmark suite for HPEC 2026 paper tables
+// bench_paper.c — Native-API benchmark suite (matrices resident on the GPU)
 //
-// Produces all tables needed for the paper:
+// Produces these tables:
 //   Table 1: Square DGEMM/ZGEMM scaling (GPU vs AMX crossover)
 //   Table 2: Tall-skinny ZGEMM (QE-realistic dimensions)
 //   Table 3: Batched ZGEMM throughput
@@ -540,7 +540,7 @@ int main(int argc, char** argv) {
     }
 
     printf("╔══════════════════════════════════════════════════════════════════╗\n");
-    printf("║  apple-bottom HPEC 2026 Paper Benchmark Suite                    ║\n");
+    printf("║  apple-bottom native-API benchmark suite                         ║\n");
     printf("╚══════════════════════════════════════════════════════════════════╝\n\n");
 
     if (ab_init() != AB_OK) { fprintf(stderr, "Init failed\n"); return 1; }
@@ -559,7 +559,6 @@ int main(int argc, char** argv) {
 
     printf("\n═══════════════════════════════════════════════════════════════════\n");
     printf("Benchmark complete.\n");
-    if (g_csv) printf("# CSV output above can be parsed with scripts/analyze_bench_paper.py\n");
 
     ab_shutdown();
     return 0;

@@ -1,12 +1,12 @@
 # apple-bottom — Python Wrapper
 
-High-performance FP64-class BLAS for Apple Silicon GPUs, from Python.
+FP64-class BLAS for Apple Silicon GPUs, from Python.
 
 > **Experimental:** the bindings are not covered by `make test`; check them against your build with `make test-python`.
 
 ## Features
 
-- **High-precision arithmetic**: ~10⁻¹⁵ Frobenius relative error via double-float emulation
+- **FP64-class arithmetic**: double-float values with about 48 significant bits (~10⁻¹⁵ per value); GEMM results are accurate to the 10⁻¹⁴ range normwise (~5×10⁻¹⁴ at N = 4096)
 - **Pythonic API**: numpy array integration, context managers, proper error handling
 - **Type hints**: Full PEP 484 annotations for IDE support
 - **Multiple APIs**: Low-level ctypes bindings, high-level classes, and functional convenience functions
@@ -15,26 +15,17 @@ High-performance FP64-class BLAS for Apple Silicon GPUs, from Python.
 
 ## Installation
 
-Ensure the C library is built first:
-
 ```bash
 cd /path/to/apple-bottom
-make clean && make
-make install  # Installs libapplebottom to /usr/local/lib or /opt/homebrew/lib
+make                        # builds build/libapplebottom.dylib
+pip install -e python/      # the package finds ../build/libapplebottom.dylib
 ```
 
-Then install the Python package:
-
-```bash
-cd python/
-pip install -e .
-```
-
-Or install from source directly:
-
-```bash
-pip install -e /path/to/apple-bottom/python
-```
+To use another copy of the library, set
+`AB_LIBRARY=/path/to/libapplebottom.dylib`. Without it the package also
+looks in `/usr/local/lib` and `/opt/homebrew/lib`, so `make install`
+(`sudo` for the default `/usr/local`) is optional; after an install to
+another prefix, point `AB_LIBRARY` at `<prefix>/lib/libapplebottom.dylib`.
 
 ## Quick Start
 
@@ -61,7 +52,7 @@ print(f"Device: {ab.get_device_name()}")
 ab.shutdown()
 ```
 
-### Fine-Grained Control with Matrix Class
+### Moving Data with the Matrix Class
 
 ```python
 import numpy as np
@@ -69,27 +60,15 @@ import apple_bottom as ab
 
 ab.init()
 
-# Create GPU matrices
-gpu_A = ab.Matrix(2048, 2048)
-gpu_B = ab.Matrix(2048, 2048)
-gpu_C = ab.Matrix(2048, 2048)
-
-# Upload data
-A_data = np.random.randn(2048, 2048)
-B_data = np.random.randn(2048, 2048)
-gpu_A.upload(A_data)
-gpu_B.upload(B_data)
-gpu_C.zero()
-
-# Perform computation
-# Note: ab_dgemm computes C = A @ B
-gpu_A.dgemm(gpu_B, gpu_C)  # Would be low-level call
-
-# Download result
-C_result = gpu_C.download()
+gpu_A = ab.Matrix(2048, 2048)               # DD storage on the GPU
+gpu_A.upload(np.random.randn(2048, 2048))   # FP64 -> DD, row-major
+A_back = gpu_A.download()                   # DD -> FP64
 
 ab.shutdown()
 ```
+
+Products between matrices that stay on the GPU go through a `Session`
+(next section) or the C API.
 
 ### Using Sessions for Complex Workflows
 
@@ -181,7 +160,7 @@ ab.shutdown()
 
 ### Functional API (All-in-One)
 
-- `ab.dgemm(A, B, alpha=1.0, beta=0.0)` — Double-precision matrix multiply
+- `ab.dgemm(A, B, alpha=1.0, beta=0.0)` — `alpha * A @ B` (the result starts from zero, so `beta` has no effect)
 - `ab.zgemm(Ar, Ai, Br, Bi)` — Complex matrix multiply
 - `ab.dsyrk(A)` — Symmetric rank-k update: C = A @ A.T
 
@@ -229,13 +208,19 @@ ab.print_stats()
 
 ## Performance Guidance
 
-GPU is beneficial when:
-- DGEMM: N >= 2048
-- ZGEMM: N >= 1024
-- DSYRK: N >= 3072
+There are two regimes (measurements on an M2 Max in the main
+[README](../README.md#performance)):
 
-Use CPU (Accelerate framework) for:
-- ZHERK: GPU is 20x slower — use cblas_zherk instead
+- **`ab.dgemm`, `ab.zgemm`, `ab.dsyrk`** allocate, convert FP64 to DD,
+  transfer and convert back on every call. That is the cost structure of
+  the BLAS ABI, where Accelerate (and so numpy linked to it) is faster for
+  nearly every shape; do not expect these calls to beat `A @ B`.
+- **Matrices uploaded once and multiplied repeatedly** in a `Session` stay
+  on the GPU. There the GPU overtakes Accelerate from about N = 1,500
+  (DGEMM) and N = 1,000 (ZGEMM).
+
+For ZHERK, use `cblas_zherk` (or numpy): the GPU version is slower at every
+measured size.
 
 ## Error Handling
 
@@ -264,29 +249,27 @@ except ab.AppleBottomError as e:
 
 ## System Requirements
 
-- macOS 14+ (Monterey or later)
-- Apple Silicon Mac (M1, M2, M3, etc.)
+- macOS 14 (Sonoma) or later, on Apple Silicon (M1 or later)
 - Python 3.9+
 - numpy 1.20+
-- Xcode 16+ SDK recommended (for ~10⁻¹⁵ precision; ~10⁻⁸ without)
 
 ## Library Limits
 
-- Maximum matrix dimension: 46,340 (AB_MAX_DIMENSION)
+- Maximum matrix size: rows × cols ≤ 2³¹ − 1 elements (`MAX_ELEMENTS`, `AB_MAX_MATRIX_ELEMENTS`), any shape
 - Memory pool capacity: 128 matrices
 - Session capacity: 64 matrices per session
-- Thread safety: Matrix operations are NOT thread-safe (Metal queue is serialized)
+- Threads: calls on different matrices may come from different threads; one matrix, pool or session must not be used by two threads at once
 
 ## Building from Source
 
 ```bash
 cd /path/to/apple-bottom
 make clean
-make test  # Verify 48/48 tests pass
-make install
+make test         # the C library's test suite
+make test-python  # these bindings
 ```
 
-Then install Python package from `python/` directory.
+Then `pip install -e python/` as above.
 
 ## License
 

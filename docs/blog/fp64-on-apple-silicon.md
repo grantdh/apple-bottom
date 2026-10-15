@@ -1,5 +1,28 @@
 # How I Got FP64-Class Precision on Apple Silicon GPUs Without FP64 Hardware
 
+> **Correction (October 2026).** Four claims in this April post were wrong.
+>
+> 1. The Quantum ESPRESSO results, "22% faster" and "11 decimal places",
+>    came from runs that never used the GPU: the library then needed an
+>    explicit `ab_init()` that QE never called, and the timing compared two
+>    different QE builds. Repeated with the GPU path working, the energies
+>    still agree, but for QE's matrix shapes the GPU path is slower than
+>    Accelerate on an M2 Max ([VAL-1](../../tests/validation/VAL001_QE_Si64.md)).
+> 2. The 643 GFLOP/s DGEMM figure was measured with the matrices kept on the
+>    GPU. Through the BLAS interface, which converts the operands on every
+>    call, Accelerate is faster ([README](../../README.md#performance)).
+> 3. Double-float carries about 48 significant bits, ~10⁻¹⁵ relative error:
+>    close to FP64's 10⁻¹⁶, not "matching or exceeding" it.
+> 4. The metal-float64 figures (24 GFLOP/s, "~25× faster") have no
+>    reproducible source: metal-float64 is an unfinished library of scalar
+>    operations with no GEMM. Its README estimates 1/32 to 1/64 of FP32
+>    throughput.
+>
+> The triple-double figures came from research prototypes that are not part
+> of the library. The rest of the post is as published, apart from the
+> precision sentence, the repository link, the test counts and the list of
+> what the repository contains (it has no precompiled binaries).
+
 The problem seemed impossible when I started: Apple Silicon GPUs can do floating-point math blazingly fast, but they've never supported native 64-bit double precision (FP64). For scientific computing, that's a deal-breaker. Quantum simulations, climate modeling, and other high-precision workloads need the ~15 decimal digits of accuracy that FP64 provides. The GPU's single-precision (FP32) numbers just don't cut it.
 
 Over the past two years, I've been building **apple-bottom**, a BLAS library that delivers FP64-class precision on Apple Silicon Metal GPUs—without any native FP64 hardware. Here's how I did it, why the obvious approaches failed, and what the numbers look like now.
@@ -40,7 +63,7 @@ The idea is beautifully simple: represent each FP64 number as a pair of FP32 val
 - `lo` holds the remaining bits (the "tail")
 - Together, they give you approximately 48 bits of mantissa
 
-In IEEE 754 terms, a single FP32 has 24 bits of mantissa. By storing two FP32 values and using careful arithmetic, you can get the range of FP64 (exponent ~11 bits) with much higher precision (mantissa ~48 bits) than FP32 alone provides. The relative error target: **~10⁻¹⁵**, matching or exceeding standard FP64.
+In IEEE 754 terms, a single FP32 has 24 bits of mantissa. By storing two FP32 values and using careful arithmetic, you can get the range of FP64 (exponent ~11 bits) with much higher precision (mantissa ~48 bits) than FP32 alone provides. The relative error target: **~10⁻¹⁵**, close to standard FP64's ~10⁻¹⁶.
 
 The key insight: you're not emulating floating-point. You're just using **two FP32 numbers instead of one**, and applying well-established DD arithmetic algorithms. All the hard floating-point work is still done by the GPU's native FP32 hardware.
 
@@ -109,7 +132,7 @@ apple-bottom is built to production standards:
 - **Metal Shaders**: Optimized kernels for DGEMM, ZGEMM (complex double), and supporting BLAS routines.
 - **Fortran Bridge**: A wrapper layer for seamless integration with legacy Fortran code like Quantum ESPRESSO.
 - **NASA-STD-7009A Validation**: The library includes verification and validation documentation following NASA's standards for scientific software. This isn't just "it works on my machine"—it's formal, auditable validation.
-- **48/48 Tests Pass**: A comprehensive test suite covering precision and correctness, all green.
+- **Test suite**: precision and correctness tests, run with `make test`.
 
 ## The Limitations (Honest Talk)
 
@@ -141,15 +164,15 @@ The immediate roadmap:
 
 apple-bottom is open-source and on GitHub. If you're running scientific code on Apple Silicon and hitting the FP64 bottleneck, or if you're curious about how DD arithmetic works, start here:
 
-**[github.com/GrantHeileman/apple-bottom](https://github.com/GrantHeileman/apple-bottom)**
+**[github.com/grantdh/apple-bottom](https://github.com/grantdh/apple-bottom)**
 
 The repo includes:
-- Precompiled binaries and source
+- The source, built with `make`
 - The Quantum ESPRESSO integration guide
 - Benchmarks you can run on your own hardware
 - MIT licensing
 
-Clone it, run `make test`, and see all 48 tests pass on your M-series machine.
+Clone it and run `make test` on your M-series machine.
 
 ## Final Thought
 

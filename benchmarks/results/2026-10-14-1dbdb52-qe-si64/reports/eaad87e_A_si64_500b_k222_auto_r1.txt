@@ -1,0 +1,20 @@
+# eaad87e A_si64_500b_k222 auto_r1: stderr without dyld lines and without AB_PROFILE per-call lines
+loaded: <campaign>/lib/eaad87e/libapplebottom.dylib
+Note: The following floating-point exceptions are signalling: IEEE_INVALID_FLAG IEEE_DIVIDE_BY_ZERO IEEE_OVERFLOW_FLAG IEEE_UNDERFLOW_FLAG
+
+=== apple-bottom BLAS profile ===
+routine           calls     total_ms   gpu_pct    avg_us   max_dim    hotbin
+---------------------------------------------------------------------------------
+zgemm             28425     144642.4      3.3%    5088.6     18336       8K+
+dgemm              2064        223.3      0.0%     108.2    292250    33-128
+
+Total BLAS time: 144865.7 ms across 2 routines
+
+Dimension distribution for 'zgemm' (by max(M,N)):
+  bin         calls      time_ms   pct_time
+  1-32           11264          2.4      0.0%
+  33-128          4096          5.4      0.0%
+  129-512        11847      26067.1     18.0%
+  513-1K           324      29269.8     20.2%
+  8K+              894      89297.8     61.7%
+

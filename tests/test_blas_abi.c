@@ -17,7 +17,7 @@
 // A and B are bitwise unchanged, C outside its M x N block is bitwise
 // unchanged, ab_get_last_dispatch_path() names what computed C ("gpu" if the
 // GEMM counters in ab_get_stats() advanced, "cpu" otherwise), under
-// AB_PROFILE the profiler counts dgemm_/zgemm_ calls the same way, and the
+// AB_PROFILE the profiler counts the calls the same way, and the
 // case's routing expectation holds (ROUTE_GPU: the counters advanced;
 // ROUTE_CPU: they did not). Leading-dimension padding is filled with NaN so
 // that reading it shows up in the result. An illegal-argument case passes
@@ -26,8 +26,8 @@
 //
 // Isolation: every suite runs in a child process (this binary re-executed
 // with --child lo hi), because
-//   - AB_MODE is read once and cached (ab_get_mode in blas_wrapper.c,
-//     fb_get_mode in fortran_bridge.c), so each mode needs a fresh process;
+//   - AB_MODE and the other routing settings are read once and cached
+//     (dispatch.c), so each mode needs a fresh process;
 //   - the gpu-noinit suites must run in processes that never called ab_init();
 //   - known-bad cases crash (SIGSEGV, Metal API-validation SIGABRT), and
 //     illegal-argument cases end the child on purpose (exit(255) from the
@@ -35,6 +35,10 @@
 //     parent restarts the child at the next case.
 // posix_spawn is used rather than a bare fork(): Metal cannot reach
 // MTLCompilerService from a forked child that did not exec.
+//
+// The report suite checks the AB_REPORT and AB_PROFILE exit reports of a
+// grandchild process (this binary with --report-child) that makes GPU and
+// CPU calls and forks.
 //
 // Known failures live in the XFAIL table below, tagged with audit IDs. An
 // XFAIL does not fail the run; an XFAIL case that passes (XPASS), an XFAIL
@@ -94,8 +98,8 @@ void ab_prof_dump(FILE *out);
 
 #define TOL             1e-11
 #define MAX_CASES       1024
-#define MIN_GPU_DIM     32      // DEFAULT_MIN_GPU_DIM in blas_wrapper.c
-#define MAX_MATRIX_DIM  46340   // AB_MAX_DIMENSION in apple_bottom.m
+#define MIN_GPU_DIM     32      // AB_DISPATCH_DEFAULT_MIN_DIM in dispatch.h
+#define OLD_MAX_DIM     46340   // v1.3 per-dimension limit, now a per-matrix one
 #define CASE_TIMEOUT_S  120
 
 // =============================================================================
@@ -108,6 +112,7 @@ typedef enum {
     OP_DGEMM_SYM,  OP_ZGEMM_SYM,        // plain dgemm_ / zgemm_
     OP_DGEMM, OP_DGEMM_SCALED, OP_ZGEMM, OP_BATCH_DGEMM, OP_DGEMM_ASYNC,
     OP_SYMBOL,                          // which image a symbol binds to
+    OP_REPORT,                          // AB_REPORT / AB_PROFILE exit reports
 } Op;
 
 static const char *const OP_NAME[] = {
@@ -117,6 +122,7 @@ static const char *const OP_NAME[] = {
     [OP_DGEMM] = "ab_dgemm",           [OP_DGEMM_SCALED] = "ab_dgemm_scaled",
     [OP_ZGEMM] = "ab_zgemm",           [OP_BATCH_DGEMM] = "ab_batch_dgemm",
     [OP_DGEMM_ASYNC] = "ab_dgemm_async", [OP_SYMBOL] = "symbol",
+    [OP_REPORT] = "report",
 };
 
 typedef enum { ROUTE_ANY, ROUTE_GPU, ROUTE_CPU } Route;
@@ -128,7 +134,7 @@ typedef struct {
     Poison poison;
 } Scalars;
 
-enum { SC_GEN, SC_A1B0, SC_B1, SC_B0_NAN_C, SC_A0_NAN_AB };
+enum { SC_GEN, SC_A1B0, SC_B1, SC_B0_NAN_C, SC_A0_NAN_AB, SC_A2B0 };
 
 static const Scalars SCALARS[] = {
     [SC_GEN]       = {"gen",     CMPLX(1.25, -0.5), CMPLX(-0.75, 0.25), POISON_NONE},
@@ -136,6 +142,7 @@ static const Scalars SCALARS[] = {
     [SC_B1]        = {"b1",      CMPLX(1.25, -0.5), CMPLX(1.0, 0.0),    POISON_NONE},
     [SC_B0_NAN_C]  = {"b0nanC",  CMPLX(1.25, -0.5), CMPLX(0.0, 0.0),    POISON_C},   // C must not be read
     [SC_A0_NAN_AB] = {"a0nanAB", CMPLX(0.0, 0.0),   CMPLX(0.5, -0.25),  POISON_AB},  // A, B must not be read
+    [SC_A2B0]      = {"a2b0",    CMPLX(2.0, 0.0),   CMPLX(0.0, 0.0),    POISON_NONE},  // QE newq, gamma point
 };
 
 // Illegal BLAS arguments. Accelerate's cblas rejects each one by printing
@@ -200,6 +207,7 @@ typedef struct Suite Suite;
 struct Suite {
     const char *label;          // mode segment of BLAS-ABI case names
     const char *ab_mode;        // AB_MODE for the child (NULL: unset)
+    bool test_table;            // AB_DISPATCH_TABLE=<TEST_TABLE in a temporary file>
     bool init;                  // call ab_init() before the first case
     bool debug_layer;           // MTL_DEBUG_LAYER=1 (Metal API validation)
     bool profile;               // AB_PROFILE=1
@@ -272,29 +280,44 @@ static void gen_blas(const Suite *s) {
     add_std(s, 'N', 'N', 96, 0, 72, 3, SC_GEN);
     add_std(s, 'N', 'N', 96, 80, 0, 3, SC_GEN);
 
-    // op(A) exceeds the ABMatrix dimension limit: routed to the GPU, the
-    // call fails there and must fall back to cblas and report "cpu".
-    add_blas(s, s->op, 'N', 'N', MAX_MATRIX_DIM + 1, 48, 48, 0, SC_GEN, ROUTE_CPU);
+    add_std(s, 'N', 'N', OLD_MAX_DIM + 1, 48, 48, 0, SC_GEN);       // past the v1.3 limit
 }
 
-// AB_MODE=auto: the QE cegterg call crosses both FLOP thresholds (3.6e8 >= 1e8).
+// AB_MODE=auto with the built-in table (dispatch_table.h, from `make
+// calibrate`). Through every BLAS-ABI entry point, calls the GPU path was
+// measured slower on stay on Accelerate: the QE cegterg-like call of the
+// gen_blas suites, which v1.3's FLOP thresholds sent to the GPU, and QE si64
+// PAW DGEMMs and Davidson ZGEMMs (calibrate_summary.csv; test_dispatch
+// checks the whole table against it).
 static void gen_auto(const Suite *s) {
-    add_blas(s, OP_ZGEMM_BLAS, 'C', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_GPU);
-    add_blas(s, OP_ZGEMM_F,    'C', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_GPU);
-    add_blas(s, OP_ZGEMM_SYM,  'C', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_GPU);
-    add_blas(s, OP_DGEMM_BLAS, 'T', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_GPU);
+    add_blas(s, OP_ZGEMM_BLAS, 'C', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_CPU);
+    add_blas(s, OP_ZGEMM_F,    'C', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_CPU);
+    add_blas(s, OP_ZGEMM_SYM,  'C', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_CPU);
+    add_blas(s, OP_DGEMM_BLAS, 'T', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_CPU);
+    add_blas(s, OP_DGEMM_F,    'T', 'N', 150, 150, 2000, 0, SC_A1B0, ROUTE_CPU);
+    add_blas(s, OP_DGEMM_SYM,  'T', 'N', 171, 64, 143666, 0, SC_A2B0, ROUTE_CPU);
+    add_blas(s, OP_DGEMM_SYM,  'N', 'T', 143666, 171, 64, 0, SC_A2B0, ROUTE_CPU);
+    add_blas(s, OP_ZGEMM_SYM,  'C', 'N', 1000, 1000, 9000, 0, SC_A1B0, ROUTE_CPU);
+    add_blas(s, OP_ZGEMM_SYM,  'N', 'N', 9000, 500, 1000, 0, SC_A1B0, ROUTE_CPU);
 }
 
-// AB_MODE=auto and AB_PROFILE=1, no ab_init(). The bridge sends all three
-// shapes to ab_*gemm_blas, but only the first runs on the GPU: K = 16 is
-// below AB_MIN_GPU_DIM (the audit's 2048x2048x16 call) and the last one
-// fails on the GPU and falls back. The profiler must report what ran.
+// AB_DISPATCH_TABLE of the test_table suites: every 'N','N' call on the GPU.
+static const char TEST_TABLE[] = "# test_blas_abi\ndgemm N N 0 0 0\nzgemm N N 0 0 0\n";
+static char test_table_path[PATH_MAX];
+
+// AB_MODE=auto and AB_PROFILE=1, no ab_init(), with TEST_TABLE. The second
+// shape stays on cblas: K = 16 is below AB_MIN_GPU_DIM (the audit's
+// 2048x2048x16 call). The third is past the v1.3 limit and must run on the
+// GPU; the fourth has no table row for its TRANS class. The profiler must
+// report what ran; the fork suite covers a GPU-routed call that falls back.
 static void gen_profile(const Suite *s) {
     static const Op OPS[] = {OP_DGEMM_SYM, OP_ZGEMM_SYM};
     for (size_t o = 0; o < TEST_REGISTRY_SIZE(OPS); o++) {
         add_blas(s, OPS[o], 'N', 'N', 256, 256, 2048, 0, SC_GEN, ROUTE_GPU);
         add_blas(s, OPS[o], 'N', 'N', 2048, 2048, 16, 0, SC_GEN, ROUTE_CPU);
-        add_blas(s, OPS[o], 'N', 'N', MAX_MATRIX_DIM + 1, 48, 48, 0, SC_GEN, ROUTE_CPU);
+        add_blas(s, OPS[o], 'N', 'N', OLD_MAX_DIM + 1, 48, 48, 0, SC_GEN, ROUTE_GPU);
+        add_blas(s, OPS[o], op_is_complex(OPS[o]) ? 'C' : 'T', 'N', 256, 256, 2048, 0, SC_GEN,
+                 ROUTE_CPU);
     }
 }
 
@@ -318,12 +341,33 @@ static void gen_illegal(const Suite *s) {
         }
 }
 
-// AB_MODE=gpu without ab_init(): a GPU call creates the Metal context, then
-// a fork()ed child repeats it. Metal does not survive fork(), so the child
-// must run the call on cblas and get the same correct result.
+// AB_MODE=gpu and AB_PROFILE=1 without ab_init(): a GPU call creates the
+// Metal context, then a fork()ed child repeats it. Metal does not survive
+// fork(), so the child must fall back to cblas, get the same correct result
+// and be profiled as a CPU call. (The shapes stay small: Accelerate's own
+// threaded cblas does not survive fork() either.)
 static void gen_fork(const Suite *s) {
     add_blas(s, OP_DGEMM_SYM, 'N', 'N', 96, 80, 72, 3, SC_GEN, ROUTE_GPU)->fork = true;
     add_blas(s, OP_ZGEMM_SYM, 'N', 'N', 96, 80, 72, 3, SC_GEN, ROUTE_GPU)->fork = true;
+}
+
+// The only QE Si64 calls the v1.3 per-dimension limit (46340) kept off the
+// GPU: the PAW DGEMMs of newq ('T','N', 171 x 64 x 2*ngm_l, alpha = 2 at the
+// gamma point) and addusdens (2*ngm_l x 171 x 64; QE passes 'N','T'). 171 =
+// nh(nh+1)/2 projector pairs (nh = 18 per Si atom), 64 = atoms, 2*ngm_l =
+// 71834 (gamma point) or 143666 (k-points), the rank's dense-grid G-vectors
+// as real pairs; QE's ld is 2*ngm_l, the ld > rows variants are extra. The
+// 'C','N' ZGEMM with K = 100000 is synthetic (cegterg's K is ~9000 per rank).
+// Through dgemm_/zgemm_ in AB_MODE=gpu without ab_init(), every case must
+// run on the GPU. This checks robustness only: these DGEMMs are faster on
+// Accelerate (0.09-0.15x on the GPU in make calibrate), where AB_MODE=auto
+// keeps them (gen_auto).
+static void gen_qe(const Suite *s) {
+    add_blas(s, OP_DGEMM_SYM, 'T', 'N', 171, 64, 71834, 0, SC_A2B0, ROUTE_GPU);
+    add_blas(s, OP_DGEMM_SYM, 'T', 'N', 171, 64, 143666, 3, SC_A2B0, ROUTE_GPU);
+    add_blas(s, OP_DGEMM_SYM, 'N', 'N', 71834, 171, 64, 0, SC_A2B0, ROUTE_GPU);
+    add_blas(s, OP_DGEMM_SYM, 'N', 'N', 143666, 171, 64, 3, SC_A2B0, ROUTE_GPU);
+    add_blas(s, OP_ZGEMM_SYM, 'C', 'N', 171, 64, 100000, 0, SC_A1B0, ROUTE_GPU);
 }
 
 static void add_native(Op op, int M, int N, int K) {
@@ -358,6 +402,13 @@ static void add_symbol(const char *sym, const void *addr) {
     c->sym = addr;
 }
 
+static void gen_report(const Suite *s) {
+    (void)s;
+    AbiCase *c = new_case();
+    snprintf(c->name, sizeof c->name, "report/gpu-noinit/exit-reports");
+    c->op = OP_REPORT;
+}
+
 // The Fortran symbols must bind to libapplebottom; ab_*gemm_ are controls.
 static void gen_symbols(const Suite *s) {
     (void)s;
@@ -373,8 +424,8 @@ enum {
     SU_DGEMM_SYM_GPU, SU_DGEMM_SYM_CPU, SU_ZGEMM_SYM_GPU, SU_ZGEMM_SYM_CPU,
     SU_AUTO,
     SU_DGEMM_BLAS_NOINIT, SU_ZGEMM_BLAS_NOINIT, SU_DGEMM_F_NOINIT, SU_ZGEMM_F_NOINIT,
-    SU_DGEMM_SYM_NOINIT, SU_ZGEMM_SYM_NOINIT, SU_ILLEGAL, SU_FORK,
-    SU_PROFILE, SU_NATIVE, SU_SYMBOLS, SU_COUNT
+    SU_DGEMM_SYM_NOINIT, SU_ZGEMM_SYM_NOINIT, SU_ILLEGAL, SU_FORK, SU_QE,
+    SU_PROFILE, SU_REPORT, SU_NATIVE, SU_SYMBOLS, SU_COUNT
 };
 
 #define BLAS_SUITE(entry, mode) \
@@ -406,9 +457,12 @@ static Suite SUITES[SU_COUNT] = {
     [SU_DGEMM_SYM_NOINIT]  = NOINIT_SUITE(OP_DGEMM_SYM),
     [SU_ZGEMM_SYM_NOINIT]  = NOINIT_SUITE(OP_ZGEMM_SYM),
     [SU_ILLEGAL] = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_illegal},
-    [SU_FORK]    = {.label = "gpu-noinit-fork", .ab_mode = "gpu", .gen = gen_fork},
-    [SU_PROFILE] = {.label = "auto-profile", .ab_mode = "auto", .profile = true,
-                    .gen = gen_profile},
+    [SU_FORK]    = {.label = "gpu-noinit-fork", .ab_mode = "gpu", .profile = true,
+                    .gen = gen_fork},
+    [SU_QE]      = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_qe},
+    [SU_PROFILE] = {.label = "auto-table-profile", .ab_mode = "auto", .test_table = true,
+                    .profile = true, .gen = gen_profile},
+    [SU_REPORT]  = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_report},
     [SU_NATIVE]  = {.init = true, .debug_layer = true, .gen = gen_native},
     [SU_SYMBOLS] = {.gen = gen_symbols},
 };
@@ -555,16 +609,17 @@ static uint64_t gpu_gemm_count(void) {
     return s.dgemm_count + s.zgemm_count;
 }
 
-// Under AB_PROFILE, after every dgemm_/zgemm_ call (bridge entry points;
-// ab_*gemm_blas are not profiled) the profiler row for the routine must hold
-// all calls so far, with a GPU share equal to the calls that ran on the GPU.
+// Under AB_PROFILE, after every BLAS-ABI call the profiler row for the
+// routine must hold all calls so far, gpu_calls the calls that ran on the
+// GPU, and gpu_calls% their share. A fork()ed child starts from zero
+// (run_fork resets these).
+static unsigned long long prof_calls[2], prof_gpu[2];
+
 static bool profile_ok(const AbiCase *c, uint64_t gpu_gemms) {
-    static unsigned long long calls[2], gpu[2];
-    if (!getenv("AB_PROFILE") || c->op == OP_DGEMM_BLAS || c->op == OP_ZGEMM_BLAS)
-        return true;
+    if (!getenv("AB_PROFILE")) return true;
     const int z = op_is_complex(c->op);
-    calls[z]++;
-    gpu[z] += gpu_gemms > 0;
+    prof_calls[z]++;
+    prof_gpu[z] += gpu_gemms > 0;
 
     char *table = NULL;
     size_t len = 0;
@@ -575,11 +630,13 @@ static bool profile_ok(const AbiCase *c, uint64_t gpu_gemms) {
     char *save = NULL;
     for (char *line = strtok_r(table, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
         char name[32];
-        unsigned long long n;
-        double ms, pct;
-        if (sscanf(line, "%31s %llu %lf %lf%%", name, &n, &ms, &pct) == 4 &&
+        unsigned long long n, g;
+        double pct;
+        int end = 0;
+        if (sscanf(line, "%31s %llu %llu %lf%%%n", name, &n, &g, &pct, &end) == 4 && end &&
             !strcmp(name, z ? "zgemm" : "dgemm"))
-            ok = n == calls[z] && fabs(pct - 100.0 * gpu[z] / calls[z]) < 0.051;
+            ok = n == prof_calls[z] && g == prof_gpu[z] &&
+                 fabs(pct - 100.0 * g / n) < 0.051;
     }
     free(table);
     return ok;
@@ -604,7 +661,7 @@ static bool blas_verdict(const AbiCase *c, double err, bool inputs_ok, bool outs
              inputs_ok ? "" : " [A or B modified]",
              outside_ok ? "" : " [C outside MxN modified]",
              path_ok ? "" : " [path record does not match]",
-             prof_ok ? "" : " [AB_PROFILE GPU share does not match]",
+             prof_ok ? "" : " [AB_PROFILE counts do not match]",
              routed ? "" : c->route == ROUTE_GPU ? " [GPU path not taken]"
                                                  : " [GPU used, expected cblas]");
     return err <= TOL && inputs_ok && outside_ok && path_ok && prof_ok && routed;
@@ -767,6 +824,8 @@ static bool run_fork(const AbiCase *c, char *detail, size_t n) {
     if (pid == 0) {
         AbiCase in_child = *c;
         in_child.route = ROUTE_CPU;
+        memset(prof_calls, 0, sizeof prof_calls);
+        memset(prof_gpu, 0, sizeof prof_gpu);
         _exit(run(&in_child, after, page) ? 0 : 1);
     }
     int status = 0;
@@ -910,6 +969,304 @@ static bool run_symbol(const AbiCase *c, char *detail, size_t n) {
     return strstr(base, "libapplebottom") != NULL;
 }
 
+// =============================================================================
+// Exit reports (AB_REPORT, AB_PROFILE)
+// =============================================================================
+
+// The calls the --report-child process makes, in AB_MODE=gpu without
+// ab_init(): three run on the GPU and three stay on cblas by routing (a
+// dimension <= AB_MIN_GPU_DIM, or alpha == 0). It then fork()s; the child
+// repeats the first call, which falls back to cblas (no Metal context after
+// fork()), and ends with exit() so that its exit reports run.
+static const struct { Op op; int M, N, K; double alpha; bool gpu; } REPORT_CALLS[] = {
+    {OP_DGEMM_SYM,  96, 80, 72, 1.25, true},
+    {OP_DGEMM_BLAS, 96, 80, 72, 1.25, true},
+    {OP_DGEMM_F,    96, 80, 16, 1.25, false},
+    {OP_ZGEMM_SYM,  96, 80, 72, 1.25, true},
+    {OP_ZGEMM_F,    64, 48, 16, 1.25, false},
+    {OP_ZGEMM_BLAS, 96, 80, 72, 0.0,  false},
+};
+
+// One 'N','N' call with tight leading dimensions; M, N, K <= 96, 80, 72.
+static void report_call(Op op, int M, int N, int K, double alpha) {
+    static double complex A[96 * 80], B[96 * 80], C[96 * 80];
+    const char t = 'N';
+    const double beta = 0.0;
+    const double complex za = alpha, zb = 0.0;
+    double *a = (double *)A, *b = (double *)B, *c = (double *)C;
+    for (size_t i = 0; i < 96 * 80; i++) A[i] = B[i] = CMPLX(1.0 / (i + 1), 0.5);
+    switch (op) {
+    case OP_DGEMM_SYM:  fortran_dgemm(&t, &t, &M, &N, &K, &alpha, a, &M, b, &K, &beta, c, &M); break;
+    case OP_DGEMM_F:    ab_dgemm_(&t, &t, &M, &N, &K, &alpha, a, &M, b, &K, &beta, c, &M); break;
+    case OP_DGEMM_BLAS: ab_dgemm_blas(t, t, M, N, K, alpha, a, M, b, K, beta, c, M); break;
+    case OP_ZGEMM_SYM:  fortran_zgemm(&t, &t, &M, &N, &K, &za, A, &M, B, &K, &zb, C, &M); break;
+    case OP_ZGEMM_F:    ab_zgemm_(&t, &t, &M, &N, &K, &za, A, &M, B, &K, &zb, C, &M); break;
+    default:            ab_zgemm_blas(t, t, M, N, K, za, A, M, B, K, zb, C, M); break;
+    }
+}
+
+// --report-child: REPORT_CALLS, then the fork()ed repeat; prints
+// "child <pid> <wait status>".
+static int report_child_main(void) {
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(REPORT_CALLS); i++)
+        report_call(REPORT_CALLS[i].op, REPORT_CALLS[i].M, REPORT_CALLS[i].N,
+                    REPORT_CALLS[i].K, REPORT_CALLS[i].alpha);
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid == 0) {
+        report_call(REPORT_CALLS[0].op, REPORT_CALLS[0].M, REPORT_CALLS[0].N,
+                    REPORT_CALLS[0].K, REPORT_CALLS[0].alpha);
+        exit(0);
+    }
+    int status = -1;
+    if (pid > 0)
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    printf("child %d %d\n", (int)pid, status);
+    return 0;
+}
+
+// What one process's reports say about one routine (times in ms).
+typedef struct {
+    int rows, stage_rows, fallback_rows, prof_rows;
+    unsigned long long calls, gpu, cpu, fallbacks, reasons[4];
+    double calls_pct, total, gpu_ms, cpu_ms, time_pct, stages[8];   // [7]: other
+    unsigned long long prof_calls, prof_gpu, prof_fallbacks;
+    double prof_time_pct, prof_total, prof_gpu_ms;
+} RoutineReport;
+
+typedef struct {
+    int pid;
+    int headers, prof_headers;       // first lines naming ab_build_info()
+    RoutineReport r[2];              // dgemm, zgemm
+} ProcessReport;
+
+static RoutineReport *routine_of(ProcessReport *p, const char *name) {
+    return !strcmp(name, "dgemm") ? &p->r[0] : !strcmp(name, "zgemm") ? &p->r[1] : NULL;
+}
+
+// The report child's process, or the first other pid seen: its fork()ed child.
+static ProcessReport *process_of(ProcessReport proc[2], int pid) {
+    if (proc[0].pid == pid) return &proc[0];
+    if (proc[1].pid == -1) proc[1].pid = pid;
+    return proc[1].pid == pid ? &proc[1] : NULL;
+}
+
+// Parses one line of the report child's output. Returns false for an
+// AB_REPORT line it cannot read.
+static bool parse_report_line(const char *line, const char *build, ProcessReport proc[2],
+                              ProcessReport **section, int *gpu_lines, int *fallback_lines) {
+    char name[16], head[256];
+    int pid, off = 0, end = 0;
+    RoutineReport *r;
+    double st[8], total;
+    if (sscanf(line, "AB_REPORT[%d] %n", &pid, &off) == 1 && off) {
+        ProcessReport *p = process_of(proc, pid);
+        const char *rest = line + off;
+        snprintf(head, sizeof head, "%s AB_MODE=gpu", build);
+        if (!p) return false;
+        if (!strcmp(rest, head)) {
+            p->headers++;
+            return true;
+        }
+        if (sscanf(rest, "%15s %n", name, &end) != 1 || !(r = routine_of(p, name))) return false;
+        rest += end;
+        if (sscanf(rest, "calls=%llu gpu_calls=%llu cpu_calls=%llu gpu_calls%%=%lf total_ms=%lf "
+                         "gpu_ms=%lf cpu_ms=%lf gpu_time%%=%lf fallbacks=%llu",
+                   &r->calls, &r->gpu, &r->cpu, &r->calls_pct, &r->total, &r->gpu_ms,
+                   &r->cpu_ms, &r->time_pct, &r->fallbacks) == 9)
+            r->rows++;
+        else if (sscanf(rest, "gpu_stages_ms init=%lf alloc=%lf pack=%lf upload=%lf kernel=%lf "
+                              "download=%lf epilogue=%lf other=%lf",
+                        &r->stages[0], &r->stages[1], &r->stages[2], &r->stages[3],
+                        &r->stages[4], &r->stages[5], &r->stages[6], &r->stages[7]) == 8)
+            r->stage_rows++;
+        else if (sscanf(rest, "fallbacks no_device=%llu too_large=%llu gpu_failed=%llu other=%llu",
+                        &r->reasons[0], &r->reasons[1], &r->reasons[2], &r->reasons[3]) == 4)
+            r->fallback_rows++;
+        else
+            return false;
+        return true;
+    }
+    // AB_PROFILE table: its first line names the build and the pid; rows follow.
+    snprintf(head, sizeof head, "=== %s BLAS profile, pid %%d ===", build);
+    if (sscanf(line, head, &pid) == 1) {
+        *section = process_of(proc, pid);
+        if (*section) (*section)->prof_headers++;
+        return *section != NULL;
+    }
+    unsigned long long calls, gpu, fb;
+    double calls_pct, gpu_ms, cpu_ms, time_pct;
+    if (*section && sscanf(line, "%15s %llu %llu %lf%% %lf %lf %lf %lf%% %llu%n", name, &calls,
+                           &gpu, &calls_pct, &total, &gpu_ms, &cpu_ms, &time_pct, &fb,
+                           &end) == 9 && end && (r = routine_of(*section, name))) {
+        r->prof_rows++;
+        r->prof_calls = calls; r->prof_gpu = gpu; r->prof_fallbacks = fb;
+        r->prof_time_pct = time_pct; r->prof_total = total; r->prof_gpu_ms = gpu_ms;
+        return true;
+    }
+    // AB_PROFILE per-call lines: one per GPU call, its stages within its total.
+    if (sscanf(line, "AB_PROFILE %15s M=%*d N=%*d K=%*d init=%lf alloc=%lf pack=%lf upload=%lf "
+                     "kernel=%lf download=%lf epilogue=%lf other=%lf total=%lf ms",
+               name, &st[0], &st[1], &st[2], &st[3], &st[4], &st[5], &st[6], &st[7],
+               &total) == 10) {
+        double sum = 0.0;
+        for (int i = 0; i < 8; i++) sum += st[i] >= 0.0 ? st[i] : INFINITY;
+        if (sum <= total + 0.005) ++*gpu_lines;
+        return true;
+    }
+    if (strstr(line, "AB_PROFILE ") == line && strstr(line, "GPU fallback to cblas: "))
+        ++*fallback_lines;
+    return true;
+}
+
+// The AB_REPORT and AB_PROFILE lines of one process for one routine against
+// the calls it made. NULL if they agree.
+static const char *check_routine(const RoutineReport *r, unsigned long long calls,
+                                 unsigned long long gpu, unsigned long long no_device) {
+    if (!calls)
+        return r->rows || r->prof_rows ? "a routine without calls is reported" : NULL;
+    if (r->rows != 1 || r->prof_rows != 1) return "routine missing from a report";
+    if (r->calls != calls || r->gpu != gpu || r->cpu != calls - gpu)
+        return "AB_REPORT call counts do not match the calls made";
+    if (r->prof_calls != calls || r->prof_gpu != gpu || r->prof_fallbacks != no_device)
+        return "AB_PROFILE counts do not match the calls made";
+    if (fabs(r->calls_pct - 100.0 * gpu / calls) > 0.051) return "gpu_calls% is not the call share";
+    if (!(r->time_pct >= 0.0 && r->time_pct <= 100.0) ||
+        !(r->prof_time_pct >= 0.0 && r->prof_time_pct <= 100.0))
+        return "gpu_time% outside [0, 100]";
+    // gpu_time% is the share of time, not of calls (the two differ by up to 30x in QE).
+    if (r->total > 0.0 && fabs(r->time_pct - 100.0 * r->gpu_ms / r->total) > 0.1)
+        return "AB_REPORT gpu_time% is not gpu_ms / total_ms";
+    if (r->prof_total > 0.0 &&
+        fabs(r->prof_time_pct - 100.0 * r->prof_gpu_ms / r->prof_total) > 0.1)
+        return "AB_PROFILE gpu_time% is not gpu_ms / total_ms";
+    if (fabs(r->total - r->gpu_ms - r->cpu_ms) > 0.002) return "gpu_ms + cpu_ms != total_ms";
+    if (!gpu && (r->gpu_ms != 0.0 || r->time_pct != 0.0)) return "GPU time without GPU calls";
+    if (r->stage_rows != (gpu > 0)) return "GPU stage line missing or unexpected";
+    if (gpu) {
+        double sum = 0.0;                    // the named stages; [7] is the remainder
+        for (int i = 0; i < 8; i++)
+            if (r->stages[i] < 0.0) return "negative stage time";
+        for (int i = 0; i < 7; i++) sum += r->stages[i];
+        if (r->stages[4] <= 0.0) return "no kernel time";
+        if (sum > r->gpu_ms + 0.004) return "GPU stages exceed gpu_ms";
+        if (fabs(sum + r->stages[7] - r->gpu_ms) > 0.005) return "stages + other != gpu_ms";
+    }
+    if (r->fallbacks != no_device || r->fallback_rows != (no_device > 0) ||
+        (no_device && (r->reasons[0] != no_device ||
+                       r->reasons[1] + r->reasons[2] + r->reasons[3] != 0)))
+        return "fallback counts do not match";
+    return NULL;
+}
+
+// Spawns argv[0] with env, its stdout and stderr on a pipe. Returns the read
+// end, or NULL with the failure in why.
+static FILE *spawn_piped(char *const argv[], char *const env[], pid_t *pid,
+                         char *why, size_t why_len) {
+    int fds[2];
+    if (pipe(fds) != 0) {
+        snprintf(why, why_len, "pipe: %s", strerror(errno));
+        return NULL;
+    }
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, fds[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&fa, fds[1], STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&fa, fds[0]);
+    posix_spawn_file_actions_addclose(&fa, fds[1]);
+    fflush(stdout);
+    int rc = posix_spawn(pid, argv[0], &fa, NULL, argv, env);
+    posix_spawn_file_actions_destroy(&fa);
+    close(fds[1]);
+    if (rc != 0) {
+        close(fds[0]);
+        snprintf(why, why_len, "posix_spawn: %s", strerror(rc));
+        return NULL;
+    }
+    return fdopen(fds[0], "r");
+}
+
+// Runs --report-child with AB_REPORT=1 and AB_PROFILE=1 and checks what both
+// of its processes report at exit: the build, call counts by route, time
+// shares and stage sums, and that the fork()ed child reports only its own call.
+static bool run_report(const AbiCase *c, char *detail, size_t n) {
+    (void)c;
+    static char report[] = "AB_REPORT=1", profile[] = "AB_PROFILE=1", flag[] = "--report-child";
+    char self[PATH_MAX];
+    uint32_t len = sizeof self;
+    if (_NSGetExecutablePath(self, &len) != 0) {
+        snprintf(detail, n, "cannot resolve executable path");
+        return false;
+    }
+    size_t ne = 0;
+    while (environ[ne]) ne++;
+    char **env = calloc(ne + 3, sizeof *env);
+    memcpy(env, environ, ne * sizeof *env);
+    env[ne] = report;
+    env[ne + 1] = profile;
+    char *argv[] = {self, flag, NULL};
+    pid_t pid;
+    FILE *in = spawn_piped(argv, env, &pid, detail, n);
+    free(env);
+    if (!in) return false;
+    char *out = NULL, buf[4096];
+    size_t out_len = 0;
+    FILE *mem = open_memstream(&out, &out_len);
+    for (size_t got; (got = fread(buf, 1, sizeof buf, in)) > 0; ) fwrite(buf, 1, got, mem);
+    fclose(in);
+    fclose(mem);
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+
+    // Expected counts: [0] the report child, [1] its fork()ed child.
+    unsigned long long calls[2][2] = {{0}}, gpu[2][2] = {{0}}, no_device[2][2] = {{0}};
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(REPORT_CALLS); i++) {
+        int z = op_is_complex(REPORT_CALLS[i].op);
+        calls[0][z]++;
+        gpu[0][z] += REPORT_CALLS[i].gpu;
+    }
+    calls[1][op_is_complex(REPORT_CALLS[0].op)] = 1;
+    no_device[1][op_is_complex(REPORT_CALLS[0].op)] = 1;
+
+    ProcessReport proc[2] = {{.pid = pid}, {.pid = -1}}, *section = NULL;
+    int fork_pid = 0, fork_status = -1, gpu_lines = 0, fallback_lines = 0;
+    const char *build = ab_build_info(), *why = NULL;
+    char bad[160] = "";
+    for (char *save = NULL, *line = strtok_r(out, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save))
+        if (sscanf(line, "child %d %d", &fork_pid, &fork_status) != 2 &&
+            !parse_report_line(line, build, proc, &section, &gpu_lines, &fallback_lines) &&
+            !bad[0])
+            snprintf(bad, sizeof bad, "%s", line);
+
+    unsigned long long gpu_calls = gpu[0][0] + gpu[0][1];
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) why = "report child failed";
+    else if (fork_pid <= 0 || !WIFEXITED(fork_status) || WEXITSTATUS(fork_status) != 0)
+        why = "forked child failed";
+    else if (proc[1].pid != fork_pid) why = "no report from the forked child";
+#ifdef AB_EXPECT_BUILD_SHA
+    else if (!strstr(build, "(" AB_EXPECT_BUILD_SHA ")")) why = "ab_build_info() lacks the build SHA";
+#endif
+    else if (bad[0]) why = "unrecognized report line";
+    else if (proc[0].headers != 1 || proc[1].headers != 1 ||
+             proc[0].prof_headers != 1 || proc[1].prof_headers != 1)
+        why = "each process must start each report once with ab_build_info()";
+    else if ((unsigned long long)gpu_lines != gpu_calls || fallback_lines != 1)
+        why = "AB_PROFILE per-call lines: wrong count, or stages exceed the call's total";
+    for (int p = 0; p < 2 && !why; p++)
+        for (int z = 0; z < 2 && !why; z++)
+            why = check_routine(&proc[p].r[z], calls[p][z], gpu[p][z], no_device[p][z]);
+
+    if (why)
+        snprintf(detail, n, "%s%s%s (status %d, fork status %d)", why, bad[0] ? ": " : "", bad,
+                 status, fork_status);
+    else
+        snprintf(detail, n, "%s; pid %d: %llu GPU of %llu calls; forked pid %d: 1 fallback",
+                 build, (int)pid, gpu_calls, calls[0][0] + calls[0][1], proc[1].pid);
+    free(out);
+    return !why;
+}
+
 static bool run_case(int idx, char *detail, size_t n) {
     const AbiCase *c = &CASES[idx];
     rng_state = 0x9E3779B97F4A7C15ULL * (uint64_t)(idx + 1);
@@ -923,6 +1280,8 @@ static bool run_case(int idx, char *detail, size_t n) {
         return run_native_complex(c, detail, n);
     case OP_SYMBOL:
         return run_symbol(c, detail, n);
+    case OP_REPORT:
+        return run_report(c, detail, n);
     default:
         return run_native_real(c, detail, n);
     }
@@ -988,12 +1347,13 @@ static void record(const AbiCase *c, bool ok, const char *detail) {
 }
 
 // Child environment: the caller's, minus AB_* and MTL_DEBUG_LAYER, plus the suite's.
-static char **child_env(const Suite *s, char *mode_buf, size_t mode_len) {
+static char **child_env(const Suite *s, char *mode_buf, size_t mode_len,
+                        char *table_buf, size_t table_len) {
     static char debug_layer[] = "MTL_DEBUG_LAYER=1";
     static char profile[] = "AB_PROFILE=1";
     size_t n = 0;
     while (environ[n]) n++;
-    char **env = calloc(n + 4, sizeof *env);
+    char **env = calloc(n + 5, sizeof *env);
     size_t k = 0;
     for (size_t i = 0; i < n; i++)
         if (strncmp(environ[i], "AB_", 3) && strncmp(environ[i], "MTL_DEBUG_LAYER=", 16))
@@ -1001,6 +1361,10 @@ static char **child_env(const Suite *s, char *mode_buf, size_t mode_len) {
     if (s->ab_mode) {
         snprintf(mode_buf, mode_len, "AB_MODE=%s", s->ab_mode);
         env[k++] = mode_buf;
+    }
+    if (s->test_table) {
+        snprintf(table_buf, table_len, "AB_DISPATCH_TABLE=%s", test_table_path);
+        env[k++] = table_buf;
     }
     if (s->debug_layer) env[k++] = debug_layer;
     if (s->profile) env[k++] = profile;
@@ -1010,39 +1374,21 @@ static char **child_env(const Suite *s, char *mode_buf, size_t mode_len) {
 // Runs cases [lo, s->hi) in one child and records every reported case.
 // Returns the first unreported index; *why describes an abnormal exit.
 static int run_child(const Suite *s, int lo, char *why, size_t why_len) {
-    char mode_buf[32], lo_arg[16], hi_arg[16], child_flag[] = "--child";
+    char mode_buf[32], table_buf[PATH_MAX + 32], lo_arg[16], hi_arg[16], child_flag[] = "--child";
     char *argv[] = {self_path, child_flag, lo_arg, hi_arg, NULL};
-    int fds[2], next = lo;
+    int next = lo;
     pid_t pid;
 
     why[0] = '\0';
     snprintf(lo_arg, sizeof lo_arg, "%d", lo);
     snprintf(hi_arg, sizeof hi_arg, "%d", s->hi);
-    if (pipe(fds) != 0) {
-        snprintf(why, why_len, "pipe: %s", strerror(errno));
-        return lo;
-    }
-    posix_spawn_file_actions_t fa;
-    posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_adddup2(&fa, fds[1], STDOUT_FILENO);
-    posix_spawn_file_actions_adddup2(&fa, fds[1], STDERR_FILENO);
-    posix_spawn_file_actions_addclose(&fa, fds[0]);
-    posix_spawn_file_actions_addclose(&fa, fds[1]);
-    char **env = child_env(s, mode_buf, sizeof mode_buf);
-    fflush(stdout);
-    int rc = posix_spawn(&pid, self_path, &fa, NULL, argv, env);
-    posix_spawn_file_actions_destroy(&fa);
+    char **env = child_env(s, mode_buf, sizeof mode_buf, table_buf, sizeof table_buf);
+    FILE *in = spawn_piped(argv, env, &pid, why, why_len);
     free(env);
-    close(fds[1]);
-    if (rc != 0) {
-        close(fds[0]);
-        snprintf(why, why_len, "posix_spawn: %s", strerror(rc));
-        return lo;
-    }
+    if (!in) return lo;
 
     // Result lines advance `next`; anything else (library or Metal
     // diagnostics) is kept so a crash can be explained.
-    FILE *in = fdopen(fds[0], "r");
     char line[2048], last_noise[512] = "";
     while (fgets(line, sizeof line, in)) {
         line[strcspn(line, "\n")] = '\0';
@@ -1144,7 +1490,9 @@ static void test_dgemm_sym_noinit(void)  { run_suite(SU_DGEMM_SYM_NOINIT); }
 static void test_zgemm_sym_noinit(void)  { run_suite(SU_ZGEMM_SYM_NOINIT); }
 static void test_illegal_args(void)     { run_suite(SU_ILLEGAL); }
 static void test_fork_after_gpu(void)   { run_suite(SU_FORK); }
+static void test_qe_shapes(void)        { run_suite(SU_QE); }
 static void test_profile_path(void)     { run_suite(SU_PROFILE); }
+static void test_exit_reports(void)     { run_suite(SU_REPORT); }
 static void test_native_morton(void)    { run_suite(SU_NATIVE); }
 static void test_fortran_symbols(void)  { run_suite(SU_SYMBOLS); }
 
@@ -1170,7 +1518,9 @@ static const TestCase TESTS[] = {
     {"test_zgemm_sym_noinit",  test_zgemm_sym_noinit},
     {"test_illegal_args",     test_illegal_args},
     {"test_fork_after_gpu",   test_fork_after_gpu},
+    {"test_qe_shapes",        test_qe_shapes},
     {"test_profile_path",     test_profile_path},
+    {"test_exit_reports",     test_exit_reports},
     {"test_native_morton",    test_native_morton},
     {"test_fortran_symbols",  test_fortran_symbols},
 };
@@ -1180,6 +1530,8 @@ int main(int argc, char **argv) {
     build_cases();
     if (argc == 4 && !strcmp(argv[1], "--child"))
         return child_main(atoi(argv[2]), atoi(argv[3]));
+    if (argc == 2 && !strcmp(argv[1], "--report-child"))
+        return report_child_main();
     verbose = argc > 1 && !strcmp(argv[1], "-v");
 
     uint32_t len = sizeof self_path;
@@ -1187,6 +1539,16 @@ int main(int argc, char **argv) {
         fprintf(stderr, "test_blas_abi: cannot resolve executable path\n");
         return 1;
     }
+    const char *tmp = getenv("TMPDIR");
+    snprintf(test_table_path, sizeof test_table_path, "%s/test_blas_abi.XXXXXX",
+             tmp && *tmp ? tmp : "/tmp");
+    int table_fd = mkstemp(test_table_path);
+    if (table_fd < 0 || write(table_fd, TEST_TABLE, sizeof TEST_TABLE - 1) !=
+                            (ssize_t)(sizeof TEST_TABLE - 1)) {
+        fprintf(stderr, "test_blas_abi: cannot write %s: %s\n", test_table_path, strerror(errno));
+        return 1;
+    }
+    close(table_fd);
 
     printf("╔══════════════════════════════════════════════════════════════════╗\n");
     printf("║  apple-bottom BLAS-ABI Conformance (reference: Accelerate cblas) ║\n");
@@ -1206,6 +1568,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    unlink(test_table_path);
     int stale = 0;
     printf("\nXFAIL table (audit ID, cases matched, pattern):\n");
     for (size_t i = 0; i < TEST_REGISTRY_SIZE(XFAIL); i++) {

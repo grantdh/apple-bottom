@@ -22,12 +22,13 @@ try:
 except ImportError:
     np = None
 
-__version__ = "1.2.0"
+__version__ = "1.4.0"
 
 # =============================================================================
 # Constants
 # =============================================================================
-MAX_DIMENSION = 46340
+MAX_ELEMENTS = 2**31 - 1     # AB_MAX_MATRIX_ELEMENTS: rows * cols per matrix
+MAX_DIMENSION = 2**31 - 1    # rows or cols alone (a C int)
 POOL_CAPACITY = 128
 SESSION_CAPACITY = 64
 
@@ -84,6 +85,7 @@ _STATUS_TO_EXCEPTION = {
     -5: KernelExecutionError,
     -6: InvalidArgumentError,
     -7: ShaderCompileError,
+    -8: InvalidArgumentError,  # AB_ERROR_TOO_LARGE
 }
 
 
@@ -106,7 +108,6 @@ def _find_library() -> ctypes.CDLL:
     1. ../build/ relative to this file
     2. /usr/local/lib
     3. /opt/homebrew/lib
-    4. System library path via ctypes.util.find_library
     """
     if os.environ.get("AB_LIBRARY"):
         return ctypes.CDLL(os.environ["AB_LIBRARY"], use_errno=True)
@@ -114,8 +115,8 @@ def _find_library() -> ctypes.CDLL:
     candidates = []
 
     # Try relative to this module
-    module_dir = Path(__file__).parent.parent.parent  # python/
-    build_dir = module_dir / "build"
+    repo_dir = Path(__file__).parent.parent.parent  # the apple-bottom checkout
+    build_dir = repo_dir / "build"
     for variant in [
         build_dir / "libapplebottom.dylib",
         build_dir / "libapplebottom.a",
@@ -138,8 +139,8 @@ def _find_library() -> ctypes.CDLL:
             continue
 
     raise AppleBottomError(
-        "Could not find libapplebottom. Install with 'make install' or "
-        "set LD_LIBRARY_PATH. Searched: " + ", ".join(candidates)
+        "Could not find libapplebottom. Build it with 'make' in the apple-bottom "
+        "checkout, or set AB_LIBRARY to its path. Searched: " + ", ".join(candidates)
     )
 
 
@@ -167,6 +168,7 @@ class ABStatus(ctypes.c_int):
     ERROR_KERNEL_FAILED = -5
     ERROR_INVALID_ARG = -6
     ERROR_SHADER_COMPILE = -7
+    ERROR_TOO_LARGE = -8
 
 
 class ABTranspose(ctypes.c_int):
@@ -508,13 +510,13 @@ class Matrix(_Handle):
             cols: Number of columns
 
         Raises:
-            InvalidArgumentError: If dimensions exceed MAX_DIMENSION
+            InvalidArgumentError: If rows * cols exceeds MAX_ELEMENTS
             DeviceNotFoundError: If GPU device is unavailable
             AllocationError: If GPU memory allocation fails
         """
-        if rows > MAX_DIMENSION or cols > MAX_DIMENSION:
+        if rows > MAX_DIMENSION or cols > MAX_DIMENSION or rows * cols > MAX_ELEMENTS:
             raise InvalidArgumentError(
-                f"Matrix dimensions ({rows}, {cols}) exceed maximum {MAX_DIMENSION}"
+                f"Matrix dimensions ({rows}, {cols}) exceed maximum {MAX_ELEMENTS} elements"
             )
 
         self._ptr = _libwrap.ab_matrix_create(rows, cols)
@@ -846,7 +848,7 @@ def dgemm(A: np.ndarray, B: np.ndarray, alpha: float = 1.0, beta: float = 0.0) -
     """
     Perform double-precision matrix multiplication with optional scaling.
 
-    Computes: C = alpha * (A @ B) + beta * C
+    Computes: C = alpha * (A @ B)
 
     This is a convenience function that handles allocation, upload, compute,
     and download in one call.
@@ -855,7 +857,7 @@ def dgemm(A: np.ndarray, B: np.ndarray, alpha: float = 1.0, beta: float = 0.0) -
         A: Left operand, shape (m, k), dtype float64 (or a sequence of rows)
         B: Right operand, shape (k, n), dtype float64 (or a sequence of rows)
         alpha: Scalar multiplier (default 1.0)
-        beta: Scalar for C accumulation (default 0.0)
+        beta: No effect: the result starts from zero (kept for compatibility)
 
     Returns:
         Result matrix, shape (m, n), dtype float64 (a list of rows if numpy
@@ -1005,6 +1007,7 @@ def status_string(status: int) -> str:
 __all__ = [
     # Constants
     'MAX_DIMENSION',
+    'MAX_ELEMENTS',
     'POOL_CAPACITY',
     'SESSION_CAPACITY',
     # Exceptions

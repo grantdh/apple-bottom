@@ -4,12 +4,19 @@
 
 #include "apple_bottom.h"
 #include "test_registry.h"
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <complex.h>
 #include <Accelerate/Accelerate.h>
+#include <fenv.h>
+#include <mach-o/dyld.h>
+#include <spawn.h>
+#include <sys/wait.h>
+
+extern char **environ;
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -441,6 +448,64 @@ static void test_zgemm_conj_transpose(void) {
     if (max_err < 1e-10) PASS(); else FAIL("precision too low");
 }
 
+// C = A^H * B with A stored K x M and K = 100000 rows, a synthetic shape
+// (v1.3 refused matrices with more than 46340 rows): the GPU conjugate
+// transpose runs on a tall matrix. Error is componentwise, relative to
+// |A|^T |B|.
+static void test_zgemm_conj_tall(void) {
+    TEST("ab_zgemm_ex A^H*B, A 100000x64");
+    ab_init();
+    const int M = 64, N = 48, K = 100000;
+    size_t nA = (size_t)K * M, nB = (size_t)K * N, nC = (size_t)M * N;
+    double *Ar = malloc(nA * sizeof *Ar), *Ai = malloc(nA * sizeof *Ai), *absA = malloc(nA * sizeof *absA);
+    double *Br = malloc(nB * sizeof *Br), *Bi = malloc(nB * sizeof *Bi), *absB = malloc(nB * sizeof *absB);
+    double *Cr = malloc(nC * sizeof *Cr), *Ci = malloc(nC * sizeof *Ci), *absAB = malloc(nC * sizeof *absAB);
+    double complex *Az = malloc(nA * sizeof *Az), *Bz = malloc(nB * sizeof *Bz), *Cz = malloc(nC * sizeof *Cz);
+    srand48(4242);
+    for (size_t i = 0; i < nA; i++) {
+        Ar[i] = 2 * drand48() - 1; Ai[i] = 2 * drand48() - 1;
+        Az[i] = Ar[i] + I * Ai[i]; absA[i] = cabs(Az[i]);
+    }
+    for (size_t i = 0; i < nB; i++) {
+        Br[i] = 2 * drand48() - 1; Bi[i] = 2 * drand48() - 1;
+        Bz[i] = Br[i] + I * Bi[i]; absB[i] = cabs(Bz[i]);
+    }
+
+    ABMatrix mAr = ab_matrix_create(K, M), mAi = ab_matrix_create(K, M);
+    ABMatrix mBr = ab_matrix_create(K, N), mBi = ab_matrix_create(K, N);
+    ABMatrix mCr = ab_matrix_create(M, N), mCi = ab_matrix_create(M, N);
+    ABStatus st = (mAr && mAi && mBr && mBi && mCr && mCi) ? AB_OK : AB_ERROR_ALLOC_FAILED;
+    if (st == AB_OK) st = ab_matrix_upload(mAr, Ar, true);
+    if (st == AB_OK) st = ab_matrix_upload(mAi, Ai, true);
+    if (st == AB_OK) st = ab_matrix_upload(mBr, Br, true);
+    if (st == AB_OK) st = ab_matrix_upload(mBi, Bi, true);
+    uint64_t z0 = ab_get_stats().zgemm_count;
+    if (st == AB_OK) st = ab_zgemm_ex(AB_CONJ_TRANS, AB_NO_TRANS, mAr, mAi, mBr, mBi, mCr, mCi);
+    int ran = ab_get_stats().zgemm_count == z0 + 1;
+    if (st == AB_OK) st = ab_matrix_download(mCr, Cr, false);
+    if (st == AB_OK) st = ab_matrix_download(mCi, Ci, false);
+
+    double complex one = 1.0, zero = 0.0;
+    cblas_zgemm(CblasRowMajor, CblasConjTrans, CblasNoTrans, M, N, K,
+                &one, Az, M, Bz, N, &zero, Cz, N);
+    cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans, M, N, K,
+                1.0, absA, M, absB, N, 0.0, absAB, N);
+    double max_err = 0;
+    for (size_t i = 0; i < nC; i++) {
+        double e = cabs(Cr[i] + I * Ci[i] - Cz[i]) / absAB[i];
+        if (isnan(e) || e > max_err) max_err = e;   // once NaN, stays NaN
+    }
+
+    ab_matrix_destroy(mAr); ab_matrix_destroy(mAi);
+    ab_matrix_destroy(mBr); ab_matrix_destroy(mBi);
+    ab_matrix_destroy(mCr); ab_matrix_destroy(mCi);
+    free(Ar); free(Ai); free(absA); free(Br); free(Bi); free(absB);
+    free(Cr); free(Ci); free(absAB); free(Az); free(Bz); free(Cz);
+    ab_shutdown();
+    if (st == AB_OK && ran && max_err <= 1e-11) PASS();
+    else { char buf[96]; snprintf(buf, sizeof buf, "%s, ran=%d, err=%.1e", ab_status_string(st), ran, max_err); FAIL(buf); }
+}
+
 // =============================================================================
 // Session API Tests
 // =============================================================================
@@ -788,15 +853,28 @@ static void test_skinny_matrix(void) {
     if (ok) PASS(); else FAIL("failed for skinny");
 }
 
-static void test_max_dimension_boundary(void) {
-    TEST("ab_matrix_create max dimension boundary");
+// The limit is rows * cols <= AB_MAX_MATRIX_ELEMENTS (2^31 - 1), not 46340
+// per dimension as in v1.3. Over-limit shapes are rejected before allocating.
+static void test_matrix_size_limits(void) {
+    TEST("matrix size limit is on rows * cols");
     ab_init();
-    ABMatrix m1 = ab_matrix_create(46340, 1);
-    ABMatrix m2 = ab_matrix_create(46341, 46341);
-    int ok = (m1 != NULL) && (m2 == NULL);
-    ab_matrix_destroy(m1);
+    ABMatrix tall = ab_matrix_create(143666, 171);   // QE addusdens, k-points: 2*ngm_l x nij
+    ABMatrix wide = ab_matrix_create(1, 100000);
+    ABSession s = ab_session_create();
+    int ok = tall && wide &&
+             ab_matrix_check_size(143666, 171) == AB_OK &&
+             ab_matrix_check_size(46341, 46341) == AB_ERROR_TOO_LARGE &&
+             ab_matrix_check_size(65536, 32768) == AB_ERROR_TOO_LARGE &&   // 2^31
+             ab_matrix_check_size(INT_MAX, 2) == AB_ERROR_TOO_LARGE &&
+             ab_matrix_check_size(0, 10) == AB_ERROR_INVALID_ARG &&
+             ab_matrix_check_size(10, -1) == AB_ERROR_INVALID_ARG &&
+             ab_matrix_create(46341, 46341) == NULL &&
+             ab_session_add(s, "X", 65536, 32768) == AB_ERROR_TOO_LARGE;
+    ab_session_destroy(s);
+    ab_matrix_destroy(tall); ab_matrix_destroy(wide);
     ab_shutdown();
-    if (ok) PASS(); else FAIL("boundary check failed");
+    ok = ok && ab_matrix_check_size(143666, 171) == AB_ERROR_NO_DEVICE;
+    if (ok) PASS(); else FAIL("size limit check failed");
 }
 
 // =============================================================================
@@ -2139,6 +2217,41 @@ static void test_morton_dtrsm_panel(void) {
 // Main
 // =============================================================================
 
+// Child of test_init_keeps_host_fp_flags: the first ab_init() in a fresh
+// process, with one flag (FE_INEXACT) already raised by the "host". Exit 0
+// if the flags afterwards are exactly the host's, 1 if ab_init added or
+// cleared any, 2 without a device.
+static int init_fp_flags_child(void) {
+    feclearexcept(FE_ALL_EXCEPT);
+    feraiseexcept(FE_INEXACT);
+    ABStatus st = ab_init();
+    int flags = fetestexcept(FE_ALL_EXCEPT);
+    return st != AB_OK ? 2 : flags != FE_INEXACT ? 1 : 0;
+}
+
+// Creating the Metal device raises FE_OVERFLOW on macOS 27; ab_init() must not
+// pass that on to the host (gfortran reports raised flags at exit).
+static void test_init_keeps_host_fp_flags(void) {
+    TEST("ab_init leaves the host's FP exception flags alone");
+    char self[PATH_MAX];
+    uint32_t len = sizeof self;
+    char flag[] = "--init-fp-flags-child";
+    char *argv[] = {self, flag, NULL};
+    pid_t pid;
+    int status = 0;
+    if (_NSGetExecutablePath(self, &len) != 0 ||
+        posix_spawn(&pid, self, NULL, NULL, argv, environ) != 0 ||
+        waitpid(pid, &status, 0) != pid || !WIFEXITED(status)) {
+        FAIL("could not run the child");
+    } else if (WEXITSTATUS(status) == 1) {
+        FAIL("ab_init changed the caller's FP exception flags");
+    } else if (WEXITSTATUS(status) != 0) {
+        FAIL("ab_init failed in the child");
+    } else {
+        PASS();
+    }
+}
+
 static const TestCase TESTS[] = {
     {"test_init_shutdown",                    test_init_shutdown},
     {"test_double_init",                      test_double_init},
@@ -2160,6 +2273,8 @@ static const TestCase TESTS[] = {
     {"test_dgemm_vs_accelerate",              test_dgemm_vs_accelerate},
     {"test_zgemm_vs_accelerate",              test_zgemm_vs_accelerate},
     {"test_zgemm_conj_transpose",             test_zgemm_conj_transpose},
+    {"test_zgemm_conj_tall",                  test_zgemm_conj_tall},
+    {"test_init_keeps_host_fp_flags",         test_init_keeps_host_fp_flags},
     {"test_session_basic",                    test_session_basic},
     {"test_session_destroy_null",             test_session_destroy_null},
     {"test_session_dgemm",                    test_session_dgemm},
@@ -2178,7 +2293,7 @@ static const TestCase TESTS[] = {
     {"test_non_power_of_2",                   test_non_power_of_2},
     {"test_rectangular_matrix",               test_rectangular_matrix},
     {"test_skinny_matrix",                    test_skinny_matrix},
-    {"test_max_dimension_boundary",           test_max_dimension_boundary},
+    {"test_matrix_size_limits",               test_matrix_size_limits},
     {"test_dtrsm_lower_notrans",              test_dtrsm_lower_notrans},
     {"test_dtrsm_upper_notrans",              test_dtrsm_upper_notrans},
     {"test_dtrsm_lower_trans",                test_dtrsm_lower_trans},
@@ -2214,7 +2329,8 @@ static const TestCase TESTS[] = {
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "--init-fp-flags-child")) return init_fp_flags_child();
     printf("╔══════════════════════════════════════════════════════════════════╗\n");
     printf("║  apple-bottom Comprehensive Test Suite                           ║\n");
     printf("╚══════════════════════════════════════════════════════════════════╝\n");

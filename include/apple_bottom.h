@@ -5,36 +5,48 @@
 
 // =============================================================================
 // Requirements:
-//   - macOS 14+ with Xcode 16+ SDK (required for MTLMathModeSafe)
-//   - Without Xcode 16+ SDK: compiles but achieves only ~10⁻⁸ precision
+//   - macOS 14+ on Apple Silicon
+//   - With the macOS 15 SDK (Xcode 16+) on macOS 15+, shaders use MTLMathModeSafe;
+//     otherwise they are compiled with fastMathEnabled = NO. Both keep full DD precision.
+//
+// Storage: ABMatrix data passed to ab_matrix_upload / ab_matrix_download is
+// row-major (C order). The BLAS ABI (ab_*gemm_blas, dgemm_/zgemm_) and the
+// device-buffer API (apple_bottom_device.h) are column-major, as in BLAS.
 //
 // Thread Safety:
-//   - ab_init/ab_shutdown: Safe to call from any thread (uses dispatch_once)
-//   - Matrix operations: NOT thread-safe — Metal command queue serializes
-//   - Use separate contexts for concurrent workloads (future feature)
+//   - ab_init/ab_shutdown: safe to call from any thread
+//   - Calls on different matrices may come from different threads; one matrix,
+//     pool or session must not be used by two threads at once. All work shares
+//     one Metal command queue.
 //
-// Performance notes — TWO regimes (see docs/review/REVIEW_04_TRANCHE_A_2026-04-24.md
-// and the apple-bottom-qe skill §0 for the full distinction).
+// Performance on an M2 Max, against Accelerate (README.md#performance):
 //
-// Steady-state regime — native ABMatrix API, ABMatrix handles persisted across calls,
-// upload and FP64<->DD conversion amortized:
-//   DGEMM: GPU wins for N >= 2048   (anchor: benchmarks/results/2026-04-22-6b5447a/dgemm.csv)
-//   ZGEMM: GPU wins for N >= 1024   (anchor: benchmarks/results/2026-04-22-6b5447a/zgemm.csv)
-//   DSYRK: GPU wins for N >= 3072   (steady-state; prior measurement, not re-measured for end-to-end regime)
-//   ZHERK: GPU wins for N >= 1024   (steady-state; v1.4 introduced GPU-native transpose / no CPU roundtrip; not re-measured for end-to-end regime)
+// Native ABMatrix API, matrices resident (upload and FP64<->DD conversion
+// amortized; benchmarks/results/2026-10-14-3253a22-bench-paper/):
+//   DGEMM: faster from about N = 1536 (1.04x), 1.10-1.16x for N = 2048-4096
+//   ZGEMM: faster from about N = 1024 (1.12x), 1.30-1.39x for N = 1536-3072
+//   ZHERK: slower at every measured size (0.06-0.67x, N <= 2048); use cblas_zherk
+//   DSYRK: not re-measured for 1.4.0
 //
 // End-to-end regime — BLAS-ABI (ab_*_blas, raw pointers, no handle persistence; this is
 // the path Fortran host codes hit through dgemm_/zgemm_):
-//   No crossover in the measured grid through N=2048. AMX wins by 15-170x at all
-//   tested shapes, dominated by FP64<->DD conversion at ~140 MB/s effective bandwidth
-//   (root cause localized in commit 07c6a87 via AB_PROFILE=1).
-//   For Fortran host codes calling dgemm_/zgemm_ without handle caching: AB_MODE=cpu
-//   is the right default. Anchor: benchmarks/results/2026-04-24-0bfb147-rect/.
-//   DSYRK/ZHERK end-to-end behavior expected to be similar to GEMM (same conversion
-//   path); not directly measured.
+//   The GPU is >= 1.10x faster than Accelerate only for ZGEMM with both operands
+//   transposed or conjugated, M = N = K >= 4096 (1.11x at 4096, 1.20x at 6144). Every
+//   DGEMM through N=6144 and every Quantum ESPRESSO si64 shape is slower on the GPU
+//   (0.06-0.84x); other ZGEMMs reach at most 1.02x (6144, one operand transposed).
+//   Anchor: benchmarks/results/2026-10-14-52f1880-calibrate/
+//   (`make calibrate`). AB_MODE=auto, the default, follows that measurement
+//   (src/dispatch_table.h): a call goes to the GPU only where the GPU was >= 1.10x
+//   faster. DSYRK/ZHERK end-to-end behavior expected to be similar to GEMM (same
+//   conversion path); not directly measured.
 //
 // API Limits:
-//   - AB_MAX_DIMENSION = 46340 (max matrix dimension, overflow protection)
+//   - Matrix size: rows * cols <= AB_MAX_MATRIX_ELEMENTS (2^31 - 1) and the DD
+//     buffer, rows * cols * 8 bytes, <= the Metal device's maxBufferLength. The
+//     limit is on the total, not on each dimension: tall-skinny shapes such as
+//     143666 x 171 are fine. ab_matrix_check_size() says whether a shape fits;
+//     BLAS-ABI calls with a larger operand run on Accelerate (AB_PROFILE=1
+//     prints why).
 //   - Memory pool capacity: 128 entries (ab_pool_get_matrix returns NULL when full)
 //   - Session capacity: 64 matrices per session
 // =============================================================================
@@ -50,9 +62,9 @@ extern "C" {
 #endif
 
 #define APPLE_BOTTOM_VERSION_MAJOR 1
-#define APPLE_BOTTOM_VERSION_MINOR 3
-#define APPLE_BOTTOM_VERSION_PATCH 1
-#define APPLE_BOTTOM_VERSION_STRING "1.3.1-dev"
+#define APPLE_BOTTOM_VERSION_MINOR 4
+#define APPLE_BOTTOM_VERSION_PATCH 0
+#define APPLE_BOTTOM_VERSION_STRING "1.4.0"
 
 typedef struct ABMatrix_s* ABMatrix;
 typedef struct ABSession_s* ABSession;
@@ -68,6 +80,7 @@ typedef enum {
     AB_ERROR_KERNEL_FAILED = -5,
     AB_ERROR_INVALID_ARG = -6,
     AB_ERROR_SHADER_COMPILE = -7,
+    AB_ERROR_TOO_LARGE = -8,      // matrix beyond the size limits (see API Limits)
 } ABStatus;
 
 typedef enum {
@@ -107,6 +120,15 @@ const char* ab_device_name(void);
 bool ab_is_initialized(void);
 
 // Matrix lifecycle
+// Most elements (rows * cols) one matrix may hold: the GPU kernels index
+// elements with 32-bit unsigned arithmetic.
+#define AB_MAX_MATRIX_ELEMENTS 2147483647
+
+// AB_OK if a rows x cols matrix fits the size limits; AB_ERROR_INVALID_ARG if
+// rows or cols <= 0, AB_ERROR_TOO_LARGE beyond AB_MAX_MATRIX_ELEMENTS or the
+// device's maxBufferLength, AB_ERROR_NO_DEVICE before ab_init(). Allocates nothing.
+ABStatus ab_matrix_check_size(int rows, int cols);
+// NULL if ab_matrix_check_size(rows, cols) fails or the allocation does.
 ABMatrix ab_matrix_create(int rows, int cols);
 void ab_matrix_destroy(ABMatrix m);
 void ab_matrix_dims(ABMatrix m, int* rows, int* cols);
@@ -241,7 +263,9 @@ void ab_print_stats(void);
 // Utility
 const char* ab_status_string(ABStatus status);
 
-// BLAS-compatible dispatch-aware entry points (respect AB_MODE + crossover thresholds).
+// BLAS-compatible dispatch-aware entry points: each call runs on the GPU or on
+// Accelerate as AB_MODE and, in the default AB_MODE=auto, the calibrated dispatch
+// table decide (docs/INTEGRATION.md, "Routing").
 // These are the entry points host codes reach via the dgemm_/zgemm_ Fortran symbols;
 // benchmarks use them directly to measure end-to-end dispatch behavior.
 // They create the Metal context on first GPU use, so callers need not call ab_init().
@@ -260,6 +284,30 @@ void ab_zgemm_blas(char transA, char transB, int M, int N, int K,
 // call on this thread: "gpu" only if the GPU computed C, "cpu" if cblas did
 // (including a fallback after a GPU failure), or "none" before any call. Thread-local.
 const char* ab_get_last_dispatch_path(void);
+
+// Library version and the git commit it was built from, "-dirty" if tracked
+// files differed from that commit, e.g. "apple-bottom 1.4.0 (428f1cc1a1d3)";
+// "unknown" in place of the commit when built outside a git checkout or from a copy
+// vendored inside another repository. Static string.
+const char* ab_build_info(void);
+
+// BLAS-ABI diagnostics (dgemm_, zgemm_, ab_*gemm_, ab_*gemm_blas), read once
+// per process from the environment; both reports start with ab_build_info():
+//   AB_REPORT=1   at exit, a short summary on stderr, one "AB_REPORT[pid]" line
+//                 per item: per routine the calls and wall time by where C was
+//                 computed (gpu_calls% is a share of calls, gpu_time% a share
+//                 of time), the GPU calls' stage costs (init, alloc, pack,
+//                 upload, kernel = command-buffer GPU time, download,
+//                 epilogue, other) and fallbacks to cblas by reason
+//                 (no_device, too_large, gpu_failed, other).
+//   AB_PROFILE=1  the same counts as a detailed table with dimension
+//                 histograms at exit, plus a stderr line per GPU call and per
+//                 fallback. AB_PROFILE_JSON=path also writes JSON at exit.
+//   AB_PROFILE_THRESHOLD_NS=n  count only calls of at least n ns (both reports).
+// A call that falls back counts as a CPU call, its wall time including the
+// failed GPU attempt. A fork()ed child starts with empty counters and reports
+// only calls of its own. The native ABMatrix API is not counted. Formats and
+// the routing variables (AB_MODE, ...): docs/INTEGRATION.md.
 
 #ifdef __cplusplus
 }

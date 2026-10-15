@@ -1,0 +1,23 @@
+# 1dbdb52 A_si64_500b_k222 auto_r2: stderr without dyld lines and without AB_PROFILE per-call lines
+loaded: <campaign>/lib/1dbdb52/libapplebottom.dylib
+Note: The following floating-point exceptions are signalling: IEEE_INVALID_FLAG IEEE_DIVIDE_BY_ZERO IEEE_UNDERFLOW_FLAG
+=== apple-bottom 1.3.1-dev (1dbdb52abeec) BLAS profile, pid 64761 ===
+gpu_calls%: share of calls whose C the GPU computed; gpu_time%: share of wall time spent in those calls.
+routine           calls  gpu_calls  gpu_calls%     total_ms       gpu_ms       cpu_ms  gpu_time%  fallbacks     avg_us   max_dim    hotbin
+------------------------------------------------------------------------------------------------------------------------------
+zgemm             28425          0        0.0%    57958.272        0.000    57958.272       0.0%          0     2039.0     18336       8K+
+dgemm              2064          0        0.0%      203.547        0.000      203.547       0.0%          0       98.6    292250       8K+
+
+Total BLAS time: 58161.8 ms across 2 routines
+
+Dimension distribution for 'zgemm' (by max(M,N)):
+  bin         calls      time_ms   pct_time
+  1-32           11264          2.4      0.0%
+  33-128          4096          5.4      0.0%
+  129-512        11847      14044.9     24.2%
+  513-1K           324      12530.8     21.6%
+  8K+              894      31374.7     54.1%
+
+AB_REPORT[64761] apple-bottom 1.3.1-dev (1dbdb52abeec) AB_MODE=auto
+AB_REPORT[64761] zgemm calls=28425 gpu_calls=0 cpu_calls=28425 gpu_calls%=0.0 total_ms=57958.272 gpu_ms=0.000 cpu_ms=57958.272 gpu_time%=0.0 fallbacks=0
+AB_REPORT[64761] dgemm calls=2064 gpu_calls=0 cpu_calls=2064 gpu_calls%=0.0 total_ms=203.547 gpu_ms=0.000 cpu_ms=203.547 gpu_time%=0.0 fallbacks=0

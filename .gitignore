@@ -25,6 +25,7 @@ __pycache__/
 *.egg-info/
 dist/
 *.egg
-Apple-Bottom: ULP Fiction/
-REORGANIZATION_PLAN.md
 benchmarks/qe_yambo/
+
+# Pseudopotentials for benchmarks/qe (not redistributed)
+benchmarks/qe/pseudo/

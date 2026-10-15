@@ -3,15 +3,12 @@
 ## Installation
 
 ```bash
-# 1. Build the C library
 cd /path/to/apple-bottom
-make clean && make
-make install
-
-# 2. Install Python wrapper
-cd python/
-pip install -e .
+make                        # builds build/libapplebottom.dylib
+pip install -e python/      # finds ../build/libapplebottom.dylib
 ```
+
+Set `AB_LIBRARY=/path/to/libapplebottom.dylib` to use another copy.
 
 ## Minimal Example
 
@@ -85,14 +82,14 @@ except ab.AppleBottomError as e:
 
 ## Performance Tips
 
-- GPU wins for large matrices: DGEMM N ≥ 2048
+- `ab.dgemm` converts and transfers on every call and does not beat `A @ B`; the GPU wins only for large products on matrices kept in a `Session` (DGEMM from about N = 1,500, ZGEMM from about N = 1,000 on an M2 Max)
 - Use memory pool in loops to reduce allocation overhead
 - Call `ab.get_stats()` to profile operations
 - Complex (ZGEMM) requires separate real/imaginary arrays
 
 ## Limits
 
-- Max dimension: 46,340
+- Max matrix size: rows × cols ≤ 2³¹ − 1 elements
 - Max matrices per pool: 128
 - Max matrices per session: 64
 - Requires Apple Silicon Mac (M1, M2, M3, etc.)

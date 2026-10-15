@@ -1,8 +1,16 @@
 # Precision Envelope — apple-bottom v1.0.2
 
 **Document Status**: Validated (2026-03-31)
-**Validation Baseline**: Git tag `v1.0.2-bugfix` (SHA: d115498)
+**Validation Baseline**: Git tag `v1.0.2-bugfix` (SHA: f3e2fc1)
 **Test System**: Apple M2 Max, macOS 14.7, Metal 3
+
+> **Correction (2026-10-14).** The Quantum ESPRESSO result of §2.4 came from
+> runs that did not use the GPU (versions before 1.4.0 needed an `ab_init()`
+> that QE never called), and its timing compared a serial with an MPI QE
+> build; it is withdrawn and replaced by VAL-1 revision 2. The performance
+> thresholds of §5.1 are replaced by the 1.4.0 measurements. The precision
+> analysis and the V-2 convergence data are unaffected. Test counts are
+> those of v1.0.2; see `tests/README.md` for the current suite.
 
 ---
 
@@ -169,17 +177,17 @@ This `~N²·⁵` scaling means max element error grows **faster than the Frobeni
 
 ### 2.4 Production Validation (Quantum ESPRESSO)
 
-**Test Case**: Si64 SCF convergence (64-atom silicon crystal)
+*Revised 2026-10-14.* VAL-1 revision 2 (`tests/validation/VAL001_QE_Si64.md`)
+ran Quantum ESPRESSO (develop, 7.5) on 64-atom Si with PAW, with the GEMMs
+on Accelerate (`AB_MODE=cpu`) and on the GPU in DD (`AB_MODE=gpu`, the calls
+that make up 89–99% of the GEMM work). The total energy at every SCF
+iteration and every printed band energy agree in every printed digit
+(10⁻⁸ Ry, 10⁻⁴ eV), on the k-point (ZGEMM) and Γ-point (DGEMM) paths, with
+the same number of iterations.
 
-| Metric | OpenBLAS (FP64 Reference) | apple-bottom (DD) | Agreement |
-|--------|---------------------------|-------------------|-----------|
-| Total Energy | -2990.44276157 Ry | -2990.44276157 Ry | **11 decimal places** |
-| Wall Time | 2m28s (6 threads) | 2m01s (1 thread + GPU) | 1.22× speedup |
-| Final Convergence | `|ΔE| < 10⁻¹⁰ Ry` | `|ΔE| < 10⁻¹⁰ Ry` | Identical |
-
-**Implication**: DD precision is sufficient for production DFT calculations requiring `~10⁻¹⁰` energy convergence. DFT energy is a norm-averaged quantity (sum over occupied states), so Frobenius-class error is appropriate.
-
-**Data source**: `docs/BENCHMARK_SUMMARY.md`, QE v7.2 validation
+**Implication**: DD precision is sufficient for these SCF calculations. DFT
+energy is a norm-averaged quantity (sum over occupied states), so
+Frobenius-class error is appropriate.
 
 ---
 
@@ -190,9 +198,9 @@ This `~N²·⁵` scaling means max element error grows **faster than the Frobeni
 | Type | Validated Range | Notes |
 |------|----------------|-------|
 | Square matrices | `64 ≤ N ≤ 4096` | Optimal for N ≥ 2048 |
-| Rectangular matrices | Any aspect ratio, `M,N ≤ 46340` | Error scales with K dimension |
+| Rectangular matrices | Any aspect ratio; tested to 143666 × 171 and K = 143666 | Error scales with K dimension |
 | Small matrices | `N ≥ 64` | N < 64: CPU overhead dominates |
-| Large matrices | `N ≤ 4096` (validated), `≤ 46340` (max) | Theoretical limit 46340 |
+| Large matrices | `N ≤ 4096` (validated); `rows·cols ≤ 2³¹ − 1` per matrix (max) | Square limit N = 46340 |
 
 **K-dimension error scaling**: For DGEMM with dimensions M×K × K×N, max element error scales as `O(K)×2⁻⁴⁸`. With K=10000, expect ~1.5×10⁻¹³ max error (still within DD precision class). Rectangular matrices work correctly at all aspect ratios.
 
@@ -217,7 +225,7 @@ This `~N²·⁵` scaling means max element error grows **faster than the Frobeni
 | `ab_matrix_scale(α, A)` | `~10⁻¹⁵` | `~10⁻¹⁵` | ✓ BUG-4 fix | Element-wise A ← αA |
 | `ab_dsyrk(A, C)` | `~N·10⁻¹⁵` | `~N²·⁵·10⁻²¹` | ✓ Tested | C = A × Aᵀ (symmetric) |
 
-**DEPRECATED**: `ab_zherk` is 20× slower than CPU and not recommended for production.
+**DEPRECATED**: `ab_zherk` runs at 0.06–0.67× Accelerate's speed (N ≤ 2,048, 2026-10-14 measurement); use `cblas_zherk`.
 
 ---
 
@@ -258,31 +266,29 @@ The following conditions are **outside the validated envelope**. Results are und
 
 ### 5.1 GPU Crossover Point
 
-apple-bottom is **faster than CPU** when:
+*Revised 2026-10-14* (M2 Max, against Accelerate; data in
+`benchmarks/results/2026-10-14-3253a22-bench-paper/` and
+`benchmarks/results/2026-10-14-52f1880-calibrate/`):
 
-```
-FLOP_count ≥ 100M  (approximately N³ ≥ 100M for DGEMM)
-```
-
-**Practical thresholds**:
-- Square DGEMM: `N ≥ 2048` (1.10-1.29× speedup vs 6-thread OpenBLAS)
-- Complex ZGEMM: `N ≥ 1024` (1.18-1.29× speedup)
-- Iterative algorithms: **Always faster** (memory pool amortizes overhead)
-
-**For `N < 2048`**: GPU overhead (upload/download/dispatch) exceeds compute savings. Use CPU BLAS.
+- **Matrices resident on the GPU** (native API): DGEMM is faster from about
+  N = 1,500 (1.10–1.16× from N = 2,048); ZGEMM from about N = 1,000
+  (1.30–1.39× from N = 1,536).
+- **One call at a time from host memory** (BLAS ABI): slower for every
+  measured shape except ZGEMM with both operands transposed at N ≥ 4096
+  (1.11–1.20×). `AB_MODE=auto` routes by this measurement.
 
 ### 5.2 Precision vs. Performance
 
 | Approach | Frobenius Precision | Max Element (N=4096) | Performance (N=2048) | Use Case |
 |----------|---------------------|----------------------|----------------------|----------|
 | CPU FP64 (`cblas_dgemm`) | `~10⁻¹⁶` | `~10⁻¹⁶` | 1.0× (baseline) | Reference, κ > 10¹², pivoting |
-| apple-bottom DD | `~10⁻¹⁵` | `~10⁻⁶` | 1.10× | Iterative solvers, DFT, MD |
-| GPU FP32 (cuBLAS) | `~10⁻⁸` | `~10⁻⁸` | ~5× | Deep learning only |
+| apple-bottom DD | `~10⁻¹⁵` | `~10⁻⁶` | 1.15× (resident, 2026-10-14) | Iterative solvers, DFT, MD |
+| GPU FP32 (for comparison) | `~10⁻⁸` | `~10⁻⁸` | not measured here | Deep learning only |
 
 **Recommendation**: Use apple-bottom when:
 1. Problem requires Frobenius error `< 10⁻¹⁴` (rules out FP32)
 2. Matrices are square or moderately rectangular
-3. Iterative algorithm (QE, CG, eigensolver) can keep data GPU-resident
+3. The algorithm can keep its large matrices on the GPU between products (codes that call BLAS one call at a time, such as Quantum ESPRESSO, cannot)
 4. **Application is norm-averaged** (energies, residuals), not element-sensitive
 
 ---
@@ -294,9 +300,9 @@ FLOP_count ≥ 100M  (approximately N³ ≥ 100M for DGEMM)
 | Test ID | Description | Status | Source |
 |---------|-------------|--------|--------|
 | **V-2** | DGEMM convergence study (N ≤ 4096) | ✓ PASS | `tests/verification/test_convergence.c` |
-| **VAL-1** | QE Si64 production validation | ✓ PASS | `docs/BENCHMARK_SUMMARY.md` |
-| **BUG-3** | Scaled DGEMM precision (α,β in DD) | ✓ PASS | `tests/test_correctness.c:786` |
-| **BUG-4** | Matrix scaling precision (α in DD) | ✓ PASS | `tests/test_correctness.c:819` |
+| **VAL-1** | QE Si64 production validation | revision 1 withdrawn; revision 2 ✓ PASS (accuracy) | `tests/validation/VAL001_QE_Si64.md` |
+| **BUG-3** | Scaled DGEMM precision (α,β in DD) | ✓ PASS | `test_bug3_dgemm_scaled_precision` in `tests/test_correctness.c` |
+| **BUG-4** | Matrix scaling precision (α in DD) | ✓ PASS | `test_bug4_matrix_scale_precision` in `tests/test_correctness.c` |
 
 ### 6.2 Regression Testing
 
@@ -311,12 +317,12 @@ FLOP_count ≥ 100M  (approximately N³ ≥ 100M for DGEMM)
 
 | Item | Value | Notes |
 |------|-------|-------|
-| **Validated version** | v1.0.2-bugfix | Git tag `v1.0.2-bugfix` (SHA: d115498) |
+| **Validated version** | v1.0.2-bugfix | Git tag `v1.0.2-bugfix` (SHA: f3e2fc1) |
 | **Compiler** | clang 15.0.0 (Apple) | `-O3 -std=c11` |
-| **Metal SDK** | macOS 15.0+ SDK (Xcode 16+) | **`MTLMathModeSafe` is CRITICAL** - without it precision degrades from ~10⁻¹⁵ to ~10⁻⁸ |
+| **Metal SDK** | macOS 15.0+ SDK (Xcode 16+) | **Fast math must be off** (`MTLMathModeSafe`, or `fastMathEnabled = NO` before macOS 15 / SDK 15) - with Metal's default fast math, precision degrades from ~10⁻¹⁵ to ~10⁻⁸ |
 | **Test system** | M2 Max, 64GB RAM | 12 CPU cores, 38 GPU cores |
 
-**CRITICAL**: `MTLMathModeSafe` is a hard requirement, not optional. Without it (SDK < 15.0), DD precision degrades by 8 orders of magnitude (~10⁻⁸ instead of ~10⁻¹⁵). Do not modify validated code without re-running V&V tests. Tag validated states in Git.
+**CRITICAL**: the shaders must be compiled without fast math. Metal's default fast math lets the compiler reorder and fuse the error-free transformations, and DD precision degrades by about 7 orders of magnitude (~10⁻⁸ instead of ~10⁻¹⁵). The validated v1.0.2 baseline required `MTLMathModeSafe` (SDK 15+). Since 1.4.0 the library uses `MTLMathModeSafe` where the SDK and OS provide it and `fastMathEnabled = NO` otherwise, which keeps full DD precision; `test_precision` and the V-2 study fail if precision is lost. Do not modify validated code without re-running V&V tests. Tag validated states in Git.
 
 ---
 
@@ -328,13 +334,13 @@ For scientific computing on Apple Silicon:
 
 **✓ USE apple-bottom for**:
 - DFT, molecular dynamics, FEM iterative solvers (norm-averaged quantities)
-- Matrices `N ≥ 1024`, condition number `κ < 10⁶`
+- Large products on GPU-resident matrices (§5.1: DGEMM from about N = 1,500, ZGEMM from about N = 1,000 on an M2 Max), condition number `κ < 10⁶`
 - Applications requiring `10⁻¹⁴` to `10⁻¹⁰` Frobenius convergence
 
 **✗ DO NOT USE for**:
 - Algorithms requiring element-wise accuracy `< 10⁻⁶` (e.g., pivoting, eigensolvers)
 - Ill-conditioned systems (`κ > 10¹²`)
-- Matrices `N < 512` (CPU faster due to overhead)
+- Smaller products, and GEMMs issued one call at a time from host memory (§5.1)
 - Thread-unsafe contexts (add external locking)
 
 **Validation requirement**: For mission-critical calculations, perform cross-verification:

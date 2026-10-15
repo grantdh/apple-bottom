@@ -2,9 +2,57 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.3.1-dev] - Unreleased
+## [1.4.0] - Unreleased
 
-_TBD following Si64 benchmark campaign._
+### Added
+- **`ab_build_info()`** returns the library version and the git commit it
+  was built from, with `-dirty` if tracked files differed from it (the
+  Makefile passes `AB_BUILD_SHA`; `unknown` outside a git checkout and in a
+  copy vendored inside another repository). Every
+  `AB_PROFILE` and `AB_REPORT` report starts with it.
+- **`AB_REPORT=1`**: a short summary on stderr at exit, once per process
+  and tagged with the pid. Per routine: calls and wall time by where C was
+  computed, the GPU calls' stage costs (init, alloc, pack, upload, kernel as
+  command-buffer GPU time, download, epilogue, other) and fallbacks to cblas
+  by reason (`no_device`, `too_large`, `gpu_failed`). See the environment
+  variable table in `docs/INTEGRATION.md`.
+- **`make calibrate`** measures the BLAS-ABI GPU path against Accelerate and
+  derives the `AB_MODE=auto` dispatch table from the result.
+  `benchmarks/calibrate.c` times each shape of its grid end to end, through
+  `ab_*gemm_blas` with the GPU path forced and through Accelerate
+  `cblas_*gemm` in the same process, under `caffeinate -is` (3 warmups,
+  median of 7, GPU results checked against cblas). The grid holds the
+  Quantum ESPRESSO si64 PAW DGEMMs and Davidson ZGEMMs and square and
+  transposed-square DGEMM/ZGEMM from 256 to 6144. It writes the raw and
+  summary CSVs and `dispatch_table.txt` under
+  `benchmarks/results/<date>-<sha>-calibrate/` and regenerates the built-in
+  table, `src/dispatch_table.h`, whose header records the machine, OS, SDK,
+  library commit and date.
+- **`AB_DISPATCH_TABLE=<path>`** makes `AB_MODE=auto` use a table file, such
+  as the `dispatch_table.txt` of a calibration on another machine, instead
+  of the built-in table.
+- **Quantum ESPRESSO validation kit** (`benchmarks/qe/`): the si64 inputs,
+  `run_campaign.sh` (inputs × `AB_MODE`s × repetitions, fresh directories,
+  rotated mode order) and `analyze.py` / `compare.py`, which summarize the
+  BLAS time by route and the GPU stage costs and compare every energy and
+  band energy with the `cpu` run. Plan lines can add pw.x arguments such as
+  `-nk 4`; with several ranks the runner caps each rank's OpenBLAS and
+  Accelerate threads, and `analyze.py` sums over the ranks. VAL-1 was repeated with it;
+  results in `benchmarks/results/2026-10-14-1dbdb52-qe-si64/`. The 1.4.0
+  release check on a QE build compiled `-O3`, with 1 and 8 ranks, is in
+  `benchmarks/results/2026-10-15-c5a1fa6-qe-si64-opt/`.
+- **`make version-check`** (`scripts/check_version.sh`, first step of
+  `make ci-local` and of CI) checks that the Python package, CITATION.cff,
+  the README citation and the top CHANGELOG entry state the version in
+  `include/apple_bottom.h`, which the Makefile now reads for the dylib and
+  pkg-config versions.
+- **`make test-rectangular`** builds and runs `tests/test_rectangular.c`
+  (shapes up to 18277 × 150 × 18277), which no target built before.
+- **CI** builds both libraries and runs `make version-check`,
+  `make build-check`, `make test-symbols` and the routing unit tests on
+  macos-14 and macos-15 (it only compiled the sources before). GitHub's
+  runners have no usable Metal GPU, so the GPU suites stay in
+  `make ci-local`.
 
 ### Fixed
 - **Morton remap dropped output tiles on non-square power-of-two grids**
@@ -30,7 +78,7 @@ _TBD following Si64 benchmark campaign._
 - **Dispatch path and AB_PROFILE reported the routing decision, not the path
   taken** (H-P2-8). `ab_get_last_dispatch_path()` says `"gpu"` only
   once the GPU result is in C and `"cpu"` for every cblas run, including
-  calls the Fortran bridge keeps on the CPU; `ab_use_gpu()` no longer sets
+  calls the Fortran bridge keeps on the CPU; the routing no longer sets
   it. The AB_PROFILE table counts a `dgemm_`/`zgemm_` call as GPU only if it
   ran there, and a GPU failure that falls back to cblas prints its reason
   under AB_PROFILE.
@@ -111,8 +159,85 @@ _TBD following Si64 benchmark campaign._
   overflow its buffer. numpy is optional, `AB_LIBRARY` selects the dylib,
   and `make test-python` runs the binding tests. The bindings remain
   experimental.
+- **Matrices with more than 46,340 rows or columns never reached the GPU.**
+  The limit was 46,340 per dimension, a square-matrix stand-in for 2³¹
+  elements. In Quantum ESPRESSO Si64 (PAW, 2 MPI ranks) it rejected only
+  the PAW DGEMMs in `newq` (called from `newd`) and `addusdens`,
+  171 × 64 × 2·ngm_l and 2·ngm_l × 171 × 64: 171 = nh(nh+1)/2 projector
+  pairs (nh = 18 per Si atom), 64 = the atoms of that species, and
+  2·ngm_l = 71,834 (gamma point) or 143,666 (k-points) = the rank's
+  dense-grid G-vectors, complex values passed as real pairs. Those
+  BLAS-ABI calls always ran on cblas; the Davidson GEMMs (`regterg`,
+  `cegterg`; long dimension ≈ 9,000 per rank) were never affected. This
+  is a robustness fix, not a speed-up: the PAW DGEMMs run at 0.09–0.15×
+  Accelerate's speed on the GPU, and calibrated `AB_MODE=auto` routing
+  keeps them on Accelerate. The limit is now what actually overflows, for any shape:
+  rows × cols ≤ `AB_MAX_MATRIX_ELEMENTS` (2³¹ − 1; the kernels index in
+  32-bit unsigned arithmetic) and the DD buffer within the device's
+  `maxBufferLength`. Every kernel was checked bit-exact on matrices past
+  2²⁹ elements (byte offsets above 4 GiB).
+  Beyond the limit, `ab_matrix_create` returns NULL; the new
+  `ab_matrix_check_size()`, `ab_session_add` and `ab_dev_*gemm` return
+  the new `AB_ERROR_TOO_LARGE` (`ab_dev_*gemm` returned
+  `AB_ERROR_ALLOC_FAILED`); BLAS-ABI calls run on cblas, and `AB_PROFILE=1`
+  prints why. In Python, `MAX_ELEMENTS` (2³¹ − 1) bounds rows × cols and
+  `MAX_DIMENSION` is now 2³¹ − 1.
+- **The first GPU call left `FE_OVERFLOW` raised in the caller.**
+  `MTLCreateSystemDefaultDevice()` raises it on its first call in a
+  process (macOS 27), so every Quantum ESPRESSO run that reached the GPU
+  ended with gfortran's `IEEE_OVERFLOW_FLAG is signalling` note.
+  `ab_init()` and the device API now restore the caller's floating-point
+  environment around device creation (`test_init_keeps_host_fp_flags`).
+- **`AB_PROFILE` stage lines could interleave** when threads called BLAS
+  concurrently; each line is now written with one call.
+- **Build tooling.** `make build-check` wrote its objects over the
+  library's (a later `make lib` then reported the build as `unknown`) and
+  skipped `src/device_api.m`; `make test-asan`/`test-ubsan` could not
+  build; a copy vendored inside another git repository stamped that
+  repository's commit as its build SHA; `make calibrate` with `--only`
+  replaced the built-in table with one derived from part of the grid.
+- **`tests/test_rectangular.c` failed correct results.** It compared
+  elementwise relative errors with 1e-14, which cancellation defeats; it now
+  measures componentwise error against |op(A)| |B| and runs the
+  conjugate-transpose case it used to skip.
 
 ### Changed
+- **`AB_MODE=auto`, the default, is calibrated from measured end-to-end
+  times.** A BLAS-ABI call (`dgemm_`, `zgemm_`, `ab_*gemm_`,
+  `ab_*gemm_blas`) now goes to the GPU only if a row of the dispatch table
+  covers it: a shape the GPU was measured at least 1.10× faster on, with no
+  slower shape of the same routine and TRANS class at least as large in M,
+  N and K. Before, fixed FLOP thresholds (10⁸ complex, 5·10⁷ real, applied
+  differently by the Fortran bridge and `ab_*gemm_blas`) sent most large
+  calls to the GPU, including Quantum ESPRESSO's Davidson ZGEMMs (VAL-1
+  input A: ZGEMM time 57.9 s on Accelerate, 144.6 s with the old thresholds,
+  which sent the same 951 large ZGEMMs to the GPU). On the M2 Max calibration
+  (`benchmarks/results/2026-10-14-52f1880-calibrate/`) the GPU was at least
+  1.10× faster only for ZGEMM with both operands transposed or conjugated
+  and M, N, K ≥ 4096 (1.11× at 4096, 1.20× at 6144), the table's one row.
+  Every QE si64 shape (0.09–0.76× Accelerate's speed) and every DGEMM up to
+  6144 (at most 0.84×) is slower on the GPU and now stays on Accelerate.
+  One module (`src/dispatch.c`) routes every entry point; precedence is in
+  `docs/INTEGRATION.md`. `AB_MODE=cpu`/`gpu`, `AB_MIN_GPU_DIM` and the
+  native `ABMatrix` and device APIs are unchanged.
+- **`AB_CROSSOVER_FLOPS` and `AB_CROSSOVER_FLOPS_REAL` now replace the
+  table** and are unset by default. When set, `auto` sends a call with at
+  least that many FLOPs to the GPU: `AB_CROSSOVER_FLOPS` for ZGEMM, and for
+  DGEMM unless `AB_CROSSOVER_FLOPS_REAL` is set. Before, they adjusted
+  default thresholds, `AB_CROSSOVER_FLOPS_REAL` only for `ab_dgemm_blas`
+  calls with every dimension ≥ 64.
+- **The AB_PROFILE table separates call share from time share.** Its
+  `gpu_pct` column was the share of calls that ran on the GPU, not of time,
+  and was read as a time share. It is replaced by `gpu_calls`, `gpu_calls%`,
+  `gpu_ms`, `cpu_ms`, `gpu_time%` and `fallbacks`, followed by tables of the
+  GPU stage costs and of the fallbacks by reason. Every GPU call now prints
+  a stage line, DGEMM included (it was ZGEMM only), with the stages named as
+  in `AB_REPORT`. Direct `ab_dgemm_blas` / `ab_zgemm_blas` calls are now
+  counted too (only `dgemm_`, `zgemm_` and `ab_*gemm_` were). A `fork()`ed
+  child starts with empty counters, so it no longer reports the parent's
+  calls as its own. In the `AB_PROFILE_JSON` file, `gpu_dispatch_count` and
+  `amx_fallback_count` are now `gpu_calls` and `cpu_calls`, next to
+  `gpu_ns`, `cpu_ns`, `gpu_stage_ns`, `fallbacks` and the top-level `build`.
 - **`_dgemm$NEWLAPACK` / `_zgemm$NEWLAPACK` are no longer exported.** C code
   that calls `dgemm_`/`zgemm_` through the `ACCELERATE_NEW_LAPACK` headers
   now gets Accelerate, not apple-bottom; call `ab_dgemm_blas` /
@@ -129,10 +254,47 @@ _TBD following Si64 benchmark campaign._
   Frobenius error exceeds √N·u². A build without safe math now fails both.
 - **`make ci-local` runs `test_device_api` and counts tests one way**
   (RH-P1-1). `TEST_TOTAL` counts tests (precision cases, `TESTS[]` entries
-  and BLAS-ABI suites: 143), with device-API `CHECK`s and BLAS-ABI cases on
+  and BLAS-ABI suites: 156), with device-API `CHECK`s and BLAS-ABI cases on
   their own lines. `test_convergence` takes its CSV path as `argv[1]`, so
   `make ci-local BUILD=...` reports the convergence data instead of
   `missing`.
+
+### Removed
+- `CMakeLists.txt`. It built only `src/apple_bottom.m`, a library without
+  the BLAS ABI, routing, device API or profiler; the Makefile is the
+  supported build.
+- Internal review notes (`docs/review/`), `python/INDEX.md` (a copy of the
+  Python README), two committed test binaries and two scratch test sources
+  that no target built.
+
+### Corrected claims
+Earlier releases and documents made claims that measurement does not
+support. They are withdrawn, and the documents now say what was measured:
+- **"22% faster" / "1.22× vs 6-thread OpenBLAS" / "+12% (Si128)" on Quantum
+  ESPRESSO** (README, INTEGRATION, VV_REPORT, VAL-1, blog). Versions
+  1.0–1.3 needed an explicit `ab_init()`, which no QE build called, so those
+  runs never used the GPU, and the 22% compared a serial QE build with an
+  MPI build. Repeated with the GPU path working (VAL-1, revision 2), forcing
+  the GPU makes Si64 runs 1–17% slower on an M2 Max (QE itself compiled at
+  `-O0`), and `AB_MODE=auto`
+  keeps QE's GEMMs on Accelerate at no cost.
+- **"11 decimal places of agreement"** with QE. The March runs compared CPU
+  with CPU. With the calls that make up 89–99% of the GEMM work on the GPU,
+  the energies and band energies of VAL-1 revision 2 agree with the CPU run
+  in every printed digit (10⁻⁸ Ry, 10⁻⁴ eV).
+- **"2.7× speedup"** (CITATION.cff, rectangular-tiling note). No measurement
+  supports it.
+- **"618 GFLOP/s" / "643 GFLOP/s"** headline DGEMM figures. They were
+  steady-state figures with matrices resident on the GPU, not BLAS-call
+  throughput, and are replaced by dated measurements of both regimes in the
+  README.
+- **"~24 GFLOP/s" for metal-float64 and "26× faster" than it** (README,
+  COMPARISON, blog). metal-float64 is an unfinished scalar library with no
+  GEMM; there is nothing to benchmark against.
+- **DSYRK through the Fortran ABI**, **SGEMM/TGEMM coverage** and
+  **multi-GPU** claims (INTEGRATION, COMPARISON): the library exports only
+  `dgemm_`/`zgemm_` (and `ab_dgemm_`/`ab_zgemm_`) to Fortran, and has no
+  SGEMM, TGEMM or multi-GPU support.
 
 ## [1.3.0] - 2026-04-18
 
@@ -223,7 +385,7 @@ _TBD following Si64 benchmark campaign._
   - Reduces GPU dispatch overhead for QE's many small ZGEMM calls
 
 ### Fixed
-- **BUG-8: ARC leak in Metal-ref structs** — `ABMatrix_s`, `ABFuture_s`, `ABBatch_s`, and `ab_dev_buffer_s` now allocate via `new`/`delete` so ARC destructors release their `id<MTL…>` strong refs (was `calloc`/`free`, which does not run ARC destructors and leaked the buffers, command buffers, and encoders). Landed in ad993e1.
+- **BUG-8: ARC leak in Metal-ref structs** — `ABMatrix_s`, `ABFuture_s`, `ABBatch_s`, and `ab_dev_buffer_s` now allocate via `new`/`delete` so ARC destructors release their `id<MTL…>` strong refs (was `calloc`/`free`, which does not run ARC destructors and leaked the buffers, command buffers, and encoders). Landed in 8c18ef3.
 
 ### Changed
 - **README.md**: Complete rewrite as high-conversion landing page
@@ -319,7 +481,7 @@ _TBD following Si64 benchmark campaign._
 - **Status**: VALIDATED for production DFT, MD, FEM iterative solvers
 
 ### Notes
-- Validated baseline: Git tag `v1.0.2-bugfix` (SHA: d115498)
+- Validated baseline: Git tag `v1.0.2-bugfix` (SHA: f3e2fc1)
 - All precision claims backed by empirical convergence data
 - Known limitation: Rectangular matrices (aspect ratio >10:1) fail correctness
 

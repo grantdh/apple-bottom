@@ -239,7 +239,7 @@ def demo_error_handling():
     # Test matrix dimension limits
     print("Testing dimension limits...")
     try:
-        gpu_m = ab.Matrix(50000, 50000)  # Exceeds MAX_DIMENSION
+        gpu_m = ab.Matrix(50000, 50000)  # 2.5e9 elements, exceeds MAX_ELEMENTS
     except ab.InvalidArgumentError as e:
         print(f"  Caught expected error: {type(e).__name__}")
 

@@ -23,7 +23,7 @@ make ci-local
 ```
 
 This will:
-- Run all 143 tests (precision, correctness, chaos, device-API, BLAS-ABI; see the counting rule in `tests/README.md`) plus the ghost-detection, symbol and Fortran checks
+- Run all 156 tests (precision, correctness, chaos, device-API, routing, BLAS-ABI; see the counting rule in `tests/README.md`) plus the ghost-detection, symbol and Fortran checks
 - Run convergence study (V-2)
 - Generate `build/CI_REPORT.txt` with test results and convergence data hash
 
@@ -33,21 +33,23 @@ This will:
 ✓ test_correctness: PASS
 ✓ test_chaos: PASS
 ✓ test_device_api: PASS
+✓ test_dispatch: PASS
 ✓ test_blas_abi: PASS
 ✓ test_convergence: PASS
 
 GIT_SHA: <current-commit-sha>
-TEST_TOTAL: 143
-TEST_PASSED: 143
+AB_BUILD_SHA: <12-digit commit; a release build must not end in -dirty>
+TEST_TOTAL: 156
+TEST_PASSED: 156
 TEST_FAILED: 0
 DEVICE_API_CHECKS: 152
-BLAS_ABI_CASES: 994 passed, 0 xfailed, 0 failed, 0 xpassed, 0 stale XFAIL entries
+BLAS_ABI_CASES: 1007 passed, 0 xfailed, 0 failed, 0 xpassed, 0 stale XFAIL entries
 CONVERGENCE_POINTS: 7
 STATUS: PASS
 ```
 
 - [ ] `make ci-local` completed successfully
-- [ ] All 143 tests passed
+- [ ] All 156 tests passed
 - [ ] Convergence study generated 7 data points (N ∈ {64, 128, 256, 512, 1024, 2048, 4096})
 - [ ] Review `build/convergence_data.csv` for expected error ranges (Frobenius ~10⁻¹⁴ to 5×10⁻¹⁴)
 
@@ -55,11 +57,11 @@ STATUS: PASS
 
 Check that CI passed on the latest commit:
 
-- [ ] GitHub Actions: `build-check` job passed (compile-time verification)
+- [ ] GitHub Actions: the `CI` workflow passed on macos-14 and macos-15
 
 **Check at:** `https://github.com/grantdh/apple-bottom/actions`
 
-**Note:** GitHub Actions runners don't expose Metal GPU access, so CI only verifies compile-time correctness. Full GPU validation (143 tests + convergence study) must be run locally via `make ci-local` (see step 2 above).
+**Note:** GitHub-hosted runners don't give jobs a usable Metal GPU, so CI runs only the checks that need none: `make version-check`, `make build-check`, `make lib`, `make test-symbols` and the routing unit tests (`build/test_dispatch`). The GPU suites and the convergence study run locally via `make ci-local` (step 2 above).
 
 ### 4. Documentation Review
 
@@ -67,13 +69,22 @@ Check that CI passed on the latest commit:
 - [ ] `docs/INTEGRATION.md` examples are up-to-date
 - [ ] `docs/vv/VV_REPORT.md` references current validated baseline (if V&V changed)
 - [ ] `docs/vv/PRECISION_ENVELOPE.md` validated range is accurate
+- [ ] If the BLAS-ABI GPU path or the kernels changed since the last
+      calibration: `make calibrate` on an idle machine, and commit the
+      regenerated `src/dispatch_table.h` with its
+      `benchmarks/results/<date>-<sha>-calibrate/` directory
 
 ### 5. Version Update
 
-Update version numbers in:
+The version lives in `include/apple_bottom.h` (`APPLE_BOTTOM_VERSION_MAJOR`,
+`_MINOR`, `_PATCH` and `_STRING`); the Makefile reads it from there for the
+dylib and the pkg-config file. Set it, then bring the other copies in line:
 
-- [ ] `CHANGELOG.md` — Add release date to `[Unreleased]` section
-- [ ] (Optional) `include/apple_bottom.h` — Update version comment if present
+- [ ] `python/apple_bottom/__init__.py` (`__version__`) and `python/setup.py`
+- [ ] `CITATION.cff` (`version`, and add `date-released: YYYY-MM-DD`)
+- [ ] The citation block at the end of `README.md`
+- [ ] `CHANGELOG.md` — rename the top `[X.Y.Z] - Unreleased` entry to the release date
+- [ ] `make version-check` passes (it is also the first step of `make ci-local` and of CI)
 
 Example CHANGELOG update:
 ```markdown

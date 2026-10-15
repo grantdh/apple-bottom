@@ -43,30 +43,72 @@ static double get_time_sec(void) {
 // Validation Helpers
 // =============================================================================
 
-static double max_relative_error_real(const double* a, const double* b, int n) {
-    double max_err = 0.0;
-    for (int i = 0; i < n; i++) {
-        double ref = b[i];
-        double got = a[i];
-        if (fabs(ref) < 1e-300) continue; // Skip near-zero
-        double err = fabs((got - ref) / ref);
-        if (err > max_err) max_err = err;
+// Componentwise error: |got - ref| / (|op(A)| |B|) per element of C. A dot
+// product's rounding error is relative to the sum of |a_k b_k|, not to the
+// result; where the sum cancels, |ref| is far below its terms, so the
+// elementwise |got - ref| / |ref| says nothing about accuracy.
+// absA is M x K (or K x M with transA), absB is K x N, both row-major.
+static double componentwise_error(const double* got_re, const double* got_im,
+                                  const double* ref_re, const double* ref_im,
+                                  const double* absA, const double* absB,
+                                  bool transA, int M, int N, int K) {
+    double* scale = (double*)malloc((size_t)M * N * sizeof(double));
+    cblas_dgemm(CblasRowMajor, transA ? CblasTrans : CblasNoTrans, CblasNoTrans,
+                M, N, K, 1.0, absA, transA ? M : K, absB, N, 0.0, scale, N);
+    double worst = 0.0;
+    for (size_t i = 0; i < (size_t)M * N; i++) {
+        double d = fabs(got_re[i] - ref_re[i]);
+        if (got_im) d = hypot(d, got_im[i] - ref_im[i]);
+        if (!isfinite(d)) { worst = INFINITY; break; }       // NaN or Inf in the result
+        if (scale[i] > 0.0) { if (d / scale[i] > worst) worst = d / scale[i]; }
+        else if (d != 0.0) { worst = INFINITY; break; }      // nonzero where |A||B| is 0
     }
-    return max_err;
+    free(scale);
+    return worst;
 }
 
-static double max_relative_error_complex(const double complex* a, const double complex* b, int n) {
-    double max_err = 0.0;
-    for (int i = 0; i < n; i++) {
-        double complex ref = b[i];
-        double complex got = a[i];
-        double mag_ref = cabs(ref);
-        if (mag_ref < 1e-300) continue;
-        double mag_diff = cabs(got - ref);
-        double err = mag_diff / mag_ref;
-        if (err > max_err) max_err = err;
+static double real_error(const double* A, const double* B, const double* got,
+                         const double* ref, int M, int N, int K) {
+    double* absA = (double*)malloc((size_t)M * K * sizeof(double));
+    double* absB = (double*)malloc((size_t)K * N * sizeof(double));
+    for (size_t i = 0; i < (size_t)M * K; i++) absA[i] = fabs(A[i]);
+    for (size_t i = 0; i < (size_t)K * N; i++) absB[i] = fabs(B[i]);
+    double e = componentwise_error(got, NULL, ref, NULL, absA, absB, false, M, N, K);
+    free(absA); free(absB);
+    return e;
+}
+
+// A has a_count elements (M x K, or K x M with transA).
+static double complex_error(const double complex* A, const double complex* B,
+                            const double complex* got, const double complex* ref,
+                            bool transA, int M, int N, int K) {
+    size_t a_count = (size_t)M * K, b_count = (size_t)K * N, c_count = (size_t)M * N;
+    double* absA = (double*)malloc(a_count * sizeof(double));
+    double* absB = (double*)malloc(b_count * sizeof(double));
+    double* g = (double*)malloc(4 * c_count * sizeof(double));
+    for (size_t i = 0; i < a_count; i++) absA[i] = cabs(A[i]);
+    for (size_t i = 0; i < b_count; i++) absB[i] = cabs(B[i]);
+    for (size_t i = 0; i < c_count; i++) {
+        g[i] = creal(got[i]); g[c_count + i] = cimag(got[i]);
+        g[2 * c_count + i] = creal(ref[i]); g[3 * c_count + i] = cimag(ref[i]);
     }
-    return max_err;
+    double e = componentwise_error(g, g + c_count, g + 2 * c_count, g + 3 * c_count,
+                                   absA, absB, transA, M, N, K);
+    free(absA); free(absB); free(g);
+    return e;
+}
+
+// Accumulated DD rounding over K terms with margin, 10 K u^2 (u^2 = 2^-48),
+// with a floor for short sums: the bound of test_rectangular_diag.c.
+static double dd_bound(int K) {
+    double b = 10.0 * K * 3.55e-15;
+    return b > 3.55e-14 ? b : 3.55e-14;
+}
+
+static void check(double err, int K) {
+    printf("(err %.1e, bound %.1e) ", err, dd_bound(K));
+    if (err <= dd_bound(K)) PASS();
+    else FAIL("componentwise error above the DD bound");
 }
 
 // =============================================================================
@@ -102,7 +144,7 @@ static void test_dgemm_tall_skinny(void) {
     ab_matrix_download(mC, C_gpu, true);
 
     // Validate
-    double err = max_relative_error_real(C_gpu, C_ref, M * N);
+    double err = real_error(A, B, C_gpu, C_ref, M, N, K);
 
     ab_matrix_destroy(mA);
     ab_matrix_destroy(mB);
@@ -110,8 +152,7 @@ static void test_dgemm_tall_skinny(void) {
     free(A); free(B); free(C_gpu); free(C_ref);
     ab_shutdown();
 
-    if (err < 1e-14) PASS();
-    else FAIL("error too large");
+    check(err, K);
 }
 
 static void test_dgemm_short_wide(void) {
@@ -139,7 +180,7 @@ static void test_dgemm_short_wide(void) {
     ab_dgemm(mA, mB, mC);
     ab_matrix_download(mC, C_gpu, true);
 
-    double err = max_relative_error_real(C_gpu, C_ref, M * N);
+    double err = real_error(A, B, C_gpu, C_ref, M, N, K);
 
     ab_matrix_destroy(mA);
     ab_matrix_destroy(mB);
@@ -147,15 +188,14 @@ static void test_dgemm_short_wide(void) {
     free(A); free(B); free(C_gpu); free(C_ref);
     ab_shutdown();
 
-    if (err < 1e-14) PASS();
-    else FAIL("error too large");
+    check(err, K);
 }
 
 static void test_dgemm_qe_dimensions(void) {
     TEST("DGEMM QE-like (18277 × 150 × 18277 × 150)");
     ab_init();
 
-    // Actual QE Davidson dimensions
+    // QE-like aspect (M, N as in a Davidson update); K is synthetic
     int M = 18277, N = 150, K = 18277;
 
     double* A = (double*)malloc(M * K * sizeof(double));
@@ -180,7 +220,7 @@ static void test_dgemm_qe_dimensions(void) {
     ab_dgemm(mA, mB, mC);
     ab_matrix_download(mC, C_gpu, true);
 
-    double err = max_relative_error_real(C_gpu, C_ref, M * N);
+    double err = real_error(A, B, C_gpu, C_ref, M, N, K);
 
     ab_matrix_destroy(mA);
     ab_matrix_destroy(mB);
@@ -188,8 +228,7 @@ static void test_dgemm_qe_dimensions(void) {
     free(A); free(B); free(C_gpu); free(C_ref);
     ab_shutdown();
 
-    if (err < 1e-14) PASS();
-    else FAIL("error too large");
+    check(err, K);
 }
 
 static void test_dgemm_thin_middle(void) {
@@ -219,7 +258,7 @@ static void test_dgemm_thin_middle(void) {
     ab_dgemm(mA, mB, mC);
     ab_matrix_download(mC, C_gpu, true);
 
-    double err = max_relative_error_real(C_gpu, C_ref, M * N);
+    double err = real_error(A, B, C_gpu, C_ref, M, N, K);
 
     ab_matrix_destroy(mA);
     ab_matrix_destroy(mB);
@@ -227,8 +266,7 @@ static void test_dgemm_thin_middle(void) {
     free(A); free(B); free(C_gpu); free(C_ref);
     ab_shutdown();
 
-    if (err < 1e-14) PASS();
-    else FAIL("error too large");
+    check(err, K);
 }
 
 // =============================================================================
@@ -299,7 +337,7 @@ static void test_zgemm_qe_dimensions(void) {
         C_gpu[i] = Cr[i] + I * Ci[i];
     }
 
-    double err = max_relative_error_complex(C_gpu, C_ref, M * N);
+    double err = complex_error(A, B, C_gpu, C_ref, false, M, N, K);
 
     ab_matrix_destroy(mAr); ab_matrix_destroy(mAi);
     ab_matrix_destroy(mBr); ab_matrix_destroy(mBi);
@@ -308,8 +346,7 @@ static void test_zgemm_qe_dimensions(void) {
     free(Ar); free(Ai); free(Br); free(Bi); free(Cr); free(Ci);
     ab_shutdown();
 
-    if (err < 1e-14) PASS();
-    else FAIL("error too large");
+    check(err, K);
 }
 
 static void test_zgemm_conjugate_transpose_qe(void) {
@@ -340,12 +377,33 @@ static void test_zgemm_conjugate_transpose_qe(void) {
     cblas_zgemm(CblasRowMajor, CblasConjTrans, CblasNoTrans,
                 M, N, K, &alpha, A, M, B, N, &beta, C_ref, N);
 
-    // GPU (currently doesn't support transpose, so this is a TODO test)
-    printf("(skipped - transpose not yet supported) ");
-    PASS(); // Placeholder
+    // GPU: A is stored K x M, ab_zgemm_ex applies the conjugate transpose
+    size_t a_count = (size_t)K * M, b_count = (size_t)K * N, c_count = (size_t)M * N;
+    double *Ar = malloc(a_count * sizeof(double)), *Ai = malloc(a_count * sizeof(double));
+    double *Br = malloc(b_count * sizeof(double)), *Bi = malloc(b_count * sizeof(double));
+    double *Cr = malloc(c_count * sizeof(double)), *Ci = malloc(c_count * sizeof(double));
+    for (size_t i = 0; i < a_count; i++) { Ar[i] = creal(A[i]); Ai[i] = cimag(A[i]); }
+    for (size_t i = 0; i < b_count; i++) { Br[i] = creal(B[i]); Bi[i] = cimag(B[i]); }
+    ABMatrix mAr = ab_matrix_create(K, M), mAi = ab_matrix_create(K, M);
+    ABMatrix mBr = ab_matrix_create(K, N), mBi = ab_matrix_create(K, N);
+    ABMatrix mCr = ab_matrix_create(M, N), mCi = ab_matrix_create(M, N);
+    ab_matrix_upload(mAr, Ar, true); ab_matrix_upload(mAi, Ai, true);
+    ab_matrix_upload(mBr, Br, true); ab_matrix_upload(mBi, Bi, true);
+    ABStatus st = ab_zgemm_ex(AB_CONJ_TRANS, AB_NO_TRANS, mAr, mAi, mBr, mBi, mCr, mCi);
+    ab_matrix_download(mCr, Cr, true);
+    ab_matrix_download(mCi, Ci, true);
+    for (size_t i = 0; i < c_count; i++) C_gpu[i] = Cr[i] + I * Ci[i];
+    double err = complex_error(A, B, C_gpu, C_ref, true, M, N, K);
 
+    ab_matrix_destroy(mAr); ab_matrix_destroy(mAi);
+    ab_matrix_destroy(mBr); ab_matrix_destroy(mBi);
+    ab_matrix_destroy(mCr); ab_matrix_destroy(mCi);
+    free(Ar); free(Ai); free(Br); free(Bi); free(Cr); free(Ci);
     free(A); free(B); free(C_gpu); free(C_ref);
     ab_shutdown();
+
+    if (st != AB_OK) FAIL("ab_zgemm_ex failed");
+    else check(err, K);
 }
 
 // =============================================================================
@@ -378,7 +436,7 @@ static void benchmark_aspect_ratios(void) {
         {512, 8192, 2048, "Wide 1:16"},
     };
 
-    for (int c = 0; c < sizeof(cases)/sizeof(cases[0]); c++) {
+    for (size_t c = 0; c < sizeof(cases)/sizeof(cases[0]); c++) {
         int M = cases[c].M;
         int N = cases[c].N;
         int K = cases[c].K;

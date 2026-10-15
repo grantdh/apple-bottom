@@ -1,20 +1,27 @@
-# Reproducing apple-bottom benchmarks
+# Reproducing apple-bottom measurements
 
-## Environment
+The performance numbers in the README and VAL-1 each have a dated directory
+under `benchmarks/results/` that names the machine, OS, toolchain and
+library build they came from:
 
-- Hardware: Apple M2 Max (38-core GPU)
-- macOS: 26.2 (build 25C56)
-- Xcode: 26.0.1 (build 17A400)
-- apple-bottom: commit `3d2381b` (HEAD at time of capture)
+| What | Command | Results |
+|---|---|---|
+| Native-API GEMM throughput | `make build/bench_paper && ./build/bench_paper --csv` (three runs) | `benchmarks/results/2026-10-14-3253a22-bench-paper/` |
+| BLAS-ABI GPU vs Accelerate, and the `AB_MODE=auto` table | `make calibrate` (about 15 minutes) | `benchmarks/results/2026-10-14-52f1880-calibrate/` |
+| Quantum ESPRESSO validation (VAL-1) | `benchmarks/qe/run_campaign.sh` (see `benchmarks/qe/README.md`) | `benchmarks/results/2026-10-14-1dbdb52-qe-si64/` |
+
+Environment of those runs: MacBook Pro (Mac14,6), Apple M2 Max, 38-core
+GPU, 8P+4E CPU cores, 64 GB; macOS 27.0.1 (26A434); macOS SDK 26.0, Apple
+clang 17.0.0. Run on AC power under `caffeinate -is`, with nothing else
+using the GPU, and record `ab_build_info()` with the results (it prints
+the library version and commit, `-dirty` if tracked files had changed).
 
 ## Build
 
 ```bash
-make clean && make test   # expect 113/113 passing
-make bench                # builds and runs all bench_* binaries
-                          # (bench_dgemm, bench_sgemm, bench_zgemm,
-                          #  bench_pool, bench_dsyrk, bench_zherk,
-                          #  bench_async)
+make clean && make test   # 138 tests
+make ci-local             # 156 tests + the V-2 convergence study
+make bench                # builds and runs the bench_* binaries
 ```
 
 ## CSV emission to timestamped directory

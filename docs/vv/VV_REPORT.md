@@ -3,11 +3,36 @@
 
 **Report Version**: 1.1
 **Date**: 2026-04-23
-**Status**: Validated for Production Use
-**Validated Baseline**: Git tag `v1.0.2-bugfix` (SHA: d115498)
+**Status**: Verification (V-2, unit suites) current; validation: VAL-1 revision 2 passes for accuracy on Quantum ESPRESSO Si64 (see Revision 1.2)
+**Validated Baseline**: Git tag `v1.0.2-bugfix` (SHA: f3e2fc1)
 **Revision 1.1**: Added §10 Clock-pin and Utilization Methodology; §10 Conclusions renumbered to §11, §11 References renumbered to §12.
+**Revision 1.2 (2026-10-14)**: Correction of VAL-1; see the notice below.
 **Test System**: Apple M2 Max, macOS 14.7, Metal 3
 **Validation Standard**: NASA-STD-7009A, ASME V&V 10-2006
+
+> **Correction (Revision 1.2, 2026-10-14).** The VAL-1 runs this report
+> cites (March 2026) did not exercise the GPU. Versions 1.0–1.3 needed an
+> explicit `ab_init()`, which no Quantum ESPRESSO build called, so every
+> ZGEMM ran on the CPU; and the 1.22× timing compared a serial QE build
+> with an MPI build. VAL-1 therefore says nothing about DD arithmetic, and
+> its findings below (R-3, R-12, the production-validation and performance
+> rows, §4.2, the QE example in §9) are **withdrawn**, with the QE routing
+> advice of §2.4 and the performance expectations of §7.4, which are
+> replaced by the 1.4.0 measurements. The deployment
+> recommendations in §1.4 and §11.2 rest on the verification evidence
+> alone until application workloads are revalidated.
+>
+> VAL-1 was repeated for v1.4.0 with the GPU path exercised
+> ([`tests/validation/VAL001_QE_Si64.md`](../../tests/validation/VAL001_QE_Si64.md)):
+> with the calls that make up 89–99% of the GEMM work on the GPU, the
+> energies and band energies agree with the CPU run in every printed
+> digit. Forcing the GPU makes the Si64 runs 1.3–17% slower with QE itself
+> compiled at `-O0` (their GEMMs take 2.5–4.9× as long as on Accelerate), so `AB_MODE=auto` keeps QE's
+> GEMMs on Accelerate.
+>
+> The verification evidence (V-2 and the unit suites) ran on the GPU and is
+> unaffected. Test counts in this report are those of v1.0.2; the current
+> suite is described in [`tests/README.md`](../../tests/README.md).
 
 ---
 
@@ -61,11 +86,11 @@
 |--------|--------|----------|
 | **Precision (Frobenius)** | ~10⁻¹⁴ to 5×10⁻¹⁴ for N ≤ 4096 | V-2 convergence study |
 | **Precision (Max Element)** | ~10⁻¹¹ to 6×10⁻⁶ for N ≤ 4096 | V-2 convergence study |
-| **Production Validation** | 11 decimal place agreement | VAL-1 (QE Si64 DFT) |
-| **Performance** | 1.22× speedup vs 6-thread CPU | VAL-1 (QE Si64 benchmark) |
+| **Production Validation** | ~~11 decimal place agreement~~ withdrawn (GPU not exercised; see Revision 1.2) | VAL-1 (QE Si64 DFT) |
+| **Performance** | ~~1.22× speedup vs 6-thread CPU~~ withdrawn (serial vs MPI build; see Revision 1.2) | VAL-1 (QE Si64 benchmark) |
 | **Correctness** | 48/48 tests passing | Regression + unit + precision tests |
 
-**Bottom Line**: apple-bottom provides **sufficient precision for production DFT/MD** (10⁻¹⁰ convergence criteria) with **modest performance gains** (1.1-1.3× at N≥2048) and **significant energy efficiency** (47% CPU reduction).
+**Bottom Line**: apple-bottom's DD GEMMs reproduce a Quantum ESPRESSO Si64 SCF to every printed digit (10⁻⁸ Ry; VAL-1 revision 2), and are modestly faster than Accelerate for large products on GPU-resident matrices (1.10–1.16× DGEMM, 1.37–1.39× ZGEMM from N = 2,048; §7.4). *(The QE CPU-usage reduction quoted in Revision 1.1 is withdrawn; see Revision 1.2.)*
 
 ### 1.4 Recommendation
 
@@ -115,7 +140,7 @@ In practice, random matrices exhibit `~√N` scaling due to statistical cancella
 
 ### 2.3 Supported Operations
 
-| Operation | Precision | Performance (N=2048) | Notes |
+| Operation | Precision | Performance (N=2048; v1.0.2, superseded by §7.4) | Notes |
 |-----------|-----------|----------------------|-------|
 | `ab_dgemm(A, B, C)` | ~N·10⁻¹⁵ | 1.10× | C = A × B |
 | `ab_dgemm_scaled(α, A, B, β, C)` | ~N·10⁻¹⁵ | 1.10× | C = αAB + βC |
@@ -123,7 +148,7 @@ In practice, random matrices exhibit `~√N` scaling due to statistical cancella
 | `ab_dsyrk(A, C)` | ~N·10⁻¹⁵ | 0.9-1.1× | C = A × Aᵀ (symmetric) |
 | `ab_matrix_scale(α, A)` | ~10⁻¹⁵ | — | Element-wise scaling |
 
-**Deprecated**: `ab_zherk` (20× slower than CPU, not recommended)
+**Deprecated**: `ab_zherk` (0.06–0.67× Accelerate's speed at N ≤ 2,048 in the 1.4.0 measurement; use `cblas_zherk`)
 
 ### 2.4 Integration Patterns
 
@@ -133,15 +158,11 @@ EXTERNAL ab_dgemm, ab_zgemm
 CALL ab_dgemm(M, N, K, A, LDA, B, LDB, C, LDC)
 ```
 
-**Hybrid CPU/GPU Routing** (recommended for QE):
-```fortran
-flops = 8.0d0 * DBLE(M) * DBLE(N) * DBLE(K)
-IF (flops .GE. 100.0d6) THEN
-    CALL ab_zgemm(...)  ! GPU for large ops
-ELSE
-    CALL ZGEMM(...)     ! CPU for small ops
-END IF
-```
+**Hybrid CPU/GPU Routing**: *withdrawn in Revision 1.2.* The FLOP-threshold
+routing recommended here for QE sent its Davidson ZGEMMs to the GPU, which
+VAL-1 revision 2 measured as 17% slower on the BLAS-heavy input. Since 1.4.0,
+call `ZGEMM`/`DGEMM` unchanged and let `AB_MODE=auto` route each call from
+the calibrated table (`docs/INTEGRATION.md`).
 
 **Memory Pool** (for iterative solvers):
 ```c
@@ -308,7 +329,7 @@ apple-bottom correctly implements DGEMM/ZGEMM to within DD precision bounds:
 - Dimensions: N ~ 200-400 (basis size)
 - Frequency: ~230 calls per SCF cycle, 14 cycles total
 
-#### 4.2.2 Results
+#### 4.2.2 Results (withdrawn in Revision 1.2: these runs did not use the GPU)
 
 | Configuration | Total Energy (Ry) | Wall Time | CPU Usage |
 |---------------|-------------------|-----------|-----------|
@@ -335,7 +356,7 @@ Single ZGEMM: ~N · 10⁻¹⁵ ≈ 400 · 10⁻¹⁵ = 4×10⁻¹³
 
 #### 4.2.4 Validation Statement
 
-✅ **VAL-1 PASSED**
+~~✅ **VAL-1 PASSED**~~ — withdrawn in Revision 1.2; see `tests/validation/VAL001_QE_Si64.md` for the repeated validation.
 
 apple-bottom demonstrates:
 1. **Numerical equivalence** to CPU FP64 for production DFT
@@ -417,7 +438,7 @@ apple-bottom is suitable for production use in:
 | Item | Value |
 |------|-------|
 | **Validated Version** | v1.0.2-bugfix |
-| **Git SHA** | d115498 |
+| **Git SHA** | f3e2fc1 |
 | **Tag Date** | 2026-03-31 |
 | **Repository** | https://github.com/grantdh/apple-bottom |
 
@@ -469,7 +490,7 @@ apple-bottom is suitable for production use in:
 
 **Requirements**:
 - Application uses norm-averaged metrics (energies, residuals)
-- Matrices `N ≥ 1024` (GPU crossover point)
+- Large products on matrices kept on the GPU (on an M2 Max: DGEMM from about N = 1,500, ZGEMM from about N = 1,000; §7.4)
 - Condition number `κ < 10⁶`
 
 ### 7.2 When NOT to Use apple-bottom
@@ -477,7 +498,7 @@ apple-bottom is suitable for production use in:
 **Avoid for**:
 1. **Direct methods** requiring pivoting (LU, QR factorization)
 2. **Eigenvalue problems** (element-wise accuracy critical)
-3. **Small problems** (`N < 512`, CPU faster)
+3. **Small and medium problems**, and any GEMM issued one call at a time from host memory (§7.4)
 4. **Ill-conditioned systems** (`κ > 10¹²`)
 5. **High aspect ratio** rectangular matrices (`> 10:1`)
 
@@ -506,15 +527,18 @@ diff <(grep "total energy" system_gpu.out) \
 
 ### 7.4 Performance Expectations
 
-| Matrix Size | Speedup vs 6-thread CPU | Use Case |
-|-------------|-------------------------|----------|
-| N < 512 | 0.5-0.8× (slower) | Use CPU BLAS |
-| N = 1024 | 0.9-1.1× (break-even) | Marginal |
-| N = 2048 | 1.10-1.29× | Good |
-| N ≥ 4096 | 1.3-1.5× (projected) | Excellent |
-| **Iterative (pool)** | 1.5-2.7× | Always faster |
+*Revised in Revision 1.2.* The table that stood here compared against a
+6-thread CPU BLAS, projected 1.3–1.5× for N ≥ 4096, claimed 1.5–2.7× for
+iterative (pool) use and a 40–50% CPU-usage reduction. None of these is
+supported by a measurement and they are withdrawn. The 1.4.0 measurements
+on the same M2 Max class, against Accelerate:
 
-**Energy Efficiency**: 40-50% CPU reduction while maintaining speedup (useful for battery-powered systems).
+| Regime | GPU vs Accelerate | Source |
+|---|---|---|
+| Native API, matrices resident, DGEMM | 0.13× (N = 256) to 1.04× (1536), 1.10–1.16× (2048–4096) | `benchmarks/results/2026-10-14-3253a22-bench-paper/` |
+| Native API, matrices resident, ZGEMM | 0.29× (N = 256) to 1.12× (1024), 1.30–1.39× (1536–3072) | same |
+| BLAS ABI (per call, conversion included) | 0.06–1.02×; ≥ 1.10× only for ZGEMM with both operands transposed at N ≥ 4096 (1.11–1.20×) | `benchmarks/results/2026-10-14-52f1880-calibrate/` |
+| Quantum ESPRESSO Si64, `AB_MODE=gpu` | 1.3–17.3% more wall time | VAL-1 revision 2 |
 
 ### 7.5 Integration Checklist
 
@@ -535,7 +559,7 @@ diff <(grep "total energy" system_gpu.out) \
 |--------|-------------|---------|----------------|--------|----------|
 | **R-1** | Frobenius error `< N·10⁻¹⁴` | V-2, test_precision | `tests/verification/test_convergence.c`, `tests/test_precision.c` | ✓ PASS | `convergence_data.csv` |
 | **R-2** | Max element error documented | V-2 | `tests/verification/test_convergence.c` | ✓ PASS | Section 3.2.3 |
-| **R-3** | Production DFT accuracy (10⁻¹⁰ Ry) | VAL-1 | `tests/validation/VAL001_QE_Si64.md` | ✓ PASS | 11 decimal places |
+| **R-3** | Production DFT accuracy (10⁻¹⁰ Ry) | VAL-1 | `tests/validation/VAL001_QE_Si64.md` | withdrawn (Rev. 1.2) | March runs did not use the GPU; repeated for v1.4.0 |
 | **R-4** | Correctness vs CPU BLAS | test_correctness | `tests/test_correctness.c` | ✓ PASS | 42/42 tests |
 | **R-5** | ZGEMM complex arithmetic | test_zgemm | `tests/test_correctness.c:test_zgemm_vs_accelerate()` | ✓ PASS | Frobenius `< 10⁻¹⁴` |
 | **R-6** | Async API correctness | test_async | `tests/test_correctness.c:test_async_dgemm_basic()` | ✓ PASS | BUG-1/2 fixed |
@@ -544,7 +568,7 @@ diff <(grep "total energy" system_gpu.out) \
 | **R-9** | Reinit after shutdown (no UB) | BUG-5 regression | `tests/test_correctness.c:test_bug5_reinit_after_shutdown()` | ✓ PASS | Operations succeed |
 | **R-10** | Memory pool overflow safety | BUG-6 regression | `tests/test_correctness.c:test_bug6_pool_overflow()` | ✓ PASS | Returns NULL |
 | **R-11** | Pipeline creation error handling | BUG-7 fix | Implicit in init tests | ✓ PASS | No silent failures |
-| **R-12** | Performance ≥ 0.8× CPU (N≥1024) | VAL-1 benchmark | QE Si64 timing | ✓ PASS | 1.22× speedup |
+| **R-12** | Performance ≥ 0.8× CPU (N≥1024) | VAL-1 benchmark | QE Si64 timing | withdrawn (Rev. 1.2) | serial vs MPI build comparison |
 | **R-13** | Rectangular matrices (≤2:1) | test_rectangular_matrix | `tests/test_correctness.c:test_rectangular_matrix()` | ✓ PASS | 100×50 correct |
 | **R-14** | Edge cases (N=1, non-pow2) | test_small_matrix_n1, test_non_power_of_2 | `tests/test_correctness.c` | ✓ PASS | Correctness verified |
 
@@ -553,7 +577,7 @@ diff <(grep "total energy" system_gpu.out) \
 | Req ID | Requirement | Test | Result | Documented In |
 |--------|-------------|------|--------|---------------|
 | **R-15** | Rectangular `aspect_ratio > 10:1` | test_skinny_matrix (10000×10) | ✗ FAIL | Known limitation |
-| **R-16** | ZHERK performance | bench_zherk | ⚠ WARN (20× slower) | `PRECISION_ENVELOPE.md` Section 3.3 |
+| **R-16** | ZHERK performance | bench_zherk | ⚠ WARN (0.06–0.67×, 1.4.0) | `PRECISION_ENVELOPE.md` Section 3.3 |
 
 ### 8.3 Test → Source Code Mapping
 
@@ -568,10 +592,10 @@ diff <(grep "total energy" system_gpu.out) \
 
 | Artifact | Git SHA | Tag | Date |
 |----------|---------|-----|------|
-| `src/apple_bottom.m` | d115498 | v1.0.2-bugfix | 2026-03-31 |
-| `tests/verification/test_convergence.c` | d89484d | (validation) | 2026-03-31 |
-| `docs/vv/PRECISION_ENVELOPE.md` | d89484d | (validation) | 2026-03-31 |
-| `tests/validation/VAL001_QE_Si64.md` | 433fef7 | (validation) | 2026-03-31 |
+| `src/apple_bottom.m` | f3e2fc1 | v1.0.2-bugfix | 2026-03-31 |
+| `tests/verification/test_convergence.c` | a15ddb8 | (validation) | 2026-03-31 |
+| `docs/vv/PRECISION_ENVELOPE.md` | a15ddb8 | (validation) | 2026-03-31 |
+| `tests/validation/VAL001_QE_Si64.md` | 4f3c6de | (validation) | 2026-03-31 |
 
 ---
 
@@ -583,7 +607,7 @@ diff <(grep "total energy" system_gpu.out) \
 |--------|--------------|------------|
 | **DD representation** | `~2⁻⁴⁸` per operation | Error-free transformations (Dekker/Knuth) |
 | **K-term accumulation** | `~K·2⁻⁴⁸ = N·2⁻⁴⁸` | Documented in theoretical bound |
-| **Iteration accumulation** | `~√n_iter · single_step_error` | Validated in QE (14 iterations, 11 decimal places) |
+| **Iteration accumulation** | `~√n_iter · single_step_error` | Not validated: the QE evidence was withdrawn (Rev. 1.2) |
 | **Compiler optimizations** | Unknown | `-O3` with `MTLMathModeSafe` |
 | **Hardware variations** | Unknown | Validated on M2 Max only |
 
@@ -597,7 +621,7 @@ Total error ≈ √K · (N · 10⁻¹⁵)
 **Example** (QE Si64, N=400, K=14):
 ```
 Expected: √14 · (400 · 10⁻¹⁵) ≈ 1.5×10⁻¹²
-Measured: < 10⁻¹¹ (conservative)
+Measured: withdrawn (Rev. 1.2; the March QE runs did not use the GPU)
 ```
 
 ### 9.3 Confidence Intervals
@@ -621,8 +645,8 @@ Measured: < 10⁻¹¹ (conservative)
 **Headline: FP32 utilization is 35–45% of theoretical peak at boost clock.**
 On an M2 Max 38-core GPU (peak 13.60 TFLOP/s = 1.398 GHz × 38 × 128 FMA × 2),
 DD-DGEMM sustains 654–672 GFLOP/s (dgemm.csv min at N=2048, bench_paper.csv
-max at N=4096; see `benchmarks/results/2026-04-22-6b5447a/dgemm.csv` and
-`benchmarks/results/2026-04-23-2c76e39/bench_paper.csv`).
+max at N=4096; see `benchmarks/results/2026-04-22-29dcc79/dgemm.csv` and
+`benchmarks/results/2026-04-23-5bc07c8/bench_paper.csv`).
 Each DD-FMA consumes 9 FP32 FLOPs, giving 5.89–6.05 TFLOP/s effective FP32.
 Point estimate: 43.3% of theoretical peak at boost clock.
 
@@ -649,12 +673,12 @@ The 35–45% band reflects uncertainty in the denominator:
   of the best-case FP32 envelope the hardware can offer.
 
 Run-to-run variance in GPU GFLOP/s at N≥2048 (e.g., 726 vs 813 at N=2048
-across ZGEMM runs 29db164 and 3d2381b — a 12% spread) tracks this
+across ZGEMM runs da510f6 and b2e2f6b — a 12% spread) tracks this
 boost-clock volatility directly.
 
 ### References
-- Benchmark CSVs (run 1): `benchmarks/results/2026-04-22-6b5447a/{dgemm,zgemm,sgemm}.csv`
-- Benchmark CSVs (run 2): `benchmarks/results/2026-04-22-29db164-run2/zgemm.csv`
+- Benchmark CSVs (run 1): `benchmarks/results/2026-04-22-29dcc79/{dgemm,zgemm,sgemm}.csv`
+- Benchmark CSVs (run 2): `benchmarks/results/2026-04-22-da510f6-run2/zgemm.csv`
 - Powermetrics captures: `docs/vv/powermetrics/`
 - Reproducibility: `docs/REPRODUCIBILITY.md`
 - FP32 utilization derivation: `docs/design/FP32_UTILIZATION.md`
@@ -673,7 +697,7 @@ boost-clock volatility directly.
 
 **Evidence Base**:
 1. **V-2 Convergence Study**: Frobenius error `~10⁻¹⁴` to `5×10⁻¹⁴` for N ∈ {64..4096}
-2. **VAL-1 QE DFT**: 11 decimal place agreement on production workload
+2. ~~**VAL-1 QE DFT**: 11 decimal place agreement on production workload~~ (withdrawn, Rev. 1.2)
 3. **Correctness Suite**: 48/48 tests passing
 4. **Bug Fixes**: 7 critical bugs fixed and regression-tested
 
@@ -709,7 +733,7 @@ boost-clock volatility directly.
 
 **Known issues requiring resolution**:
 1. Rectangular matrices (`aspect_ratio > 10:1`) correctness failures
-2. ZHERK performance (20× slower than CPU)
+2. ZHERK performance (0.06–0.67× Accelerate's speed, 1.4.0)
 
 ### 11.4 Approval for Production Use
 

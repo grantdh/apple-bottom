@@ -1,0 +1,24 @@
+libtag,input,np,omp,mode,rep,start,end,rc,power,load1,energy_Ry,scf_iters,wall_s,cpu_s,cegterg_wall_s,regterg_wall_s,h_psi_wall_s,calbec_wall_s,paw_pot_wall_s,newd_wall_s,addusdens_wall_s,lib_loaded
+1dbdb52,A_si64_500b_k222,1,8,cpu,1,1791954885,1791955391,0,AC Power,2.30,-2990.44276149,7,506.51,608.88,299.38,,201.54,8.63,109.04,2.49,2.49,<campaign>/lib/1dbdb52/libapplebottom.dylib
+1dbdb52,A_si64_500b_k222,1,8,auto,1,1791955392,1791955900,0,AC Power,3.01,-2990.44276149,7,507.97,609.68,300.66,,202.19,8.24,109.19,2.49,2.49,<campaign>/lib/1dbdb52/libapplebottom.dylib
+1dbdb52,A_si64_500b_k222,1,8,gpu,1,1791955900,1791956498,0,AC Power,2.88,-2990.44276149,7,597.70,581.63,383.14,,224.77,16.86,109.20,4.99,3.37,<campaign>/lib/1dbdb52/libapplebottom.dylib
+1dbdb52,A_si64_500b_k222,1,8,auto,2,1791956498,1791957008,0,AC Power,2.92,-2990.44276149,7,509.30,611.52,301.66,,203.57,9.24,109.25,2.52,2.51,<campaign>/lib/1dbdb52/libapplebottom.dylib
+1dbdb52,A_si64_500b_k222,1,8,gpu,2,1791957008,1791957606,0,AC Power,3.82,-2990.44276149,7,597.95,581.52,383.56,,224.83,16.96,109.13,4.96,3.38,<campaign>/lib/1dbdb52/libapplebottom.dylib
+1dbdb52,A_si64_500b_k222,1,8,cpu,2,1791957606,1791958116,0,AC Power,2.70,-2990.44276149,7,509.87,611.97,302.28,,204.25,11.11,109.05,2.52,2.49,<campaign>/lib/1dbdb52/libapplebottom.dylib
+1dbdb52,A_si64_500b_k222,1,8,gpu,3,1791958116,1791958715,0,AC Power,3.10,-2990.44276149,7,598.11,581.39,383.62,,224.95,17.01,109.10,4.98,3.37,<campaign>/lib/1dbdb52/libapplebottom.dylib
+1dbdb52,A_si64_500b_k222,1,8,cpu,3,1791958715,1791959225,0,AC Power,2.95,-2990.44276149,7,510.05,612.54,302.04,,204.36,9.22,109.12,2.50,2.51,<campaign>/lib/1dbdb52/libapplebottom.dylib
+1dbdb52,A_si64_500b_k222,1,8,auto,3,1791959225,1791959735,0,AC Power,2.53,-2990.44276149,7,509.34,611.29,301.77,,203.26,9.76,109.13,2.51,2.52,<campaign>/lib/1dbdb52/libapplebottom.dylib
+eaad87e,A_si64_500b_k222,1,8,auto,1,1791959765,1791960361,0,AC Power,2.57,-2990.44276149,7,595.21,578.82,384.08,,224.82,17.08,109.15,2.57,2.48,<campaign>/lib/eaad87e/libapplebottom.dylib
+eaad87e,A_si64_500b_k222,1,8,auto,2,1791960361,1791960954,0,AC Power,5.10,-2990.44276149,7,593.32,578.72,382.18,,224.37,16.94,109.11,2.53,2.48,<campaign>/lib/eaad87e/libapplebottom.dylib
+1dbdb52,B_si64_160b_k222,1,8,cpu,1,1791960955,1791962075,0,AC Power,2.99,-2990.44093535,9,1120.08,1147.93,115.89,,97.25,10.09,775.69,12.43,13.35,<campaign>/lib/1dbdb52/libapplebottom.dylib
+1dbdb52,B_si64_160b_k222,1,8,auto,1,1791962075,1791963197,0,AC Power,2.98,-2990.44093535,9,1121.20,1149.56,116.44,,97.77,10.07,775.99,12.47,13.36,<campaign>/lib/1dbdb52/libapplebottom.dylib
+1dbdb52,B_si64_160b_k222,1,8,gpu,1,1791963197,1791964393,0,AC Power,2.72,-2990.44093535,9,1196.37,1155.51,182.71,,122.04,19.44,775.80,15.71,15.45,<campaign>/lib/1dbdb52/libapplebottom.dylib
+1dbdb52,B_si64_160b_k222,1,8,auto,2,1791964394,1791965515,0,AC Power,2.85,-2990.44093535,9,1121.35,1148.35,116.14,,97.43,10.08,776.41,12.49,13.44,<campaign>/lib/1dbdb52/libapplebottom.dylib
+1dbdb52,B_si64_160b_k222,1,8,gpu,2,1791965515,1791966715,0,AC Power,1.86,-2990.44093535,9,1199.06,1156.18,183.81,,123.15,19.45,776.76,15.86,15.51,<campaign>/lib/1dbdb52/libapplebottom.dylib
+1dbdb52,B_si64_160b_k222,1,8,cpu,2,1791966715,1791967837,0,AC Power,2.38,-2990.44093535,9,1121.71,1148.97,116.27,,97.71,10.42,776.31,12.57,13.53,<campaign>/lib/1dbdb52/libapplebottom.dylib
+1dbdb52,C_si64_160b_gamma,1,8,cpu,1,1791967837,1791968586,0,AC Power,2.55,-2989.94060060,8,748.60,750.04,,12.12,10.79,0.73,698.67,5.67,5.96,<campaign>/lib/1dbdb52/libapplebottom.dylib
+1dbdb52,C_si64_160b_gamma,1,8,auto,1,1791968586,1791969335,0,AC Power,2.75,-2989.94060060,8,748.47,749.89,,12.22,10.89,0.79,698.44,5.68,5.96,<campaign>/lib/1dbdb52/libapplebottom.dylib
+1dbdb52,C_si64_160b_gamma,1,8,gpu,1,1791969335,1791970093,0,AC Power,3.16,-2989.94060060,8,758.40,752.79,,19.04,13.63,1.68,698.75,7.20,6.74,<campaign>/lib/1dbdb52/libapplebottom.dylib
+1dbdb52,C_si64_160b_gamma,1,8,auto,2,1791970094,1791970842,0,AC Power,2.83,-2989.94060060,8,748.69,750.13,,12.19,10.84,0.75,698.65,5.70,5.96,<campaign>/lib/1dbdb52/libapplebottom.dylib
+1dbdb52,C_si64_160b_gamma,1,8,gpu,2,1791970843,1791971601,0,AC Power,2.38,-2989.94060060,8,758.49,752.75,,19.04,13.66,1.65,698.85,7.17,6.73,<campaign>/lib/1dbdb52/libapplebottom.dylib
+1dbdb52,C_si64_160b_gamma,1,8,cpu,2,1791971602,1791972350,0,AC Power,1.84,-2989.94060060,8,748.63,749.57,,12.16,10.84,0.79,698.59,5.67,5.98,<campaign>/lib/1dbdb52/libapplebottom.dylib

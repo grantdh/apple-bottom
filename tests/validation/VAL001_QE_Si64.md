@@ -1,333 +1,235 @@
-# VAL-1: Quantum ESPRESSO Si64 Production Validation
+# VAL-1: Quantum ESPRESSO Si64 SCF
 
-**Test ID**: VAL-1
-**Type**: Production Validation (Code-to-Code)
-**Status**: ✓ PASS (validated 2026-03-31)
-**Validation Engineer**: Grant Heileman
-**Baseline**: apple-bottom v1.0.2-bugfix (SHA: d115498)
+| | |
+|---|---|
+| **Test ID** | VAL-1, revision 2 |
+| **Type** | Code-to-code validation inside one Quantum ESPRESSO build: DD GEMMs on the GPU against FP64 GEMMs on the CPU |
+| **Date** | 2026-10-14 |
+| **Library** | apple-bottom 1dbdb52 (the 1.4.0 candidate; `ab_build_info()` reports `1dbdb52abeec`), and eaad87e (main before 1.4.0) for comparison |
+| **Status** | Accuracy: **PASS**. Routing: **PASS**. Performance: the GPU path is slower than Accelerate (reported, not a criterion) |
+| **Data** | [`benchmarks/results/2026-10-14-1dbdb52-qe-si64/`](../../benchmarks/results/2026-10-14-1dbdb52-qe-si64/) |
+| **Kit** | [`benchmarks/qe/`](../../benchmarks/qe/) (inputs, `run_campaign.sh`, `analyze.py`, `compare.py`, `tables.py`) |
 
----
+## 1. Questions
 
-## 1. Purpose
+1. **Accuracy.** With the SCF's ZGEMMs and DGEMMs computed in double-float
+   arithmetic on the GPU, does Quantum ESPRESSO produce the same result as
+   with FP64 on the CPU?
+2. **Routing.** Does the default, `AB_MODE=auto`, send QE's calls where the
+   calibration says it should (for these shapes on an M2 Max: Accelerate)?
+3. **Cost.** What does the GPU path cost end to end, and where does its time
+   go?
 
-Validate that apple-bottom DD arithmetic provides sufficient precision for production density functional theory (DFT) calculations by demonstrating bit-for-bit agreement with a CPU FP64 reference implementation on a representative SCF (self-consistent field) convergence problem.
+## 2. Revision 1 is withdrawn
 
-**Application Domain**: Quantum chemistry, materials science, condensed matter physics (DFT codes: Quantum ESPRESSO, VASP, CP2K, ABINIT)
+Revision 1 (2026-03-31) reported energy agreement "to 11 decimal places"
+and a 1.22× speed-up over 6-thread OpenBLAS. Neither measured the GPU.
+Versions 1.0–1.3 created the Metal context only in `ab_init()`, which no
+QE build called, so every BLAS-ABI call ran on the CPU; agreement between
+two CPU runs says nothing about DD arithmetic. The 1.22× compared a serial
+QE build with an MPI build. Since 1.4.0 the BLAS ABI initializes the GPU on
+first use, `AB_REPORT` records where each call ran and how long it took,
+and this revision checks that the calls did run where the mode says.
 
----
+## 3. Setup
 
-## 2. Test System Description
+| | |
+|---|---|
+| Machine | MacBook Pro (Mac14,6), Apple M2 Max: 8 performance + 4 efficiency cores, 38-core GPU, 64 GB; on AC power, `caffeinate -is`, no other GPU work |
+| OS, toolchain | macOS 27.0.1 (26A434); Apple clang 17; GNU Fortran 15.2.0; Open MPI 5.0.9 |
+| Quantum ESPRESSO | develop at 5b7f8e1bc (2026-04-03, `qe-7.5CN-26`; reports 7.5), built with gfortran 15.2 and Open MPI. **QE's own Fortran was compiled `-O0 -g -fbounds-check`** (all objects in PW, FFTXlib, Modules, upflib, XClib, LAXlib and UtilXlib, built 2026-04-04 before `make.inc` was changed to `-O3`), except the two patched Davidson files, `cegterg` and `regterg` (`-O3 -fopenmp`). The libraries it calls (Accelerate, OpenBLAS 0.3.31, FFTW 3 without threads, ScaLAPACK) are optimized. In this build `cegterg`/`regterg` call `ab_zgemm`/`ab_dgemm` and all other code calls `ZGEMM`/`DGEMM`; both names forward to the same `ab_*gemm_blas`, so an unpatched QE linked as in the integration guide routes every GEMM the same way |
+| Linking | The link is flat-namespace (Open MPI's wrapper adds `-flat_namespace`). At run time `dgemm_`, `zgemm_`, `ab_dgemm_` and `ab_zgemm_` bind to libapplebottom and the other 66 BLAS/LAPACK symbols pw.x imports bind to OpenBLAS (checked with `DYLD_PRINT_BINDINGS`). apple-bottom's CPU route is Accelerate (`cblas_zgemm`/`cblas_dgemm`). |
+| Library under test | Each library was built once from a clean worktree of its commit and copied aside (libapplebottom.dylib SHA-256 `b8cd26bdaee1abb3…` for 1dbdb52, `7bbb86408ee571fb…` for eaad87e); pw.x loads it through its rpath, and every run's stderr records the dylib that was loaded |
+| Parallelism | `mpirun -np 1`, `OMP_NUM_THREADS=8` |
+| Modes | `AB_MODE=cpu` (every GEMM on Accelerate), `auto` (calibrated table), `gpu` (every GEMM with all dimensions > 32 on the GPU) |
+| Repetitions | Input A: 3 per mode; B, C: 2 per mode; eaad87e: input A, `auto`, 2. The mode order rotates with each repetition; every run starts from an empty `outdir`. |
+| Reports | `AB_REPORT=1` and `AB_PROFILE=1` in every mode (per-call accounting in all three, so its small cost is common to all) |
 
-### 2.1 Physical System
+### Inputs
 
-**Material**: Crystalline silicon (diamond cubic structure)
-**Unit Cell**: Face-centered cubic (fcc) with 2-atom basis
-**Supercell**: 2×2×2 expansion → 64 atoms total
-**Lattice Constant**: a = 10.26 Bohr (5.43 Å experimental)
+64-atom silicon (2 × 2 × 2 conventional cells), PBE, PAW (pslibrary 1.0.0),
+`ecutwfc = 25` Ry, `conv_thr = 1e-6` Ry, Davidson, `verbosity = 'high'`.
 
-**Atomic Positions** (crystal coordinates):
-```
-Si64: 64 atoms at fcc lattice sites + (¼,¼,¼) shift
-```
+| Input | Bands | k-points | Plane waves | Davidson GEMMs | Why |
+|---|---|---|---|---|---|
+| A `A_si64_500b_k222` | 500 | 2 × 2 × 2, 4 irreducible | ~18,270 per k | ZGEMM (`cegterg`) | BLAS-heavy: the largest GEMMs and BLAS share of the three |
+| B `B_si64_160b_k222` | 160 | 2 × 2 × 2 | 17,845–18,016 per k | ZGEMM (`cegterg`) | smaller Davidson GEMMs (320-wide subspace), more PAW work (6 projectors) |
+| C `C_si64_160b_gamma` | 160 | Γ | 8,923 (Γ: half the sphere) | DGEMM (`regterg`) | the real (gamma-point) code path |
 
-### 2.2 DFT Parameters
+## 4. Acceptance criteria
 
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| **Code** | Quantum ESPRESSO v7.2 | Plane-wave DFT |
-| **Functional** | PBE (GGA) | Perdew-Burke-Ernzerhof |
-| **Pseudopotential** | Si.pbe-n-kjpaw_psl.1.0.0.UPF | PAW, scalar-relativistic |
-| **Kinetic Energy Cutoff** | 50 Ry (680 eV) | Plane-wave basis |
-| **k-Point Grid** | 2×2×2 Monkhorst-Pack | 4 irreducible k-points |
-| **Convergence Threshold** | 10⁻¹⁰ Ry | Total energy |
-| **SCF Mixing** | 0.7 (Davidson diagonalization) | `electron_maxstep = 100` |
-
-### 2.3 Computational Details
-
-**BLAS Operations**:
-- Davidson diagonalization: `ZGEMM('C', 'N', ...)` in `cegterg.f90`
-- Typical FLOP count per SCF iteration: ~200M - 500M FLOPs
-- Routing threshold: Operations ≥ 100M FLOPs → apple-bottom GPU
-
-**Modified QE Routine**:
-```fortran
-! File: LAXlib/cegterg.f90
-! Line: ~450 (ZGEMM call in subspace diagonalization)
-
-EXTERNAL ab_zgemm  ! apple-bottom Fortran bridge
-
-! Compute FLOP count
-flops = 8.0d0 * DBLE(nbase)**3
-
-IF (flops .GE. 100.0d6) THEN
-    ! Large operation: use GPU
-    CALL ab_zgemm('C', 'N', nbase, nbnd, notcnv, ...)
-ELSE
-    ! Small operation: use CPU BLAS
-    CALL ZGEMM('C', 'N', nbase, nbnd, notcnv, ...)
-END IF
-```
-
----
-
-## 3. Test Setup
-
-### 3.1 Reference Configuration (Baseline)
-
-| Component | Configuration |
-|-----------|---------------|
-| **System** | Mac Studio M2 Max |
-| **CPU** | 12 cores @ 3.68 GHz |
-| **RAM** | 64 GB unified memory |
-| **BLAS** | OpenBLAS 0.3.21 (6 threads) |
-| **Compiler** | gfortran 13.2.0, `-O3 -march=native` |
-| **QE Build** | Serial BLAS calls (no MPI, no GPU) |
-
-**Command**:
-```bash
-OMP_NUM_THREADS=6 ./pw.x < si64.in > si64_ref.out
-```
-
-### 3.2 Test Configuration (apple-bottom)
-
-| Component | Configuration |
-|-----------|---------------|
-| **System** | Same Mac Studio M2 Max |
-| **BLAS** | Hybrid: OpenBLAS (< 100M FLOPs) + apple-bottom (≥ 100M FLOPs) |
-| **Routing** | Modified `cegterg.f90` with FLOP-based dispatch |
-| **apple-bottom** | v1.0.2-bugfix, libapplebottom.a linked via `EXTERNAL` |
-
-**Command**:
-```bash
-OMP_NUM_THREADS=1 ./pw.x < si64.in > si64_gpu.out
-```
-
-*(Single thread to avoid CPU BLAS thread contention with GPU)*
-
----
-
-## 4. Acceptance Criteria
-
-| Metric | Threshold | Rationale |
-|--------|-----------|-----------|
-| **Total Energy Agreement** | ≥ 10 decimal places | DFT requires ~10⁻¹⁰ Ry for production |
-| **SCF Convergence** | Both reach `|ΔE| < 10⁻¹⁰ Ry` | Identical convergence behavior |
-| **Final Forces** | Agreement to `< 10⁻⁹ Ry/Bohr` | Force accuracy (optional check) |
-| **Wall Time** | ≥ 0.8× baseline | GPU must not be slower |
-
----
+| | Criterion |
+|---|---|
+| Accuracy | In `gpu` mode, the final total energy is within `conv_thr` (10⁻⁶ Ry) of the `cpu` run, the SCF takes the same number of iterations, and every printed band energy is within 10⁻³ eV |
+| Routing | In `auto` mode no GEMM of these inputs runs on the GPU (the built-in table has no row for their shapes); in `gpu` mode the large GEMMs do; no fallbacks |
+| Stability | Every run exits with status 0 |
 
 ## 5. Results
 
-### 5.1 Energy Convergence
+### 5.1 Accuracy
 
-**Reference (OpenBLAS 6 threads)**:
-```
-     SCF iteration #  1     etot =   -2989.75482361 Ry
-     SCF iteration #  2     etot =   -2990.42871543 Ry
-     ...
-     SCF iteration # 14     etot =   -2990.44276157 Ry
-     convergence achieved after 14 iterations
-```
+| Input | Total energy, `cpu` (Ry) | Largest \|ΔE\|, `gpu` vs `cpu`: final / any iteration (Ry) | SCF iterations, `cpu` / `gpu` | Band energies per run | Largest \|Δε\|, any run vs `cpu` (eV) |
+|---|---|---|---|---|---|
+| A | -2990.44276149 | 0 / 0 | 7 / 7 | 2000 | 0 |
+| B | -2990.44093535 | 0 / 0 | 9 / 9 | 640 | 0 |
+| C | -2989.94060060 | 0 / 0 | 8 / 8 | 160 | 0 |
 
-**Test (apple-bottom + OpenBLAS hybrid)**:
-```
-     SCF iteration #  1     etot =   -2989.75482361 Ry
-     SCF iteration #  2     etot =   -2990.42871543 Ry
-     ...
-     SCF iteration # 14     etot =   -2990.44276157 Ry
-     convergence achieved after 14 iterations
-```
+Every run of every mode ended with the same total energy as the `cpu`
+run, after the same number of SCF iterations, with the same total energy
+at every iteration and the same value for every printed band energy. QE
+prints total energies to 10⁻⁸ Ry and band energies to 10⁻⁴ eV, so the
+agreement is to the last printed digit; the differences in DD arithmetic
+are below what the SCF output resolves. **PASS.**
 
-**Agreement**: **Identical to 11 decimal places** (`-2990.44276157 Ry`)
+### 5.2 Routing
 
-### 5.2 Performance
+| Input | Mode | Routine | Calls | On the GPU | GPU share of the routine's time | Fallbacks |
+|---|---|---|---:|---:|---:|---:|
+| A | `auto` | ZGEMM | 28425 | 0 | 0.0% | 0 |
+| A | `auto` | DGEMM | 2064 | 0 | 0.0% | 0 |
+| A | `gpu` | ZGEMM | 28425 | 951 | 97.8% | 0 |
+| A | `gpu` | DGEMM | 2064 | 16 | 99.9% | 0 |
+| B | `auto` | ZGEMM | 29048 | 0 | 0.0% | 0 |
+| B | `auto` | DGEMM | 2580 | 0 | 0.0% | 0 |
+| B | `gpu` | ZGEMM | 29048 | 1090 | 96.8% | 0 |
+| B | `gpu` | DGEMM | 2580 | 20 | 99.8% | 0 |
+| C | `auto` | DGEMM | 5624 | 0 | 0.0% | 0 |
+| C | `gpu` | DGEMM | 5624 | 263 | 98.8% | 0 |
 
-| Configuration | Wall Time | Speedup | CPU Utilization |
-|---------------|-----------|---------|-----------------|
-| OpenBLAS (6 threads) | 2m28s | 1.00× | ~600% (6 cores) |
-| apple-bottom + OpenBLAS (1 thread) | 2m01s | **1.22×** | ~320% (1 core + GPU) |
+`auto` ran every GEMM of these inputs on Accelerate, as the calibrated
+table says it should; `gpu` sent the large calls to the GPU: fewer than 5%
+of the calls, but 89–99% of each routine's time on Accelerate (`cpu` mode). No call fell back. **PASS.**
 
-**Energy Efficiency**: 47% CPU reduction while achieving 22% speedup.
+### 5.3 Run time
 
-### 5.3 Iteration-by-Iteration Comparison
+| Input | `cpu` | `auto` | `gpu` | `gpu` / `cpu` | ZGEMM+DGEMM time, `cpu` | same, `gpu` | `auto`, eaad87e |
+|---|---|---|---|---:|---:|---:|---|
+| A | 509.9 [506.5–510.1] | 509.3 [508.0–509.3] | 598.0 [597.7–598.1] | 1.173 | 58.1 | 147.8 | 594.3 [593.3–595.2] |
+| B | 1120.9 [1120.1–1121.7] | 1121.3 [1121.2–1121.3] | 1197.7 [1196.4–1199.1] | 1.069 | 30.5 | 107.0 | – |
+| C | 748.6 [748.6–748.6] | 748.6 [748.5–748.7] | 758.4 [758.4–758.5] | 1.013 | 2.5 | 12.1 | – |
 
-| Iteration | Reference Energy (Ry) | Test Energy (Ry) | ΔE (Ry) |
-|-----------|-----------------------|------------------|---------|
-| 1 | -2989.75482361 | -2989.75482361 | 0.0 |
-| 2 | -2990.42871543 | -2990.42871543 | 0.0 |
-| 5 | -2990.44206892 | -2990.44206892 | 0.0 |
-| 10 | -2990.44276141 | -2990.44276141 | 0.0 |
-| 14 (final) | -2990.44276157 | -2990.44276157 | 0.0 |
+`auto` costs nothing: its median is within 0.2% of `cpu` for every input.
+Forcing the GPU costs 17.3%, 6.9% and 1.3% of the run: the GEMMs take
+2.5×, 3.5× and 4.9× as long as on Accelerate, and they are 11%, 2.7% and
+0.3% of the `cpu` run (input A is the BLAS-heavy one; in B and C the PAW
+routines dominate in this unoptimized build). The spread over repetitions is at most 0.7%. macOS
+background services (Spotlight, media analysis) were not stopped.
 
-**Observation**: Bit-for-bit agreement throughout SCF cycle indicates:
-1. No accumulation of DD rounding errors across iterations
-2. ZGEMM routing logic preserves determinism
-3. GPU asynchronous execution does not introduce race conditions
+**These run times belong to this build.** QE's own code was compiled
+without optimization and with bounds checking (§3), while the GEMMs run in
+optimized libraries. With an optimized QE the rest of the run shrinks, so
+the GEMMs take a larger share and forcing the GPU costs a larger fraction
+of the run than the 1.3–17.3% above. The accuracy results (§5.1), the
+routing (§5.2) and the per-call comparisons (§5.4), which involve only
+library code, do not depend on how QE was compiled.
 
----
+### 5.4 Where the GPU path spends its time
 
-## 6. Error Analysis
+| Input | Routine | GPU calls | init | alloc | pack | upload | kernel | download | epilogue | other | total | Accelerate, same calls (`cpu`) | kernel / Accelerate |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| A | ZGEMM | 951 | 0.00 | 0.17 | 48.12 | 13.80 | 55.01 | 1.77 | 10.62 | 11.62 | 141.16 | 54.80 | 1.00 |
+| A | DGEMM | 16 | 0.03 | 0.00 | 1.02 | 0.19 | 1.89 | 0.02 | 0.27 | 0.11 | 3.54 | 0.19 | 10.20 |
+| B | ZGEMM | 1090 | 0.00 | 0.18 | 38.08 | 12.69 | 32.13 | 0.83 | 4.65 | 9.01 | 97.58 | 26.44 | 1.22 |
+| B | DGEMM | 20 | 0.03 | 0.00 | 1.66 | 0.41 | 2.39 | 0.14 | 1.36 | 0.26 | 6.26 | 0.89 | 2.68 |
+| C | DGEMM | 263 | 0.03 | 0.03 | 4.67 | 1.76 | 3.84 | 0.13 | 0.73 | 0.77 | 11.95 | 2.30 | 1.67 |
 
-### 6.1 Expected Error Budget
+Stages, as `AB_REPORT` defines them: `pack` builds op(A) and op(B) in
+the layout the GPU expects and converts them to DD on the CPU, `upload`
+copies them, `kernel` is the command buffers' GPU execution time,
+`download` and `epilogue` bring C back and apply alpha and beta, and
+`other` is the rest of the kernel call (encoding, waiting, and for ZGEMM
+the per-call allocation of four temporary matrices). "Accelerate, same
+calls" is the routine's `cpu`-mode time minus the time of the calls that
+`gpu` mode also left on the CPU, i.e. what the GPU-routed calls cost on
+Accelerate. Input C's DGEMM row holds both its Davidson (`regterg`) calls
+and its PAW (`newq`, `addusdens`) calls; A's and B's DGEMM rows are PAW
+only.
 
-For ZGEMM in Davidson diagonalization:
-- Matrix dimensions: typically `N ~ 200-400` (basis size)
-- Theoretical DD error: `~N · 10⁻¹⁵ ≈ 4×10⁻¹³`
-- SCF iterations: 14
-- Accumulated error (worst case): `√14 · 4×10⁻¹³ ≈ 1.5×10⁻¹²`
+**The GPU kernels alone take as long as Accelerate needs for the same calls,
+or longer:** 1.00× and 1.22× for the ZGEMMs of A and B, 1.67× for C's
+DGEMMs, and 2.7–10× for the PAW DGEMMs of A and B. Removing every other
+stage would at best bring the GPU path level with Accelerate on these
+shapes, on this GPU. By the rule
+in the [roadmap](../../docs/ROADMAP.md), there is therefore no performance
+work on the BLAS-ABI path for M2-class GPUs.
 
-**Measured error**: `< 10⁻¹¹` (11 decimal place agreement)
+### 5.5 What the calibrated routing changed
 
-**Conclusion**: DD precision provides **10× safety margin** beyond theoretical worst case.
+With eaad87e (unreleased main after the correctness fixes that made the BLAS
+ABI initialize the GPU on first use, before calibrated routing), `AB_MODE=auto` used fixed FLOP
+thresholds and sent the same 951 large ZGEMMs of input A to the GPU as
+`gpu` mode does (its profile: 28,425 ZGEMM calls, 3.3% on the GPU, 144.6 s
+of ZGEMM time). Input A took 594.3 s [593.3–595.2] with it, against 509.3 s
+with the calibrated table: the default was 16.7% slower than it needed to
+be. eaad87e predates `AB_REPORT`, so its figures come from its `AB_PROFILE`
+table, which has no time-by-route columns.
 
-### 6.2 Routing Effectiveness
+## 6. Conclusions
 
-Breakdown of BLAS calls (from instrumented run):
-- **GPU (apple-bottom)**: 47 ZGEMM calls, FLOP count 150M-500M each
-- **CPU (OpenBLAS)**: 183 ZGEMM calls, FLOP count 10K-80M each
+1. **DD arithmetic is accurate enough for these SCF runs.** With the calls
+   that make up 89–99% of the GEMM work on the GPU, the energies and band energies agree with the
+   FP64 CPU run in every printed digit, for the complex (k-point) and real
+   (Γ-point) Davidson paths and the PAW DGEMMs.
+2. **The calibrated default is right for QE on an M2 Max.** It keeps every
+   GEMM on Accelerate and costs nothing; the previous default cost 17% on
+   the BLAS-heavy input.
+3. **The GPU path is slower for QE's shapes, and not only because of
+   overheads.** Its kernels alone are as slow as Accelerate or slower;
+   packing, transfers and per-call allocation come on top.
+4. **A side finding, fixed after these runs.** In every run that reached
+   the GPU, gfortran reported `IEEE_OVERFLOW_FLAG` signalling at exit.
+   The flag comes from `MTLCreateSystemDefaultDevice()`, which raises
+   `FE_OVERFLOW` on its first call in a process; apple-bottom's own
+   arithmetic raises none (a probe that converts and multiplies unit-scale
+   data leaves every flag clear). Since 0cf1852, `ab_init()` restores the
+   caller's floating-point environment around device creation, and
+   `test_init_keeps_host_fp_flags` checks it. The fix changes no
+   computed value.
 
-**Verification**: All large operations (> 100M FLOPs) correctly routed to GPU.
+## 7. Reproducing
 
----
+Build pw.x against apple-bottom as in the
+[integration guide](../../docs/INTEGRATION.md#quantum-espresso-integration),
+put the two pslibrary files in `benchmarks/qe/pseudo/` and run, on AC power
+with nothing else on the GPU:
 
-## 7. Validation Statement
-
-✅ **VAL-1 PASSED**
-
-apple-bottom v1.0.2-bugfix demonstrates:
-1. **Numerical equivalence** to CPU FP64 for production DFT (11 decimal places)
-2. **Performance improvement** (1.22× speedup with reduced CPU load)
-3. **Deterministic behavior** (iteration-by-iteration agreement)
-4. **Sufficient precision** for `10⁻¹⁰ Ry` convergence criteria
-
-**Implication**: apple-bottom is suitable for production use in DFT codes (Quantum ESPRESSO, VASP, CP2K) and other iterative solvers requiring `10⁻¹⁴` to `10⁻¹⁰` precision.
-
-**Example Integration**: This validation was performed at the request of Sceye (aerospace multi-physics) but applies to any scientific computing workflow using iterative linear algebra on Apple Silicon.
-
----
-
-## 8. Reproducibility
-
-### 8.1 Input File
-
-**Location**: `tests/validation/si64.in`
-
-```fortran
-&CONTROL
-  calculation = 'scf'
-  prefix = 'si64'
-  outdir = './tmp'
-  pseudo_dir = './pseudo'
-/
-&SYSTEM
-  ibrav = 0
-  nat = 64
-  ntyp = 1
-  ecutwfc = 50.0
-/
-&ELECTRONS
-  conv_thr = 1.0d-10
-  mixing_beta = 0.7
-/
-ATOMIC_SPECIES
-  Si  28.0855  Si.pbe-n-kjpaw_psl.1.0.0.UPF
-
-K_POINTS automatic
-  2 2 2  0 0 0
-
-CELL_PARAMETERS angstrom
-  10.86  0.00  0.00
-   0.00 10.86  0.00
-   0.00  0.00 10.86
-
-ATOMIC_POSITIONS crystal
-  Si  0.000  0.000  0.000
-  Si  0.000  0.500  0.500
-  ... [62 more positions]
-```
-
-*(Full coordinates in `tests/validation/si64.in`)*
-
-### 8.2 Build Instructions
-
-**Step 1**: Build apple-bottom
 ```bash
-cd ~/apple-bottom
-make clean && make lib
+cat > plan.txt <<'EOF'
+1dbdb52 A_si64_500b_k222  1 8 3 cpu,auto,gpu
+1dbdb52 B_si64_160b_k222  1 8 2 cpu,auto,gpu
+1dbdb52 C_si64_160b_gamma 1 8 2 cpu,auto,gpu
+EOF
+PW_X=/path/to/pw.x caffeinate -is benchmarks/qe/run_campaign.sh plan.txt out
+python3 benchmarks/qe/analyze.py out
+python3 benchmarks/qe/compare.py out
+python3 benchmarks/qe/tables.py out 1dbdb52
 ```
 
-**Step 2**: Patch Quantum ESPRESSO
-```bash
-cd ~/q-e-qe-7.2
-patch -p1 < apple-bottom/docs/qe-apple-bottom.patch
-```
+The baseline column of §5.3 needs a second campaign into the same `out`,
+with a pw.x that loads the eaad87e build and the plan line
+`eaad87e A_si64_500b_k222 1 8 2 auto`; then run `tables.py out 1dbdb52 eaad87e`.
 
-**Step 3**: Configure QE with apple-bottom
-```bash
-./configure --with-external-blas="-L/path/to/apple-bottom/build -lapplebottom -lc++ -framework Metal -framework Foundation"
-make pw
-```
+The script sets `AB_REPORT=1` and `AB_PROFILE=1` and records the loaded
+library, as the 2026-10-14 runs did; those ran an earlier version of it
+with the same environment and output (later changes add CSV columns, make
+the time parser work with the Python 3.9 that ships with macOS, and fix the
+analysis scripts).
 
-**Step 4**: Run test
-```bash
-cd ~/q-e-qe-7.2/test-suite
-cp ~/apple-bottom/tests/validation/si64.in .
-mpirun -np 1 ../bin/pw.x < si64.in > si64.out
-```
+## 8. Limitations
 
-**Step 5**: Verify result
-```bash
-grep "!    total energy" si64.out
-# Expected: !    total energy              =   -2990.44276157 Ry
-```
+- One machine (M2 Max), one QE build, one system (Si64 PAW) at a modest
+  cutoff. Other chips, codes and systems are not covered.
+- `np = 1`. With more MPI ranks each rank's GEMMs are smaller, which favours
+  Accelerate further.
+- QE's own code was compiled at `-O0` with bounds checking (§3), so the
+  whole-run times and shares are those of an unoptimized QE; a repetition
+  with an optimized build is planned.
+- Printed precision bounds the comparison: QE prints total energies to
+  10⁻⁸ Ry and band energies to 10⁻⁴ eV.
 
-### 8.3 Data Artifacts
+## 9. Revision history
 
-**Validation Data** (archived):
-- `si64_ref.out`: Reference run (OpenBLAS 6 threads)
-- `si64_gpu.out`: Test run (apple-bottom hybrid)
-- `si64_timing.log`: Per-iteration timing breakdown
-- **SHA-256 checksum**: `7f3a2c...` (output reproducible within 10⁻¹¹ Ry)
-
-**Location**: `tests/validation/qe_data/` (not in Git due to size)
-
----
-
-## 9. Known Limitations
-
-1. **Single k-point only validated**: Full Brillouin zone integration (e.g., 8×8×8 grid) not yet tested
-2. **Spin-unpolarized only**: Spin-polarized calculations double ZGEMM call count (needs validation)
-3. **Structural relaxation not tested**: Forces agree, but geometry optimization convergence needs validation
-4. **Portability**: Validated only on M2 Max; M1/M3/M4 assumed equivalent (not verified)
-
----
-
-## 10. References
-
-1. Giannozzi, P., et al. (2009). "QUANTUM ESPRESSO: a modular and open-source software project for quantum simulations of materials." *J. Phys.: Condens. Matter* 21, 395502.
-2. Quantum ESPRESSO Documentation: https://www.quantum-espresso.org/Doc/user_guide/
-3. apple-bottom QE Integration Guide: `docs/qe-integration.md`
-4. Benchmark Summary: `docs/BENCHMARK_SUMMARY.md`
-
----
-
-## 11. Approval
-
-| Role | Name | Date | Signature |
-|------|------|------|-----------|
-| **Test Engineer** | Grant Heileman | 2026-03-31 | (approved) |
-| **Production Reviewer** | (TBD) | | |
-
----
-
-## 12. Revision History
-
-| Version | Date | Changes | Author |
-|---------|------|---------|--------|
-| 1.0 | 2026-03-31 | Initial validation report | Grant Heileman |
-
----
-
-**Document Classification**: Engineering Validation
-**Next Review**: Upon code changes to ZGEMM kernel or routing logic
+| Revision | Date | |
+|---|---|---|
+| 1 | 2026-03-31 | Withdrawn: the GPU path was not exercised, and the timing compared different builds (§2) |
+| 2 | 2026-10-14 | Repeated with the GPU path exercised and time-weighted reports; three inputs, three modes, repetitions |

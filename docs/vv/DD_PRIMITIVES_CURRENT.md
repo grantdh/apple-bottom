@@ -21,7 +21,7 @@ DWTimesDW2.
 
 ### 1.1 Default: DWTimesDW2 (Alg 11 / Thm 2.7)
 
-Source: `src/apple_bottom.m:198-216` (inside the `#else` branch at line 196).
+Source: `dd_mul` / `dd_fma` in the `#else  // DWTimesDW2 (default)` branch of `src/apple_bottom.m`.
 
 ```metal
 inline DD dd_mul(DD a, DD b) {
@@ -54,7 +54,7 @@ Operation counts:
 
 The two cross-term FMAs are nested: `fma(a.hi, b.lo, fma(a.lo, b.hi, e1))`.
 This form replaced the earlier additive-accumulation sequence in commit
-`735e504` ("perf: nested FMA cross-terms in dd_mul/dd_fma (2 roundings vs 4)"),
+`f5dd2d3` ("perf: nested FMA cross-terms in dd_mul/dd_fma (2 roundings vs 4)"),
 which is what drove the effective rounding-event count per cross-term from 4
 down to 2.
 
@@ -64,9 +64,9 @@ roundoff — Muller–Rideau 2022 Theorem 2.7, tightened from JMP 2017's origina
 
 ### 1.2 Opt-in: DWTimesDW3 (Alg 12 / Thm 2.8)
 
-Source: `src/apple_bottom.m:168-194` (inside the `#ifdef APPLEBOTTOM_USE_DWTIMESDW3`
-branch at line 168). Landed as `feat: add DWTimesDW3 compile-time variant (opt-in)`
-in commit `ad993e1`.
+Source: `dd_mul` / `dd_fma` in `src/apple_bottom.m` (inside the `#ifdef APPLEBOTTOM_USE_DWTIMESDW3`
+branch). Landed as `feat: add DWTimesDW3 compile-time variant (opt-in)`
+in commit `8c18ef3`.
 
 ```metal
 inline DD dd_mul(DD a, DD b) {
@@ -122,10 +122,10 @@ The FMA-cross-term migration described in earlier planning notes ("replace
 additive accumulation with nested `fma()` calls, moving from ~5-13u² down to
 ≤2u² for the cross-term step") has already landed:
 
-- `735e504` (April 2026) introduced nested FMA cross-terms in the default
-  path. That is what made the default `< 5u²` instead of the pre-735e504
+- `f5dd2d3` (April 2026) introduced nested FMA cross-terms in the default
+  path. That is what made the default `< 5u²` instead of the pre-f5dd2d3
   `< ~6-13u²` bound.
-- `ad993e1` (April 2026) added DWTimesDW3 as a compile-time opt-in, pushing
+- `8c18ef3` (April 2026) added DWTimesDW3 as a compile-time opt-in, pushing
   the bound to `< 4u²` at the cost of +1 mul +1 add per primitive.
 
 There is no lower-hanging cross-term rewrite left in a DD representation;
@@ -180,6 +180,6 @@ The open v1.3.0 question is not "how do we tighten the bound further" but
   DOI: 10.1145/3484514
 - `docs/vv/PRECISION_ENVELOPE.md` §1.2 — per-operation DD bound derivation
   for the default (DWTimesDW2) path.
-- `src/apple_bottom.m:157-218` — the gated implementations themselves.
+- `src/apple_bottom.m`, the `#ifdef APPLEBOTTOM_USE_DWTIMESDW3` … `#endif` block — the gated implementations themselves.
 - `Makefile:20-27` — the `DWTIMESDW3=1` build flag and `-DAPPLEBOTTOM_USE_DWTIMESDW3`
   propagation.

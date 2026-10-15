@@ -1,0 +1,162 @@
+# 1.4.0-np8 C_si64_160b_gamma gpu_r1 (np=8 omp=1): stderr without dyld lines and without AB_PROFILE per-call lines
+loaded: <frozen>/libapplebottom.dylib
+Note: The following floating-point exceptions are signalling: IEEE_UNDERFLOW_FLAG
+Note: The following floating-point exceptions are signalling: IEEE_UNDERFLOW_FLAG
+=== apple-bottom 1.4.0 (c5a1fa6a8166) BLAS profile, pid 51310 ===
+gpu_calls%: share of calls whose C the GPU computed; gpu_time%: share of wall time spent in those calls.
+routine           calls  gpu_calls  gpu_calls%     total_ms       gpu_ms       cpu_ms  gpu_time%  fallbacks     avg_us   max_dim    hotbin
+------------------------------------------------------------------------------------------------------------------------------
+dgemm              7123        800       11.2%     4391.813     4132.191      259.622      94.1%          0      616.6     17958     2K-4K
+GPU calls by stage, ms (kernel: command-buffer GPU time; other: rest of gpu_ms):
+routine            init      alloc       pack     upload     kernel   download   epilogue      other       gpu_ms
+dgemm           110.961     62.768    843.140    568.220   1346.898     68.174    150.018    982.012     4132.191
+Total BLAS time: 4391.8 ms across 1 routines
+Dimension distribution for 'dgemm' (by max(M,N)):
+  bin         calls      time_ms   pct_time
+  1-32            1792          4.1      0.1%
+  33-128          1638        397.9      9.1%
+  129-512         3164        879.6     20.0%
+  1K-2K             53        894.4     20.4%
+  2K-4K            466       1924.5     43.8%
+  8K+               10        291.4      6.6%
+AB_REPORT[51310] apple-bottom 1.4.0 (c5a1fa6a8166) AB_MODE=gpu
+Note: The following floating-point exceptions are signalling: IEEE_UNDERFLOW_FLAG
+Note: The following floating-point exceptions are signalling: IEEE_UNDERFLOW_FLAG
+AB_REPORT[51310] dgemm calls=7123 gpu_calls=800 cpu_calls=6323 gpu_calls%=11.2 total_ms=4391.813 gpu_ms=4132.191 cpu_ms=259.622 gpu_time%=94.1 fallbacks=0
+AB_REPORT[51310] dgemm gpu_stages_ms init=110.961 alloc=62.768 pack=843.140 upload=568.220 kernel=1346.898 download=68.174 epilogue=150.018 other=982.012
+Note: The following floating-point exceptions are signalling: IEEE_UNDERFLOW_FLAG
+=== apple-bottom 1.4.0 (c5a1fa6a8166) BLAS profile, pid 51316 ===
+gpu_calls%: share of calls whose C the GPU computed; gpu_time%: share of wall time spent in those calls.
+routine           calls  gpu_calls  gpu_calls%     total_ms       gpu_ms       cpu_ms  gpu_time%  fallbacks     avg_us   max_dim    hotbin
+------------------------------------------------------------------------------------------------------------------------------
+Note: The following floating-point exceptions are signalling: IEEE_UNDERFLOW_FLAG
+dgemm              7123        800       11.2%     4459.998     4183.510      276.488      93.8%          0      626.1     17960     2K-4K
+GPU calls by stage, ms (kernel: command-buffer GPU time; other: rest of gpu_ms):
+routine            init      alloc       pack     upload     kernel   downloadNote: The following floating-point exceptions are signalling: IEEE_UNDERFLOW_FLAG
+Note: The following floating-point exceptions are signalling: IEEE_UNDERFLOW_FLAG
+dgemm           111.896     62.754=== apple-bottom 1.4.0 (c5a1fa6a8166) BLAS profile, pid 51312 ===
+gpu_calls%: share of calls whose C the GPU computed; gpu_time%: share of wall time spent in those calls.
+routine           calls  gpu_calls  gpu_calls%     total_ms       gpu_ms       cpu_ms  gpu_time%  fallbacks     avg_us   max_dim    hotbin
+------------------------------------------------------------------------------------------------------------------------------
+dgemm              7123        800       11.2%     4390.861     4125.049      265.812      93.9%          0      616.4     17958     2K-4K
+GPU calls by stage, ms (kernel: command-buffer GPU time; other: rest of gpu_ms):
+routine            init      alloc       pack=== apple-bottom 1.4.0 (c5a1fa6a8166) BLAS profile, pid 51313 ===
+gpu_calls%: share of calls whose C the GPU computed; gpu_time%: share of wall time spent in those calls.
+routine           calls  gpu_calls  gpu_calls%     total_ms       gpu_ms       cpu_ms  gpu_time%  fallbacks     avg_us   max_dim    hotbin
+------------------------------------------------------------------------------------------------------------------------------
+dgemm              6877        554        8.1%     4278.241     4004.562      273.678      93.6%          0      622.1     17958     2K-4K
+Total BLAS time: 4460.0 ms across 1 routines
+Dimension distribution for 'dgemm' (by max(M,N)):
+dgemm           112.441     62.739    835.651    569.365   1325.103     67.254
+GPU calls by stage, ms (kernel: command-buffer GPU time; other: rest of gpu_ms):
+routine            init      alloc       pack     upload     kernel   download   epilogue      other       gpu_ms
+dgemm           111.541     50.584  bin         calls      time_ms   pct_time
+  1-32            1792          4.1      0.1%
+  33-128          1638        400.2      9.0%
+  129-512         3164        874.6     19.6%
+  1K-2K             53        897.1     20.1%
+Total BLAS time: 4390.9 ms across 1 routines
+Dimension distribution for 'dgemm' (by max(M,N)):
+  bin         calls      time_ms   pct_time
+  1-32            1792          4.1      0.1%
+  33-128          1638        421.0      9.6%
+  129-512         3164        877.7     20.0%
+  1K-2K             53        916.9     20.9%
+  2K-4K            466       1877.4     42.8%
+  8K+               10        293.7      6.7%
+=== apple-bottom 1.4.0 (c5a1fa6a8166) BLAS profile, pid 51315 ===
+gpu_calls%: share of calls whose C the GPU computed; gpu_time%: share of wall time spent in those calls.
+routine           calls  gpu_calls  gpu_calls%     total_ms       gpu_ms       cpu_ms  gpu_time%  fallbacks     avg_us   max_dim    hotbin
+------------------------------------------------------------------------------------------------------------------------------
+dgemm              6877        554        8.1%     4335.827     4068.420      267.407      93.8%          0      630.5     17958     2K-4K
+GPU calls by stage, ms (kernel: command-buffer GPU time; other: rest of gpu_ms):
+routine            init      alloc       pack     upload     kernel   download   epilogue      other       gpu_ms
+dgemm           111.973     51.319=== apple-bottom 1.4.0 (c5a1fa6a8166) BLAS profile, pid 51311 ===
+gpu_calls%: share of calls whose C the GPU computed; gpu_time%: share of wall time spent in those calls.
+routine           calls  gpu_calls  gpu_calls%     total_ms       gpu_ms       cpu_ms  gpu_time%  fallbacks     avg_us   max_dim    hotbin
+------------------------------------------------------------------------------------------------------------------------------
+dgemm              6877        554        8.1%     4276.428     4006.092      270.336      93.7%          0      621.8     17962     2K-4K
+GPU calls by stage, ms (kernel: command-buffer GPU time; other: rest of gpu_ms):
+routine            init      alloc       pack     upload     kernel  2K-4K            466       1976.7     44.3%
+  8K+               10        307.4      6.9%
+AB_REPORT[51316] apple-bottom 1.4.0 (c5a1fa6a8166) AB_MODE=gpu
+AB_REPORT[51316] dgemm calls=7123 gpu_calls=800 cpu_calls=6323 gpu_calls%=11.2 total_ms=4459.998 gpu_ms=4183.510 cpu_ms=276.488 gpu_time%=93.8 fallbacks=0
+AB_REPORT[51316] dgemm gpu_stages_ms init=111.896 alloc=62.754 pack=823.935 upload=570.541 kernel=1402.998 download=71.640 epilogue=151.655 other=988.091
+AB_REPORT[51312] apple-bottom 1.4.0 (c5a1fa6a8166) AB_MODE=gpu
+AB_REPORT[51312] dgemm calls=7123 gpu_calls=800 cpu_calls=6323 gpu_calls%=11.2 total_ms=4390.861 gpu_ms=4125.049 cpu_ms=265.812 gpu_time%=93.9 fallbacks=0
+AB_REPORT[51312] dgemm gpu_stages_ms init=112.441 alloc=62.739 pack=835.651 upload=569.365 kernel=1325.103 download=67.254 epilogue=155.940 other=996.556
+Total BLAS time: 4335.8 ms across 1 routines
+Dimension distribution for 'dgemm' (by max(M,N)):
+  bin         calls      time_ms   pct_time
+  1-32            1792          4.1      0.1%
+  33-128          1518        334.4      7.7%
+  129-512         3038        803.6     18.5%
+  1K-2K             53        903.8     20.8%
+  2K-4K            466       1994.1     46.0%
+  8K+               10        295.8      6.8%
+dgemm           113.445     51.929    831.816    577.526   1314.517     64.690    143.299    908.872     4006.092
+Total BLAS time: 4276.4 ms across 1 routines
+Dimension distribution for 'dgemm' (by max(M,N)):
+  bin         calls      time_ms   pct_time
+Total BLAS time: 4278.2 ms across 1 routines
+Dimension distribution for 'dgemm' (by max(M,N)):
+  bin         calls      time_ms   pct_time
+  1-32            1792          4.2      0.1%
+  33-128          1518        339.4      7.9%
+  129-512         3038        797.2     18.6%
+  1K-2K             53        907.7     21.2%
+  2K-4K            466       1946.1     45.5%
+  8K+               10        283.7      6.6%
+AB_REPORT[51313] apple-bottom 1.4.0 (c5a1fa6a8166) AB_MODE=gpu
+=== apple-bottom 1.4.0 (c5a1fa6a8166) BLAS profile, pid 51317 ===
+gpu_calls%: share of calls whose C the GPU computed; gpu_time%: share of wall time spent in those calls.
+routine           calls  gpu_calls  gpu_calls%     total_ms       gpu_ms       cpu_ms  gpu_time%  fallbacks     avg_us   max_dim    hotbin
+------------------------------------------------------------------------------------------------------------------------------
+dgemm              6877        554        8.1%     4265.281     3990.979      274.302      93.6%          0      620.2     17954     2K-4K
+GPU calls by stage, ms (kernel: command-buffer GPU time; other: rest of gpu_ms):
+routine            init      alloc       pack     upload     kernel   download   epilogue      other       gpu_ms
+dgemm           112.538     48.821    827.550    563.151=== apple-bottom 1.4.0 (c5a1fa6a8166) BLAS profile, pid 51314 ===
+gpu_calls%: share of calls whose C the GPU computed; gpu_time%: share of wall time spent in those calls.
+routine           calls  gpu_calls  gpu_calls%     total_ms       gpu_ms       cpu_ms  gpu_time%  fallbacks     avg_us   max_dim    hotbin
+------------------------------------------------------------------------------------------------------------------------------
+dgemm              7123        800       11.2%     4625.377     4360.013      265.364      94.3%          0      649.4     17958     2K-4K
+GPU calls by stage, ms (kernel: command-buffer GPU time; other: rest of gpu_ms):
+routine            init      alloc       pack     upload     kernel   download   epilogue      other       gpu_ms
+AB_REPORT[51315] apple-bottom 1.4.0 (c5a1fa6a8166) AB_MODE=gpu
+AB_REPORT[51315] dgemm calls=6877 gpu_calls=554 cpu_calls=6323 gpu_calls%=8.1 total_ms=4335.827 gpu_ms=4068.420 cpu_ms=267.407 gpu_time%=93.8 fallbacks=0
+AB_REPORT[51315] dgemm gpu_stages_ms init=111.973 alloc=51.319 pack=835.149 upload=580.267 kernel=1351.560 download=63.127 epilogue=152.445 other=922.581
+  1-32            1792          4.1      0.1%
+  33-128          1518        341.9      8.0%
+  129-512         3038        809.9     18.9%
+  1K-2K             53        863.8     20.2%
+  2K-4K            466       1967.9     46.0%
+  8K+               10        288.9      6.8%
+AB_REPORT[51313] dgemm calls=6877 gpu_calls=554 cpu_calls=6323 gpu_calls%=8.1 total_ms=4278.241 gpu_ms=4004.562 cpu_ms=273.678 gpu_time%=93.6 fallbacks=0
+AB_REPORT[51313] dgemm gpu_stages_ms init=111.541 alloc=50.584 pack=831.567 upload=563.057 kernel=1323.965 download=64.076 epilogue=148.910 other=910.862
+Total BLAS time: 4265.3 ms across 1 routines
+Dimension distribution for 'dgemm' (by max(M,N)):
+  bin         calls      time_ms   pct_time
+  1-32            1792          4.1      0.1%
+  33-128          1518        338.1      7.9%
+Total BLAS time: 4625.4 ms across 1 routines
+Dimension distribution for 'dgemm' (by max(M,N)):
+  bin         calls      time_ms   pct_time
+AB_REPORT[51311] apple-bottom 1.4.0 (c5a1fa6a8166) AB_MODE=gpu
+AB_REPORT[51311] dgemm calls=6877 gpu_calls=554 cpu_calls=6323 gpu_calls%=8.1 total_ms=4276.428 gpu_ms=4006.092 cpu_ms=270.336 gpu_time%=93.7 fallbacks=0
+  129-512         3038        797.7     18.7%
+  1K-2K             53        871.1     20.4%
+  2K-4K            466       1962.9     46.0%
+  8K+               10        291.3      6.8%
+  1-32            1792          4.1      0.1%
+  33-128          1638        405.5      8.8%
+  129-512         3164       1049.7     22.7%
+  1K-2K             53        860.2     18.6%
+  2K-4K            466       2013.1     43.5%
+  8K+               10        292.7      6.3%
+AB_REPORT[51311] dgemm gpu_stages_ms init=113.445 alloc=51.929 pack=831.816 upload=577.526 kernel=1314.517 download=64.690 epilogue=143.299 other=908.872
+AB_REPORT[51317] apple-bottom 1.4.0 (c5a1fa6a8166) AB_MODE=gpu
+AB_REPORT[51317] dgemm calls=6877 gpu_calls=554 cpu_calls=6323 gpu_calls%=8.1 total_ms=4265.281 gpu_ms=3990.979 cpu_ms=274.302 gpu_time%=93.6 fallbacks=0
+AB_REPORT[51317] dgemm gpu_stages_ms init=112.538 alloc=48.821 pack=827.550 upload=563.151 kernel=1333.516 download=62.700 epilogue=151.586 other=891.116
+AB_REPORT[51314] apple-bottom 1.4.0 (c5a1fa6a8166) AB_MODE=gpu
+AB_REPORT[51314] dgemm calls=7123 gpu_calls=800 cpu_calls=6323 gpu_calls%=11.2 total_ms=4625.377 gpu_ms=4360.013 cpu_ms=265.364 gpu_time%=94.3 fallbacks=0
+AB_REPORT[51314] dgemm gpu_stages_ms init=280.165 alloc=62.839 pack=829.600 upload=589.083 kernel=1330.653 download=69.150 epilogue=154.956 other=1043.568

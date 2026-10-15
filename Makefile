@@ -42,7 +42,25 @@ SRC = src
 INCLUDE = include
 EXAMPLES = examples
 
-.PHONY: all lib test bench bench-report bench-rect clean examples install uninstall
+# Library version, from include/apple_bottom.h (scripts/check_version.sh checks
+# that every other place stating it agrees: make version-check).
+VERSION := $(shell sed -nE 's/^.define APPLE_BOTTOM_VERSION_STRING "([^"]+)"/\1/p' $(INCLUDE)/apple_bottom.h)
+VERSION_NUM := $(firstword $(subst -, ,$(VERSION)))
+
+# Build identity reported by ab_build_info() and at the top of every
+# AB_PROFILE / AB_REPORT report: the git commit, with -dirty if tracked files
+# differ from it, or "unknown" outside a git checkout or when this directory is
+# not the top of its checkout, as for a copy vendored inside another repository
+# (override with make AB_BUILD_SHA=...). The stamp file changes only when the
+# identity does, so a new commit or edit rebuilds just blas_profiler.o.
+ifndef AB_BUILD_SHA
+AB_BUILD_SHA := $(shell [ -z "$$(git rev-parse --show-prefix 2>/dev/null)" ] \
+                  && sha=$$(git rev-parse --short=12 HEAD 2>/dev/null) \
+                  && { git diff --quiet HEAD -- 2>/dev/null || sha=$$sha-dirty; echo $$sha; } \
+                  || echo unknown)
+endif
+
+.PHONY: all lib test bench bench-report bench-rect clean examples install uninstall FORCE
 
 # =============================================================================
 # Main targets
@@ -70,21 +88,28 @@ $(BUILD):
 $(BUILD)/apple_bottom.o: $(SRC)/apple_bottom.m $(INCLUDE)/apple_bottom.h | $(BUILD)
 	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $@
 
-$(BUILD)/blas_wrapper.o: $(SRC)/blas_wrapper.c $(SRC)/blas_trans.h $(INCLUDE)/apple_bottom.h | $(BUILD)
+$(BUILD)/blas_wrapper.o: $(SRC)/blas_wrapper.c $(SRC)/blas_trans.h $(SRC)/dispatch.h $(INCLUDE)/apple_bottom.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $@
 
-$(BUILD)/fortran_bridge.o: $(SRC)/fortran_bridge.c $(SRC)/blas_trans.h $(INCLUDE)/apple_bottom.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
+$(BUILD)/fortran_bridge.o: $(SRC)/fortran_bridge.c $(INCLUDE)/apple_bottom.h | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c $(SRC)/fortran_bridge.c -o $@
 
-$(BUILD)/blas_profiler.o: $(SRC)/profiling/blas_profiler.c $(SRC)/profiling/blas_profiler.h | $(BUILD)
-	$(CC) $(CFLAGS) -I$(SRC) -c $(SRC)/profiling/blas_profiler.c -o $@
+# BLAS-ABI routing; dispatch_table.h is the built-in table `make calibrate` writes.
+$(BUILD)/dispatch.o: $(SRC)/dispatch.c $(SRC)/dispatch.h $(SRC)/dispatch_table.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $(SRC)/dispatch.c -o $@
+
+$(BUILD)/build_sha.stamp: FORCE | $(BUILD)
+	@echo '$(AB_BUILD_SHA)' | cmp -s - $@ || echo '$(AB_BUILD_SHA)' > $@
+
+$(BUILD)/blas_profiler.o: $(SRC)/profiling/blas_profiler.c $(SRC)/profiling/blas_profiler.h $(INCLUDE)/apple_bottom.h $(BUILD)/build_sha.stamp | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) '-DAB_BUILD_SHA="$(AB_BUILD_SHA)"' -c $(SRC)/profiling/blas_profiler.c -o $@
 
 $(BUILD)/device_api.o: $(SRC)/device_api.m $(INCLUDE)/apple_bottom.h $(INCLUDE)/apple_bottom_device.h | $(BUILD)
 	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/device_api.m -o $@
 
 LIB_OBJS = $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o \
            $(BUILD)/fortran_bridge.o $(BUILD)/blas_profiler.o \
-           $(BUILD)/device_api.o
+           $(BUILD)/device_api.o $(BUILD)/dispatch.o
 
 $(BUILD)/libapplebottom.a: $(LIB_OBJS)
 	ar rcs $@ $^
@@ -95,7 +120,7 @@ $(BUILD)/libapplebottom.a: $(LIB_OBJS)
 # Accelerate is re-exported so -lapplebottom alone provides full BLAS/LAPACK.
 $(BUILD)/libapplebottom.dylib: $(LIB_OBJS)
 	$(CC) -dynamiclib -install_name @rpath/libapplebottom.dylib \
-	    -current_version 1.3.1 -compatibility_version 1.0.0 \
+	    -current_version $(VERSION_NUM) -compatibility_version 1.0.0 \
 	    $^ -o $@ $(DYLIB_LDFLAGS)
 	@echo "Built: $@"
 
@@ -172,15 +197,22 @@ $(BUILD)/test_device_api: tests/test_device_api.c lib | $(BUILD)
 # BLAS-ABI conformance harness: column-major ab_*gemm_blas / ab_*gemm_ /
 # dgemm_ / zgemm_ vs Accelerate cblas. Known failures are tracked in the
 # XFAIL table in tests/test_blas_abi.c (XPASS and stale entries fail the run).
+# AB_EXPECT_BUILD_SHA: the exit-report suite checks ab_build_info() names it.
 $(BUILD)/test_blas_abi: tests/test_blas_abi.c lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	$(CC) $(CFLAGS) -I$(INCLUDE) '-DAB_EXPECT_BUILD_SHA="$(AB_BUILD_SHA)"' $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
 $(BUILD)/test_convergence: tests/verification/test_convergence.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
-test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_blas_abi test-ghost-detection test-symbols test-fortran
+# Routing unit tests: dispatch.c alone, no library or GPU. They check the
+# built-in table against its calibration data, found under AB_SOURCE_ROOT.
+$(BUILD)/test_dispatch: tests/test_dispatch.c $(BUILD)/dispatch.o $(SRC)/dispatch.h $(SRC)/dispatch_table.h | $(BUILD)
+	$(CC) $(CFLAGS) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' $< $(BUILD)/dispatch.o -o $@
+	@echo "Built: $@"
+
+test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "Running Tests"
@@ -188,6 +220,7 @@ test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api
 	./$(BUILD)/test_precision
 	./$(BUILD)/test_correctness
 	./$(BUILD)/test_device_api
+	./$(BUILD)/test_dispatch
 	./$(BUILD)/test_blas_abi
 	@echo ""
 	@echo "✓ All tests passed!"
@@ -290,6 +323,16 @@ test-rectangular-diag: $(BUILD)/test_rectangular_diag
 	@echo "═══════════════════════════════════════════════════════════════════"
 	./$(BUILD)/test_rectangular_diag
 
+# Rectangular shapes up to 18277 x 150 x 18277 (correctness, then timings).
+# Not part of `make test`: it peaks at about 21 GB of memory (M2 Max: ~10 s).
+$(BUILD)/test_rectangular: tests/test_rectangular.c lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
+.PHONY: test-rectangular test-rectangular-diag
+test-rectangular: $(BUILD)/test_rectangular
+	./$(BUILD)/test_rectangular
+
 # Performance regression: save baseline or compare
 bench-baseline: lib
 	@echo "Saving performance baseline..."
@@ -322,7 +365,7 @@ install: lib
 	install -m 644 $(INCLUDE)/apple_bottom.h $(PREFIX)/include/
 	install -m 644 $(INCLUDE)/apple_bottom_device.h $(PREFIX)/include/
 	@sed -e 's|@PREFIX@|$(PREFIX)|g' \
-	     -e 's|@VERSION@|1.3.1|g' \
+	     -e 's|@VERSION@|$(VERSION)|g' \
 	     applebottom.pc.in > $(PREFIX)/lib/pkgconfig/applebottom.pc
 	@echo "Installed to $(PREFIX)"
 
@@ -333,32 +376,30 @@ uninstall:
 	rm -f $(PREFIX)/include/apple_bottom_device.h
 	rm -f $(PREFIX)/lib/pkgconfig/applebottom.pc
 	@echo "Uninstalled from $(PREFIX)"
-# =============================================================================
-# Add these targets to the end of your Makefile
-# =============================================================================
 
+# =============================================================================
 # Sanitizer builds (for local debugging)
 .PHONY: test-asan test-ubsan
 
-test-asan: clean
-	@echo "Building with AddressSanitizer..."
-	$(OBJC) $(OBJCFLAGS) -fsanitize=address -g -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $(BUILD)/apple_bottom.o
-	$(CC) $(CFLAGS) -fsanitize=address -g -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $(BUILD)/blas_wrapper.o
-	$(CC) $(CFLAGS) -fsanitize=address -g -I$(INCLUDE) -c $(SRC)/fortran_bridge.c -o $(BUILD)/fortran_bridge.o
-	ar rcs $(BUILD)/libapplebottom.a $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o $(BUILD)/fortran_bridge.o
-	$(CC) $(CFLAGS) -fsanitize=address -g -I$(INCLUDE) tests/test_correctness.c -o $(BUILD)/test_correctness -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
-	@echo "Running tests with ASan..."
-	ASAN_OPTIONS=detect_leaks=1 ./$(BUILD)/test_correctness
+# Sanitizer builds: the whole library and test_correctness, built by the
+# normal rules with the sanitizer's flags into their own directory (so they
+# never mix with the normal objects).
+SAN_TARGET = $(MAKE) --no-print-directory BUILD=$(BUILD)/$(1) \
+	CFLAGS="$(CFLAGS) -fsanitize=$(2) -g" OBJCFLAGS="$(OBJCFLAGS) -fsanitize=$(2) -g" \
+	LDFLAGS="$(LDFLAGS) -fsanitize=$(2)" DYLIB_LDFLAGS="$(DYLIB_LDFLAGS) -fsanitize=$(2)" \
+	$(BUILD)/$(1)/test_correctness
 
-test-ubsan: clean
+test-asan:
+	@echo "Building with AddressSanitizer..."
+	+$(call SAN_TARGET,asan,address)
+	@echo "Running tests with ASan..."
+	ASAN_OPTIONS=halt_on_error=1 ./$(BUILD)/asan/test_correctness
+
+test-ubsan:
 	@echo "Building with UndefinedBehaviorSanitizer..."
-	$(OBJC) $(OBJCFLAGS) -fsanitize=undefined -g -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $(BUILD)/apple_bottom.o
-	$(CC) $(CFLAGS) -fsanitize=undefined -g -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $(BUILD)/blas_wrapper.o
-	$(CC) $(CFLAGS) -fsanitize=undefined -g -I$(INCLUDE) -c $(SRC)/fortran_bridge.c -o $(BUILD)/fortran_bridge.o
-	ar rcs $(BUILD)/libapplebottom.a $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o $(BUILD)/fortran_bridge.o
-	$(CC) $(CFLAGS) -fsanitize=undefined -g -I$(INCLUDE) tests/test_correctness.c -o $(BUILD)/test_correctness -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	+$(call SAN_TARGET,ubsan,undefined)
 	@echo "Running tests with UBSan..."
-	./$(BUILD)/test_correctness
+	UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./$(BUILD)/ubsan/test_correctness
 
 $(BUILD)/bench_dsyrk: benchmarks/bench_dsyrk.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
@@ -403,16 +444,46 @@ bench-rect: $(BUILD)/bench_rect_dgemm $(BUILD)/bench_rect_zgemm
 bench-paper: $(BUILD)/bench_paper
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
-	@echo "HPEC 2026 Paper Benchmark Suite"
+	@echo "Native-API benchmark suite (square, tall-skinny, batched, ZHERK, precision)"
 	@echo "═══════════════════════════════════════════════════════════════════"
 	./$(BUILD)/bench_paper
 
 bench-paper-csv: $(BUILD)/bench_paper
 	./$(BUILD)/bench_paper --csv
 
+# AB_MODE=auto calibration (about 15 minutes; run on an idle machine on AC
+# power). benchmarks/calibrate.c times every shape of its grid end to end
+# through ab_*gemm_blas with the GPU path forced and through Accelerate, in
+# one process, and derives the table that sends a BLAS-ABI call to the GPU
+# only where the GPU measured >= 1.10x faster. It writes the raw and summary
+# CSVs and dispatch_table.txt (use it at once with AB_DISPATCH_TABLE=<path>)
+# under CALIBRATE_DIR, and regenerates CALIBRATE_SOURCE, the built-in table:
+# rebuild to compile it in, and commit it with CALIBRATE_DIR.
+# CALIBRATE_ARGS passes options, e.g. --only qe-paw for one part of the grid
+# (which leaves CALIBRATE_SOURCE unchanged).
+CALIBRATE_DIR ?= benchmarks/results/$(shell date +%Y-%m-%d)-$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)-calibrate
+CALIBRATE_SOURCE ?= $(SRC)/dispatch_table.h
+CALIBRATE_ARGS ?=
+GPU_CORES = $(shell ioreg -rc AGXAccelerator -d1 2>/dev/null | sed -nE 's/.*"gpu-core-count" = ([0-9]+).*/\1/p' | head -1)
+
+$(BUILD)/calibrate: benchmarks/calibrate.c $(SRC)/dispatch.h lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) '-DAB_CAL_SDK="$(shell xcrun --show-sdk-version 2>/dev/null)"' $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
+.PHONY: calibrate
+calibrate: $(BUILD)/calibrate
+	mkdir -p $(CALIBRATE_DIR)
+	caffeinate -is ./$(BUILD)/calibrate --out $(CALIBRATE_DIR) --source $(CALIBRATE_SOURCE) \
+	    --gpu-cores "$(GPU_CORES)" $(CALIBRATE_ARGS)
+	@echo "Use it now: export AB_DISPATCH_TABLE=$(abspath $(CALIBRATE_DIR))/dispatch_table.txt"
+
 # =============================================================================
 # CI Targets
 # =============================================================================
+
+.PHONY: version-check
+version-check:
+	@./scripts/check_version.sh
 
 .PHONY: build-check ci-local verify-symbols test-symbols
 
@@ -459,29 +530,44 @@ test-symbols: $(BUILD)/libapplebottom.dylib $(BUILD)/libapplebottom.a
 
 # Build check: compile all source files to .o without linking
 # Used by GitHub Actions to verify syntax and compilation (fast check)
-build-check: | $(BUILD)
+# Objects go to build/check/ so they never replace the library's own objects
+# (blas_profiler.o there carries the build SHA).
+$(BUILD)/check:
+	mkdir -p $@
+
+build-check: | $(BUILD)/check
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "Build Check (compile only, no linking)"
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "Compiling apple_bottom.m..."
-	@$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $(BUILD)/apple_bottom.o
+	@$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $(BUILD)/check/apple_bottom.o
 	@echo "Compiling blas_wrapper.c..."
-	@$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $(BUILD)/blas_wrapper.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $(BUILD)/check/blas_wrapper.o
 	@echo "Compiling fortran_bridge.c..."
-	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c $(SRC)/fortran_bridge.c -o $(BUILD)/fortran_bridge.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c $(SRC)/fortran_bridge.c -o $(BUILD)/check/fortran_bridge.o
 	@echo "Compiling blas_profiler.c..."
-	@$(CC) $(CFLAGS) -I$(SRC) -c $(SRC)/profiling/blas_profiler.c -o $(BUILD)/blas_profiler.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c $(SRC)/profiling/blas_profiler.c -o $(BUILD)/check/blas_profiler.o
+	@echo "Compiling dispatch.c..."
+	@$(CC) $(CFLAGS) -c $(SRC)/dispatch.c -o $(BUILD)/check/dispatch.o
+	@echo "Compiling device_api.m..."
+	@$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/device_api.m -o $(BUILD)/check/device_api.o
 	@echo "Compiling test_correctness.c..."
-	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_correctness.c -o $(BUILD)/test_correctness.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_correctness.c -o $(BUILD)/check/test_correctness.o
 	@echo "Compiling test_precision.c..."
-	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_precision.c -o $(BUILD)/test_precision.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_precision.c -o $(BUILD)/check/test_precision.o
 	@echo "Compiling test_blas_abi.c..."
-	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_blas_abi.c -o $(BUILD)/test_blas_abi.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_blas_abi.c -o $(BUILD)/check/test_blas_abi.o
+	@echo "Compiling test_dispatch.c..."
+	@$(CC) $(CFLAGS) -I$(SRC) -c tests/test_dispatch.c -o $(BUILD)/check/test_dispatch.o
+	@echo "Compiling test_device_api.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_device_api.c -o $(BUILD)/check/test_device_api.o
+	@echo "Compiling calibrate.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c benchmarks/calibrate.c -o $(BUILD)/check/calibrate.o
 	@echo "Compiling test_chaos.c..."
-	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_chaos.c -o $(BUILD)/test_chaos.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_chaos.c -o $(BUILD)/check/test_chaos.o
 	@echo "Compiling test_convergence.c..."
-	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/verification/test_convergence.c -o $(BUILD)/test_convergence.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/verification/test_convergence.c -o $(BUILD)/check/test_convergence.o
 	@echo ""
 	@echo "✓ All source files compile successfully"
 	@echo ""
@@ -491,11 +577,11 @@ build-check: | $(BUILD)
 #
 # Counting rule (also README.md, tests/README.md): TEST_TOTAL counts tests.
 # A test is one test_precision case, one TESTS[] registry entry of
-# test_correctness / test_chaos / test_device_api, or one test_blas_abi
-# suite. Device-API CHECKs and BLAS-ABI cases are reported on their own
-# lines and are not part of TEST_TOTAL. The report is written only after
-# every binary passed, so TEST_PASSED = TEST_TOTAL and TEST_FAILED = 0.
-ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_blas_abi $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
+# test_correctness / test_chaos / test_device_api / test_dispatch, or one
+# test_blas_abi suite. Device-API CHECKs and BLAS-ABI cases are reported on
+# their own lines and are not part of TEST_TOTAL. The report is written only
+# after every binary passed, so TEST_PASSED = TEST_TOTAL and TEST_FAILED = 0.
+ci-local: version-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "CI Local Validation"
@@ -506,6 +592,7 @@ ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos 
 	@./$(BUILD)/test_correctness > $(BUILD)/test_correctness.log 2>&1 && echo "✓ test_correctness: PASS" || (echo "✗ test_correctness: FAIL" && cat $(BUILD)/test_correctness.log && exit 1)
 	@./$(BUILD)/test_chaos > $(BUILD)/test_chaos.log 2>&1 && echo "✓ test_chaos: PASS" || (echo "✗ test_chaos: FAIL" && cat $(BUILD)/test_chaos.log && exit 1)
 	@./$(BUILD)/test_device_api > $(BUILD)/test_device_api.log 2>&1 && echo "✓ test_device_api: PASS" || (echo "✗ test_device_api: FAIL" && cat $(BUILD)/test_device_api.log && exit 1)
+	@./$(BUILD)/test_dispatch > $(BUILD)/test_dispatch.log 2>&1 && echo "✓ test_dispatch: PASS" || (echo "✗ test_dispatch: FAIL" && cat $(BUILD)/test_dispatch.log && exit 1)
 	@./$(BUILD)/test_blas_abi > $(BUILD)/test_blas_abi.log 2>&1 && echo "✓ test_blas_abi: PASS" || (echo "✗ test_blas_abi: FAIL" && cat $(BUILD)/test_blas_abi.log && exit 1)
 	@echo ""
 	@echo "Running convergence study (V-2)..."
@@ -519,19 +606,22 @@ ci-local: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos 
 		CHAOS=$$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_chaos.log); \
 		DEVICE_API=$$(sed -nE "s/^Summary: ([0-9]+) test.*/\1/p" $(BUILD)/test_device_api.log); \
 		DEVICE_API_CHECKS=$$(sed -nE "s/^Summary: .* ([0-9]+) CHECK.*/\1/p" $(BUILD)/test_device_api.log); \
+		DISPATCH=$$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_dispatch.log); \
 		BLAS_ABI=$$(grep -cE "^\[[0-9]+/[0-9]+\] " $(BUILD)/test_blas_abi.log); \
-		for n in "$$PRECISION" "$$CORRECTNESS" "$$CHAOS" "$$DEVICE_API" "$$DEVICE_API_CHECKS" "$$BLAS_ABI"; do \
+		for n in "$$PRECISION" "$$CORRECTNESS" "$$CHAOS" "$$DEVICE_API" "$$DEVICE_API_CHECKS" "$$DISPATCH" "$$BLAS_ABI"; do \
 			case "$$n" in ""|*[!0-9]*|0) echo "✗ CI report: could not read a test count from the logs"; exit 1;; esac; \
 		done; \
-		TOTAL=$$((PRECISION + CORRECTNESS + CHAOS + DEVICE_API + BLAS_ABI)); \
+		TOTAL=$$((PRECISION + CORRECTNESS + CHAOS + DEVICE_API + DISPATCH + BLAS_ABI)); \
 		echo "GIT_SHA: $$(git rev-parse HEAD)" > $(BUILD)/CI_REPORT.txt; \
 		echo "GIT_BRANCH: $$(git rev-parse --abbrev-ref HEAD)" >> $(BUILD)/CI_REPORT.txt; \
+		echo "AB_BUILD_SHA: $(AB_BUILD_SHA)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TIMESTAMP: $$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $(BUILD)/CI_REPORT.txt; \
 		echo "HOSTNAME: $$(hostname)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_PRECISION: PASS ($$PRECISION tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_CORRECTNESS: PASS ($$CORRECTNESS tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_CHAOS: PASS ($$CHAOS tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_DEVICE_API: PASS ($$DEVICE_API tests)" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_DISPATCH: PASS ($$DISPATCH tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_BLAS_ABI: PASS ($$BLAS_ABI tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_CONVERGENCE: PASS" >> $(BUILD)/CI_REPORT.txt; \
 		echo "test-ghost-detection: PASS" >> $(BUILD)/CI_REPORT.txt; \

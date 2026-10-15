@@ -1,0 +1,30 @@
+# apple-bottom AB_MODE=auto dispatch table, for AB_DISPATCH_TABLE=<this file>
+# Written by `make calibrate` (benchmarks/calibrate.c).
+#
+# Date:     2026-10-14T04:32:14Z
+# Machine:  Apple M2 Max, 38-core GPU, 64 GB, 8P+4E CPU cores
+# OS:       macOS 27.0.1 (26A434)
+# SDK:      macOS SDK 26.0, clang 17.0.0 (clang-1700.3.19.1)
+# Library:  apple-bottom 1.3.1-dev (52f188016c27)
+# Data:     benchmarks/results/2026-10-14-52f1880-calibrate/calibrate_summary.csv
+# Method:   ab_*gemm_blas, GPU path forced, vs Accelerate cblas in one
+#           process; alpha 1, beta 0, tight ld; 3 warmups, median of 7
+#           timed runs; GPU results cross-checked against cblas
+#
+# Accelerate time / GPU time per routine and TRANS class (a win is >= 1.10x):
+#   dgemm N N   9 shapes, 0 wins; best 0.62x at 6144x6144x6144
+#   dgemm N T   6 shapes, 0 wins; best 0.69x at 6144x6144x6144
+#   dgemm T N   6 shapes, 0 wins; best 0.65x at 6144x6144x6144
+#   dgemm T T   4 shapes, 0 wins; best 0.84x at 6144x6144x6144
+#   zgemm N N  20 shapes, 0 wins; best 0.89x at 6144x6144x6144
+#   zgemm N T   4 shapes, 0 wins; best 1.02x at 6144x6144x6144
+#   zgemm T N  13 shapes, 0 wins; best 1.02x at 6144x6144x6144
+#   zgemm T T   4 shapes, 2 wins; best 1.20x at 6144x6144x6144
+#
+# A call goes to the GPU iff M >= min_M, N >= min_N and K >= min_K for a
+# row of its routine and TRANS class ('T' rows also cover 'C'); no row:
+# Accelerate. Each row is a measured win with no slower shape of its class
+# at least as large in M, N and K.
+#
+# routine transA transB min_M min_N min_K
+zgemm T T 4096 4096 4096   # 1.11x

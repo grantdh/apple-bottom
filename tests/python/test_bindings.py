@@ -231,7 +231,7 @@ class BindingsTest(unittest.TestCase):
             m2.download()
 
         with self.assertRaises(ab.InvalidArgumentError):
-            ab.Matrix(ab.MAX_DIMENSION + 1, 1)  # half-built object is collected
+            ab.Matrix(65536, 32768)  # 2^31 elements; half-built object is collected
 
         for cls in (ab.MemoryPool, ab.Session):
             with cls() as obj:
