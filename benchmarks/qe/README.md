@@ -50,6 +50,13 @@ python3 benchmarks/qe/compare.py /path/to/out
 python3 benchmarks/qe/tables.py /path/to/out 1.4.0
 ```
 
+A plan line may end with extra pw.x arguments, e.g. `-nk 4` for k-point
+pools, and `VAR=value` environment settings (see the header of
+`run_campaign.sh`). With more than one rank, the runner caps each rank's
+OpenBLAS and Accelerate threads at its OpenMP threads. Without the cap,
+eight ranks each start their own Accelerate threads: input A at 8 ranks ×
+1 thread with `-nk 4` took 110 s uncapped and 101 s capped (one run each).
+
 The scripts need only the Python 3 that ships with macOS (3.9 or later).
 
 Input A takes about 8.5 minutes per run on an M2 Max with `np = 1` and 8
