@@ -26,8 +26,14 @@ Performance work on these shapes starts only if the GPU kernel time alone
 is below 0.8× of Accelerate's time for the same calls. Above that, even a
 GPU path with no other cost would be at most 1.25× faster, a margin that
 per-call conversion and transfers would not leave.
-On the M2 Max that ratio is 1.00–1.67, so this work is **not planned for
-M2-class GPUs**. The candidates stay open for GPUs on which `make
+On the M2 Max that ratio is 1.00–1.72 with one rank (VAL-1 and the
+[release check](../benchmarks/results/2026-10-15-c5a1fa6-qe-si64-opt/)), so
+for single-process runs this work is **not planned for M2-class GPUs**.
+With 8 ranks it is 0.65–0.78 for A's and B's ZGEMMs and C's DGEMMs, below
+the bar: each rank's Accelerate runs one thread and the ranks share the
+matrix hardware. With 8 ranks the other stages, at 0.7–2.1× the kernel
+time, still make `gpu` mode 5–21% slower. Whether to work on that case is a
+decision for 1.5; the candidates below would be measured there first. The candidates stay open for GPUs on which `make
 calibrate` and an `AB_REPORT` show the kernel clearly ahead of Accelerate.
 
 Candidates, each aimed at a measured stage:

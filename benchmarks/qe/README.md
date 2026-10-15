@@ -52,17 +52,25 @@ python3 benchmarks/qe/tables.py /path/to/out 1.4.0
 
 A plan line may end with extra pw.x arguments, e.g. `-nk 4` for k-point
 pools, and `VAR=value` environment settings (see the header of
-`run_campaign.sh`). With more than one rank, the runner caps each rank's
-OpenBLAS and Accelerate threads at its OpenMP threads. Without the cap,
-eight ranks each start their own Accelerate threads: input A at 8 ranks ×
-1 thread with `-nk 4` took 110 s uncapped and 101 s capped (one run each).
+`run_campaign.sh`). With more than one rank, the runner sets each rank's
+`OPENBLAS_NUM_THREADS` and `VECLIB_MAXIMUM_THREADS` to its OpenMP threads
+unless the plan line sets them; a single rank keeps the libraries'
+defaults. Without that, eight ranks each start their own Accelerate
+threads: input A at 8 ranks × 1 thread with `-nk 4` (the QE build of the
+2026-10-15 results) took 110 s uncapped and 101 s capped (one run each). `LOCK_CMD`, if set, prefixes each `mpirun`, e.g. with a machine-lock
+wrapper.
 
 The scripts need only the Python 3 that ships with macOS (3.9 or later).
 
-Input A takes about 8.5 minutes per run on an M2 Max with `np = 1` and 8
-OpenMP threads (`AB_MODE=cpu`).
+Input A takes about 8.5 minutes per run in `cpu` mode on an M2 Max with
+VAL-1's `-O0` QE build (`np = 1`, 8 OpenMP threads). With QE compiled `-O3`
+it takes about 5 minutes at 1 rank × 1 thread and 1.6 minutes at 8 ranks
+× 1 thread with `-nk 4`. Keep one OpenMP thread per rank with that build;
+see the 2026-10-15 results.
 
 ## Results
 
 - 2026-10-14, library 1dbdb52 (1.4.0 candidate) and eaad87e (main before
   1.4.0): [`../results/2026-10-14-1dbdb52-qe-si64/`](../results/2026-10-14-1dbdb52-qe-si64/)
+- 2026-10-15, library c5a1fa6 (1.4.0), QE compiled `-O3`, 1 rank and
+  8 ranks: [`../results/2026-10-15-c5a1fa6-qe-si64-opt/`](../results/2026-10-15-c5a1fa6-qe-si64-opt/)

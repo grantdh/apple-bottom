@@ -42,9 +42,12 @@ Where it does not:
 - Bit-for-bit IEEE FP64 results, or values outside FP32's exponent range.
 - GEMMs issued one call at a time from host memory through the BLAS ABI:
   on an M2 Max no measured shape is more than 1.02× faster than Accelerate
-  except ZGEMM with both operands transposed at N ≥ 4096 (1.11–1.20×). For Quantum ESPRESSO's
-  long-K shapes even the GPU kernel alone is no faster; conversion and
-  transfers add to that. The device-buffer API converts on every call in
+  except ZGEMM with both operands transposed at N ≥ 4096 (1.11–1.20×).
+  For Quantum ESPRESSO's long-K shapes the GPU kernel alone is no faster
+  than Accelerate in a single process. With 8 ranks, where each rank's
+  Accelerate has one thread, it takes 0.65–0.78× of Accelerate's time, but
+  conversion and transfers cost more than that margin: `gpu` mode is 5–21%
+  slower ([release check](../benchmarks/results/2026-10-15-c5a1fa6-qe-si64-opt/)). The device-buffer API converts on every call in
   the same way (it has not been benchmarked separately).
 - Anything beyond the GEMM family: the rest of BLAS and LAPACK comes from
   your BLAS library.

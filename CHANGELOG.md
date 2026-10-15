@@ -35,8 +35,12 @@ All notable changes to this project will be documented in this file.
   `run_campaign.sh` (inputs × `AB_MODE`s × repetitions, fresh directories,
   rotated mode order) and `analyze.py` / `compare.py`, which summarize the
   BLAS time by route and the GPU stage costs and compare every energy and
-  band energy with the `cpu` run. VAL-1 was repeated with it; results in
-  `benchmarks/results/2026-10-14-1dbdb52-qe-si64/`.
+  band energy with the `cpu` run. Plan lines can add pw.x arguments such as
+  `-nk 4`; with several ranks the runner caps each rank's OpenBLAS and
+  Accelerate threads, and `analyze.py` sums over the ranks. VAL-1 was repeated with it;
+  results in `benchmarks/results/2026-10-14-1dbdb52-qe-si64/`. The 1.4.0
+  release check on a QE build compiled `-O3`, with 1 and 8 ranks, is in
+  `benchmarks/results/2026-10-15-c5a1fa6-qe-si64-opt/`.
 - **`make version-check`** (`scripts/check_version.sh`, first step of
   `make ci-local` and of CI) checks that the Python package, CITATION.cff,
   the README citation and the top CHANGELOG entry state the version in

@@ -92,14 +92,18 @@ routing table: rebuild to compile it in, or point `AB_DISPATCH_TABLE` at its
 `dispatch_table.txt`.
 
 **Quantum ESPRESSO** (develop, 7.5), 64-atom Si, PAW
-([VAL-1](tests/validation/VAL001_QE_Si64.md)): the total energy and every
-printed band energy are the same in every mode and run, also in `gpu` mode,
-where the calls that make up 89–99% of the GEMM work run on the GPU.
-`AB_MODE=auto` keeps all of QE's GEMMs on Accelerate and matches `cpu`
-mode within 0.2%; forcing the GPU makes the runs 1.3–17.3% slower (with QE
-itself compiled at `-O0`; VAL-1 explains), and the
-GPU kernels alone already take 1.00–1.67× as long as Accelerate needs for
-the same calls (2.7–10× for the PAW DGEMMs).
+([VAL-1](tests/validation/VAL001_QE_Si64.md), QE compiled `-O0`, and the
+[release check](benchmarks/results/2026-10-15-c5a1fa6-qe-si64-opt/), QE
+compiled `-O3`): the total energy and every printed band energy are the same
+in every mode and run, also in `gpu` mode, where the calls that make up
+88–99% of the GEMM work run on the GPU. `AB_MODE=auto` keeps all of QE's
+GEMMs on Accelerate and matches `cpu` mode (within 0.2% at `-O0`, 1.7% at
+`-O3`). Forcing the GPU makes the runs slower: 1.3–17.3% at `-O0`, and at
+`-O3` 14–40% with one rank and 5–21% with 8 ranks. With one rank the GPU
+kernels alone take 1.00–1.72× as long as Accelerate needs for the same calls
+(2.7–12.6× for the PAW DGEMMs). With 8 ranks, where each rank's Accelerate
+has one thread, they take 0.65–0.78× (PAW DGEMMs 1.5–4.3×), but packing,
+transfers and the epilogue cost more than that margin.
 
 ## Using it
 
