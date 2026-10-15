@@ -407,6 +407,9 @@ call. The native `ABMatrix` and device APIs do not use them.
 | `AB_PROFILE` | off | `1`: the same counts as a detailed table on stderr at exit, with a dimension histogram, plus one line per GPU call and per fallback. |
 | `AB_PROFILE_JSON` | unset | With `AB_PROFILE=1`: also write the profile as JSON to this path at exit. |
 | `AB_PROFILE_THRESHOLD_NS` | `0` | Count only calls that took at least this many ns, in both reports. |
+| `AB_TRACE` | unset | A path: each process appends one line per call to `<path>.<pid>` (see [Per-call trace](#per-call-trace-ab_trace)). Unset or empty: no trace. |
+| `AB_TRACE_HASH` | off | With `AB_TRACE`, `1`: also hash the operands each call reads. |
+| `AB_TEST_FAIL_STAGE` | unset | Test-only. `alloc`: every GPU buffer allocation (`ab_matrix_create()`) fails; `kernel`: the command buffer of every `ab_dgemm_scaled()` and `ab_zgemm()`, the GEMMs of the GPU path, reports an error. A GPU-routed call then fails as it would on a real failure there and runs on Accelerate instead (a `gpu_failed` fallback). Never set it in production. |
 
 ### Routing (AB_MODE=auto)
 
@@ -482,7 +485,7 @@ AB_REPORT[<pid>] <routine> fallbacks no_device=… too_large=… gpu_failed=… 
   none), `download` (DD → FP64), `epilogue` (the row-major result into
   column-major C, with alpha and beta for ZGEMM) and `other`, the rest:
   mostly command-buffer encode, submit and wait latency, and ZGEMM's GPU
-  temporaries.
+  temporaries. `AB_TRACE` splits it per call (below).
 - **Fallbacks** are calls the routing sent to the GPU that ran on Accelerate
   instead: `no_device` (no Metal context: no GPU, or a `fork()`ed child),
   `too_large` (an operand beyond the size limits), `gpu_failed` (an
@@ -500,6 +503,60 @@ tables of the GPU stages and of the fallbacks, and the dimension histogram of
 the routine with the most time. During the run it prints an
 `AB_PROFILE <routine> M=… N=… K=…` line with the stages of each GPU call and
 one for each fallback, with its reason.
+
+### Per-call trace (AB_TRACE)
+
+`AB_TRACE=<path>` records every BLAS-ABI call, on Accelerate or the GPU and
+in every `AB_MODE`, so that a run can be replayed or its timeline lined up
+with other processes'. Each process appends to its own file,
+`<path>.<pid>`: a `fork()`ed child, or an MPI rank, gets a file of its own.
+A file starts with `#` lines naming the build (`ab_build_info()`), the pid,
+`AB_MODE` and the field legend. Each call then adds one line of
+`key=value` fields when it returns, written with a single `writev(2)`:
+
+```
+seq=2 t0_ns=411972254072166 t1_ns=411972258538707 routine=zgemm ta=C tb=N M=96 N=80 K=72 lda=74 ldb=74 ldc=98 alpha=0x1.4p+0,-0x1p-1 beta=-0x1.8p-1,0x1p-2 path=gpu init_ns=1291 alloc_ns=53998 pack_ns=7291 upload_ns=24291 kernel_ns=577500 download_ns=10958 epilogue_ns=10958 other_ns=3780254 temps_ns=33083 encode_ns=42208 submit_ns=3560959 wake_ns=135916 rest_ns=8088 gpu_start_ns=411972257776500 gpu_end_ns=411972258354000
+```
+
+- **`seq`** numbers the process's calls from 1. **`t0_ns`, `t1_ns`** are the
+  call's start and end in ns of `mach_absolute_time` (`CLOCK_UPTIME_RAW`),
+  one clock for every process on the machine, so traces of different
+  processes line up. `t1_ns - t0_ns` is the call's time as `AB_REPORT`
+  counts it.
+- **The arguments** as the call passed them: `ta`, `tb` (the TRANS
+  characters, lower case kept), `M N K lda ldb ldc`, and `alpha`, `beta`
+  exactly as C99 `%a` hex floats (`real,imaginary` for `zgemm`; Python reads
+  them with `float.fromhex`).
+- **`path`**: `cpu`, `gpu`, or `fallback:<reason>` for a call the routing
+  sent to the GPU that ran on Accelerate (`no_device`, `too_large`,
+  `gpu_failed`, `other`; see the run report).
+- **GPU calls** add the stages of the run report in ns (`init_ns` …
+  `epilogue_ns`, then `other_ns`), which sum exactly to `t1_ns - t0_ns`, and
+  split `other_ns` exactly into `temps_ns` (creating and destroying ZGEMM's
+  GPU temporaries; 0 for DGEMM, which has none), `encode_ns` (building the
+  command buffer), `submit_ns` (from commit until the GPU started it:
+  scheduling, and waiting behind other GPU work, including other
+  processes'), `wake_ns` (from the GPU's end until `waitUntilCompleted`
+  returned: the completion notice and the waiting thread's wake-up) and
+  `rest_ns` (everything else; a few ns below zero is clock rounding).
+  `gpu_start_ns` and `gpu_end_ns` are the command buffer's `GPUStartTime`
+  and `GPUEndTime` on the same clock (0 if Metal reported none).
+- **`AB_TRACE_HASH=1`** adds `hash_a` and `hash_b`, 64-bit hashes (16 hex
+  digits) of op(A) and op(B) as stored, when the call reads them
+  (M, N, K > 0 and alpha ≠ 0), and `hash_c` of C on entry when beta ≠ 0.
+  Each is FNV-1a over the 64-bit words of the referenced elements, column
+  by column: from the offset basis `0xcbf29ce484222325`,
+  `h = (h ^ word) * 0x100000001b3` for each word, a complex element being
+  two words (real, then imaginary). The padding of a leading dimension is
+  not included, so equal operands hash equal whatever their `ld`. Hashing
+  reads every operand once more; the call's times leave it out.
+
+Every call is traced, whatever `AB_PROFILE_THRESHOLD_NS` says. A call that
+Accelerate rejects for an illegal argument ends the process before its line
+is written. Unset, the trace costs a call one predictable branch.
+A file that cannot be created is reported once on stderr, and that process
+is not traced. A file that already exists (a pid reused since an earlier
+run) is appended to, after a new header.
 
 ---
 

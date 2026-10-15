@@ -206,11 +206,12 @@ static inline uint64_t gpu_gemm_count(void) {
 
 // 64-bit FNV-1a of len bytes, continuing from h (FNV_OFFSET for a new hash).
 #define FNV_OFFSET 0xcbf29ce484222325ULL
+#define FNV_PRIME  0x100000001b3ULL
 static inline uint64_t fnv1a(const void *data, size_t len, uint64_t h) {
     const unsigned char *p = data;
     for (size_t i = 0; i < len; i++) {
         h ^= p[i];
-        h *= 0x100000001b3ULL;
+        h *= FNV_PRIME;
     }
     return h;
 }

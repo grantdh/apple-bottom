@@ -30,8 +30,9 @@ check "python/setup.py" \
 check "CITATION.cff" "$(sed -nE 's/^version: *"?([^"]+)"?$/\1/p' CITATION.cff)" "$str"
 check "README.md citation" \
     "$(sed -nE 's/^ *version *= *\{([^}]+)\}.*/\1/p' README.md)" "$str"
+# An [Unreleased] section above the top entry collects the next version's changes.
 check "CHANGELOG.md top entry" \
-    "$(sed -nE 's/^## \[([^]]+)\].*/\1/p' CHANGELOG.md | head -1)" "$str"
+    "$(sed -nE 's/^## \[([^]]+)\].*/\1/p' CHANGELOG.md | grep -vx Unreleased | head -1)" "$str"
 
 [ $fail -eq 0 ] && echo "version-check: PASS" || echo "version-check: FAIL"
 exit $fail

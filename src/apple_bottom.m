@@ -24,6 +24,7 @@
 #include <mach/mach_time.h>
 #include <pthread.h>
 #include "apple_bottom.h"
+#include "profiling/blas_profiler.h"
 
 // =============================================================================
 // Double-Float Primitives (Host Side)
@@ -96,14 +97,49 @@ static void stats_add_zgemm(void) {
 // kernel stage of the BLAS-ABI profile (blas_wrapper.c), which takes it per call.
 static thread_local double t_gpu_seconds = 0;
 
-static void note_gpu_time(id<MTLCommandBuffer> cmdBuf) {
+// The rest of the host time of the calls that completed them (temporaries,
+// encoding, submit and wake-up latency) and when the GPU ran, for the AB_TRACE
+// split of the profile's "other"; taken with t_gpu_seconds.
+static thread_local ab_prof_kernel_split_t t_kernel_split;
+
+// The clock of the split: mach_absolute_time in ns, converted as the trace's
+// call times are, the time base that GPUStartTime and GPUEndTime give in
+// seconds.
+static uint64_t host_ns(void) { return ab_prof_ticks_to_ns(ab_prof_now_ticks()); }
+
+static uint64_t gpu_time_ns(CFTimeInterval s) { return (uint64_t)(s * 1e9 + 0.5); }
+
+// cmdBuf was committed at commit_ns, and waitUntilCompleted returned at done_ns.
+static void note_gpu_time(id<MTLCommandBuffer> cmdBuf, uint64_t commit_ns, uint64_t done_ns) {
     CFTimeInterval start = cmdBuf.GPUStartTime, end = cmdBuf.GPUEndTime;
-    if (start > 0 && end > start) t_gpu_seconds += end - start;
+    if (!(start > 0 && end > start)) return;
+    t_gpu_seconds += end - start;
+    uint64_t start_ns = gpu_time_ns(start), end_ns = gpu_time_ns(end);
+    ab_prof_kernel_split_t *k = &t_kernel_split;
+    k->submit_ns += start_ns > commit_ns ? start_ns - commit_ns : 0;
+    k->wake_ns += done_ns > end_ns ? done_ns - end_ns : 0;
+    if (!k->gpu_start_ns) k->gpu_start_ns = start_ns;
+    k->gpu_end_ns = end_ns;
 }
 
-extern "C" double ab_internal_take_gpu_seconds(void) {
+// Commits cmdBuf, which encoding started to build at encode_ns, waits for it
+// and notes its times. False if it failed; AB_TEST_FAIL_STAGE=kernel
+// (test-only) reports every one as failed.
+static bool commit_and_wait(id<MTLCommandBuffer> cmdBuf, uint64_t encode_ns) {
+    uint64_t commit_ns = host_ns();
+    t_kernel_split.encode_ns += commit_ns - encode_ns;
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+    note_gpu_time(cmdBuf, commit_ns, host_ns());
+    return cmdBuf.status != MTLCommandBufferStatusError &&
+           ab_test_fail_stage() != AB_PROF_STAGE_KERNEL;
+}
+
+extern "C" double ab_internal_take_gpu_seconds(ab_prof_kernel_split_t *split) {
     double s = t_gpu_seconds;
     t_gpu_seconds = 0;
+    if (split) *split = t_kernel_split;
+    t_kernel_split = ab_prof_kernel_split_t();
     return s;
 }
 
@@ -1066,7 +1102,9 @@ ABMatrix ab_matrix_create(int rows, int cols) {
     m->uploaded = false;
 
     size_t alloc_size = m->count * sizeof(DDFloat);
-    m->buffer = [ctx.device newBufferWithLength:alloc_size options:MTLResourceStorageModeShared];
+    // AB_TEST_FAIL_STAGE=alloc (test-only): no buffer, as when Metal refuses one.
+    if (ab_test_fail_stage() != AB_PROF_STAGE_ALLOC)
+        m->buffer = [ctx.device newBufferWithLength:alloc_size options:MTLResourceStorageModeShared];
     if (!m->buffer) { delete m; return NULL; }
     
     return m;
@@ -1303,6 +1341,7 @@ ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMa
     DDFloat beta_dd = fp64_to_dd(beta);
     double t0 = get_time_ms();
 
+    uint64_t encode_ns = host_ns();
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
     // Select kernel based on aspect ratio: tall-skinny for M >= 4*N
@@ -1338,10 +1377,7 @@ ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMa
                  threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     }
     [encoder endEncoding];
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
-    if (cmdBuf.status == MTLCommandBufferStatusError) return AB_ERROR_KERNEL_FAILED;
-    note_gpu_time(cmdBuf);
+    if (!commit_and_wait(cmdBuf, encode_ns)) return AB_ERROR_KERNEL_FAILED;
 
     stats_add_kernel(get_time_ms() - t0);
     stats_add_dgemm();
@@ -1607,10 +1643,12 @@ static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatri
     if (!ctx) return AB_ERROR_NO_DEVICE;
 
     // Allocate all temporaries upfront
+    uint64_t temps_ns = host_ns();
     ABMatrix T1 = ab_matrix_create(M, N);  // Ar * Br
     ABMatrix T2 = ab_matrix_create(M, N);  // Ai * Bi
     ABMatrix T3 = ab_matrix_create(M, K);  // Ar + Ai
     ABMatrix T4 = ab_matrix_create(K, N);  // Br + Bi
+    t_kernel_split.temps_ns += host_ns() - temps_ns;
 
     if (!T1 || !T2 || !T3 || !T4) {
         ab_matrix_destroy(T1); ab_matrix_destroy(T2);
@@ -1620,6 +1658,7 @@ static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatri
 
     double t0 = get_time_ms();
 
+    uint64_t encode_ns = host_ns();
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
 
     // --- Encoder 1: element-wise additions (T3 = Ar + Ai, T4 = Br + Bi) ---
@@ -1657,19 +1696,19 @@ static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatri
         [enc endEncoding];
     }
 
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
-    note_gpu_time(cmdBuf);
+    bool completed = commit_and_wait(cmdBuf, encode_ns);
 
     stats_add_kernel(get_time_ms() - t0);
     stats_add_zgemm();
 
+    temps_ns = host_ns();
     ab_matrix_destroy(T1);
     ab_matrix_destroy(T2);
     ab_matrix_destroy(T3);
     ab_matrix_destroy(T4);
+    t_kernel_split.temps_ns += host_ns() - temps_ns;
 
-    if (cmdBuf.status == MTLCommandBufferStatusError) {
+    if (!completed) {
         return AB_ERROR_KERNEL_FAILED;
     }
     return AB_OK;

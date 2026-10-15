@@ -2,6 +2,62 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **`AB_TRACE=<path>`**: every BLAS-ABI call (`dgemm_`, `zgemm_`,
+  `ab_*gemm_`, `ab_*gemm_blas`; Accelerate and GPU, every `AB_MODE`) appends
+  one `key=value` line to `<path>.<pid>` when it returns (a call with an
+  illegal argument, for which Accelerate ends the process, gets none), so
+  each process, including a `fork()`ed child or an MPI rank, writes a file
+  of its own, which starts with `#` lines naming the build, `AB_MODE` and
+  the fields. A line gives the call's arguments as passed (TRANS, M, N, K,
+  the leading dimensions, alpha and beta exactly as `%a` hex floats), its
+  start and end on the machine-wide `mach_absolute_time` clock in ns, so
+  traces of several processes line up, and its path (`cpu`, `gpu` or
+  `fallback:<reason>`).
+  GPU calls add the stages of `AB_REPORT` in ns, the command buffer's
+  `GPUStartTime` and `GPUEndTime` on the same clock, and split the stage
+  `other` into `temps` (ZGEMM's GPU temporaries), `encode`, `submit`
+  (commit until the GPU starts), `wake` (GPU end until the waiting thread
+  runs) and `rest`; both sums are exact. `AB_REPORT` and the `AB_PROFILE`
+  tables are unchanged. See "Per-call trace" in `docs/INTEGRATION.md`.
+- **`AB_TRACE_HASH=1`** adds hashes of op(A) and op(B) as stored and of C
+  on entry, when the call reads them: FNV-1a over the 64-bit words of the
+  referenced elements, column by column, so a replay can tell repeated
+  operands whatever their leading dimension.
+- **`AB_TEST_FAIL_STAGE=<alloc|kernel>`** (test-only) fails GPU work where
+  it really can fail: `alloc` makes every `ab_matrix_create()` return NULL,
+  `kernel` the command buffer of every `ab_dgemm_scaled()` and `ab_zgemm()`
+  report an error. A GPU-routed BLAS-ABI call then takes the whole-call
+  fallback to Accelerate, counted as `gpu_failed`.
+- **`tests/test_trace.c`** (5 tests, in `make test` and `make ci-local`):
+  trace files per pid, header, fields and exact arguments, the stage and
+  `other` sums, GPU times within each call, a `fork()`ed child's file of
+  its own on the inherited trace descriptor left intact, hashes, no file
+  without `AB_TRACE`, and for each `AB_TEST_FAIL_STAGE` value a result
+  bitwise equal to cblas, the path record `"cpu"`, the `ab_get_stats()`
+  GPU work done before the failure, and the `gpu_failed` fallback in
+  `AB_REPORT` and the trace.
+- **Guards for results that faster GPU code must keep** (in `make test`
+  and `make ci-local`). `tests/test_qe_golden.c` hashes C after 32
+  GPU-routed `dgemm_`/`zgemm_` cases (every TRANS pair, alpha and beta
+  variants, padded leading dimensions with NaN, beta = 0 with NaN and Inf
+  in C, cancellation, signed zeros, Quantum ESPRESSO shapes) against
+  `tests/golden/qe_golden.txt`, the bits of the 1.4.0 release-check build
+  `c5a1fa6a8166`, and checks each case against cblas, so the file cannot
+  freeze a wrong result; another device gives `SKIP` (a failure under
+  `AB_GOLDEN_STRICT=1`), reported on the `TEST_QE_GOLDEN` line of
+  `make ci-local`. `tests/test_blas_abi.c` adds long-K precision through
+  the BLAS ABI (K up to 143666, against a compensated Dot2 reference),
+  determinism of repeated calls, 8 threads on distinct and on identical
+  shapes, memory growth over 2000 GPU calls, and a `fork()`ed child that
+  ends with `exit()`. The test counts are kept in `tests/README.md` only.
+
+### Changed
+- `make version-check` skips an `[Unreleased]` section at the top of
+  `CHANGELOG.md` and checks the first versioned entry.
+
 ## [1.4.0] - Unreleased
 
 ### Added

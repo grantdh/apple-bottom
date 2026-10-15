@@ -54,6 +54,7 @@
 #include "test_blas_check.h"
 #include "test_dot2.h"
 #include "test_registry.h"
+#include "test_spawn.h"
 #include <Accelerate/Accelerate.h>
 #include <complex.h>
 #include <dlfcn.h>
@@ -66,7 +67,6 @@
 #include <malloc/malloc.h>
 #include <math.h>
 #include <pthread.h>
-#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1494,33 +1494,6 @@ static const char *check_routine(const RoutineReport *r, unsigned long long call
     return NULL;
 }
 
-// Spawns argv[0] with env, its stdout and stderr on a pipe. Returns the read
-// end, or NULL with the failure in why.
-static FILE *spawn_piped(char *const argv[], char *const env[], pid_t *pid,
-                         char *why, size_t why_len) {
-    int fds[2];
-    if (pipe(fds) != 0) {
-        snprintf(why, why_len, "pipe: %s", strerror(errno));
-        return NULL;
-    }
-    posix_spawn_file_actions_t fa;
-    posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_adddup2(&fa, fds[1], STDOUT_FILENO);
-    posix_spawn_file_actions_adddup2(&fa, fds[1], STDERR_FILENO);
-    posix_spawn_file_actions_addclose(&fa, fds[0]);
-    posix_spawn_file_actions_addclose(&fa, fds[1]);
-    fflush(stdout);
-    int rc = posix_spawn(pid, argv[0], &fa, NULL, argv, env);
-    posix_spawn_file_actions_destroy(&fa);
-    close(fds[1]);
-    if (rc != 0) {
-        close(fds[0]);
-        snprintf(why, why_len, "posix_spawn: %s", strerror(rc));
-        return NULL;
-    }
-    return fdopen(fds[0], "r");
-}
-
 // Runs --report-child with AB_REPORT=1 and AB_PROFILE=1 and checks what both
 // of its processes report at exit: the build, call counts by route, time
 // shares and stage sums, and that the fork()ed child reports only its own call.
@@ -1544,12 +1517,7 @@ static bool run_report(const AbiCase *c, char *detail, size_t n) {
     FILE *in = spawn_piped(argv, env, &pid, detail, n);
     free(env);
     if (!in) return false;
-    char *out = NULL, buf[4096];
-    size_t out_len = 0;
-    FILE *mem = open_memstream(&out, &out_len);
-    for (size_t got; (got = fread(buf, 1, sizeof buf, in)) > 0; ) fwrite(buf, 1, got, mem);
-    fclose(in);
-    fclose(mem);
+    char *out = slurp(in);
     int status = 0;
     while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
 
@@ -1694,12 +1662,8 @@ static char **child_env(const Suite *s, char *mode_buf, size_t mode_len,
                         char *table_buf, size_t table_len) {
     static char debug_layer[] = "MTL_DEBUG_LAYER=1";
     static char profile[] = "AB_PROFILE=1";
-    size_t n = 0;
-    while (environ[n]) n++;
-    char **env = calloc(n + 5, sizeof *env);
-    size_t k = 0;
-    for (size_t i = 0; i < n; i++)
-        if (!is_ab_env(environ[i])) env[k++] = environ[i];
+    size_t k;
+    char **env = child_environ(4, &k);
     if (s->ab_mode) {
         snprintf(mode_buf, mode_len, "AB_MODE=%s", s->ab_mode);
         env[k++] = mode_buf;

@@ -23,7 +23,7 @@ make ci-local
 ```
 
 This will:
-- Run every test (precision, correctness, chaos, device-API, routing, BLAS-ABI; `tests/README.md`, Coverage status, gives the counts and the counting rule) plus the golden-bits, ghost-detection, symbol and Fortran checks
+- Run every test (precision, correctness, chaos, device-API, routing, BLAS-ABI, trace; `tests/README.md`, Coverage status, gives the counts and the counting rule) plus the golden-bits, ghost-detection, symbol and Fortran checks
 - Run convergence study (V-2)
 - Generate `build/CI_REPORT.txt` with test results and convergence data hash
 
@@ -35,6 +35,7 @@ This will:
 ✓ test_device_api: PASS
 ✓ test_dispatch: PASS
 ✓ test_blas_abi: PASS
+✓ test_trace: PASS
 ✓ test_qe_golden: PASS
 ✓ test_convergence: PASS
 

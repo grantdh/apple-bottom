@@ -15,10 +15,6 @@
 #include "dispatch.h"
 #include "profiling/blas_profiler.h"
 
-// GPU execution time of the command buffers this thread completed since the
-// last call, in seconds; 0 if Metal reported none (apple_bottom.m).
-extern double ab_internal_take_gpu_seconds(void);
-
 // Thread-local record of the path the last BLAS-ABI call on this thread
 // actually took, for bench harnesses and the profiler (prof_end). Only the
 // two places that produce C write it: "cpu" in ab_internal_*gemm_cpu, "gpu"
@@ -109,25 +105,28 @@ static void ab_internal_zgemm_cpu(enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE 
 }
 
 // =============================================================================
-// Call profile (AB_PROFILE, AB_REPORT)
+// Call profile (AB_PROFILE, AB_REPORT, AB_TRACE)
 // =============================================================================
 // Every BLAS-ABI call is timed once, around routing and compute, and recorded
 // by where C was computed (the path record). The GPU path charges each step
-// to a stage as it finishes. p is NULL when profiling is off, so an
-// unprofiled call pays one branch per stage.
+// to a stage as it finishes. p is NULL when profiling and tracing are off,
+// so such a call pays one branch per stage.
 
 typedef struct {
     uint64_t t0, mark;                         // ticks: call start, end of the last stage
     uint64_t stage_ns[AB_PROF_STAGE_COUNT];
     ab_prof_fallback_t fallback;               // why a GPU-routed call ran on cblas
+    bool trace;                                // AB_TRACE: write the call's trace line
+    ab_trace_call_t call;                      // its arguments, hashes and kernel split
 } CallProf;
 
 static CallProf *prof_begin(CallProf *p) {
-    if (!ab_prof_enabled()) return NULL;
+    if (!ab_prof_active()) return NULL;
     memset(p, 0, sizeof *p);
     p->fallback = AB_PROF_FB_NONE;
+    p->trace = ab_trace_enabled();
     p->t0 = p->mark = ab_prof_now_ticks();
-    (void)ab_internal_take_gpu_seconds();     // drop GPU time of earlier native-API calls
+    (void)ab_internal_take_gpu_seconds(NULL); // drop GPU time of earlier native-API calls
     return p;
 }
 
@@ -139,24 +138,33 @@ static void prof_stage(CallProf *p, ab_prof_stage_t s) {
 }
 
 // The kernel stage is the command buffers' GPU execution time, or the wall
-// time if Metal reports none. The rest of the kernel call (encoding, submit
-// and wait latency, ZGEMM's GPU-side temporaries) is left to "other".
+// time if Metal reports none. The rest of the kernel call (ZGEMM's GPU-side
+// temporaries, encoding, submit and wake-up latency) is left to "other",
+// which AB_TRACE splits; when the stage holds the wall time, nothing of the
+// kernel call is in "other" and the split is zero.
 static void prof_kernel(CallProf *p) {
     if (!p) return;
     uint64_t now = ab_prof_now_ticks();
     uint64_t wall = ab_prof_ticks_to_ns(now - p->mark);
-    uint64_t gpu = (uint64_t)(ab_internal_take_gpu_seconds() * 1e9);
-    p->stage_ns[AB_PROF_STAGE_KERNEL] += gpu && gpu < wall ? gpu : wall;
+    ab_prof_kernel_split_t *k = &p->call.split;
+    uint64_t gpu = (uint64_t)(ab_internal_take_gpu_seconds(k) * 1e9);
+    bool gpu_timed = gpu && gpu < wall;
+    p->stage_ns[AB_PROF_STAGE_KERNEL] += gpu_timed ? gpu : wall;
+    if (!gpu_timed) k->temps_ns = k->encode_ns = k->submit_ns = k->wake_ns = 0;
     p->mark = now;
 }
 
-// Records the finished call; under AB_PROFILE also prints the stages of a GPU call.
+// Records the finished call; under AB_PROFILE also prints the stages of a GPU
+// call, under AB_TRACE writes its trace line.
 static void prof_end(CallProf *p, const char *routine, int M, int N, int K) {
     if (!p) return;
     uint64_t ns = ab_prof_ticks_to_ns(ab_prof_now_ticks() - p->t0);
     bool gpu = !strcmp(_ab_last_path, "gpu");
     ab_prof_record(routine, ns, M > 0 ? (size_t)M : 0, N > 0 ? (size_t)N : 0,
                    K > 0 ? (size_t)K : 0, gpu, gpu ? p->stage_ns : NULL, p->fallback);
+    if (p->trace)
+        ab_trace_record(&p->call, ab_prof_ticks_to_ns(p->t0), ns, gpu ? p->stage_ns : NULL,
+                        p->fallback);
     if (!gpu || !ab_prof_verbose()) return;
     // One write per line, so lines from concurrent callers do not interleave.
     char line[512];
@@ -183,6 +191,62 @@ static void note_gpu_fallback(CallProf *p, const char *routine, int M, int N, in
     if (ab_prof_verbose())
         fprintf(stderr, "AB_PROFILE %s M=%d N=%d K=%d  GPU fallback to cblas: %s\n",
                 routine, M, N, K, why);
+}
+
+// FNV-1a over the 64-bit words of the referenced elements of a stored
+// rows x cols operand (column-major, leading dimension ld, elem = 8 or 16
+// bytes), column by column: from the 64-bit offset basis, h = (h ^ word) *
+// FNV prime per word. The padding below row `rows` is not read.
+static uint64_t hash_stored(const void *X, size_t elem, int ld, int rows, int cols) {
+    const unsigned char *x = X;
+    size_t col_words = (size_t)rows * (elem / sizeof(uint64_t));
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (size_t j = 0; j < (size_t)cols; j++) {
+        const unsigned char *col = x + j * (size_t)ld * elem;
+        for (size_t w = 0; w < col_words; w++) {
+            uint64_t word;
+            memcpy(&word, col + w * sizeof word, sizeof word);
+            h = (h ^ word) * 0x100000001b3ULL;
+        }
+    }
+    return h;
+}
+
+// AB_TRACE: the call's arguments as passed and, under AB_TRACE_HASH, the
+// hashes of what it reads: op(A) and op(B) as stored unless the BLAS quick
+// return skips them (M, N or K == 0, alpha == 0), and C on entry when
+// beta != 0. Invalid arguments are not hashed (cblas rejects the call). The
+// clock restarts after hashing, so the hashes cost the call nothing.
+static void trace_begin(CallProf *p, const char *routine, char transA, char transB,
+                        int M, int N, int K, const double alpha[2],
+                        const void *A, int ldA, const void *B, int ldB,
+                        const double beta[2], const void *C, int ldC) {
+    bool z = routine[0] == 'z';
+    ab_trace_call_t *c = &p->call;
+    c->routine = routine;
+    c->ta = transA;
+    c->tb = transB;
+    c->m = M; c->n = N; c->k = K;
+    c->lda = ldA; c->ldb = ldB; c->ldc = ldC;
+    memcpy(c->alpha, alpha, sizeof c->alpha);
+    memcpy(c->beta, beta, sizeof c->beta);
+    if (!ab_trace_hash_enabled()) return;
+
+    enum CBLAS_TRANSPOSE ta = ab_blas_trans(transA, z), tb = ab_blas_trans(transB, z);
+    size_t elem = z ? sizeof(double complex) : sizeof(double);
+    if (blas_args_valid(ta, tb, M, N, K, ldA, ldB, ldC) && M > 0 && N > 0) {
+        if (K > 0 && (alpha[0] != 0.0 || alpha[1] != 0.0)) {
+            bool na = ta == CblasNoTrans, nb = tb == CblasNoTrans;
+            c->hash[0] = hash_stored(A, elem, ldA, na ? M : K, na ? K : M);
+            c->hash[1] = hash_stored(B, elem, ldB, nb ? K : N, nb ? N : K);
+            c->hashed[0] = c->hashed[1] = true;
+        }
+        if (beta[0] != 0.0 || beta[1] != 0.0) {
+            c->hash[2] = hash_stored(C, elem, ldC, M, N);
+            c->hashed[2] = true;
+        }
+    }
+    p->t0 = p->mark = ab_prof_now_ticks();
 }
 
 // Hosts that reach us through dgemm_/zgemm_ (QE, Yambo) never call ab_init(),
@@ -452,13 +516,16 @@ cleanup:
 // =============================================================================
 // Every BLAS-ABI call ends here: dgemm_, zgemm_ and ab_*gemm_ forward to
 // these (fortran_bridge.c). Each call is timed and recorded for AB_PROFILE
-// and AB_REPORT.
+// and AB_REPORT, and traced for AB_TRACE.
 
 void ab_dgemm_blas(char transA, char transB, int M, int N, int K,
                    double alpha, const double* A, int ldA,
                    const double* B, int ldB,
                    double beta, double* C, int ldC) {
     CallProf prof, *p = prof_begin(&prof);
+    if (p && p->trace)
+        trace_begin(p, "dgemm", transA, transB, M, N, K, (const double[2]){alpha, 0.0},
+                    A, ldA, B, ldB, (const double[2]){beta, 0.0}, C, ldC);
     dgemm_blas(p, transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
     prof_end(p, "dgemm", M, N, K);
 }
@@ -468,6 +535,10 @@ void ab_zgemm_blas(char transA, char transB, int M, int N, int K,
                    const double complex* B, int ldB,
                    double complex beta, double complex* C, int ldC) {
     CallProf prof, *p = prof_begin(&prof);
+    if (p && p->trace)
+        trace_begin(p, "zgemm", transA, transB, M, N, K,
+                    (const double[2]){creal(alpha), cimag(alpha)}, A, ldA, B, ldB,
+                    (const double[2]){creal(beta), cimag(beta)}, C, ldC);
     zgemm_blas(p, transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
     prof_end(p, "zgemm", M, N, K);
 }

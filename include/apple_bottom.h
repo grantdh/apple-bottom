@@ -304,10 +304,25 @@ const char* ab_build_info(void);
 //                 histograms at exit, plus a stderr line per GPU call and per
 //                 fallback. AB_PROFILE_JSON=path also writes JSON at exit.
 //   AB_PROFILE_THRESHOLD_NS=n  count only calls of at least n ns (both reports).
+//   AB_TRACE=path  one line per call, appended to path.<pid> as it returns:
+//                 its arguments as passed (TRANS, M, N, K, the leading
+//                 dimensions, alpha and beta exactly), start and end on the
+//                 machine-wide mach_absolute_time clock in ns, the path
+//                 (cpu, gpu, fallback:<reason>) and, for GPU calls, the
+//                 stages with "other" split into temps, encode, submit, wake
+//                 and rest, and the command buffer's GPU start and end.
+//   AB_TRACE_HASH=1  with AB_TRACE: also a hash of op(A), op(B) and C on
+//                 entry (when read), FNV-1a over the 64-bit words of the
+//                 referenced elements, to spot repeated operands.
+//   AB_TEST_FAIL_STAGE=alloc|kernel  test-only: every ab_matrix_create()
+//                 (alloc), or the command buffer of every ab_dgemm_scaled()
+//                 and ab_zgemm() (kernel), fails, so GPU-routed BLAS-ABI
+//                 calls fall back to cblas.
 // A call that falls back counts as a CPU call, its wall time including the
-// failed GPU attempt. A fork()ed child starts with empty counters and reports
-// only calls of its own. The native ABMatrix API is not counted. Formats and
-// the routing variables (AB_MODE, ...): docs/INTEGRATION.md.
+// failed GPU attempt. A fork()ed child starts with empty counters, reports
+// only calls of its own and traces to a file of its own. The native ABMatrix
+// API is not counted. Formats and the routing variables (AB_MODE, ...):
+// docs/INTEGRATION.md.
 
 #ifdef __cplusplus
 }

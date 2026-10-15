@@ -85,7 +85,7 @@ $(BUILD):
 # Library
 # =============================================================================
 
-$(BUILD)/apple_bottom.o: $(SRC)/apple_bottom.m $(INCLUDE)/apple_bottom.h | $(BUILD)
+$(BUILD)/apple_bottom.o: $(SRC)/apple_bottom.m $(INCLUDE)/apple_bottom.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
 	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $@
 
 $(BUILD)/blas_wrapper.o: $(SRC)/blas_wrapper.c $(SRC)/blas_trans.h $(SRC)/dispatch.h $(INCLUDE)/apple_bottom.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
@@ -198,8 +198,14 @@ $(BUILD)/test_device_api: tests/test_device_api.c lib | $(BUILD)
 # dgemm_ / zgemm_ vs Accelerate cblas. Known failures are tracked in the
 # XFAIL table in tests/test_blas_abi.c (XPASS and stale entries fail the run).
 # AB_EXPECT_BUILD_SHA: the exit-report suite checks ab_build_info() names it.
-$(BUILD)/test_blas_abi: tests/test_blas_abi.c tests/test_blas_check.h tests/test_dot2.h lib | $(BUILD)
+$(BUILD)/test_blas_abi: tests/test_blas_abi.c tests/test_blas_check.h tests/test_dot2.h tests/test_spawn.h lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) '-DAB_EXPECT_BUILD_SHA="$(AB_BUILD_SHA)"' $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
+# AB_TRACE per-call trace and AB_TEST_FAIL_STAGE fallbacks: re-executes itself
+# with each setting (tests/test_trace.c).
+$(BUILD)/test_trace: tests/test_trace.c tests/test_spawn.h tests/test_blas_check.h lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
 # Golden bits: FNV-1a of C after GPU-routed dgemm_/zgemm_ calls, against the
@@ -219,7 +225,7 @@ $(BUILD)/test_dispatch: tests/test_dispatch.c $(BUILD)/dispatch.o $(SRC)/dispatc
 	$(CC) $(CFLAGS) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' $< $(BUILD)/dispatch.o -o $@
 	@echo "Built: $@"
 
-test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_qe_golden test-ghost-detection test-symbols test-fortran
+test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "Running Tests"
@@ -229,6 +235,7 @@ test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api
 	./$(BUILD)/test_device_api
 	./$(BUILD)/test_dispatch
 	./$(BUILD)/test_blas_abi
+	./$(BUILD)/test_trace
 	./$(BUILD)/test_qe_golden
 	@echo ""
 	@echo "✓ All tests passed!"
@@ -566,6 +573,8 @@ build-check: | $(BUILD)/check
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_precision.c -o $(BUILD)/check/test_precision.o
 	@echo "Compiling test_blas_abi.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_blas_abi.c -o $(BUILD)/check/test_blas_abi.o
+	@echo "Compiling test_trace.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_trace.c -o $(BUILD)/check/test_trace.o
 	@echo "Compiling test_qe_golden.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_qe_golden.c -o $(BUILD)/check/test_qe_golden.o
 	@echo "Compiling test_dispatch.c..."
@@ -587,13 +596,13 @@ build-check: | $(BUILD)/check
 #
 # Counting rule (also README.md, tests/README.md): TEST_TOTAL counts tests.
 # A test is one test_precision case, one TESTS[] registry entry of
-# test_correctness / test_chaos / test_device_api / test_dispatch, or one
-# test_blas_abi suite. Device-API CHECKs and BLAS-ABI cases are reported on
-# their own lines and are not part of TEST_TOTAL, nor is test_qe_golden (its
-# TEST_QE_GOLDEN line says PASS, or SKIP on another device).
+# test_correctness / test_chaos / test_device_api / test_dispatch /
+# test_trace, or one test_blas_abi suite. Device-API CHECKs and BLAS-ABI cases
+# are reported on their own lines and are not part of TEST_TOTAL, nor is
+# test_qe_golden (its TEST_QE_GOLDEN line says PASS, or SKIP on another device).
 # The report is written only after every binary passed, so TEST_PASSED =
 # TEST_TOTAL and TEST_FAILED = 0.
-ci-local: version-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_qe_golden $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
+ci-local: version-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "CI Local Validation"
@@ -606,6 +615,7 @@ ci-local: version-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUIL
 	@./$(BUILD)/test_device_api > $(BUILD)/test_device_api.log 2>&1 && echo "✓ test_device_api: PASS" || (echo "✗ test_device_api: FAIL" && cat $(BUILD)/test_device_api.log && exit 1)
 	@./$(BUILD)/test_dispatch > $(BUILD)/test_dispatch.log 2>&1 && echo "✓ test_dispatch: PASS" || (echo "✗ test_dispatch: FAIL" && cat $(BUILD)/test_dispatch.log && exit 1)
 	@./$(BUILD)/test_blas_abi > $(BUILD)/test_blas_abi.log 2>&1 && echo "✓ test_blas_abi: PASS" || (echo "✗ test_blas_abi: FAIL" && cat $(BUILD)/test_blas_abi.log && exit 1)
+	@./$(BUILD)/test_trace > $(BUILD)/test_trace.log 2>&1 && echo "✓ test_trace: PASS" || (echo "✗ test_trace: FAIL" && cat $(BUILD)/test_trace.log && exit 1)
 	@./$(BUILD)/test_qe_golden > $(BUILD)/test_qe_golden.log 2>&1 && echo "✓ test_qe_golden: $$(sed -nE 's/^Golden bits: ([A-Z]+).*/\1/p' $(BUILD)/test_qe_golden.log)" || (echo "✗ test_qe_golden: FAIL" && cat $(BUILD)/test_qe_golden.log && exit 1)
 	@echo ""
 	@echo "Running convergence study (V-2)..."
@@ -621,12 +631,13 @@ ci-local: version-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUIL
 		DEVICE_API_CHECKS=$$(sed -nE "s/^Summary: .* ([0-9]+) CHECK.*/\1/p" $(BUILD)/test_device_api.log); \
 		DISPATCH=$$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_dispatch.log); \
 		BLAS_ABI=$$(grep -cE "^\[[0-9]+/[0-9]+\] " $(BUILD)/test_blas_abi.log); \
+		TRACE=$$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_trace.log); \
 		GOLDEN=$$(sed -nE "s/^Golden bits: //p" $(BUILD)/test_qe_golden.log); \
 		[ -n "$$GOLDEN" ] || { echo "✗ CI report: no Golden bits line in test_qe_golden.log"; exit 1; }; \
-		for n in "$$PRECISION" "$$CORRECTNESS" "$$CHAOS" "$$DEVICE_API" "$$DEVICE_API_CHECKS" "$$DISPATCH" "$$BLAS_ABI"; do \
+		for n in "$$PRECISION" "$$CORRECTNESS" "$$CHAOS" "$$DEVICE_API" "$$DEVICE_API_CHECKS" "$$DISPATCH" "$$BLAS_ABI" "$$TRACE"; do \
 			case "$$n" in ""|*[!0-9]*|0) echo "✗ CI report: could not read a test count from the logs"; exit 1;; esac; \
 		done; \
-		TOTAL=$$((PRECISION + CORRECTNESS + CHAOS + DEVICE_API + DISPATCH + BLAS_ABI)); \
+		TOTAL=$$((PRECISION + CORRECTNESS + CHAOS + DEVICE_API + DISPATCH + BLAS_ABI + TRACE)); \
 		echo "GIT_SHA: $$(git rev-parse HEAD)" > $(BUILD)/CI_REPORT.txt; \
 		echo "GIT_BRANCH: $$(git rev-parse --abbrev-ref HEAD)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "AB_BUILD_SHA: $(AB_BUILD_SHA)" >> $(BUILD)/CI_REPORT.txt; \
@@ -638,6 +649,7 @@ ci-local: version-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUIL
 		echo "TEST_DEVICE_API: PASS ($$DEVICE_API tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_DISPATCH: PASS ($$DISPATCH tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_BLAS_ABI: PASS ($$BLAS_ABI tests)" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_TRACE: PASS ($$TRACE tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_QE_GOLDEN: $$GOLDEN" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_CONVERGENCE: PASS" >> $(BUILD)/CI_REPORT.txt; \
 		echo "test-ghost-detection: PASS" >> $(BUILD)/CI_REPORT.txt; \

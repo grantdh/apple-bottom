@@ -163,6 +163,7 @@ LIBS = -L/path/to/apple-bottom/build -Wl,-rpath,/path/to/apple-bottom/build -lap
 | `AB_MODE=auto` (default) | GPU only for shapes measured ≥ 1.10× faster there (`src/dispatch_table.h`) |
 | `AB_MODE=cpu` / `AB_MODE=gpu` | everything on Accelerate / everything above `AB_MIN_GPU_DIM` on the GPU |
 | `AB_REPORT=1` | at exit: calls and time by route, GPU stage costs, fallbacks |
+| `AB_TRACE=<path>` | a line per call in `<path>.<pid>`: arguments, timestamps, route, GPU stages |
 | `AB_DISPATCH_TABLE=<file>` | route from another calibration, e.g. one from your own machine |
 
 The [Integration Guide](docs/INTEGRATION.md) covers C, Fortran, Python
@@ -194,12 +195,12 @@ fused multiply-add of the GEMM inner loop has a conservative 8u² envelope
 DGEMM's normwise relative error grows like √N·10⁻¹⁵ on random matrices,
 about 5 × 10⁻¹⁴ at N = 4096 (V-2 convergence study). `make test` checks
 precision against a compensated FP64 reference, correctness of every API
-against Accelerate, the device-buffer API, the routing rules, and the
-BLAS-ABI entry points in a conformance harness (with long-K precision,
-determinism, concurrency, memory and fork checks); it also holds
-GPU-routed BLAS results to the bits 1.4.0 produced. `make ci-local` adds
-adversarial inputs and the convergence study;
-[tests/README.md](tests/README.md) gives the test counts.
+against Accelerate, the device-buffer API, the routing rules, the BLAS-ABI
+entry points in a conformance harness (with long-K precision,
+determinism, concurrency, memory and fork checks), and the per-call trace
+and forced GPU failures; it also holds GPU-routed BLAS results to the bits
+1.4.0 produced. `make ci-local` adds adversarial inputs and the
+convergence study; [tests/README.md](tests/README.md) gives the test counts.
 
 [V&V report](docs/vv/VV_REPORT.md) · [precision envelope](docs/vv/PRECISION_ENVELOPE.md) ·
 [limitations and scope](docs/vv/LIMITATIONS.md) ·
@@ -235,7 +236,7 @@ src/apple_bottom.m              Metal context and DD kernels
 src/blas_wrapper.c              BLAS ABI: packing, conversion, fallbacks
 src/dispatch.c, dispatch_table.h  AB_MODE routing and the calibrated table
 src/fortran_bridge.c            dgemm_ / zgemm_ / ab_*gemm_ entry points
-src/profiling/                  AB_PROFILE / AB_REPORT accounting
+src/profiling/                  AB_PROFILE / AB_REPORT accounting, AB_TRACE
 tests/                          test suites (tests/README.md)
 benchmarks/                     benchmarks, calibration and their results
 docs/                           integration guide, V&V package, design notes
