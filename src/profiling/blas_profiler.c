@@ -3,6 +3,7 @@
 // =============================================================================
 #include "blas_profiler.h"
 #include "apple_bottom.h"
+#include "dispatch.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -470,13 +471,31 @@ void ab_prof_report(FILE* out) {
 // Per-call trace (AB_TRACE)
 // =============================================================================
 
+uint64_t ab_prof_take_kernel_ns(uint64_t wall_ns, ab_prof_kernel_split_t* split) {
+    uint64_t gpu = (uint64_t)(ab_internal_take_gpu_seconds(split) * 1e9);
+    if (gpu && gpu < wall_ns) return gpu;
+    split->temps_ns = split->encode_ns = split->submit_ns = split->wake_ns = 0;
+    return wall_ns;
+}
+
 // The header of a new trace file: the build, the settings and the line format.
 static void trace_header(int fd, pid_t pid) {
     const char* mode = getenv("AB_MODE");
     report_line_t l = { .n = 0 };
     l.buf[0] = '\0';
     line_add(&l, "# %s AB_TRACE pid=%d\n", ab_build_info(), (int)pid);
-    line_add(&l, "# AB_MODE=%s AB_TRACE_HASH=%d\n", mode && *mode ? mode : "unset", g_trace_hash);
+    // AB_MIN_GPU_DIM as the routing resolved it, so a replay routes as this run did.
+    line_add(&l, "# AB_MODE=%s AB_TRACE_HASH=%d AB_MIN_GPU_DIM=%d\n", mode && *mode ? mode : "unset",
+             g_trace_hash, ab_dispatch_process_config()->min_dim);
+    // The MPI rank and size one launcher exported (Open MPI, else PMI), so a
+    // replay can map the files of one run to its ranks; -1 when not under MPI.
+    const char *rank = getenv("OMPI_COMM_WORLD_RANK"), *size = getenv("OMPI_COMM_WORLD_SIZE");
+    if (!rank || !size) {
+        rank = getenv("PMI_RANK");
+        size = getenv("PMI_SIZE");
+    }
+    if (!rank || !size) rank = size = "-1";
+    line_add(&l, "# mpi_rank=%s mpi_size=%s\n", rank, size);
     line_add(&l, "# clock: ns of mach_absolute_time (CLOCK_UPTIME_RAW), shared by every "
                  "process on this machine\n"
                  "# line: seq t0_ns t1_ns routine ta tb M N K lda ldb ldc alpha beta path\n"

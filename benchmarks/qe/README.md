@@ -68,6 +68,153 @@ it takes about 5 minutes at 1 rank × 1 thread and 1.6 minutes at 8 ranks
 × 1 thread with `-nk 4`. Keep one OpenMP thread per rank with that build;
 see the 2026-10-15 results.
 
+## Replay
+
+`benchmarks/replay.c` replays the BLAS calls of one traced pw.x run, rank
+by rank, with QE's CPU time between them, so the GPU path can be timed on
+QE's exact call mix without QE, and also without its host costs.
+
+**Capture.** Add `AB_TRACE=trace` to a plan line's arguments. Every rank
+then writes `trace.<pid>` into its run directory, one line per BLAS call
+(see "Per-call trace" in [`docs/INTEGRATION.md`](../../docs/INTEGRATION.md)):
+
+```
+# label        input              np omp reps modes    args
+v15tr-np8nk4   A_si64_500b_k222    8  1   1    cpu,gpu  -nk 4 AB_TRACE=trace
+```
+
+**Replay and summarise**, on a machine with nothing else running:
+
+```bash
+make bench-replay
+R=/path/to/out/runs/v15tr-np8nk4/A_si64_500b_k222
+for m in cpu gpu nohost; do ./build/replay $R/cpu_r1 --mode $m --pools 4; done
+python3 benchmarks/replay_summary.py $R/cpu_r1 $R/gpu_r1 $R/cpu_r1/replay_*
+```
+
+```
+replay <trace-dir> --mode cpu|gpu|nohost [--pools P] [--gap-scale X] [--no-gaps]
+       [--timeout S] [--out DIR]
+```
+
+The header line `# mpi_rank=R mpi_size=S` of each trace file gives its
+rank; a directory with a single file without one is a run without MPI.
+Before the workers start, `replay` prints each rank's calls, pool
+barriers, reductions left without one (`skipped`) and the traced pool waits
+taken out of its gaps (`removed_s`).
+
+- **Processes.** One worker per rank, each a `posix_spawn()`ed copy of
+  `replay`: a `fork()`ed child cannot reach Metal's shader compiler. The
+  parent uses neither Metal nor Accelerate; it hands the workers the calls
+  and the barriers in POSIX shared memory. A worker runs with
+  `AB_MODE=cpu` (`--mode cpu`) or `gpu` (`gpu`, `nohost`), the
+  `AB_MIN_GPU_DIM` of the trace's header (the routing's default for a
+  trace without it) and `AB_TRACE=<out>/trace`; with more than one rank,
+  also `VECLIB_MAXIMUM_THREADS=1` and `OPENBLAS_NUM_THREADS=1` unless they
+  are set, as `run_campaign.sh` gives each rank at one OpenMP thread. A
+  single rank keeps Accelerate's default threads. In `gpu` and `nohost`
+  modes a worker sets up Metal (`ab_init()`) before the start. The workers
+  start together.
+- **Modes.**
+  - `cpu`, `gpu`: every call through `dgemm_`/`zgemm_`, with the traced
+    TRANS, M, N, K, leading dimensions, alpha and beta, in that
+    `AB_MODE`. The library routes them as it routed QE's: calls with a
+    dimension ≤ `AB_MIN_GPU_DIM` or alpha = 0 stay on Accelerate.
+  - `nohost`: the calls `AB_MODE=gpu` sends to the GPU, as the library's
+    own routing decides it in the worker, run as the native
+    `ab_dgemm_scaled()`/`ab_zgemm()` on operands resident on the GPU. Each
+    call skips the allocation, pack, upload, download and epilogue.
+    `ab_zgemm()` still creates its four GPU temporaries per call (`temps`
+    in "other"). The other calls go through `dgemm_`/`zgemm_`, which keep
+    them on Accelerate.
+- **Operands.** Contents do not change the timing. Each worker fills one
+  buffer each for A, B and C, sized for its largest call, and every call
+  uses them with its own leading dimensions. Buffers per distinct shape
+  would take 13–17 GB per rank for input A at 8 ranks. `nohost` uploads
+  one GPU matrix per operand part once and gives it each call's shape
+  through the memory-pool API.
+- **CPU time between calls.** Before each call a worker spins for the
+  traced gap since its previous call. Before its first call it spins for
+  its traced offset from the earliest rank. `--gap-scale X` scales the
+  gaps; `--no-gaps` drops them.
+- **Pools.** `--pools` is QE's `-nk`: ranks r / (N/P) form a pool. QE sums
+  the result of a call with transA `C` or `T` and transB `N` over the pool
+  (`mp_sum`). The pool's workers meet at a barrier after such a call where
+  the trace shows the whole pool waited there.
+  - **Which calls.** Every rank of the pool made the same call (routine,
+    TRANS classes, M and N; K is the rank's share), and no rank started its
+    next call before the last of them ended. Then the barriers come in the
+    same order on every rank. Ranks may make different numbers of such
+    calls. In the `cpu` trace of input C at 8 ranks, even ranks make 979
+    and odd ranks 897, as the even ranks also run the subspace
+    diagonalization; its reductions get no barrier.
+  - **PAW's per-atom DGEMMs** (`'C','N'` or `'T','N'`, nh × nh: 8 × 8 for
+    input A, 18 × 18 for C) are summed only after the loop over atoms.
+    Ranks going through their atoms side by side still often fit the rule:
+    1872 of the 2048 in the `cpu` trace of input A at 8 × 1 `-nk 4` get a
+    barrier.
+    Each rank reaches such a barrier when the trace has it there and less
+    of the next gap is waited, so the barrier only matters where the
+    replay's ranks drift apart from the trace's timing.
+  - **Gaps after a barrier.** In the trace, the gap after a barrier call
+    includes the rank's wait for the last rank of its pool. The barrier
+    now does that wait, so it is taken out of the gap.
+  - **Failures.** A worker waits at most `--timeout` seconds (default 300)
+    for the others, at the start and at each barrier, so a hung worker
+    fails its partners. When a worker fails or dies, `replay` names it,
+    kills the others and writes no summary.
+- **Output** goes to `<trace-dir>/replay_<mode>/`, or `--out`. Each worker
+  writes `trace.<pid>`. `replay.txt` is `key=value` tokens: a line of
+  settings (`source`, `mode`, `ranks`, `pools`, `gap_scale`,
+  `min_gpu_dim`, `source_mode`), then a line per rank that maps it to its
+  worker's `pid` and holds the replay's wall time (first call start to last
+  call end), call time, gaps, offset and barrier waits, the barrier counts
+  and the traced wall time. `nohost` workers trace their native calls
+  themselves as `path=gpu`, with every host stage zero and the kernel stage
+  as the BLAS-ABI layer stages a GPU call's.
+- **`replay_summary.py`** groups its arguments by input. For each group it
+  prints Markdown tables of the traced runs and the replays:
+  - wall time (longest rank) and the sums over ranks of call, Accelerate,
+    GPU-call and barrier time;
+  - GPU-busy time (the union of every rank's GPU intervals) and the
+    kernel time per GPU call;
+  - the GPU stages with "other" split.
+
+  It then compares each replay with the traced run of its mode (`nohost`
+  with `gpu`): the kernel and Accelerate sums (target ±15%), the replay's
+  `gpu` − `cpu` wall difference against the traced runs' (±30%), and the
+  `nohost` replay's wall against the `cpu` replay's. pw.x's own wall time
+  is printed when a `results.csv` of `run_campaign.sh` lists the run.
+
+**Limits.**
+- Spinning keeps a core busy but moves no memory, while QE's own work
+  between calls (FFTs, mostly) loads memory as the other ranks' calls run;
+  that is the likely reason for what one `cpu` replay of the `cpu` trace
+  of input A at 8 × 1 `-nk 4` measured. Accelerate's large `'C','N'`
+  ZGEMMs took 0.74× their time in QE and the large `'N','N'` ones 0.90×.
+  The calls on Accelerate summed to 0.83× QE's (208.0 against 249.7 s
+  over the ranks), and the replay's wall was 93.2 s against the trace's
+  95.6 s (pw.x: 96.3 s).
+- A gap is fixed time. It holds QE's own work but also waits that follow
+  no BLAS call (reductions of other data, I/O). A replay cannot move those
+  waits when the GPU path changes the ranks' timing, so confirm an 8-rank
+  result with QE itself.
+- Reused, pre-touched operands skip the page faults a call makes when QE
+  writes a fresh array. Cache state differs too.
+- Calls of one rank that overlapped in the trace (several threads) are
+  replayed one after another, with a warning.
+
+`make test-replay` (not part of `make test`; it starts GPU work in several
+processes) runs `tests/test_replay.py`. The test writes a synthetic 2-rank
+trace, replays it in every mode, and checks:
+- call counts, arguments and paths;
+- wall = calls + gaps + barrier waits;
+- the gaps, gap scaling and barriers;
+- that the routing follows the trace header's `AB_MIN_GPU_DIM`;
+- that a killed or hung worker stops the replay.
+
+It also runs `replay_summary.py`.
+
 ## Results
 
 - 2026-10-14, library 1dbdb52 (1.4.0 candidate) and eaad87e (main before

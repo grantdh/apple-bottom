@@ -70,17 +70,15 @@ static void pack_op_complex(enum CBLAS_TRANSPOSE t, const double complex* X, int
     }
 }
 
-// Reference BLAS argument checks (xerbla): TRANS flags, M, N, K >= 0 and
-// each leading dimension >= max(1, rows of the stored operand). The GPU path
-// indexes the caller's arrays with these, so a call that fails a check goes
-// to cblas instead, which rejects it before touching A, B or C.
-static bool blas_args_valid(enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
-                            int M, int N, int K, int ldA, int ldB, int ldC) {
-    int rowsA = ta == CblasNoTrans ? M : K, rowsB = tb == CblasNoTrans ? K : N;
-    return ta != AB_TRANS_INVALID && tb != AB_TRANS_INVALID &&
-           M >= 0 && N >= 0 && K >= 0 &&
-           ldA >= 1 && ldA >= rowsA && ldB >= 1 && ldB >= rowsB &&
-           ldC >= 1 && ldC >= M;
+// The gate of dgemm_blas and zgemm_blas (dispatch.h): Accelerate where the
+// routing says so, and for the BLAS quick return for alpha == 0 (A and B must
+// not be read) and invalid arguments.
+bool ab_internal_blas_routes_gpu(char routine, char transA, char transB, int M, int N, int K,
+                                 int ldA, int ldB, int ldC, bool alpha_nonzero) {
+    bool z = routine == 'z';
+    return ab_blas_args_valid(ab_blas_trans(transA, z), ab_blas_trans(transB, z),
+                              M, N, K, ldA, ldB, ldC) &&
+           alpha_nonzero && ab_dispatch_route_gpu(routine, transA, transB, M, N, K);
 }
 
 // Whole-call CPU paths (Accelerate cblas, column-major). Used for calls the
@@ -137,20 +135,13 @@ static void prof_stage(CallProf *p, ab_prof_stage_t s) {
     p->mark = now;
 }
 
-// The kernel stage is the command buffers' GPU execution time, or the wall
-// time if Metal reports none. The rest of the kernel call (ZGEMM's GPU-side
-// temporaries, encoding, submit and wake-up latency) is left to "other",
-// which AB_TRACE splits; when the stage holds the wall time, nothing of the
-// kernel call is in "other" and the split is zero.
+// The kernel stage (ab_prof_take_kernel_ns); the rest of the kernel call is
+// left to "other", which AB_TRACE splits.
 static void prof_kernel(CallProf *p) {
     if (!p) return;
     uint64_t now = ab_prof_now_ticks();
-    uint64_t wall = ab_prof_ticks_to_ns(now - p->mark);
-    ab_prof_kernel_split_t *k = &p->call.split;
-    uint64_t gpu = (uint64_t)(ab_internal_take_gpu_seconds(k) * 1e9);
-    bool gpu_timed = gpu && gpu < wall;
-    p->stage_ns[AB_PROF_STAGE_KERNEL] += gpu_timed ? gpu : wall;
-    if (!gpu_timed) k->temps_ns = k->encode_ns = k->submit_ns = k->wake_ns = 0;
+    p->stage_ns[AB_PROF_STAGE_KERNEL] +=
+        ab_prof_take_kernel_ns(ab_prof_ticks_to_ns(now - p->mark), &p->call.split);
     p->mark = now;
 }
 
@@ -234,7 +225,7 @@ static void trace_begin(CallProf *p, const char *routine, char transA, char tran
 
     enum CBLAS_TRANSPOSE ta = ab_blas_trans(transA, z), tb = ab_blas_trans(transB, z);
     size_t elem = z ? sizeof(double complex) : sizeof(double);
-    if (blas_args_valid(ta, tb, M, N, K, ldA, ldB, ldC) && M > 0 && N > 0) {
+    if (ab_blas_args_valid(ta, tb, M, N, K, ldA, ldB, ldC) && M > 0 && N > 0) {
         if (K > 0 && (alpha[0] != 0.0 || alpha[1] != 0.0)) {
             bool na = ta == CblasNoTrans, nb = tb == CblasNoTrans;
             c->hash[0] = hash_stored(A, elem, ldA, na ? M : K, na ? K : M);
@@ -284,10 +275,7 @@ static void zgemm_blas(
     enum CBLAS_TRANSPOSE ta = ab_blas_trans(transA, true);
     enum CBLAS_TRANSPOSE tb = ab_blas_trans(transB, true);
 
-    // Accelerate where the routing says so (dispatch.h); also the BLAS quick
-    // return for alpha == 0 (A and B must not be read) and invalid arguments.
-    if (!blas_args_valid(ta, tb, M, N, K, ldA, ldB, ldC) || alpha == 0.0 ||
-        !ab_dispatch_route_gpu('z', transA, transB, M, N, K)) {
+    if (!ab_internal_blas_routes_gpu('z', transA, transB, M, N, K, ldA, ldB, ldC, alpha != 0.0)) {
         ab_internal_zgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }
@@ -425,10 +413,7 @@ static void dgemm_blas(
     enum CBLAS_TRANSPOSE ta = ab_blas_trans(transA, false);
     enum CBLAS_TRANSPOSE tb = ab_blas_trans(transB, false);
 
-    // Accelerate where the routing says so (dispatch.h); also the BLAS quick
-    // return for alpha == 0 (A and B must not be read) and invalid arguments.
-    if (!blas_args_valid(ta, tb, M, N, K, ldA, ldB, ldC) || alpha == 0.0 ||
-        !ab_dispatch_route_gpu('d', transA, transB, M, N, K)) {
+    if (!ab_internal_blas_routes_gpu('d', transA, transB, M, N, K, ldA, ldB, ldC, alpha != 0.0)) {
         ab_internal_dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }

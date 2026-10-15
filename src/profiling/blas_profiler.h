@@ -143,6 +143,14 @@ typedef struct {
 // zero (apple_bottom.m).
 double ab_internal_take_gpu_seconds(ab_prof_kernel_split_t* split);
 
+// The kernel stage of a GPU call whose kernel step (ab_dgemm_scaled() or
+// ab_zgemm()) took wall_ns: the GPU time of the command buffers taken now,
+// with split getting the rest of their host time; or wall_ns if Metal
+// reported none or not less than wall_ns, and then nothing of the step is
+// in "other" and split's host parts are zero. The BLAS-ABI layer and
+// benchmarks/replay.c both stage a kernel call with it.
+uint64_t ab_prof_take_kernel_ns(uint64_t wall_ns, ab_prof_kernel_split_t* split);
+
 // One BLAS-ABI call: its arguments as the entry point received them, and
 // what the trace adds to the profile's record of it.
 typedef struct {

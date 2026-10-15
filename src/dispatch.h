@@ -79,8 +79,18 @@ bool ab_dispatch_load_table(ab_dispatch_config_t *c, const char *path,
 // Fills c from the environment variables above and the built-in table.
 void ab_dispatch_config_from_env(ab_dispatch_config_t *c);
 
-// ab_dispatch_gpu() under the configuration read from the environment at
-// the first call in this process.
+// The configuration read from the environment at the first call in this
+// process (of this or ab_dispatch_route_gpu()).
+const ab_dispatch_config_t *ab_dispatch_process_config(void);
+
+// ab_dispatch_gpu() under ab_dispatch_process_config().
 bool ab_dispatch_route_gpu(char routine, char transA, char transB, int M, int N, int K);
+
+// The whole routing of a BLAS-ABI call, as dgemm_ and zgemm_ make it
+// (blas_wrapper.c): valid arguments (ab_blas_args_valid), alpha != 0, then
+// ab_dispatch_route_gpu(). A call sent to the GPU can still fall back to
+// Accelerate (no device, operands beyond the ABMatrix limits).
+bool ab_internal_blas_routes_gpu(char routine, char transA, char transB, int M, int N, int K,
+                                 int ldA, int ldB, int ldC, bool alpha_nonzero);
 
 #endif // AB_DISPATCH_H

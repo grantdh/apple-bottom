@@ -82,6 +82,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 | `make test-rectangular` | `test_rectangular.c`: tall, wide, thin-K and conjugate-transposed shapes up to 18277 × 150 × 18277, componentwise against cblas, then timings (peaks at ~21 GB) |
 | `make test-rectangular-diag` | eight rectangular patterns against cblas |
 | `make test-python` | the Python bindings (`tests/python/`) |
+| `make test-replay` | `tests/test_replay.py`: the QE call-mix replay (`benchmarks/replay.c`) on a synthetic 2-rank trace, in every mode, with the trace header's `AB_MIN_GPU_DIM`, a killed and a hung worker, and `benchmarks/replay_summary.py` |
 | `make test-asan`, `make test-ubsan` | the library and `test_correctness` under AddressSanitizer / UndefinedBehaviorSanitizer, in `build/asan`, `build/ubsan`. On macOS 27.0.1 with Apple clang 17.0.0 the AddressSanitizer runtime hangs in its own initialization, before `main()`, even for an empty program; `test-ubsan` runs |
 
 ## BLAS-ABI conformance harness
@@ -209,7 +210,8 @@ runs GPU and CPU calls through the six BLAS-ABI entry points with
 own on the descriptor number of the trace file it inherited and repeats a
 GPU call, which falls back to cblas. There must
 be exactly one trace file per pid, each starting with the `#` header
-(`ab_build_info()`, pid, `AB_MODE`, legend), with one line per call in
+(`ab_build_info()`, pid, `AB_MODE` with `AB_MIN_GPU_DIM`, the MPI rank
+line, legend), with one line per call in
 `seq` order, the documented keys in order, and the arguments (TRANS as
 passed, leading dimensions, `%a` alpha and beta) read back exactly. On GPU
 lines the stages sum exactly to `t1_ns - t0_ns`, the split of `other_ns`

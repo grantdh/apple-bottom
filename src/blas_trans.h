@@ -1,5 +1,5 @@
 // =============================================================================
-// blas_trans.h — BLAS TRANS argument parsing (internal)
+// blas_trans.h — BLAS TRANS and argument checks (internal)
 // =============================================================================
 //
 // The single place where a Fortran/C BLAS 'TRANS' character is interpreted.
@@ -23,6 +23,19 @@ static inline enum CBLAS_TRANSPOSE ab_blas_trans(char t, bool is_complex) {
     case 'C': case 'c': return is_complex ? CblasConjTrans : CblasTrans;
     default:            return AB_TRANS_INVALID;
     }
+}
+
+// Reference BLAS argument checks (xerbla): TRANS flags, M, N, K >= 0 and
+// each leading dimension >= max(1, rows of the stored operand). The GPU path
+// indexes the caller's arrays with these, so a call that fails a check goes
+// to cblas instead, which rejects it before touching A, B or C.
+static inline bool ab_blas_args_valid(enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
+                                      int M, int N, int K, int ldA, int ldB, int ldC) {
+    int rowsA = ta == CblasNoTrans ? M : K, rowsB = tb == CblasNoTrans ? K : N;
+    return ta != AB_TRANS_INVALID && tb != AB_TRANS_INVALID &&
+           M >= 0 && N >= 0 && K >= 0 &&
+           ldA >= 1 && ldA >= rowsA && ldB >= 1 && ldB >= rowsB &&
+           ldC >= 1 && ldC >= M;
 }
 
 #endif // AB_BLAS_TRANS_H

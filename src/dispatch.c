@@ -152,7 +152,11 @@ static pthread_once_t g_config_once = PTHREAD_ONCE_INIT;
 
 static void load_config(void) { ab_dispatch_config_from_env(&g_config); }
 
-bool ab_dispatch_route_gpu(char routine, char transA, char transB, int M, int N, int K) {
+const ab_dispatch_config_t *ab_dispatch_process_config(void) {
     pthread_once(&g_config_once, load_config);
-    return ab_dispatch_gpu(&g_config, routine, transA, transB, M, N, K);
+    return &g_config;
+}
+
+bool ab_dispatch_route_gpu(char routine, char transA, char transB, int M, int N, int K) {
+    return ab_dispatch_gpu(ab_dispatch_process_config(), routine, transA, transB, M, N, K);
 }

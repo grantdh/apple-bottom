@@ -10,11 +10,12 @@ All notable changes to this project will be documented in this file.
   one `key=value` line to `<path>.<pid>` when it returns (a call with an
   illegal argument, for which Accelerate ends the process, gets none), so
   each process, including a `fork()`ed child or an MPI rank, writes a file
-  of its own, which starts with `#` lines naming the build, `AB_MODE` and
-  the fields. A line gives the call's arguments as passed (TRANS, M, N, K,
-  the leading dimensions, alpha and beta exactly as `%a` hex floats), its
-  start and end on the machine-wide `mach_absolute_time` clock in ns, so
-  traces of several processes line up, and its path (`cpu`, `gpu` or
+  of its own, which starts with `#` lines naming the build, `AB_MODE`, the
+  effective `AB_MIN_GPU_DIM`, the MPI rank and size and the fields. A line
+  gives the call's arguments as passed (TRANS, M, N, K, the leading
+  dimensions, alpha and beta exactly as `%a` hex floats), its start and end
+  on the machine-wide `mach_absolute_time` clock in ns, so traces of
+  several processes line up, and its path (`cpu`, `gpu` or
   `fallback:<reason>`).
   GPU calls add the stages of `AB_REPORT` in ns, the command buffer's
   `GPUStartTime` and `GPUEndTime` on the same clock, and split the stage
@@ -22,6 +23,12 @@ All notable changes to this project will be documented in this file.
   (commit until the GPU starts), `wake` (GPU end until the waiting thread
   runs) and `rest`; both sums are exact. `AB_REPORT` and the `AB_PROFILE`
   tables are unchanged. See "Per-call trace" in `docs/INTEGRATION.md`.
+- **`benchmarks/replay.c`** (`make bench-replay`) replays a traced pw.x
+  run's BLAS calls, one process per MPI rank, with the traced CPU time
+  between calls and k-point pool barriers, in `AB_MODE=cpu` or `gpu`, or
+  with the GPU-routed calls as native GEMMs on resident operands
+  (`nohost`); `benchmarks/replay_summary.py` compares replays with the run,
+  and `make test-replay` checks it. See "Replay" in `benchmarks/qe/README.md`.
 - **`AB_TRACE_HASH=1`** adds hashes of op(A) and op(B) as stored and of C
   on entry, when the call reads them: FNV-1a over the 64-bit words of the
   referenced elements, column by column, so a replay can tell repeated

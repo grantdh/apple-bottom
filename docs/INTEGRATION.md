@@ -511,8 +511,11 @@ in every `AB_MODE`, so that a run can be replayed or its timeline lined up
 with other processes'. Each process appends to its own file,
 `<path>.<pid>`: a `fork()`ed child, or an MPI rank, gets a file of its own.
 A file starts with `#` lines naming the build (`ab_build_info()`), the pid,
-`AB_MODE` and the field legend. Each call then adds one line of
-`key=value` fields when it returns, written with a single `writev(2)`:
+`AB_MODE`, `AB_MIN_GPU_DIM` as the routing resolved it, the MPI rank and size
+the launcher exported (`OMPI_COMM_WORLD_RANK`/`_SIZE`, else
+`PMI_RANK`/`PMI_SIZE`; `mpi_rank=-1 mpi_size=-1` outside MPI) and the field
+legend. Each call then adds one line of `key=value` fields when it returns,
+written with a single `writev(2)`:
 
 ```
 seq=2 t0_ns=411972254072166 t1_ns=411972258538707 routine=zgemm ta=C tb=N M=96 N=80 K=72 lda=74 ldb=74 ldc=98 alpha=0x1.4p+0,-0x1p-1 beta=-0x1.8p-1,0x1p-2 path=gpu init_ns=1291 alloc_ns=53998 pack_ns=7291 upload_ns=24291 kernel_ns=577500 download_ns=10958 epilogue_ns=10958 other_ns=3780254 temps_ns=33083 encode_ns=42208 submit_ns=3560959 wake_ns=135916 rest_ns=8088 gpu_start_ns=411972257776500 gpu_end_ns=411972258354000
@@ -550,6 +553,9 @@ seq=2 t0_ns=411972254072166 t1_ns=411972258538707 routine=zgemm ta=C tb=N M=96 N
   two words (real, then imaginary). The padding of a leading dimension is
   not included, so equal operands hash equal whatever their `ld`. Hashing
   reads every operand once more; the call's times leave it out.
+
+`benchmarks/replay.c` replays a run from its traces (see "Replay" in
+`benchmarks/qe/README.md`).
 
 Every call is traced, whatever `AB_PROFILE_THRESHOLD_NS` says. A call that
 Accelerate rejects for an illegal argument ends the process before its line

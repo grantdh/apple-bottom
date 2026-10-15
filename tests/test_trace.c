@@ -595,9 +595,10 @@ static int check_file(const char *dir, pid_t pid, const Call *calls, const char 
 
     char head[512], mode[64];
     snprintf(head, sizeof head, "# %s AB_TRACE pid=%d", ab_build_info(), (int)pid);
-    snprintf(mode, sizeof mode, "# AB_MODE=gpu AB_TRACE_HASH=%d", hashes);
+    // The children run without AB_MIN_GPU_DIM: the routing's default, 32.
+    snprintf(mode, sizeof mode, "# AB_MODE=gpu AB_TRACE_HASH=%d AB_MIN_GPU_DIM=32", hashes);
     int nhead = 0, nlines = 0;
-    bool legend = false, ok = true;
+    bool legend = false, rank = false, ok = true;
     unsigned long long prev_t1 = 0;
     TraceLine scratch;
     char *save = NULL;
@@ -608,10 +609,12 @@ static int check_file(const char *dir, pid_t pid, const Call *calls, const char 
                  expect(!strcmp(line, want), "header '%s', expected '%s'", line, want);
             legend = legend || strstr(line, "# line: seq t0_ns t1_ns routine ta tb M N K "
                                             "lda ldb ldc alpha beta path");
+            rank = rank || !strncmp(line, "# mpi_rank=", 11);
             nhead++;
             continue;
         }
-        ok = expect(nhead >= 2 && legend, "no header or legend before the first line");
+        ok = expect(nhead >= 2 && legend && rank,
+                    "no header, mpi_rank line or legend before the first line");
         if (!ok || !expect((size_t)nlines < n, "more lines than calls (%zu)", n)) {
             ok = false;
             break;

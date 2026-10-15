@@ -101,7 +101,7 @@ $(BUILD)/dispatch.o: $(SRC)/dispatch.c $(SRC)/dispatch.h $(SRC)/dispatch_table.h
 $(BUILD)/build_sha.stamp: FORCE | $(BUILD)
 	@echo '$(AB_BUILD_SHA)' | cmp -s - $@ || echo '$(AB_BUILD_SHA)' > $@
 
-$(BUILD)/blas_profiler.o: $(SRC)/profiling/blas_profiler.c $(SRC)/profiling/blas_profiler.h $(INCLUDE)/apple_bottom.h $(BUILD)/build_sha.stamp | $(BUILD)
+$(BUILD)/blas_profiler.o: $(SRC)/profiling/blas_profiler.c $(SRC)/profiling/blas_profiler.h $(SRC)/dispatch.h $(INCLUDE)/apple_bottom.h $(BUILD)/build_sha.stamp | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) '-DAB_BUILD_SHA="$(AB_BUILD_SHA)"' -c $(SRC)/profiling/blas_profiler.c -o $@
 
 $(BUILD)/device_api.o: $(SRC)/device_api.m $(INCLUDE)/apple_bottom.h $(INCLUDE)/apple_bottom_device.h | $(BUILD)
@@ -492,6 +492,17 @@ calibrate: $(BUILD)/calibrate
 	    --gpu-cores "$(GPU_CORES)" $(CALIBRATE_ARGS)
 	@echo "Use it now: export AB_DISPATCH_TABLE=$(abspath $(CALIBRATE_DIR))/dispatch_table.txt"
 
+# QE call-mix replay, see "Replay" in benchmarks/qe/README.md; test-replay is not in `make test`.
+$(BUILD)/replay: benchmarks/replay.c $(SRC)/blas_trans.h $(SRC)/dispatch.h $(SRC)/profiling/blas_profiler.h tests/test_blas_check.h lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -Itests $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
+.PHONY: bench-replay test-replay
+bench-replay: $(BUILD)/replay
+
+test-replay: $(BUILD)/replay
+	$(PYTHON) -I tests/test_replay.py $(BUILD)/replay
+
 # =============================================================================
 # CI Targets
 # =============================================================================
@@ -583,6 +594,8 @@ build-check: | $(BUILD)/check
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_device_api.c -o $(BUILD)/check/test_device_api.o
 	@echo "Compiling calibrate.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c benchmarks/calibrate.c -o $(BUILD)/check/calibrate.o
+	@echo "Compiling replay.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -Itests -c benchmarks/replay.c -o $(BUILD)/check/replay.o
 	@echo "Compiling test_chaos.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_chaos.c -o $(BUILD)/check/test_chaos.o
 	@echo "Compiling test_convergence.c..."
