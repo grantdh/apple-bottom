@@ -40,8 +40,8 @@ It depends on where the matrices live.
   hardware, not a speed-up.
 - **Matrix-vector products** (DGEMV, ZGEMV, ZHEMV) **on a matrix kept on the
   GPU**: yes, by a lot. They are bound by memory bandwidth, not arithmetic,
-  and at 8192²–16384² the GPU runs them at 290–360 GB/s, 2.7–19× Accelerate's
-  speed and 1.5–4.8× a threaded C loop's. One-shot BLAS-ABI calls pay to
+  and at 8192²–16384² the GPU runs them at 260–360 GB/s, 2.7–36× Accelerate's
+  speed and 2.6–4.8× a threaded C loop's. One-shot BLAS-ABI calls pay to
   map the matrix each time; `AB_MODE=auto` sends only the large DGEMV `'N'`,
   ZGEMV `'N'` and ZHEMV calls that still win to the GPU
   ([BLAS-2](#blas-2-matrix-vector-products)).
@@ -139,7 +139,8 @@ ab_dev_free(hA);   // before A is freed
 
 M2 Max, y = A x for square A of side 4096 / 8192 / 16384: GB/s of A read
 (ZHEMV: of one triangle) per call, median wall time with the GPU warmed up
-([data](benchmarks/results/2026-10-19-317bb91-gemv/), `make bench-gemv`):
+([data](benchmarks/results/2026-10-19-317bb91-gemv/), ZHEMV
+[data](benchmarks/results/2026-10-19-1bc503a-zhemv/), `make bench-gemv`):
 
 | y = A x | GPU, A resident | GPU, A mapped per call (`dgemv_`) | Accelerate | plain C, best of 4/8/12 threads |
 |---|---:|---:|---:|---:|
@@ -147,18 +148,19 @@ M2 Max, y = A x for square A of side 4096 / 8192 / 16384: GB/s of A read
 | DGEMV `'T'` | 242 / 321 / 359 | 61–68 | 52–58 | 108 / 124 / 127 |
 | ZGEMV `'N'` | 255 / 302 / 304 | 46–67 | 38–40 | 58 / 91 / 97 |
 | ZGEMV `'T'`, `'C'` | 273–275 / 334–337 / 358–359 | 52–67 | 108–121 | 107–109 / 108–123 / 114–126 |
-| ZHEMV `'U'`, `'L'` | 107–109 / 137–138 / 154–160 | 24–33 | 8.2–9.1 | 71–76 / 86–92 / 84–104 |
+| ZHEMV `'U'`, `'L'` | 156–162 / 264–274 / 305–316 | 29–38 | 8.2–8.8 | 66–70 / 76–89 / 87–97 |
 
 - **Resident:** 4.2–16× Accelerate's speed for DGEMV, 2.3–7.9× for ZGEMV
-  and 12–19× for ZHEMV, and 1.4–4.8× the best threaded C loop. At 16384² the
-  GPU reads A at 304–359 GB/s of the M2 Max's 400. ZHEMV reads the
-  off-diagonal part of its triangle twice (one pass by rows, one by
-  columns), so its rate per stored byte is about half.
+  and 18–36× for ZHEMV, and 2.2–4.8× the best threaded C loop. At 16384² the
+  GPU reads A at 304–359 GB/s of the M2 Max's 400. ZHEMV reads its stored
+  triangle once, adding each element into its row's sum and, conjugated,
+  into its column's: twice GEMV's arithmetic per byte, which holds it to
+  305–316 GB/s.
 - **Per call** there are about 0.2 ms of submit and wait on top, so 4096²
-  (0.55–1.25 ms per call) runs at 214–275 GB/s and smaller matrices lose
-  more. A cold GPU runs about the first 0.3 s of calls at half speed while
+  (0.55–1.05 ms per call) runs at 214–275 GB/s, ZHEMV's triangle
+  (0.83–0.86 ms) at 156–162 GB/s, and smaller matrices lose more. A cold GPU runs about the first 0.3 s of calls at half speed while
   its clocks rise.
-- **Accuracy:** 4×10⁻¹⁶ to 1×10⁻¹⁵ relative to |A||x| on these matrices,
+- **Accuracy:** 2.5×10⁻¹⁶ to 1×10⁻¹⁵ relative to |A||x| on these matrices,
   against 2×10⁻¹⁷ to 2×10⁻¹⁶ for Accelerate: double-float level, about ten
   times FP64's error. The kernels also track the FP64 exponents of every
   product, at no extra memory traffic, and a call whose data fall outside
@@ -169,11 +171,12 @@ M2 Max, y = A x for square A of side 4096 / 8192 / 16384: GB/s of A read
   GPU only where that was measured at least 1.10× faster than Accelerate in
   two runs: DGEMV `'N'` from 2048² to 16384² elements (3.1–3.4× in the
   table), ZGEMV `'N'` from 2048² to 12288², and ZHEMV from 2048 to 16384
-  (2.7–4.0×). DGEMV `'T'` (1.04–1.32×, too close to call) and ZGEMV `'T'`
+  (3.2–4.6×). DGEMV `'T'` (1.04–1.32×, too close to call) and ZGEMV `'T'`
   and `'C'` (0.5–0.6×) stay on Accelerate, as do smaller and larger calls;
   most one-shot calls in a real program are small. These are one-process
   numbers: MPI ranks sharing the GPU should expect less
   ([routing data](benchmarks/results/2026-10-19-317bb91-gemv/README.md),
+  [ZHEMV's](benchmarks/results/2026-10-19-1bc503a-zhemv/README.md),
   [Integration Guide](docs/INTEGRATION.md#routing-ab_modeauto)).
 
 ## Using it

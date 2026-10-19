@@ -9,7 +9,9 @@ All notable changes to this project will be documented in this file.
   (`src/blas2.m`, `src/blas2_abi.c`). The kernels read the caller's
   column-major FP64 matrix in place, convert each element to double-float
   in registers and accumulate in double-float, adding partial sums in an
-  order fixed by the shape (bitwise reproducible). A matrix-vector product
+  order fixed by the shape (bitwise reproducible); ZHEMV reads its stored
+  triangle once, each element feeding its row's and, conjugated, its
+  column's sum. A matrix-vector product
   is bound by memory bandwidth, where the GPU leads the CPU; see "BLAS-2"
   in README.md for the measured rates.
   - `ab_dev_register(ptr, nbytes)`: a device buffer over memory the caller
@@ -24,7 +26,8 @@ All notable changes to this project will be documented in this file.
     sends a call to the GPU only for shapes measured at least 1.10× faster
     end to end in two runs, mapping the matrix for the call included
     (DGEMV `'N'` 2048²–16384² elements, ZGEMV `'N'` 2048²–12288², ZHEMV
-    2048–16384; data in `benchmarks/results/2026-10-19-317bb91-gemv/`).
+    2048–16384; data in `benchmarks/results/2026-10-19-317bb91-gemv/` and,
+    for ZHEMV, `2026-10-19-1bc503a-zhemv/`).
     Smaller calls, DGEMV `'T'`/`'C'` (1.04–1.32×), ZGEMV `'T'`/`'C'` and
     calls beyond the measured sizes stay on Accelerate. Counted in
     `AB_REPORT` and `AB_PROFILE`; not traced.
@@ -33,7 +36,7 @@ All notable changes to this project will be documented in this file.
     full-precision range (FP32's exponents, subnormals flushed on the GPU),
     or that involves NaN or Inf, runs on Accelerate instead, before y is
     written (counted as a `range` fallback).
-  - `tests/test_blas2.c` (17 tests, 889 cases; in `make test` and
+  - `tests/test_blas2.c` (18 tests, 945 cases; in `make test` and
     `make ci-local`, including a check of the `AB_MODE=auto` rule against
     its measurements) and `benchmarks/bench_gemv.c` (`make bench-gemv`;
     `--sweep` and `--rect` for the routing data). The Fortran binding probe
