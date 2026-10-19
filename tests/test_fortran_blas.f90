@@ -14,7 +14,10 @@
 ! elementwise. Leading-dimension padding is NaN, so reading it shows up.
 !
 ! Both calls use the QE cegterg pattern: op(A) = A**T or A**H with M /= K.
-! Exits with status 1 on failure.
+! Then CALL DGEMV, CALL ZGEMV ('C') and CALL ZHEMV ('U') the same way;
+! ab_get_stats() counts no BLAS-2 work, so a 1 x 1 DGEMM (Accelerate) first
+! sets the last path to "cpu", and only apple-bottom's GPU path makes it
+! "gpu" again. Exits with status 1 on failure.
 ! =============================================================================
 program test_fortran_blas
    use, intrinsic :: iso_c_binding
@@ -44,6 +47,9 @@ program test_fortran_blas
 
    call check_dgemm()
    call check_zgemm()
+   call check_dgemv()
+   call check_zgemv()
+   call check_zhemv()
 
    if (failures > 0) then
       print '(i0,a)', failures, ' Fortran BLAS check(s) failed'
@@ -150,6 +156,140 @@ contains
       end do
       call check_error('ZGEMM', err)
    end subroutine check_zgemm
+
+   ! y = alpha * A * x + beta * y, A stored m x n.
+   subroutine check_dgemv()
+      real(c_double), allocatable :: a(:, :), x(:), y(:), y0(:)
+      real(c_double), parameter :: alpha = 0.75d0, beta = -0.5d0
+      real(c_double) :: nan, s, bound, e, err, one(1, 1)
+      integer :: i, j
+
+      nan = ieee_value(1.0d0, ieee_quiet_nan)
+      allocate(a(ldc, n), source=nan)
+      allocate(x(n), y0(m))
+      do j = 1, n
+         do i = 1, m
+            a(i, j) = sin(0.37d0 * i + 1.71d0 * j)
+         end do
+         x(j) = cos(0.53d0 * j)
+      end do
+      do i = 1, m
+         y0(i) = sin(0.11d0 * i)
+      end do
+      y = y0
+      one = 1
+      call dgemm('N', 'N', 1, 1, 1, 1.0d0, one, 1, one, 1, 0.0d0, one, 1)   ! path "cpu"
+      call dgemv('N', m, n, alpha, a, ldc, x, 1, beta, y, 1)
+      call check_route('DGEMV', 1_c_int64_t)
+
+      err = 0
+      do i = 1, m
+         s = 0
+         bound = 0
+         do j = 1, n
+            s = s + a(i, j) * x(j)
+            bound = bound + abs(a(i, j) * x(j))
+         end do
+         bound = abs(alpha) * bound + abs(beta * y0(i))
+         e = abs(y(i) - (alpha * s + beta * y0(i))) / bound
+         if (ieee_is_nan(e) .or. e > err) err = e
+      end do
+      call check_error('DGEMV', err)
+   end subroutine check_dgemv
+
+   ! y = alpha * A**H * x + beta * y, A stored m x n.
+   subroutine check_zgemv()
+      complex(c_double_complex), allocatable :: a(:, :), x(:), y(:), y0(:)
+      complex(c_double_complex), parameter :: alpha = (0.5d0, 0.25d0)
+      complex(c_double_complex), parameter :: beta = (-0.5d0, 0.125d0)
+      complex(c_double_complex) :: nan, s
+      real(c_double) :: bound, e, err, one(1, 1)
+      integer :: i, j
+
+      nan = cmplx(ieee_value(1.0d0, ieee_quiet_nan), 0, kind=c_double)
+      allocate(a(ldc, n), source=nan)
+      allocate(x(m), y0(n))
+      do j = 1, n
+         do i = 1, m
+            a(i, j) = cmplx(sin(0.37d0 * i + 1.71d0 * j), cos(0.19d0 * i - 0.83d0 * j), &
+                            kind=c_double)
+         end do
+         y0(j) = cmplx(sin(0.11d0 * j), cos(0.07d0 * j), kind=c_double)
+      end do
+      do i = 1, m
+         x(i) = cmplx(cos(0.53d0 * i), sin(0.41d0 * i), kind=c_double)
+      end do
+      y = y0
+      one = 1
+      call dgemm('N', 'N', 1, 1, 1, 1.0d0, one, 1, one, 1, 0.0d0, one, 1)   ! path "cpu"
+      call zgemv('C', m, n, alpha, a, ldc, x, 1, beta, y, 1)
+      call check_route('ZGEMV', 1_c_int64_t)
+
+      err = 0
+      do j = 1, n
+         s = 0
+         bound = 0
+         do i = 1, m
+            s = s + conjg(a(i, j)) * x(i)
+            bound = bound + abs(a(i, j)) * abs(x(i))
+         end do
+         bound = abs(alpha) * bound + abs(beta) * abs(y0(j))
+         e = abs(y(j) - (alpha * s + beta * y0(j))) / bound
+         if (ieee_is_nan(e) .or. e > err) err = e
+      end do
+      call check_error('ZGEMV', err)
+   end subroutine check_zgemv
+
+   ! y = alpha * H * x + beta * y, H Hermitian n x n from its upper triangle;
+   ! the lower triangle is NaN and the diagonal's imaginary parts are garbage,
+   ! neither referenced.
+   subroutine check_zhemv()
+      complex(c_double_complex), allocatable :: a(:, :), x(:), y(:), y0(:)
+      complex(c_double_complex), parameter :: alpha = (0.5d0, 0.25d0)
+      complex(c_double_complex), parameter :: beta = (-0.5d0, 0.125d0)
+      complex(c_double_complex) :: nan, s, h
+      real(c_double) :: bound, e, err, one(1, 1)
+      integer :: i, j
+
+      nan = cmplx(ieee_value(1.0d0, ieee_quiet_nan), 0, kind=c_double)
+      allocate(a(ldc, m), source=nan)
+      allocate(x(m), y0(m))
+      do j = 1, m
+         do i = 1, j
+            a(i, j) = cmplx(sin(0.37d0 * i + 1.71d0 * j), cos(0.19d0 * i - 0.83d0 * j), &
+                            kind=c_double)
+         end do
+         a(j, j) = cmplx(real(a(j, j)), 1.0d300, kind=c_double)
+         x(j) = cmplx(cos(0.53d0 * j), sin(0.41d0 * j), kind=c_double)
+         y0(j) = cmplx(sin(0.11d0 * j), cos(0.07d0 * j), kind=c_double)
+      end do
+      y = y0
+      one = 1
+      call dgemm('N', 'N', 1, 1, 1, 1.0d0, one, 1, one, 1, 0.0d0, one, 1)   ! path "cpu"
+      call zhemv('U', m, alpha, a, ldc, x, 1, beta, y, 1)
+      call check_route('ZHEMV', 1_c_int64_t)
+
+      err = 0
+      do i = 1, m
+         s = 0
+         bound = 0
+         do j = 1, m
+            if (i < j) then
+               h = a(i, j)
+            else if (i > j) then
+               h = conjg(a(j, i))
+            else
+               h = real(a(i, i))
+            end if
+            s = s + h * x(j)
+            bound = bound + abs(h) * abs(x(j))
+         end do
+         bound = abs(alpha) * bound + abs(beta) * abs(y0(i))
+         e = abs(y(i) - (alpha * s + beta * y0(i))) / bound
+         if (ieee_is_nan(e) .or. e > err) err = e
+      end do
+      call check_error('ZHEMV', err)
+   end subroutine check_zhemv
 
    subroutine check_route(name, gpu_calls)
       character(*), intent(in) :: name

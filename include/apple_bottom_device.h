@@ -24,12 +24,17 @@
 //
 // What is implemented:
 //   - Allocation and deallocation, size query, memset
+//   - Registration of memory the caller already owns, without a copy
 //   - Host<->device and device<->device copies
 //   - One default stream; every operation is synchronous
 //   - ab_dev_dgemm / ab_dev_zgemm (column-major, transA/transB, ld, offsets).
 //     Each call converts its FP64 operands to DD and back, so it has the
 //     per-call costs of the BLAS ABI, not the resident speed of the ABMatrix
 //     API.
+//   - ab_dev_dgemv / ab_dev_zgemv / ab_dev_zhemv (BLAS-2). These read the
+//     FP64 matrix in place on every call, converting to DD in registers, so
+//     a matrix filled or registered once runs each product at GPU memory
+//     bandwidth: the case of Lanczos, Haydock and other Krylov solvers.
 //
 // Thread safety: functions are serialized through a single command queue,
 // same as the rest of apple-bottom. Concurrent callers from Fortran (OpenMP
@@ -64,7 +69,20 @@ typedef struct ab_dev_stream_s* ab_dev_stream_t;
 // initialized (safe to call before ab_init, will perform init lazily).
 ab_dev_buffer_t ab_dev_malloc(size_t nbytes);
 
-// Free a device buffer. Safe to call with NULL.
+// A device buffer over `nbytes` of memory the caller already owns, starting
+// at `ptr` (malloc, posix_memalign, mmap, a Fortran ALLOCATABLE): no copy is
+// made, GPU work reads and writes the caller's memory in place, and sees
+// what the caller writes to it between calls. Offsets count from `ptr`.
+// Returns NULL for nbytes == 0, if part of the span is unmapped or
+// unreadable, or if Metal refuses it; copy into an ab_dev_malloc() buffer
+// instead.
+// Call ab_dev_free() on the handle BEFORE the memory is freed, reallocated
+// or unmapped: a wrapper that outlives its memory keeps reading the old
+// pages, without an error. ab_dev_free() never frees the caller's memory.
+ab_dev_buffer_t ab_dev_register(void* ptr, size_t nbytes);
+
+// Free a device buffer (for a registered one, only the handle). Safe to
+// call with NULL.
 void ab_dev_free(ab_dev_buffer_t buf);
 
 // Query the allocated size in bytes.
@@ -168,6 +186,58 @@ ABStatus ab_dev_zgemm_offset(ABTranspose transA, ABTranspose transB,
                              ab_dev_buffer_t B, size_t b_offset, int ldb,
                              const double beta[2],
                              ab_dev_buffer_t C, size_t c_offset, int ldc);
+
+// -----------------------------------------------------------------------------
+// BLAS-2: matrix-vector products on a resident matrix
+// -----------------------------------------------------------------------------
+//
+//   ab_dev_dgemv: y := alpha * op(A) * x + beta * y, op(A) = A or A^T
+//                 (AB_CONJ_TRANS is A^T), A m x n
+//   ab_dev_zgemv: the same for complex A, op(A) = A, A^T or A^H
+//   ab_dev_zhemv: y := alpha * A * x + beta * y, A n x n Hermitian, only the
+//                 `uplo` triangle referenced and the imaginary parts of its
+//                 diagonal taken as zero
+//
+// A is column-major in a device buffer, starting `a_offset` elements (doubles,
+// or complex doubles for Z) into it, with leading dimension lda. x and y are
+// host arrays with BLAS increments: incx, incy != 0, negative ones step
+// backwards from the far end, as in BLAS. Complex scalars and vectors are
+// (re, im) pairs of doubles, i.e. double _Complex or COMPLEX*16.
+//
+// The GPU reads A as FP64 and accumulates in double-float: componentwise
+// error of order 1e-15 relative to |alpha| |op(A)| |x| + |beta| |y| (at
+// most 1e-14 in tests/test_blas2.c, dot products up to 65536 long), about
+// ten times an FP64 BLAS's. Each call checks, at no extra memory traffic,
+// that its data stayed within double-float's exponent range at full
+// precision; a call that did not, or that involves NaN or Inf, and every
+// call with m or n == 0 or alpha == 0, runs on Accelerate instead, on the
+// same memory, with Accelerate's results. ab_get_last_dispatch_path() says
+// which ran.
+//
+// Returns AB_OK when y holds the result, AB_ERROR_INVALID_ARG (y unchanged)
+// for a bad flag, m, n < 0, lda < max(1, rows of A), incx or incy == 0,
+// NULL x or y, or a matrix extending past its buffer.
+//
+// Speed (M2 Max): each call costs about 0.2 ms of submit and wait on top of
+// reading A, which GEMV does at 214-359 GB/s on 4096^2-16384^2 matrices
+// (ZHEMV reads its triangle twice), so the GPU wins for large matrices that
+// stay in a device buffer across many products (README.md, "BLAS-2").
+// -----------------------------------------------------------------------------
+
+ABStatus ab_dev_dgemv(ABTranspose trans, int m, int n, double alpha,
+                      ab_dev_buffer_t A, size_t a_offset, int lda,
+                      const double* x, int incx,
+                      double beta, double* y, int incy);
+
+ABStatus ab_dev_zgemv(ABTranspose trans, int m, int n, const double alpha[2],
+                      ab_dev_buffer_t A, size_t a_offset, int lda,
+                      const double* x, int incx,
+                      const double beta[2], double* y, int incy);
+
+ABStatus ab_dev_zhemv(ABUplo uplo, int n, const double alpha[2],
+                      ab_dev_buffer_t A, size_t a_offset, int lda,
+                      const double* x, int incx,
+                      const double beta[2], double* y, int incy);
 
 // Element-wise utilities of the kind GPU-resident Fortran codes need
 // (conjugate, scale, axpy on device buffers).

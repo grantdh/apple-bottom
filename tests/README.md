@@ -3,7 +3,7 @@
 ## Adding a new test to a registry-based file
 
 The registry-based test runners (`test_correctness.c`, `test_chaos.c`,
-`test_device_api.c`, `test_dispatch.c`, `test_trace.c`) dispatch via a
+`test_device_api.c`, `test_dispatch.c`, `test_trace.c`, `test_blas2.c`) dispatch via a
 `TESTS[]` registry array of `{name, fn}` pairs declared just above
 `main()`. To add a test:
 
@@ -44,8 +44,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 148, every test but
-the chaos ones, and `make ci-local` all 166 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 165, every test but
+the chaos ones, and `make ci-local` all 183 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -64,6 +64,8 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
   - `tests/test_blas_abi.c` — 31 suites (1028 cases), see below
   - `tests/test_trace.c` — 5 tests of `AB_TRACE` and
     `AB_TEST_FAIL_STAGE`, see below
+  - `tests/test_blas2.c` — 17 tests (889 cases) of DGEMV, ZGEMV and
+    ZHEMV, see below
 
 - **Not yet registry-based (one `main`, no ghost guard):**
   - `tests/test_precision.c` — 14 tests; needs decomposition strategy
@@ -234,6 +236,53 @@ kernels of the GPU work before the failure (none for `alloc`; for
 reports the failure), `AB_REPORT` must count each as a `gpu_failed`
 fallback and the trace must say `fallback:gpu_failed`.
 
+## BLAS-2 (GEMV, HEMV)
+
+`tests/test_blas2.c` checks `ab_dev_dgemv` / `ab_dev_zgemv` /
+`ab_dev_zhemv` on `ab_dev_malloc()` and `ab_dev_register()` buffers,
+`ab_dgemv_blas` / `ab_zgemv_blas` / `ab_zhemv_blas` and the plain
+`dgemv_` / `zgemv_` / `zhemv_` symbols, in `AB_MODE=gpu`. A case passes
+when y is within tol(K) = 16 K w u² + 8·2⁻⁵³ (u² = 2⁻⁴⁸, K the
+dot-product length, w = 2 for complex) of a compensated FP64 reference
+(`tests/test_blas2_ref.h`, shared with `benchmarks/bench_gemv.c`)
+componentwise, relative to |alpha| (|op(A)| |x|)_i + |beta| |y0_i|, and so
+is Accelerate's result; the expected path computed y ("gpu", or "cpu" with
+y bitwise equal to Accelerate's run on the same memory, since Accelerate's
+bits depend on A's address modulo 256 bytes); and A, x and every element of
+y's array outside the call's strided elements are bitwise unchanged.
+Leading-dimension padding, the unreferenced triangle of a Hermitian matrix,
+the imaginary parts of its diagonal and the gaps between strided elements
+hold NaN.
+
+- the three semantics tests run every TRANS or UPLO flag on shapes from
+  1 × 1 to 30001 × 5 (skinny shapes take the grid-split and reduction
+  paths), padded and tight lda, increments ±1, 2, −2, −3 and complex
+  alpha and beta, through all four entry points (488 cases);
+- beta = 0 with NaN and ±Inf in y (y not read); NaN and Inf in A, x,
+  alpha or beta give Accelerate's result bitwise (the call runs there),
+  and Inf in y with beta ≠ 0 stays on the GPU;
+- the range guard: an element of 1e200, all elements 1e-200 or 1e38 run on
+  Accelerate; A scaled by 1e30, x by 1e200 or 1e-200, x with components 1
+  and 1e-30, zero rows, columns and x elements, and FP64 subnormals in A
+  stay on the GPU and within tol;
+- m or n = 0 and alpha = 0, with A and x all NaN, give Accelerate's result
+  bitwise;
+- determinism (two device-API calls and a BLAS-ABI call give the same
+  bits), 8 threads against single-threaded bits, long dot products
+  (K = 65536; error under 2e-14 of |A||x| as well as tol), registered
+  memory (updates seen by the next call, the caller's bytes at their
+  offset, unmapped, holed and PROT_NONE spans refused), invalid
+  device-API arguments;
+- the `AB_MODE=auto` rule against its measurements: every shape of
+  `benchmarks/results/2026-10-19-317bb91-gemv/sweep_*.csv` that the rule
+  sends to the GPU was measured at least 1.10× faster there, and each
+  routed class has such shapes (no GPU needed);
+- in child processes: `AB_MODE=cpu`, `gpu`, `auto` and `AB_MIN_GPU_DIM`
+  routing, illegal arguments through the Fortran symbols (cblas names the
+  parameter and exits with status 255), `AB_TEST_FAIL_STAGE=kernel` and
+  `alloc` (bitwise Accelerate results, `gpu_failed` in `AB_REPORT`) and the
+  `AB_REPORT` counts.
+
 ## Routing unit tests
 
 `tests/test_dispatch.c` tests the routing decision of the BLAS-ABI entry
@@ -256,9 +305,12 @@ leading dimensions). `make test-fortran` links it once against the dylib and
 once against the static archive and runs both with `AB_MODE=gpu`. Like QE,
 it never calls `ab_init()`. Each call must reach the GPU path
 (`ab_get_last_dispatch_path()` is `"gpu"` and the `ab_get_stats()` GEMM
-counter advanced) and match a reference loop within 1e-11. The target is
-skipped, with a message, when neither `gfortran-15` nor `gfortran` is on
-`PATH`; set `GFORTRAN=` to pick a compiler.
+counter advanced) and match a reference loop within 1e-11. Then `CALL DGEMV`,
+`CALL ZGEMV` (`'C'`) and `CALL ZHEMV` (`'U'`, NaN in the unreferenced
+triangle) the same way: a 1 × 1 DGEMM, which runs on Accelerate, sets the
+path to `"cpu"` first, so `"gpu"` afterwards shows the call reached
+apple-bottom. The target is skipped, with a message, when neither
+`gfortran-15` nor `gfortran` is on `PATH`; set `GFORTRAN=` to pick a compiler.
 
 ## Meta-test
 

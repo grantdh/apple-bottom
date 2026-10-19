@@ -280,9 +280,26 @@ void ab_zgemm_blas(char transA, char transB, int M, int N, int K,
                    double _Complex beta,
                    double _Complex* C, int ldC);
 
-// Returns the dispatch path taken by the most recent ab_*_blas (or dgemm_/zgemm_)
-// call on this thread: "gpu" only if the GPU computed C, "cpu" if cblas did
-// (including a fallback after a GPU failure), or "none" before any call. Thread-local.
+// BLAS-2, the same way (README.md, "BLAS-2"): y := alpha op(A) x + beta y
+// (GEMV, op from trans) and y := alpha A x + beta y with A Hermitian (ZHEMV,
+// the uplo triangle referenced). These are the entry points of the dgemv_,
+// zgemv_ and zhemv_ Fortran symbols. A GPU call reads A in place through a
+// mapping made for that call, so a one-shot product pays to map A each time;
+// for a matrix used in many products, keep it in a device buffer and call
+// ab_dev_dgemv / ab_dev_zgemv / ab_dev_zhemv (apple_bottom_device.h).
+void ab_dgemv_blas(char trans, int M, int N, double alpha, const double* A, int ldA,
+                   const double* x, int incx, double beta, double* y, int incy);
+void ab_zgemv_blas(char trans, int M, int N, double _Complex alpha,
+                   const double _Complex* A, int ldA, const double _Complex* x, int incx,
+                   double _Complex beta, double _Complex* y, int incy);
+void ab_zhemv_blas(char uplo, int N, double _Complex alpha,
+                   const double _Complex* A, int ldA, const double _Complex* x, int incx,
+                   double _Complex beta, double _Complex* y, int incy);
+
+// Returns the dispatch path taken by the most recent ab_*_blas (or dgemm_/zgemm_,
+// dgemv_/zgemv_/zhemv_, ab_dev_*gemv / ab_dev_zhemv) call on this thread: "gpu"
+// only if the GPU computed the result, "cpu" if cblas did (including a fallback
+// after a GPU failure), or "none" before any call. Thread-local.
 const char* ab_get_last_dispatch_path(void);
 
 // Library version and the git commit it was built from, "-dirty" if tracked

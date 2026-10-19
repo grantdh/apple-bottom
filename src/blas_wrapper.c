@@ -17,11 +17,14 @@
 
 // Thread-local record of the path the last BLAS-ABI call on this thread
 // actually took, for bench harnesses and the profiler (prof_end). Only the
-// two places that produce C write it: "cpu" in ab_internal_*gemm_cpu, "gpu"
-// once the GPU result is in C (H-P1-2). Routing (dispatch.c) never touches
+// places that produce the result write it: "cpu" in ab_internal_*gemm_cpu,
+// "gpu" once the GPU result is in C (H-P1-2), and the BLAS-2 entry points
+// through ab_internal_set_last_path(). Routing (dispatch.c) never touches
 // it. Zero runtime cost.
 static __thread const char *_ab_last_path = "none";
 const char* ab_get_last_dispatch_path(void) { return _ab_last_path; }
+
+void ab_internal_set_last_path(bool gpu) { _ab_last_path = gpu ? "gpu" : "cpu"; }
 
 // =============================================================================
 // Host-side helpers shared by the BLAS-ABI entry points
@@ -156,20 +159,7 @@ static void prof_end(CallProf *p, const char *routine, int M, int N, int K) {
     if (p->trace)
         ab_trace_record(&p->call, ab_prof_ticks_to_ns(p->t0), ns, gpu ? p->stage_ns : NULL,
                         p->fallback);
-    if (!gpu || !ab_prof_verbose()) return;
-    // One write per line, so lines from concurrent callers do not interleave.
-    char line[512];
-    size_t n = (size_t)snprintf(line, sizeof line, "AB_PROFILE %s M=%d N=%d K=%d ", routine, M, N, K);
-    uint64_t named = 0;
-    for (int s = 0; s < AB_PROF_STAGE_COUNT && n < sizeof line; s++) {
-        named += p->stage_ns[s];
-        n += (size_t)snprintf(line + n, sizeof line - n, " %s=%.3f", ab_prof_stage_names[s],
-                              p->stage_ns[s] / 1e6);
-    }
-    if (n < sizeof line)
-        snprintf(line + n, sizeof line - n, " other=%.3f  total=%.3f ms\n",
-                 (ns > named ? ns - named : 0) / 1e6, ns / 1e6);
-    fputs(line, stderr);
+    if (gpu) ab_prof_print_gpu_call(routine, M, N, K, ns, p->stage_ns);
 }
 
 // A GPU-routed call that has to run on cblas instead. The path record says
@@ -179,9 +169,7 @@ static void note_gpu_fallback(CallProf *p, const char *routine, int M, int N, in
                               ab_prof_fallback_t reason, const char *why) {
     if (!p) return;
     p->fallback = reason;
-    if (ab_prof_verbose())
-        fprintf(stderr, "AB_PROFILE %s M=%d N=%d K=%d  GPU fallback to cblas: %s\n",
-                routine, M, N, K, why);
+    ab_prof_print_fallback(routine, M, N, K, why);
 }
 
 // FNV-1a over the 64-bit words of the referenced elements of a stored

@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 // The caller's environment minus every entry is_ab_env() matches, so a child
@@ -65,6 +66,30 @@ static inline char *slurp(FILE *in) {
     fclose(in);
     fclose(mem);
     return s;
+}
+
+// Runs argv[0] with the caller's environment minus is_ab_env() entries plus
+// `extra` (NULL-terminated). Returns its exit status, or -1 if it did not
+// start or did not exit normally; *out gets its stdout and stderr (or why it
+// did not start), to free().
+static inline int spawn_capture(char *const argv[], const char *const extra[], char **out) {
+    size_t n = 0, ne = 0;
+    while (extra[ne]) ne++;
+    char **env = child_environ(ne, &n);
+    for (size_t k = 0; k < ne; k++) env[n + k] = (char *)extra[k];
+    pid_t pid;
+    char why[256];
+    FILE *in = spawn_piped(argv, env, &pid, why, sizeof why);
+    free(env);
+    if (!in) {
+        *out = strdup(why);
+        return -1;
+    }
+    *out = slurp(in);
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0)
+        if (errno != EINTR) return -1;
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
 #endif /* AB_TEST_SPAWN_H */

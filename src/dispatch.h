@@ -2,11 +2,13 @@
 // dispatch.h — GPU-or-Accelerate routing of BLAS-ABI calls (internal)
 // =============================================================================
 //
-// The one place that decides where a raw-pointer BLAS-ABI call (dgemm_,
-// zgemm_, ab_dgemm_, ab_zgemm_, ab_dgemm_blas, ab_zgemm_blas) runs. The
-// native ABMatrix and device APIs always use the GPU and never come here.
-// Calls with invalid arguments or alpha == 0 run on Accelerate before
-// routing (blas_wrapper.c).
+// Where a raw-pointer BLAS-ABI call runs. GEMM (dgemm_, zgemm_, ab_dgemm_,
+// ab_zgemm_, ab_dgemm_blas, ab_zgemm_blas) is routed here entirely; BLAS-2
+// (dgemv_, zgemv_, zhemv_, ab_*gemv_blas, ab_zhemv_blas) shares steps 1-3
+// through ab_dispatch_mode_route() and has its own auto rule (blas2_abi.c).
+// The native ABMatrix and device APIs never come here. Calls with invalid
+// arguments or alpha == 0 run on Accelerate before routing (blas_wrapper.c,
+// blas2_abi.c).
 //
 // Precedence, per call; the settings are read once per process:
 //   1. AB_MODE=cpu: Accelerate.
@@ -62,6 +64,10 @@ typedef struct {
 bool ab_dispatch_row_covers(const ab_dispatch_row_t *row, char routine,
                             char transA, char transB, int M, int N, int K);
 
+// Steps 1-3 above for a call whose smallest dimension is min_dim: 0 for
+// Accelerate, 1 for the GPU, -1 if the mode leaves it to the auto rule.
+int ab_dispatch_mode_route(const ab_dispatch_config_t *c, int min_dim);
+
 // The routing decision for one call with valid arguments under config c:
 // true for the GPU. Pure: reads no environment and touches no GPU.
 bool ab_dispatch_gpu(const ab_dispatch_config_t *c, char routine,
@@ -92,5 +98,10 @@ bool ab_dispatch_route_gpu(char routine, char transA, char transB, int M, int N,
 // Accelerate (no device, operands beyond the ABMatrix limits).
 bool ab_internal_blas_routes_gpu(char routine, char transA, char transB, int M, int N, int K,
                                  int ldA, int ldB, int ldC, bool alpha_nonzero);
+
+// Records where the latest BLAS-ABI call on this thread computed its result,
+// for ab_get_last_dispatch_path() (blas_wrapper.c): the BLAS-2 entry points
+// (blas2_abi.c) report through this.
+void ab_internal_set_last_path(bool gpu);
 
 #endif // AB_DISPATCH_H

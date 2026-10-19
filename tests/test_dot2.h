@@ -1,7 +1,8 @@
 #ifndef AB_TEST_DOT2_H
 #define AB_TEST_DOT2_H
 
-// Compensated FP64 GEMM reference for test_precision.c and test_blas_abi.c:
+// Compensated FP64 GEMM reference for test_precision.c and test_blas_abi.c, and
+// its step for the BLAS-2 reference (test_blas2_ref.h):
 // Dot2 (Ogita, Rump & Oishi, SIAM J. Sci. Comput. 26(6), 2005), as accurate
 // as accumulating in twice FP64 precision and rounding once.
 
@@ -16,10 +17,20 @@ typedef struct {
     double *S, *E;
 } Dot2Job;
 
-// Row i of S + E += sign·A·B with Dot2: TwoProduct via fma, TwoSum on S, and
-// the rounding errors summed into E.
-static inline void dot2_row(void *ctx, size_t i) {
+// *s + *e += a·b: TwoProduct via fma, TwoSum on *s, and the rounding errors
+// summed into *e (also the BLAS-2 reference, test_blas2_ref.h).
+static inline void dot2_step(double *s, double *e, double a, double b) {
 #pragma STDC FP_CONTRACT OFF    // the error-free transformations need every rounding
+    double p = a * b;
+    double pe = fma(a, b, -p);
+    double t = *s + p;
+    double z = t - *s;
+    *e += ((*s - (t - z)) + (p - z)) + pe;
+    *s = t;
+}
+
+// Row i of S + E += sign·A·B with Dot2.
+static inline void dot2_row(void *ctx, size_t i) {
     const Dot2Job *job = ctx;
     const int N = job->N, K = job->K;
     double *restrict s = job->S + i * N;
@@ -27,14 +38,7 @@ static inline void dot2_row(void *ctx, size_t i) {
     for (int k = 0; k < K; k++) {
         const double a = job->sign * job->A[i * K + k];
         const double *restrict b = job->B + (size_t)k * N;
-        for (int j = 0; j < N; j++) {
-            double p = a * b[j];
-            double pe = fma(a, b[j], -p);
-            double t = s[j] + p;
-            double z = t - s[j];
-            e[j] += ((s[j] - (t - z)) + (p - z)) + pe;
-            s[j] = t;
-        }
+        for (int j = 0; j < N; j++) dot2_step(&s[j], &e[j], a, b[j]);
     }
 }
 

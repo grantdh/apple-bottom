@@ -24,12 +24,18 @@ bool ab_dispatch_row_covers(const ab_dispatch_row_t *row, char routine,
            row->tb == trans_class(transB) && M >= row->m && N >= row->n && K >= row->k;
 }
 
+int ab_dispatch_mode_route(const ab_dispatch_config_t *c, int min_dim) {
+    if (c->mode == AB_DISPATCH_CPU) return 0;
+    // Dims below the floor are never profitable (threadgroups underutilized).
+    if (min_dim <= c->min_dim) return 0;
+    return c->mode == AB_DISPATCH_GPU ? 1 : -1;
+}
+
 bool ab_dispatch_gpu(const ab_dispatch_config_t *c, char routine,
                      char transA, char transB, int M, int N, int K) {
-    if (c->mode == AB_DISPATCH_CPU) return false;
-    // Dims below the floor are never profitable (threadgroups underutilized).
-    if (M <= c->min_dim || N <= c->min_dim || K <= c->min_dim) return false;
-    if (c->mode == AB_DISPATCH_GPU) return true;
+    int MN = M < N ? M : N;
+    int by_mode = ab_dispatch_mode_route(c, MN < K ? MN : K);
+    if (by_mode >= 0) return by_mode;
 
     uint64_t crossover = routine == 'd' && c->crossover_flops_real
                        ? c->crossover_flops_real : c->crossover_flops;

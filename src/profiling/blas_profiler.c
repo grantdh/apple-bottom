@@ -63,7 +63,7 @@ const char* const ab_prof_stage_names[AB_PROF_STAGE_COUNT] = {
 };
 
 static const char* const fallback_names[AB_PROF_FB_COUNT] = {
-    "no_device", "too_large", "gpu_failed", "other"
+    "no_device", "too_large", "gpu_failed", "other", "range"
 };
 
 // =============================================================================
@@ -471,11 +471,46 @@ void ab_prof_report(FILE* out) {
 // Per-call trace (AB_TRACE)
 // =============================================================================
 
+uint64_t ab_prof_kernel_ns(uint64_t wall_ns, double gpu_seconds) {
+    uint64_t gpu = (uint64_t)(gpu_seconds * 1e9);
+    return gpu && gpu < wall_ns ? gpu : wall_ns;
+}
+
 uint64_t ab_prof_take_kernel_ns(uint64_t wall_ns, ab_prof_kernel_split_t* split) {
-    uint64_t gpu = (uint64_t)(ab_internal_take_gpu_seconds(split) * 1e9);
-    if (gpu && gpu < wall_ns) return gpu;
-    split->temps_ns = split->encode_ns = split->submit_ns = split->wake_ns = 0;
-    return wall_ns;
+    uint64_t ns = ab_prof_kernel_ns(wall_ns, ab_internal_take_gpu_seconds(split));
+    if (ns == wall_ns) split->temps_ns = split->encode_ns = split->submit_ns = split->wake_ns = 0;
+    return ns;
+}
+
+void ab_prof_stage_mark(uint64_t* stage_ns, uint64_t* mark, ab_prof_stage_t s) {
+    if (!stage_ns) return;
+    uint64_t now = ab_prof_now_ticks();
+    stage_ns[s] += ab_prof_ticks_to_ns(now - *mark);
+    *mark = now;
+}
+
+void ab_prof_print_gpu_call(const char* routine, int m, int n, int k, uint64_t total_ns,
+                            const uint64_t* stage_ns) {
+    if (!ab_prof_verbose()) return;
+    // One write per line, so lines from concurrent callers do not interleave.
+    char line[512];
+    size_t len = (size_t)snprintf(line, sizeof line, "AB_PROFILE %s M=%d N=%d K=%d ", routine, m, n, k);
+    uint64_t named = 0;
+    for (int s = 0; s < AB_PROF_STAGE_COUNT && len < sizeof line; s++) {
+        named += stage_ns[s];
+        len += (size_t)snprintf(line + len, sizeof line - len, " %s=%.3f", ab_prof_stage_names[s],
+                                stage_ns[s] / 1e6);
+    }
+    if (len < sizeof line)
+        snprintf(line + len, sizeof line - len, " other=%.3f  total=%.3f ms\n",
+                 (total_ns > named ? total_ns - named : 0) / 1e6, total_ns / 1e6);
+    fputs(line, stderr);
+}
+
+void ab_prof_print_fallback(const char* routine, int m, int n, int k, const char* why) {
+    if (ab_prof_verbose())
+        fprintf(stderr, "AB_PROFILE %s M=%d N=%d K=%d  GPU fallback to cblas: %s\n", routine, m, n,
+                k, why);
 }
 
 // The header of a new trace file: the build, the settings and the line format.
