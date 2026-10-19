@@ -70,6 +70,15 @@ ab_b2_result_t ab_internal_b2_dev(const ab_b2_call_t *c, ab_dev_buffer_t A, size
 // flag op (upper case) on an m x n matrix goes to the GPU.
 bool ab_internal_b2_auto_gpu(ab_b2_routine_t routine, char op, int m, int n);
 
+// For tests: the calling thread's ZHEMV calls with rows_per_lane rows per
+// lane (1 or 3: panels of 32 rows_per_lane rows) and chunks of chunk_panels
+// panels, in place of the decomposition blas2.m chooses for n; 0 leaves
+// either choice automatic.
+void ab_internal_b2_hemv_override(int rows_per_lane, int chunk_panels);
+
+// The panel height and chunk width, in rows and columns, of an n x n ZHEMV.
+void ab_internal_b2_hemv_layout(int n, int *panel, int *chunk);
+
 #ifdef __cplusplus
 }
 #endif

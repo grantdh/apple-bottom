@@ -27,7 +27,7 @@
 
 #include "apple_bottom.h"
 #include "apple_bottom_device.h"
-#include "blas2.h"             // ab_internal_b2_auto_gpu
+#include "blas2.h"             // ab_internal_b2_auto_gpu, ZHEMV tiling hooks
 #include "device_internal.h"   // ab_internal_dev_data
 #include "test_blas2_ref.h"
 #include "test_blas_check.h"
@@ -399,6 +399,40 @@ static void test_dgemv_semantics(void) { run_matrix(B2_DGEMV); }
 static void test_zgemv_semantics(void) { run_matrix(B2_ZGEMV); }
 static void test_zhemv_semantics(void) { run_matrix(B2_ZHEMV); }
 
+// ZHEMV splits the rows into panels of 32 R rows (R = 1, or 3 from n = 4608)
+// and the columns into chunks of whole panels (several only for
+// 4096 <= n < 4608 and from n = 12288). Each (R, panels per chunk) below,
+// forced, at sizes around a panel and a chunk: under one panel, one off, a
+// ragged last panel, chunk and group of four columns; both triangles.
+static void test_zhemv_tiling(void) {
+    const int cfg[][2] = {{1, 1}, {1, 3}, {3, 1}, {3, 2}};   // rows per lane, panels per chunk
+    int k = 0;
+    for (int c = 0; c < 4; c++) {
+        const int H = 32 * cfg[c][0], W = H * cfg[c][1];
+        const int sizes[] = {1, 2, H - 1, H, H + 1, W + 1, 2 * W + H / 2 + 3};
+        ab_internal_b2_hemv_override(cfg[c][0], cfg[c][1]);
+        for (size_t s = 0; s < sizeof sizes / sizeof *sizes; s++) {
+            int panel, chunk;
+            ab_internal_b2_hemv_layout(sizes[s], &panel, &chunk);
+            if (panel != H || chunk != W)
+                fail_case("n %d: panel %d chunk %d, forced %d and %d", sizes[s], panel, chunk, H, W);
+            for (const char *op = "UL"; *op; op++, k++) {
+                const int *inc = INCS[k % 5];
+                const double *sc = SCALARS[k % 4];
+                Case cs = {B2_ZHEMV, *op, sizes[s], sizes[s], k % 2 ? 3 : 0, inc[0], inc[1],
+                           {sc[0], sc[1]}, {sc[2], sc[3]}, k % 3 ? EP_DEV : EP_REG};
+                Data d;
+                make_data(&cs, &d);
+                check(&cs, &d, EXPECT_GPU, -1, NULL);
+                free_data(&d);
+            }
+        }
+    }
+    ab_internal_b2_hemv_override(0, 0);
+    printf("%d cases ... ", k);
+    finish();
+}
+
 // =============================================================================
 // Special values
 // =============================================================================
@@ -731,17 +765,24 @@ static void test_invalid_dev_args(void) {
 
 // Every shape of both committed sweep runs that the auto rule sends to the
 // GPU was measured >= 1.10x faster there, and the rule routes some shapes of
-// exactly the classes DGEMV 'N', ZGEMV 'N' and ZHEMV.
+// exactly the classes DGEMV 'N', ZGEMV 'N' and ZHEMV. ZHEMV's runs are those
+// of its single-read kernel; the GEMV directory's ZHEMV rows measured the
+// two-pass kernel it replaced and are not used.
 static void test_auto_rule_matches_data(void) {
-    const char *files[] = {"sweep_square.csv", "sweep_rect.csv", "sweep_square_run1.csv",
-                           "sweep_rect_run1.csv"};
+    const struct { const char *file; bool hemv; } files[] = {
+        {"2026-10-19-317bb91-gemv/sweep_square.csv", false},
+        {"2026-10-19-317bb91-gemv/sweep_rect.csv", false},
+        {"2026-10-19-317bb91-gemv/sweep_square_run1.csv", false},
+        {"2026-10-19-317bb91-gemv/sweep_rect_run1.csv", false},
+        {"2026-10-19-1bc503a-zhemv/sweep_square.csv", true},
+        {"2026-10-19-1bc503a-zhemv/sweep_square_run1.csv", true},
+    };
     enum { DN, DT, ZN, ZT, HE, CLASSES };
     const bool want_routed[CLASSES] = {true, false, true, false, true};
     int routed = 0, kept_wins = 0, rows = 0, per_class[CLASSES] = {0};
-    for (int f = 0; f < 4; f++) {
+    for (size_t f = 0; f < sizeof files / sizeof *files; f++) {
         char path[PATH_MAX], line[256];
-        snprintf(path, sizeof path, "%s/benchmarks/results/2026-10-19-317bb91-gemv/%s",
-                 AB_SOURCE_ROOT, files[f]);
+        snprintf(path, sizeof path, "%s/benchmarks/results/%s", AB_SOURCE_ROOT, files[f].file);
         FILE *in = fopen(path, "r");
         if (!in) { fail_case("cannot read %s", path); continue; }
         while (fgets(line, sizeof line, in)) {
@@ -752,12 +793,13 @@ static void test_auto_rule_matches_data(void) {
                        &speedup) != 5)
                 continue;   // the header
             B2Routine rt = !strcmp(routine, "dgemv") ? B2_DGEMV : !strcmp(routine, "zgemv") ? B2_ZGEMV : B2_ZHEMV;
+            if ((rt == B2_ZHEMV) != files[f].hemv) continue;
             int cls = rt == B2_ZHEMV ? HE : rt == B2_DGEMV ? (op == 'N' ? DN : DT) : (op == 'N' ? ZN : ZT);
             rows++;
             if (ab_internal_b2_auto_gpu((ab_b2_routine_t)rt, op, m, n)) {
                 routed++;
                 per_class[cls]++;
-                if (speedup < 1.10) fail_case("%s '%c' %dx%d routed at %.4fx (%s)", routine, op, m, n, speedup, files[f]);
+                if (speedup < 1.10) fail_case("%s '%c' %dx%d routed at %.4fx (%s)", routine, op, m, n, speedup, files[f].file);
             } else if (speedup >= 1.10) {
                 kept_wins++;
             }
@@ -931,6 +973,7 @@ static const TestCase TESTS[] = {
     {"dgemv semantics ('N', 'T', 'C'; all entry points)", test_dgemv_semantics},
     {"zgemv semantics ('N', 'T', 'C'; all entry points)", test_zgemv_semantics},
     {"zhemv semantics ('U', 'L'; all entry points)", test_zhemv_semantics},
+    {"zhemv tiling: panel and chunk edges", test_zhemv_tiling},
     {"beta = 0 with NaN and Inf in y", test_beta0_nonfinite_y},
     {"NaN and Inf propagate as in Accelerate", test_nonfinite_propagation},
     {"range guard", test_range_guard},

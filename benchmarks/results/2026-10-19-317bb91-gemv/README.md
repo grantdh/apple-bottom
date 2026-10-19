@@ -48,6 +48,10 @@ n, lda, `gpu_path`, `gpu_median_ms`, `accel_median_ms`, `speedup`.
 | ZGEMV `'T'`, `'C'` | — | 0.04–0.79× at every shape |
 | ZHEMV `'U'`, `'L'` | 2.34–4.27× from 2048 to 16384 | 0.88–1.25× at 1536 |
 
+The ZHEMV rows here measure the first, two-pass kernel. The kernel that
+replaced it reads the triangle once; its measurements, and the data behind
+the ZHEMV routing row since, are in `../2026-10-19-1bc503a-zhemv/`.
+
 Mapping A costs about 10 ms/GB for a 1 GB matrix and 22 ms/GB for a 4 GB
 one, so the GPU's lead in one-shot calls shrinks at the largest sizes; the
 rows stop at the largest size measured as a win. A matrix kept resident

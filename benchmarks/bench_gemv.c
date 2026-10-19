@@ -15,9 +15,9 @@
 // as the median wall time of --reps calls after --warmup calls (GPU modes:
 // and at least 0.5 s of calls, so the GPU has raised its clocks). GB/s counts
 // the bytes of A the routine references: m n 8 (DGEMV), m n 16 (ZGEMV),
-// n (n + 1) / 2 16 (ZHEMV: one triangle; the GPU reads the strict triangle
-// twice). err is the largest |y_i - ref_i| / (|A| |x|)_i over 64 sampled
-// outputs against a compensated (Dot2) FP64 reference.
+// n (n + 1) / 2 16 (ZHEMV: one triangle, which the GPU reads once). err is
+// the largest |y_i - ref_i| / (|A| |x|)_i over 64 sampled outputs against a
+// compensated (Dot2) FP64 reference.
 //
 // --sweep times staged against accel over square sizes 256-16384 (3 warm-ups,
 // median of 7, as `make calibrate` does for GEMM): the data behind the

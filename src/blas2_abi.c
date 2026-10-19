@@ -43,9 +43,11 @@
 // Measured on an M2 Max (38-core GPU, macOS 27.0.1), staged GPU calls
 // (ab_*_blas, AB_MODE=gpu, each call mapping A) against Accelerate cblas in
 // one process, alpha 1, beta 0, tight lda, 3 warm-ups and the median of 7,
-// twice: benchmarks/results/2026-10-19-317bb91-gemv/ (sweep_square: 256-16384
-// square; sweep_rect: 4096 x 1024 to 262144 x 1024 and their transposes;
-// *_run1: the first run; tests/test_blas2.c checks the rows against both).
+// twice: benchmarks/results/2026-10-19-317bb91-gemv/ for GEMV (sweep_square:
+// 256-16384 square; sweep_rect: 4096 x 1024 to 262144 x 1024 and their
+// transposes) and 2026-10-19-1bc503a-zhemv/ for ZHEMV (sweep_square, the
+// single-read kernel); *_run1: the first run; tests/test_blas2.c checks the
+// rows against both.
 // A row covers only shapes measured >= 1.10x in both runs with no slower
 // shape inside it, and stops at the largest such size: the cost of mapping A
 // grows with its size (about 10 ms/GB at 1 GB, 22 ms/GB at 4 GB), so larger
@@ -57,7 +59,7 @@
 //   zgemv N   1.22-1.83x from 2048^2 to 12288^2; 16384^2 1.10x and 1.32x
 //             (1.02x in a third run); 256 x 65536 1.07-1.08x
 //   zgemv T,C at most 0.79x: no row
-//   zhemv     2.34-4.27x from 2048 to 16384 (0.88-1.25x at 1536)
+//   zhemv     2.35-4.51x from 2048 to 16384 (1.07-1.14x at 1536)
 typedef struct {
     ab_b2_routine_t routine;
     char op;

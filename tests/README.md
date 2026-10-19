@@ -64,7 +64,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
   - `tests/test_blas_abi.c` — 31 suites (1028 cases), see below
   - `tests/test_trace.c` — 5 tests of `AB_TRACE` and
     `AB_TEST_FAIL_STAGE`, see below
-  - `tests/test_blas2.c` — 17 tests (889 cases) of DGEMV, ZGEMV and
+  - `tests/test_blas2.c` — 18 tests (945 cases) of DGEMV, ZGEMV and
     ZHEMV, see below
 
 - **Not yet registry-based (one `main`, no ghost guard):**
@@ -258,6 +258,11 @@ hold NaN.
   1 × 1 to 30001 × 5 (skinny shapes take the grid-split and reduction
   paths), padded and tight lda, increments ±1, 2, −2, −3 and complex
   alpha and beta, through all four entry points (488 cases);
+- ZHEMV's tiling: each of panels of 32 or 96 rows with chunks of one to
+  three panels, forced through `ab_internal_b2_hemv_override`, at sizes
+  from 1 to a panel ± 1, a chunk + 1 and a ragged last panel, chunk and
+  group of four columns, both triangles (the semantics matrix sees only
+  32-row panels and one-panel chunks);
 - beta = 0 with NaN and ±Inf in y (y not read); NaN and Inf in A, x,
   alpha or beta give Accelerate's result bitwise (the call runs there),
   and Inf in y with beta ≠ 0 stays on the GPU;
@@ -274,9 +279,10 @@ hold NaN.
   offset, unmapped, holed and PROT_NONE spans refused), invalid
   device-API arguments;
 - the `AB_MODE=auto` rule against its measurements: every shape of
-  `benchmarks/results/2026-10-19-317bb91-gemv/sweep_*.csv` that the rule
-  sends to the GPU was measured at least 1.10× faster there, and each
-  routed class has such shapes (no GPU needed);
+  `benchmarks/results/2026-10-19-317bb91-gemv/sweep_*.csv` (GEMV) and
+  `2026-10-19-1bc503a-zhemv/sweep_*.csv` (ZHEMV) that the rule sends to the
+  GPU was measured at least 1.10× faster there, and each routed class has
+  such shapes (no GPU needed);
 - in child processes: `AB_MODE=cpu`, `gpu`, `auto` and `AB_MIN_GPU_DIM`
   routing, illegal arguments through the Fortran symbols (cblas names the
   parameter and exits with status 255), `AB_TEST_FAIL_STAGE=kernel` and
