@@ -249,17 +249,20 @@ the same matrices take part in several large products. Details:
 
 ### Overview
 
-libapplebottom exports the Fortran BLAS symbols `dgemm_` and `zgemm_`, and
-`ab_dgemm_` / `ab_zgemm_` with the same arguments. Link it ahead of your
-other BLAS library and the program's existing `CALL DGEMM` and `CALL ZGEMM`
-reach apple-bottom without a source change; every other BLAS and LAPACK
-routine still comes from that other library. Each call is then routed to
-the GPU or to Accelerate ([Automatic Routing](#automatic-routing)).
+libapplebottom exports the Fortran BLAS symbols `dgemm_`, `zgemm_`,
+`dgemv_`, `zgemv_` and `zhemv_`, and `ab_dgemm_` / `ab_zgemm_` with the
+same arguments as the first two. Link it ahead of your other BLAS library
+and the program's existing `CALL DGEMM`, `CALL ZGEMM`, `CALL DGEMV`,
+`CALL ZGEMV` and `CALL ZHEMV` reach apple-bottom without a source change;
+every other BLAS and LAPACK routine still comes from that other library.
+Each call is then routed to the GPU or to Accelerate
+([Automatic Routing](#automatic-routing)).
 
 | Fortran call | Provided by apple-bottom |
 |--------------|--------------------------|
 | `CALL DGEMM(...)` | yes (`dgemm_`; also `CALL ab_dgemm(...)`) |
 | `CALL ZGEMM(...)` | yes (`zgemm_`; also `CALL ab_zgemm(...)`) |
+| `CALL DGEMV(...)`, `CALL ZGEMV(...)`, `CALL ZHEMV(...)` | yes (`dgemv_`, `zgemv_`, `zhemv_`) |
 | any other BLAS or LAPACK routine | no: your BLAS/LAPACK library |
 
 The arguments are those of reference BLAS, and so is the behaviour: TRANS
@@ -317,12 +320,33 @@ apple-bottom first.
 ### Automatic Routing
 
 `dgemm_`, `zgemm_`, `ab_dgemm_` and `ab_zgemm_` forward each call to
-`ab_dgemm_blas` / `ab_zgemm_blas`, which route it. By default
-(`AB_MODE=auto`) a call goes to the GPU only for shapes where the GPU was
-measured at least 1.10× faster than Accelerate end to end; everything else
-runs on Accelerate. `AB_MODE=gpu` sends every call with all dimensions above
-`AB_MIN_GPU_DIM` to the GPU, `AB_MODE=cpu` none. See
+`ab_dgemm_blas` / `ab_zgemm_blas`, which route it; `dgemv_`, `zgemv_` and
+`zhemv_` forward to `ab_dgemv_blas`, `ab_zgemv_blas` and `ab_zhemv_blas`.
+By default (`AB_MODE=auto`) a call goes to the GPU only for shapes where
+the GPU was measured at least 1.10× faster than Accelerate end to end;
+everything else runs on Accelerate. `AB_MODE=gpu` sends every call with all
+dimensions above `AB_MIN_GPU_DIM` to the GPU, `AB_MODE=cpu` none. See
 [Routing](#routing-ab_modeauto).
+
+A matrix-vector product reads its matrix once, so a one-shot GPU call
+spends most of its time making the matrix visible to the GPU. A solver
+that multiplies by the same matrix many times (Lanczos, Haydock, other
+Krylov methods) should keep it in a device buffer, registering the
+Fortran array once without a copy, and call the device-buffer routines:
+
+```fortran
+! interface: TYPE(C_PTR) FUNCTION ab_dev_register(ptr, nbytes) BIND(C), and
+! INTEGER(C_INT) FUNCTION ab_dev_zgemv(trans, m, n, alpha, A, a_off, lda, x, incx, beta, y, incy) BIND(C)
+hA = ab_dev_register(C_LOC(H), INT(SIZE(H), C_SIZE_T) * 16_C_SIZE_T)
+DO it = 1, niter
+   st = ab_dev_zgemv(0, n, n, one, hA, 0_C_SIZE_T, n, v, 1, zero, w, 1)   ! w = H v on the GPU
+   ...
+END DO
+CALL ab_dev_free(hA)   ! before H is deallocated
+```
+
+(`apple_bottom_device.h` has the C prototypes; trans is an `ABTranspose`,
+0 for `'N'`, scalars are `(re, im)` pairs passed by reference.)
 
 ---
 
@@ -393,8 +417,12 @@ grep -E '/_[dz]gemm_>'` shows where each one went.
 ## Environment Variables and Run Reports
 
 The BLAS-ABI entry points (`dgemm_`, `zgemm_`, `ab_dgemm_`, `ab_zgemm_`,
-`ab_dgemm_blas`, `ab_zgemm_blas`) read these once per process, at their first
-call. The native `ABMatrix` and device APIs do not use them.
+`ab_dgemm_blas`, `ab_zgemm_blas`, and the BLAS-2 `dgemv_`, `zgemv_`,
+`zhemv_`, `ab_*gemv_blas`, `ab_zhemv_blas`) read these once per process, at
+their first call. The native `ABMatrix` and device APIs do not use them.
+`AB_DISPATCH_TABLE`, the FLOP thresholds and `AB_TRACE` concern GEMM only;
+BLAS-2 calls are counted in `AB_REPORT` and `AB_PROFILE` as `dgemv`,
+`zgemv` and `zhemv`.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
@@ -413,8 +441,8 @@ call. The native `ABMatrix` and device APIs do not use them.
 
 ### Routing (AB_MODE=auto)
 
-One function (`src/dispatch.c`) decides where each BLAS-ABI call runs, in
-this order:
+`src/dispatch.c` decides where each GEMM BLAS-ABI call runs, in this order
+(BLAS-2 calls share steps 1-4, below):
 
 1. Invalid arguments and `alpha == 0`: Accelerate (reference BLAS checks and
    quick return), in every mode.
@@ -457,6 +485,20 @@ calibrate another machine, run `make calibrate` and set
 `AB_DISPATCH_TABLE` to the `dispatch_table.txt` it writes, or rebuild:
 it also rewrites `src/dispatch_table.h`.
 
+BLAS-2 calls (`dgemv_`, `zgemv_`, `zhemv_`) follow steps 1-4 (with alpha
+or beta NaN or Inf also on Accelerate), then in `auto` a built-in rule in
+`src/blas2_abi.c` from the same kind of measurement, taken twice
+(`benchmarks/bench_gemv.c --sweep` and `--rect`; data in
+`benchmarks/results/2026-10-19-317bb91-gemv/`, which `tests/test_blas2.c`
+checks the rule against): the GPU for DGEMV `'N'` with 2048² ≤ M·N ≤ 16384²
+and min(M, N) ≥ 256, ZGEMV `'N'` with 2048² ≤ M·N ≤ 12288² and min(M, N) ≥
+512, and ZHEMV with 2048 ≤ N ≤ 16384. DGEMV `'T'` and `'C'` were 1.04–1.32×
+faster on the GPU, too close to 1.10× to route, and ZGEMV `'T'` and `'C'`
+slower at every size (at most 0.79×). Calls larger than those measured stay
+on Accelerate, because mapping the matrix for one call costs more per
+gigabyte as it grows. The measurement ran one process; MPI ranks sharing the
+GPU each map their own matrices, so expect less there.
+
 ### Reading a run report
 
 `AB_REPORT=1` prints, when the process exits:
@@ -465,7 +507,7 @@ it also rewrites `src/dispatch_table.h`.
 AB_REPORT[<pid>] apple-bottom <version> (<commit>[-dirty]) AB_MODE=<mode|unset>
 AB_REPORT[<pid>] <routine> calls=… gpu_calls=… cpu_calls=… gpu_calls%=… total_ms=… gpu_ms=… cpu_ms=… gpu_time%=… fallbacks=…
 AB_REPORT[<pid>] <routine> gpu_stages_ms init=… alloc=… pack=… upload=… kernel=… download=… epilogue=… other=…
-AB_REPORT[<pid>] <routine> fallbacks no_device=… too_large=… gpu_failed=… other=…
+AB_REPORT[<pid>] <routine> fallbacks no_device=… too_large=… gpu_failed=… other=… range=…
 ```
 
 - **The first line names the library build**, as `ab_build_info()` returns it:
@@ -485,12 +527,17 @@ AB_REPORT[<pid>] <routine> fallbacks no_device=… too_large=… gpu_failed=… 
   none), `download` (DD → FP64), `epilogue` (the row-major result into
   column-major C, with alpha and beta for ZGEMM) and `other`, the rest:
   mostly command-buffer encode, submit and wait latency, and ZGEMM's GPU
-  temporaries. `AB_TRACE` splits it per call (below).
+  temporaries. `AB_TRACE` splits it per call (below). For `dgemv`, `zgemv`
+  and `zhemv` the same stages hold: `pack` is staging x, `upload` mapping A
+  for the GPU (usually the largest), `download` the range guard's check of
+  the results and `epilogue` writing y with alpha and beta.
 - **Fallbacks** are calls the routing sent to the GPU that ran on Accelerate
   instead: `no_device` (no Metal context: no GPU, or a `fork()`ed child),
   `too_large` (an operand beyond the size limits), `gpu_failed` (an
-  allocation, upload or kernel failed before C was written). They count as
-  CPU calls, and their `cpu_ms` includes the failed GPU attempt.
+  allocation, upload or kernel failed before C was written), `other` (BLAS-2:
+  A could not be mapped for the GPU) and `range` (BLAS-2: NaN or Inf, or
+  values beyond double-float's full-precision range). They count as CPU
+  calls, and their `cpu_ms` includes the failed GPU attempt.
 - **Each process reports once**, tagged with its pid, so MPI ranks sharing
   stderr stay apart. A `fork()`ed child starts with empty counters and
   reports only its own calls (nothing if it made none). There is no report

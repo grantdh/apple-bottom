@@ -15,13 +15,14 @@ about 48 significant bits, ~10⁻¹⁵ relative error per element: close to
 IEEE FP64 (53 bits), not the same.
 
 You get DGEMM, ZGEMM and DSYRK, plus batched, asynchronous and
-triangular-solve helpers, three ways:
+triangular-solve helpers, and the matrix-vector products DGEMV, ZGEMV and
+ZHEMV ([BLAS-2](#blas-2-matrix-vector-products)), three ways:
 
 - a **C API** on matrices that stay on the GPU between calls,
 - a **device-buffer API** for codes that manage their own GPU memory,
-- a drop-in **BLAS ABI** (`dgemm_`, `zgemm_`) for Fortran codes such as
-  Quantum ESPRESSO, which sends each call to the GPU or to Accelerate
-  according to measured timings.
+- a drop-in **BLAS ABI** (`dgemm_`, `zgemm_`, `dgemv_`, `zgemv_`, `zhemv_`)
+  for Fortran codes such as Quantum ESPRESSO, which sends each call to the
+  GPU or to Accelerate according to measured timings.
 
 ## Is it faster than Accelerate?
 
@@ -37,6 +38,13 @@ It depends on where the matrices live.
   measured. The default routing (`AB_MODE=auto`) therefore keeps those
   calls on Accelerate, so linking apple-bottom is safe but, on this
   hardware, not a speed-up.
+- **Matrix-vector products** (DGEMV, ZGEMV, ZHEMV) **on a matrix kept on the
+  GPU**: yes, by a lot. They are bound by memory bandwidth, not arithmetic,
+  and at 8192²–16384² the GPU runs them at 290–360 GB/s, 2.7–19× Accelerate's
+  speed and 1.5–4.8× a threaded C loop's. One-shot BLAS-ABI calls pay to
+  map the matrix each time; `AB_MODE=auto` sends only the large DGEMV `'N'`,
+  ZGEMV `'N'` and ZHEMV calls that still win to the GPU
+  ([BLAS-2](#blas-2-matrix-vector-products)).
 
 The measurements are below, each with the data it came from.
 
@@ -105,6 +113,69 @@ kernels alone take 1.00–1.72× as long as Accelerate needs for the same calls
 has one thread, they take 0.65–0.78× (PAW DGEMMs 1.5–4.3×), but packing,
 transfers and the epilogue cost more than that margin.
 
+## BLAS-2: matrix-vector products
+
+DGEMV, ZGEMV (`'N'`, `'T'`, `'C'`) and ZHEMV run on the GPU straight from the
+caller's FP64 matrix (column-major, any `lda`): the kernels convert each
+element to double-float in registers, accumulate in double-float and add
+partial sums in an order fixed by the shape, so results are bitwise
+reproducible. A matrix-vector product reads each element of A once, so it is
+bound by memory bandwidth, where the GPU is far ahead of the CPU and the
+double-float arithmetic costs nothing extra. What costs is getting A in
+front of the GPU, so keep it there, as a Lanczos, Haydock or other Krylov
+solver can: register the array once, without a copy, and call the
+device-buffer routines for every product.
+
+```c
+#include "apple_bottom_device.h"
+
+ab_dev_buffer_t hA = ab_dev_register(A, (size_t)lda * n * sizeof(double));  // no copy
+for (int it = 0; it < iterations; it++) {
+    ab_dev_dgemv(AB_NO_TRANS, m, n, 1.0, hA, 0, lda, v, 1, 0.0, w, 1);       // w = A v
+    /* ... the solver's own vector work on v and w ... */
+}
+ab_dev_free(hA);   // before A is freed
+```
+
+M2 Max, y = A x for square A of side 4096 / 8192 / 16384: GB/s of A read
+(ZHEMV: of one triangle) per call, median wall time with the GPU warmed up
+([data](benchmarks/results/2026-10-19-317bb91-gemv/), `make bench-gemv`):
+
+| y = A x | GPU, A resident | GPU, A mapped per call (`dgemv_`) | Accelerate | plain C, best of 4/8/12 threads |
+|---|---:|---:|---:|---:|
+| DGEMV `'N'` | 214 / 291 / 304 | 62–65 | 19–21 | 56 / 61 / 86 |
+| DGEMV `'T'` | 242 / 321 / 359 | 61–68 | 52–58 | 108 / 124 / 127 |
+| ZGEMV `'N'` | 255 / 302 / 304 | 46–67 | 38–40 | 58 / 91 / 97 |
+| ZGEMV `'T'`, `'C'` | 273–275 / 334–337 / 358–359 | 52–67 | 108–121 | 107–109 / 108–123 / 114–126 |
+| ZHEMV `'U'`, `'L'` | 107–109 / 137–138 / 154–160 | 24–33 | 8.2–9.1 | 71–76 / 86–92 / 84–104 |
+
+- **Resident:** 4.2–16× Accelerate's speed for DGEMV, 2.3–7.9× for ZGEMV
+  and 12–19× for ZHEMV, and 1.4–4.8× the best threaded C loop. At 16384² the
+  GPU reads A at 304–359 GB/s of the M2 Max's 400. ZHEMV reads the
+  off-diagonal part of its triangle twice (one pass by rows, one by
+  columns), so its rate per stored byte is about half.
+- **Per call** there are about 0.2 ms of submit and wait on top, so 4096²
+  (0.55–1.25 ms per call) runs at 214–275 GB/s and smaller matrices lose
+  more. A cold GPU runs about the first 0.3 s of calls at half speed while
+  its clocks rise.
+- **Accuracy:** 4×10⁻¹⁶ to 1×10⁻¹⁵ relative to |A||x| on these matrices,
+  against 2×10⁻¹⁷ to 2×10⁻¹⁶ for Accelerate: double-float level, about ten
+  times FP64's error. The kernels also track the FP64 exponents of every
+  product, at no extra memory traffic, and a call whose data fall outside
+  double-float's full-precision range (FP32's exponents), or that involves
+  NaN or Inf, runs on Accelerate instead, before y is written.
+- **One-shot calls** (`dgemv_`, `zgemv_`, `zhemv_`, `ab_*gemv_blas`) map A
+  for the GPU on every call, at 10–22 ms/GB. `AB_MODE=auto` sends one to the
+  GPU only where that was measured at least 1.10× faster than Accelerate in
+  two runs: DGEMV `'N'` from 2048² to 16384² elements (3.1–3.4× in the
+  table), ZGEMV `'N'` from 2048² to 12288², and ZHEMV from 2048 to 16384
+  (2.7–4.0×). DGEMV `'T'` (1.04–1.32×, too close to call) and ZGEMV `'T'`
+  and `'C'` (0.5–0.6×) stay on Accelerate, as do smaller and larger calls;
+  most one-shot calls in a real program are small. These are one-process
+  numbers: MPI ranks sharing the GPU should expect less
+  ([routing data](benchmarks/results/2026-10-19-317bb91-gemv/README.md),
+  [Integration Guide](docs/INTEGRATION.md#routing-ab_modeauto)).
+
 ## Using it
 
 ### From C
@@ -145,13 +216,14 @@ A runnable version is in [`examples/01_basic_dgemm`](examples/01_basic_dgemm/mai
 | Matrices | `ab_matrix_create`, `ab_matrix_upload`, `ab_matrix_download`, `ab_matrix_zero`, `ab_matrix_copy`, `ab_matrix_add`, `ab_matrix_sub`, `ab_matrix_scale` |
 | Batches and async | `ab_batch_*`, `ab_dgemm_batched`, `ab_zgemm_batched`, `ab_dgemm_async`, `ab_zgemm_async`, `ab_future_*` |
 | Pools and sessions | `ab_pool_*`, `ab_session_*` (fewer allocations in iterative codes) |
-| Device buffers | `ab_dev_malloc`, `ab_dev_memcpy_*`, `ab_dev_dgemm`, `ab_dev_zgemm`, … ([`apple_bottom_device.h`](include/apple_bottom_device.h)) |
-| BLAS ABI | `ab_dgemm_blas`, `ab_zgemm_blas` (column-major, BLAS arguments), `ab_get_last_dispatch_path` |
+| Device buffers | `ab_dev_malloc`, `ab_dev_register`, `ab_dev_memcpy_*`, `ab_dev_dgemm`, `ab_dev_zgemm`, `ab_dev_dgemv`, `ab_dev_zgemv`, `ab_dev_zhemv`, … ([`apple_bottom_device.h`](include/apple_bottom_device.h)) |
+| BLAS ABI | `ab_dgemm_blas`, `ab_zgemm_blas`, `ab_dgemv_blas`, `ab_zgemv_blas`, `ab_zhemv_blas` (column-major, BLAS arguments), `ab_get_last_dispatch_path` |
 
 ### From Fortran (and other BLAS hosts)
 
-The library exports `dgemm_` and `zgemm_`. Link it ahead of your BLAS and
-the existing `CALL DGEMM` / `CALL ZGEMM` reach it, with reference-BLAS
+The library exports `dgemm_`, `zgemm_`, `dgemv_`, `zgemv_` and `zhemv_`.
+Link it ahead of your BLAS and the existing `CALL DGEMM` / `CALL ZGEMM` /
+`CALL DGEMV` / `CALL ZGEMV` / `CALL ZHEMV` reach it, with reference-BLAS
 argument checking; everything else still comes from your BLAS library:
 
 ```makefile
@@ -218,9 +290,15 @@ convergence study; [tests/README.md](tests/README.md) gives the test counts.
 - **Not IEEE FP64.** About 48 significant bits instead of 53, FP32's
   exponent range (about 10⁻³⁸ to 10³⁸) instead of FP64's, and no
   bit-for-bit agreement with CPU BLAS.
-- **Per-call overhead.** Through the BLAS ABI every measured shape is
+- **Per-call overhead.** Through the BLAS ABI every measured GEMM shape is
   slower than Accelerate except ZGEMM with both operands transposed at
-  N ≥ 4096; see the table above.
+  N ≥ 4096; see the table above. BLAS-2 calls win on the GPU only with the
+  matrix resident, or for the large one-shot shapes listed under
+  [BLAS-2](#blas-2-matrix-vector-products).
+- **BLAS-2 range.** A DGEMV/ZGEMV/ZHEMV row whose largest |a_ij x_j| is below
+  about 10⁻¹⁸ max |x| (or above 10³³), or a product that loses bits to
+  FP32's range and matters at double-float precision, sends the call to
+  Accelerate: a matrix scaled far outside 10⁻¹⁸–10³³ always runs there.
 - **Threads.** Calls on different matrices may come from different
   threads; one matrix, pool or session must not be used by two threads at
   once. All work shares one Metal command queue.
@@ -234,6 +312,7 @@ convergence study; [tests/README.md](tests/README.md) gives the test counts.
 include/apple_bottom.h          public API (and apple_bottom_device.h)
 src/apple_bottom.m              Metal context and DD kernels
 src/blas_wrapper.c              BLAS ABI: packing, conversion, fallbacks
+src/blas2.m, blas2_abi.c        BLAS-2 kernels; dgemv_ / zgemv_ / zhemv_, ab_dev_*gemv
 src/dispatch.c, dispatch_table.h  AB_MODE routing and the calibrated table
 src/fortran_bridge.c            dgemm_ / zgemm_ / ab_*gemm_ entry points
 src/profiling/                  AB_PROFILE / AB_REPORT accounting, AB_TRACE

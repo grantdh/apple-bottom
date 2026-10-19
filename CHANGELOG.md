@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **BLAS-2 on the GPU: DGEMV, ZGEMV (`'N'`, `'T'`, `'C'`) and ZHEMV**
+  (`src/blas2.m`, `src/blas2_abi.c`). The kernels read the caller's
+  column-major FP64 matrix in place, convert each element to double-float
+  in registers and accumulate in double-float, adding partial sums in an
+  order fixed by the shape (bitwise reproducible). A matrix-vector product
+  is bound by memory bandwidth, where the GPU leads the CPU; see "BLAS-2"
+  in README.md for the measured rates.
+  - `ab_dev_register(ptr, nbytes)`: a device buffer over memory the caller
+    already owns, without a copy (a no-copy `MTLBuffer` over the
+    page-rounded span; NULL if part of it is unmapped or unreadable).
+    Every `ab_dev_*` call works on it. Free the handle before the memory.
+  - `ab_dev_dgemv`, `ab_dev_zgemv`, `ab_dev_zhemv`: products with a matrix
+    kept in a device buffer, for solvers that use one matrix many times
+    (Lanczos, Haydock, other Krylov methods).
+  - `ab_dgemv_blas`, `ab_zgemv_blas`, `ab_zhemv_blas` and the Fortran
+    symbols `dgemv_`, `zgemv_`, `zhemv_`, routed like GEMM: `AB_MODE=auto`
+    sends a call to the GPU only for shapes measured at least 1.10× faster
+    end to end in two runs, mapping the matrix for the call included
+    (DGEMV `'N'` 2048²–16384² elements, ZGEMV `'N'` 2048²–12288², ZHEMV
+    2048–16384; data in `benchmarks/results/2026-10-19-317bb91-gemv/`).
+    Smaller calls, DGEMV `'T'`/`'C'` (1.04–1.32×), ZGEMV `'T'`/`'C'` and
+    calls beyond the measured sizes stay on Accelerate. Counted in
+    `AB_REPORT` and `AB_PROFILE`; not traced.
+  - A range guard computed by the kernels from the FP64 exponents, at no
+    extra memory traffic: a call whose data leave double-float's
+    full-precision range (FP32's exponents, subnormals flushed on the GPU),
+    or that involves NaN or Inf, runs on Accelerate instead, before y is
+    written (counted as a `range` fallback).
+  - `tests/test_blas2.c` (17 tests, 889 cases; in `make test` and
+    `make ci-local`, including a check of the `AB_MODE=auto` rule against
+    its measurements) and `benchmarks/bench_gemv.c` (`make bench-gemv`;
+    `--sweep` and `--rect` for the routing data). The Fortran binding probe
+    (`make test-fortran`) also calls `DGEMV`, `ZGEMV` and `ZHEMV`.
+- `ab_get_last_dispatch_path()` also reports BLAS-2 calls; `make
+  test-symbols` also checks `_dgemv_`, `_zgemv_` and `_zhemv_`.
 - **`AB_TRACE=<path>`**: every BLAS-ABI call (`dgemm_`, `zgemm_`,
   `ab_*gemm_`, `ab_*gemm_blas`; Accelerate and GPU, every `AB_MODE`) appends
   one `key=value` line to `<path>.<pid>` when it returns (a call with an
@@ -64,6 +99,10 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - `make version-check` skips an `[Unreleased]` section at the top of
   `CHANGELOG.md` and checks the first versioned entry.
+- The `AB_REPORT` fallback line, the `AB_PROFILE` fallback table and the
+  JSON profile have a fifth reason, `range` (BLAS-2's range guard), after
+  `other`; the BLAS-ABI routing order of `dispatch.c` (AB_MODE,
+  AB_MIN_GPU_DIM) is shared with BLAS-2 through `ab_dispatch_mode_route()`.
 
 ## [1.4.0] - Unreleased
 
