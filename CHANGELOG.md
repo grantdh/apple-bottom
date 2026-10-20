@@ -69,6 +69,11 @@ All notable changes to this project will be documented in this file.
   a small C share the GPU instead of running one after another. A call whose
   `Ci` shares a buffer with an input keeps the serial order. Results are
   bitwise unchanged.
+- **The 64×64 GEMM kernels read their threadgroup tiles as float4**:
+  `dd_dgemm`, `dd_dgemm_ab` and `dd_dsyrk` store the A tile k-major and
+  read each thread's values with two float4 loads per operand, 2-7% faster
+  on M2 Max. The tall-skinny kernel keeps its layout, which measured
+  faster there. Results are bitwise unchanged.
 
 ## [1.4.0] - Unreleased
 

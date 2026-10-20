@@ -307,6 +307,15 @@ inline DD dd_scale(DD a, float s) {
 #define TK_TS 16
 #define NT_TS ((BM_TS/TM_TS) * (BN_TS/TN_TS))
 
+// The tiled kernels hold their threadgroup tiles k-major: tileA[k][row] (A is
+// transposed on its way in) and tileB[k][col]. A thread's TM values of A and
+// TN values of B at one k are then contiguous, and it reads them as float4
+// words, two DD each; the tiles are float4 arrays so those reads are 16-byte
+// aligned. The tall-skinny kernel keeps A row-major: transposing its 128-row
+// tile costs more in conflicting threadgroup stores than the float4 reads
+// save (measured on M2 Max).
+static_assert(TM % 2 == 0 && TN % 2 == 0, "float4 tile reads take DD values in pairs");
+
 // Block-wise compensated accumulation: renormalize accumulators every
 // RENORM_INTERVAL K-tiles to prevent drift in long dot products.
 // Per Wilkinson's probabilistic analysis, Frobenius error scales as O(sqrt(K)).
@@ -391,9 +400,11 @@ kernel void dd_dgemm(
         for (uint j = 0; j < TN; j++)
             acc[i][j] = {0.0f, 0.0f};
 
-    // Shared memory tiles
-    threadgroup DD tileA[BM * TK];
-    threadgroup DD tileB[TK * BN];
+    // Shared memory tiles (k-major, see Tile Sizes)
+    threadgroup float4 tileA4[BM * TK / 2];
+    threadgroup float4 tileB4[TK * BN / 2];
+    threadgroup DD* tileA = (threadgroup DD*)tileA4;
+    threadgroup DD* tileB = (threadgroup DD*)tileB4;
 
     // Loop over K dimension in TK-sized chunks
     for (uint kt = 0; kt < (K + TK - 1) / TK; kt++) {
@@ -401,7 +412,7 @@ kernel void dd_dgemm(
         for (uint i = flatId; i < BM * TK; i += NT) {
             uint r = i / TK, c = i % TK;
             uint gr = bRow + r, gc = kt * TK + c;
-            tileA[i] = (gr < M && gc < K) ? A[gr * K + gc] : DD{0.0f, 0.0f};
+            tileA[c * BM + r] = (gr < M && gc < K) ? A[gr * K + gc] : DD{0.0f, 0.0f};
         }
         // Cooperative load of B tile
         for (uint i = flatId; i < TK * BN; i += NT) {
@@ -414,8 +425,14 @@ kernel void dd_dgemm(
         // Compute partial products from tile
         for (uint k = 0; k < TK; k++) {
             DD av[TM], bv[TN];
-            for (uint i = 0; i < TM; i++) av[i] = tileA[(ty * TM + i) * TK + k];
-            for (uint j = 0; j < TN; j++) bv[j] = tileB[k * BN + tx * TN + j];
+            for (uint h = 0; h < TM / 2; h++) {
+                float4 a = tileA4[(k * BM + ty * TM) / 2 + h];
+                av[2 * h] = {a.x, a.y}; av[2 * h + 1] = {a.z, a.w};
+            }
+            for (uint h = 0; h < TN / 2; h++) {
+                float4 b = tileB4[(k * BN + tx * TN) / 2 + h];
+                bv[2 * h] = {b.x, b.y}; bv[2 * h + 1] = {b.z, b.w};
+            }
             for (uint i = 0; i < TM; i++)
                 for (uint j = 0; j < TN; j++)
                     acc[i][j] = dd_fma(av[i], bv[j], acc[i][j]);
@@ -478,14 +495,17 @@ kernel void dd_dgemm_ab(
         for (uint j = 0; j < TN; j++)
             acc[i][j] = {0.0f, 0.0f};
 
-    threadgroup DD tileA[BM * TK];
-    threadgroup DD tileB[TK * BN];
+    // Shared memory tiles (k-major, see Tile Sizes)
+    threadgroup float4 tileA4[BM * TK / 2];
+    threadgroup float4 tileB4[TK * BN / 2];
+    threadgroup DD* tileA = (threadgroup DD*)tileA4;
+    threadgroup DD* tileB = (threadgroup DD*)tileB4;
 
     for (uint kt = 0; kt < (K + TK - 1) / TK; kt++) {
         for (uint i = flatId; i < BM * TK; i += NT) {
             uint r = i / TK, c = i % TK;
             uint gr = bRow + r, gc = kt * TK + c;
-            tileA[i] = (gr < M && gc < K) ? A[gr * K + gc] : DD{0.0f, 0.0f};
+            tileA[c * BM + r] = (gr < M && gc < K) ? A[gr * K + gc] : DD{0.0f, 0.0f};
         }
         for (uint i = flatId; i < TK * BN; i += NT) {
             uint r = i / BN, c = i % BN;
@@ -496,8 +516,14 @@ kernel void dd_dgemm_ab(
 
         for (uint k = 0; k < TK; k++) {
             DD av[TM], bv[TN];
-            for (uint i = 0; i < TM; i++) av[i] = tileA[(ty * TM + i) * TK + k];
-            for (uint j = 0; j < TN; j++) bv[j] = tileB[k * BN + tx * TN + j];
+            for (uint h = 0; h < TM / 2; h++) {
+                float4 a = tileA4[(k * BM + ty * TM) / 2 + h];
+                av[2 * h] = {a.x, a.y}; av[2 * h + 1] = {a.z, a.w};
+            }
+            for (uint h = 0; h < TN / 2; h++) {
+                float4 b = tileB4[(k * BN + tx * TN) / 2 + h];
+                bv[2 * h] = {b.x, b.y}; bv[2 * h + 1] = {b.z, b.w};
+            }
             for (uint i = 0; i < TM; i++)
                 for (uint j = 0; j < TN; j++)
                     acc[i][j] = dd_fma(av[i], bv[j], acc[i][j]);
@@ -566,6 +592,7 @@ kernel void dd_dgemm_ab_ts(
         for (uint j = 0; j < TN_TS; j++)
             acc[i][j] = {0.0f, 0.0f};
 
+    // Row-major A tile on purpose: k-major measured slower here (see Tile Sizes)
     threadgroup DD tileA[BM_TS * TK_TS];
     threadgroup DD tileB[TK_TS * BN_TS];
 
@@ -649,14 +676,17 @@ kernel void dd_dsyrk(
         for (uint j = 0; j < TN; j++)
             acc[i][j] = {0.0f, 0.0f};
 
-    threadgroup DD tileA[BM * TK];
-    threadgroup DD tileB[TK * BN];
+    // Shared memory tiles (k-major, see Tile Sizes)
+    threadgroup float4 tileA4[BM * TK / 2];
+    threadgroup float4 tileB4[TK * BN / 2];
+    threadgroup DD* tileA = (threadgroup DD*)tileA4;
+    threadgroup DD* tileB = (threadgroup DD*)tileB4;
 
     for (uint kt = 0; kt < (K + TK - 1) / TK; kt++) {
         for (uint i = flatId; i < BM * TK; i += NT) {
             uint r = i / TK, c = i % TK;
             uint gr = bRow + r, gc = kt * TK + c;
-            tileA[i] = (gr < N && gc < K) ? A[gr * K + gc] : DD{0.0f, 0.0f};
+            tileA[c * BM + r] = (gr < N && gc < K) ? A[gr * K + gc] : DD{0.0f, 0.0f};
         }
         for (uint i = flatId; i < TK * BN; i += NT) {
             uint r = i / BN, c = i % BN;
@@ -667,8 +697,14 @@ kernel void dd_dsyrk(
 
         for (uint k = 0; k < TK; k++) {
             DD av[TM], bv[TN];
-            for (uint i = 0; i < TM; i++) av[i] = tileA[(ty * TM + i) * TK + k];
-            for (uint j = 0; j < TN; j++) bv[j] = tileB[k * BN + tx * TN + j];
+            for (uint h = 0; h < TM / 2; h++) {
+                float4 a = tileA4[(k * BM + ty * TM) / 2 + h];
+                av[2 * h] = {a.x, a.y}; av[2 * h + 1] = {a.z, a.w};
+            }
+            for (uint h = 0; h < TN / 2; h++) {
+                float4 b = tileB4[(k * BN + tx * TN) / 2 + h];
+                bv[2 * h] = {b.x, b.y}; bv[2 * h + 1] = {b.z, b.w};
+            }
             for (uint i = 0; i < TM; i++)
                 for (uint j = 0; j < TN; j++)
                     acc[i][j] = dd_fma(av[i], bv[j], acc[i][j]);
