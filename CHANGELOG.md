@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.4.0] - Unreleased
+## [1.4.0] - 2026-10-19
 
 ### Added
 - **`ab_build_info()`** returns the library version and the git commit it

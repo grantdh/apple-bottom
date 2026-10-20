@@ -5,6 +5,7 @@ authors:
     given-names: "Grant David"
 title: "apple-bottom: FP64-class BLAS for Apple Silicon GPU"
 version: 1.4.0
+date-released: 2026-10-19
 url: "https://github.com/grantdh/apple-bottom"
 repository-code: "https://github.com/grantdh/apple-bottom"
 keywords:
