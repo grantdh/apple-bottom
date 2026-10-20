@@ -10,7 +10,7 @@ Inputs and scripts: [`benchmarks/qe/`](../../qe/).
 | | |
 |---|---|
 | Machine | MacBook Pro (Mac14,6), M2 Max, 38-core GPU, 64 GB, macOS 27.0.1 (26A434), AC power, `caffeinate -is` |
-| QE | develop 5b7f8e1bc (reports 7.5) with the cegterg/regterg patches. Every Fortran object is `-O3 -fopenmp` (gfortran 15.2.0), with Open MPI 5.0.9, Homebrew OpenBLAS, ScaLAPACK and `-lfftw3_omp`, and apple-bottom linked as in [INTEGRATION](../../../docs/INTEGRATION.md). One OpenMP thread per rank in every run; see the notes. |
+| QE | develop 5b7f8e1bc (reports 7.5) with the cegterg/regterg patches, which change no result ([QE builds](../../qe/README.md#qe-builds)). Every Fortran object is `-O3 -fopenmp` (gfortran 15.2.0), with Open MPI 5.0.9, Homebrew OpenBLAS, ScaLAPACK and `-lfftw3_omp`, and apple-bottom linked as in [INTEGRATION](../../../docs/INTEGRATION.md). One OpenMP thread per rank in every run; see the notes. |
 | Library | `c5a1fa6` (1.4.0; the library code is that of `9c9e4a8`), built from a clean worktree. It reports `apple-bottom 1.4.0 (c5a1fa6a8166)`. Every run loaded it from a frozen copy next to a copy of pw.x (`<frozen>` in `results.csv` and `reports/`). |
 | Layouts | `1.4.0-np1`: 1 rank × 1 thread. `1.4.0-np8nk4`: 8 ranks × 1 thread, `-nk 4` (k-point pools), for A and B. `1.4.0-np8`: 8 ranks × 1 thread for C (Γ only, R&G). The multi-rank layouts are the fastest CPU layouts found in a separate study of an optimized build of this QE. |
 | Plan | [`plan.txt`](plan.txt); mode order rotated per repetition. The last line is a rerun (see the notes). |

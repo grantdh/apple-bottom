@@ -68,6 +68,22 @@ it takes about 5 minutes at 1 rank × 1 thread and 1.6 minutes at 8 ranks
 × 1 thread with `-nk 4`. Keep one OpenMP thread per rank with that build;
 see the 2026-10-15 results.
 
+## QE builds
+
+The campaigns here (VAL-1 and the results below) used QE develop
+5b7f8e1bc with `cegterg.f90` and `regterg.f90` calling `ab_zgemm` and
+`ab_dgemm` in place of `ZGEMM` and `DGEMM` (12 calls each). Those patches
+are not needed: linking apple-bottom already sends the calls to it
+([integration guide](../../docs/INTEGRATION.md#quantum-espresso-integration)).
+A control on 2026-10-18 built one fresh QE develop checkout (4a626b7ce)
+three ways: upstream with OpenBLAS, the same objects relinked with
+apple-bottom 1.4.0 (`c5a1fa6`), and that plus the patches. It ran input B's
+geometry with `conv_thr` 1e-9 at one rank. Three runs matched in every SCF
+iteration, eigenvalue, force and stress: `cpu` mode with and without the
+patches, and `gpu` mode with them. The library received the same calls with
+and without the patches. The total energy was the same in every run; single
+printed energy terms moved by at most 2e-8 Ry.
+
 ## Results
 
 - 2026-10-14, library 1dbdb52 (1.4.0 candidate) and eaad87e (main before
