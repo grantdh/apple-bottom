@@ -184,9 +184,11 @@ fused multiply-add of the GEMM inner loop has a conservative 8u² envelope
   `fastMathEnabled = NO` before macOS 15). Fast math lets the compiler
   reassociate the error-free transformations and costs about seven
   decimal digits.
-- GEMM tiles are 64 × 64 with 4 × 4 outputs per thread and a 128 × 16
-  variant for tall-skinny shapes (M ≥ 4N); long dot products are
-  renormalized every 128 terms.
+- GEMM tiles are 64 × 64 with 4 × 4 outputs per thread, with a 128 × 16
+  variant for tall-skinny shapes (M ≥ 4N) and a 32 × 32 one (2 × 2 per
+  thread) for outputs of at most 480 × 480 elements; every variant computes
+  each output the same way. Long dot products are renormalized every 128
+  terms.
 - ZGEMM uses Gauss's three-multiplication form: three real DD GEMMs
   instead of four.
 

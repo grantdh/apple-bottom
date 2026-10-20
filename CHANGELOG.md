@@ -74,6 +74,15 @@ All notable changes to this project will be documented in this file.
   read each thread's values with two float4 loads per operand, 2-7% faster
   on M2 Max. The tall-skinny kernel keeps its layout, which measured
   faster there. Results are bitwise unchanged.
+- **Small outputs run on 32×32 tiles** (`dd_dgemm_narrow`,
+  `dd_dgemm_ab_narrow`, 2×2 outputs per thread): a C of at most 480×480
+  elements gets four times the threadgroups of the 64×64 kernels, 1.06-2.9×
+  faster on M2 Max (2.6× on 160×160×18432). A tall C (M ≥ 4N) moves off the
+  tall-skinny kernel only where the 32-column tiles add no padding or the
+  tall-skinny grid would have at most 16 threadgroups (2.1× on
+  200×40×18277). The rule is `use_narrow_tiles` in `src/apple_bottom.m`.
+  Results are bitwise unchanged. `tests/test_precision.c` gains a 64×64 scaled case and a
+  tall-skinny ZGEMM case (16 tests), so every kernel stays covered.
 
 ## [1.4.0] - Unreleased
 

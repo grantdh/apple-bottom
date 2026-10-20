@@ -307,6 +307,15 @@ inline DD dd_scale(DD a, float s) {
 #define TK_TS 16
 #define NT_TS ((BM_TS/TM_TS) * (BN_TS/TN_TS))
 
+// Narrow-output tiling: 32×32 blocks, 256 threads with 2×2 outputs each.
+// Four times the threadgroups of the square tiling, for a C too small to
+// keep the GPU busy with 64×64 blocks (routing: use_narrow_tiles, host side)
+#define BM_NW 32
+#define BN_NW 32
+#define TM_NW 2
+#define TN_NW 2
+#define NT_NW ((BM_NW/TM_NW) * (BN_NW/TN_NW))
+
 // The tiled kernels hold their threadgroup tiles k-major: tileA[k][row] (A is
 // transposed on its way in) and tileB[k][col]. A thread's TM values of A and
 // TN values of B at one k are then contiguous, and it reads them as float4
@@ -314,7 +323,11 @@ inline DD dd_scale(DD a, float s) {
 // aligned. The tall-skinny kernel keeps A row-major: transposing its 128-row
 // tile costs more in conflicting threadgroup stores than the float4 reads
 // save (measured on M2 Max).
-static_assert(TM % 2 == 0 && TN % 2 == 0, "float4 tile reads take DD values in pairs");
+static_assert(TM % 2 == 0 && TN % 2 == 0 && TM_NW % 2 == 0 && TN_NW % 2 == 0,
+              "float4 tile reads take DD values in pairs");
+// The narrow kernels stand in for the tall-skinny one: same K-tile, so they
+// renormalize at the same k and give the same bits
+static_assert(TK_TS == TK, "narrow and tall-skinny kernels share the K tiling");
 
 // Block-wise compensated accumulation: renormalize accumulators every
 // RENORM_INTERVAL K-tiles to prevent drift in long dot products.
@@ -650,6 +663,142 @@ kernel void dd_dgemm_ab_ts(
 }
 
 // =============================================================================
+// DGEMM Kernels (Narrow Output): dd_dgemm and dd_dgemm_ab with 32×32 blocks
+// BM_NW=32, BN_NW=32, TM_NW=2, TN_NW=2, 256 threads per threadgroup
+// =============================================================================
+
+// The main loop of the 64×64 kernels for a 32×32 block: each output gets the
+// same dd_fma sequence and renormalizations, so the results are bitwise the
+// same as those kernels'. acc ends renormalized.
+inline void dd_gemm_narrow_mainloop(
+    device const DD* A, device const DD* B, uint M, uint N, uint K,
+    uint bRow, uint bCol, uint ty, uint tx, uint flatId,
+    threadgroup float4* tileA4, threadgroup float4* tileB4,
+    thread DD (&acc)[TM_NW][TN_NW]
+) {
+    threadgroup DD* tileA = (threadgroup DD*)tileA4;
+    threadgroup DD* tileB = (threadgroup DD*)tileB4;
+
+    for (uint i = 0; i < TM_NW; i++)
+        for (uint j = 0; j < TN_NW; j++)
+            acc[i][j] = {0.0f, 0.0f};
+
+    for (uint kt = 0; kt < (K + TK - 1) / TK; kt++) {
+        for (uint i = flatId; i < BM_NW * TK; i += NT_NW) {
+            uint r = i / TK, c = i % TK;
+            uint gr = bRow + r, gc = kt * TK + c;
+            tileA[c * BM_NW + r] = (gr < M && gc < K) ? A[gr * K + gc] : DD{0.0f, 0.0f};
+        }
+        for (uint i = flatId; i < TK * BN_NW; i += NT_NW) {
+            uint r = i / BN_NW, c = i % BN_NW;
+            uint gr = kt * TK + r, gc = bCol + c;
+            tileB[i] = (gr < K && gc < N) ? B[gr * N + gc] : DD{0.0f, 0.0f};
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint k = 0; k < TK; k++) {
+            DD av[TM_NW], bv[TN_NW];
+            for (uint h = 0; h < TM_NW / 2; h++) {
+                float4 a = tileA4[(k * BM_NW + ty * TM_NW) / 2 + h];
+                av[2 * h] = {a.x, a.y}; av[2 * h + 1] = {a.z, a.w};
+            }
+            for (uint h = 0; h < TN_NW / 2; h++) {
+                float4 b = tileB4[(k * BN_NW + tx * TN_NW) / 2 + h];
+                bv[2 * h] = {b.x, b.y}; bv[2 * h + 1] = {b.z, b.w};
+            }
+            for (uint i = 0; i < TM_NW; i++)
+                for (uint j = 0; j < TN_NW; j++)
+                    acc[i][j] = dd_fma(av[i], bv[j], acc[i][j]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Block-wise compensated accumulation: periodic renormalization
+        if ((kt & (RENORM_INTERVAL - 1)) == (RENORM_INTERVAL - 1)) {
+            for (uint i = 0; i < TM_NW; i++)
+                for (uint j = 0; j < TN_NW; j++) {
+                    float s, e;
+                    twoSum(acc[i][j].hi, acc[i][j].lo, s, e);
+                    acc[i][j] = {s, e};
+                }
+        }
+    }
+
+    // Final renormalization
+    for (uint i = 0; i < TM_NW; i++)
+        for (uint j = 0; j < TN_NW; j++) {
+            float s, e;
+            twoSum(acc[i][j].hi, acc[i][j].lo, s, e);
+            acc[i][j] = {s, e};
+        }
+}
+
+// C = A × B, as dd_dgemm (same buffers)
+kernel void dd_dgemm_narrow(
+    device const DD* A [[buffer(0)]],
+    device const DD* B [[buffer(1)]],
+    device DD* C [[buffer(2)]],
+    constant uint& M [[buffer(3)]],
+    constant uint& N [[buffer(4)]],
+    constant uint& K [[buffer(5)]],
+    constant uint& gridW [[buffer(6)]],
+    constant uint& gridH [[buffer(7)]],
+    uint2 lid [[thread_position_in_threadgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint flatId [[thread_index_in_threadgroup]]
+) {
+    uint2 mtid = morton_remap(tgid, gridW, gridH);
+    uint bRow = mtid.y * BM_NW, bCol = mtid.x * BN_NW;
+    uint ty = lid.y, tx = lid.x;
+
+    threadgroup float4 tileA4[BM_NW * TK / 2];
+    threadgroup float4 tileB4[TK * BN_NW / 2];
+    DD acc[TM_NW][TN_NW];
+    dd_gemm_narrow_mainloop(A, B, M, N, K, bRow, bCol, ty, tx, flatId, tileA4, tileB4, acc);
+
+    for (uint i = 0; i < TM_NW; i++)
+        for (uint j = 0; j < TN_NW; j++) {
+            uint gr = bRow + ty * TM_NW + i, gc = bCol + tx * TN_NW + j;
+            if (gr < M && gc < N) C[gr * N + gc] = acc[i][j];
+        }
+}
+
+// C = α·A×B + β·C, as dd_dgemm_ab and dd_dgemm_ab_ts (same buffers)
+kernel void dd_dgemm_ab_narrow(
+    device const DD* A [[buffer(0)]],
+    device const DD* B [[buffer(1)]],
+    device DD* C [[buffer(2)]],
+    constant uint& M [[buffer(3)]],
+    constant uint& N [[buffer(4)]],
+    constant uint& K [[buffer(5)]],
+    constant DD& alpha [[buffer(6)]],
+    constant DD& beta [[buffer(7)]],
+    constant uint& gridW [[buffer(8)]],
+    constant uint& gridH [[buffer(9)]],
+    uint2 lid [[thread_position_in_threadgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint flatId [[thread_index_in_threadgroup]]
+) {
+    uint2 mtid = morton_remap(tgid, gridW, gridH);
+    uint bRow = mtid.y * BM_NW, bCol = mtid.x * BN_NW;
+    uint ty = lid.y, tx = lid.x;
+
+    threadgroup float4 tileA4[BM_NW * TK / 2];
+    threadgroup float4 tileB4[TK * BN_NW / 2];
+    DD acc[TM_NW][TN_NW];
+    dd_gemm_narrow_mainloop(A, B, M, N, K, bRow, bCol, ty, tx, flatId, tileA4, tileB4, acc);
+
+    for (uint i = 0; i < TM_NW; i++)
+        for (uint j = 0; j < TN_NW; j++) {
+            uint gr = bRow + ty * TM_NW + i, gc = bCol + tx * TN_NW + j;
+            if (gr < M && gc < N) {
+                DD result = dd_mul(acc[i][j], alpha);
+                if (beta.hi != 0.0f || beta.lo != 0.0f) result = dd_add(result, dd_mul(C[gr * N + gc], beta));
+                C[gr * N + gc] = result;
+            }
+        }
+}
+
+// =============================================================================
 // DSYRK Kernel: C = A × Aᵀ (symmetric, upper triangle only)
 // =============================================================================
 
@@ -814,6 +963,8 @@ kernel void dd_conj_transpose(
 @property (nonatomic, strong) id<MTLComputePipelineState> dgemmPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> dgemmABPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> dgemmABTSPipeline;
+@property (nonatomic, strong) id<MTLComputePipelineState> dgemmNarrowPipeline;
+@property (nonatomic, strong) id<MTLComputePipelineState> dgemmABNarrowPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> dsyrkPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> zeroPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> addPipeline;
@@ -898,6 +1049,12 @@ static void ab_atfork_child(void) { g_forked_child = true; }
 
         _dgemmABTSPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_dgemm_ab_ts"] error:&error];
         if (!_dgemmABTSPipeline) { NSLog(@"Pipeline creation failed (dd_dgemm_ab_ts): %@", error); return nil; }
+
+        _dgemmNarrowPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_dgemm_narrow"] error:&error];
+        if (!_dgemmNarrowPipeline) { NSLog(@"Pipeline creation failed (dd_dgemm_narrow): %@", error); return nil; }
+
+        _dgemmABNarrowPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_dgemm_ab_narrow"] error:&error];
+        if (!_dgemmABNarrowPipeline) { NSLog(@"Pipeline creation failed (dd_dgemm_ab_narrow): %@", error); return nil; }
 
         _dsyrkPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_dsyrk"] error:&error];
         if (!_dsyrkPipeline) { NSLog(@"Pipeline creation failed (dd_dsyrk): %@", error); return nil; }
@@ -1236,59 +1393,58 @@ ABStatus ab_matrix_copy(ABMatrix src, ABMatrix dst) {
 // committing a command buffer. Used by fused ZGEMM and batch API to amortize
 // command buffer overhead across multiple operations.
 
-// dd_dgemm (64x64 tiles, C = A*B) with all of its buffers bound, including the
-// Morton grid dims at 6/7. ab_dgemm and ab_dgemm_async always use this kernel,
-// so their results are bitwise identical.
+// Output tiling of C = op(A)*op(B), M×N. Every kernel computes each output
+// with the same dd_fma sequence and renormalizations, and a call keeps its
+// epilogue (plain C = A*B, or alpha/beta), so the choice never changes results.
+//   - 64×64 (dd_dgemm, dd_dgemm_ab): the default.
+//   - Tall-skinny 128×16 (dd_dgemm_ab_ts) for M >= 4N.
+//   - Narrow 32×32 (dd_dgemm_narrow, dd_dgemm_ab_narrow) for C of at most
+//     AB_NARROW_MAX_OUTPUTS elements. Over tall-skinny only where 32 columns
+//     per tile add no padding to its 16 (N = 20, 32, 64, 150, ...) or where
+//     the tall-skinny grid would have at most AB_NARROW_MAX_TS_GROUPS
+//     threadgroups (Davidson's small nbase+notcnv × notcnv overlaps).
+// Measured on M2 Max (38-core GPU): 480×480 is the largest C measured faster
+// on the narrow tiles than on 64×64; 512×512 breaks even. Tall-skinny stays
+// faster where N pads more and its grid is larger, by up to 1.8x (18277×5).
+#define AB_NARROW_MAX_OUTPUTS (480u * 480u)
+#define AB_NARROW_MAX_TS_GROUPS 16u
+
+static bool use_tall_skinny(uint32_t M, uint32_t N) { return M >= 4 * N; }
+
+// The narrow kernels instead of 64×64 tiles, or of tall-skinny ones when
+// tall_skinny.
+static bool use_narrow_tiles(uint32_t M, uint32_t N, bool tall_skinny) {
+    if ((uint64_t)M * N > AB_NARROW_MAX_OUTPUTS) return false;
+    if (!tall_skinny) return true;
+    uint32_t ts_groups = (M + 127) / 128 * ((N + 15) / 16);
+    return (N + 31) / 32 * 32 == (N + 15) / 16 * 16 || ts_groups <= AB_NARROW_MAX_TS_GROUPS;
+}
+
+// dd_dgemm (C = A*B) with all of its buffers bound, including the Morton grid
+// dims at 6/7, or dd_dgemm_narrow (same buffers) for a small C. ab_dgemm and
+// ab_dgemm_async always come here, so their results are bitwise identical.
 static void encode_dgemm_square_dispatch(id<MTLComputeCommandEncoder> encoder,
                                           ABContextImpl* ctx,
                                           ABMatrix A, ABMatrix B, ABMatrix C) {
     uint32_t M = A->rows, N = B->cols, K = A->cols;
-    [encoder setComputePipelineState:ctx.dgemmPipeline];
+    bool narrow = use_narrow_tiles(M, N, false);
+    uint32_t tile = narrow ? 32 : 64;
+    [encoder setComputePipelineState:narrow ? ctx.dgemmNarrowPipeline : ctx.dgemmPipeline];
     [encoder setBuffer:A->buffer offset:0 atIndex:0];
     [encoder setBuffer:B->buffer offset:0 atIndex:1];
     [encoder setBuffer:C->buffer offset:0 atIndex:2];
     [encoder setBytes:&M length:sizeof(M) atIndex:3];
     [encoder setBytes:&N length:sizeof(N) atIndex:4];
     [encoder setBytes:&K length:sizeof(K) atIndex:5];
-    uint32_t gridW = (N + 63) / 64, gridH = (M + 63) / 64;
+    uint32_t gridW = (N + tile - 1) / tile, gridH = (M + tile - 1) / tile;
     [encoder setBytes:&gridW length:sizeof(gridW) atIndex:6];
     [encoder setBytes:&gridH length:sizeof(gridH) atIndex:7];
     [encoder dispatchThreadgroups:MTLSizeMake(gridW, gridH, 1)
              threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
 }
 
-static void encode_dgemm_dispatch(id<MTLComputeCommandEncoder> encoder,
-                                   ABContextImpl* ctx,
-                                   ABMatrix A, ABMatrix B, ABMatrix C) {
-    uint32_t M = A->rows, N = B->cols, K = A->cols;
-    // Route tall-skinny shapes (M >= 4*N) to BM=128/BN=16 kernel for better
-    // boundary utilization and compensated accumulation on long dot products.
-    // For N = 150: ~22% of the computed columns are padding with BN=64, ~6% with BN=16.
-    bool use_ts = (M >= 4 * N);
-    if (use_ts) {
-        // Reuse the scaled tall-skinny kernel with alpha=1, beta=0 (C = A*B).
-        // dd_dgemm_ab_ts buffer layout: A,B,C,M,N,K,alpha,beta,gridW,gridH
-        static const DDFloat one  = {1.0f, 0.0f};
-        static const DDFloat zero = {0.0f, 0.0f};
-        [encoder setComputePipelineState:ctx.dgemmABTSPipeline];
-        [encoder setBuffer:A->buffer offset:0 atIndex:0];
-        [encoder setBuffer:B->buffer offset:0 atIndex:1];
-        [encoder setBuffer:C->buffer offset:0 atIndex:2];
-        [encoder setBytes:&M length:sizeof(M) atIndex:3];
-        [encoder setBytes:&N length:sizeof(N) atIndex:4];
-        [encoder setBytes:&K length:sizeof(K) atIndex:5];
-        [encoder setBytes:&one  length:sizeof(one)  atIndex:6];
-        [encoder setBytes:&zero length:sizeof(zero) atIndex:7];
-        uint32_t gridW = (N + 15) / 16, gridH = (M + 127) / 128;
-        [encoder setBytes:&gridW length:sizeof(gridW) atIndex:8];
-        [encoder setBytes:&gridH length:sizeof(gridH) atIndex:9];
-        [encoder dispatchThreadgroups:MTLSizeMake(gridW, gridH, 1)
-                 threadsPerThreadgroup:MTLSizeMake(8, 32, 1)];
-    } else {
-        encode_dgemm_square_dispatch(encoder, ctx, A, B, C);
-    }
-}
-
+// C = alpha*A*B + beta*C: dd_dgemm_ab, dd_dgemm_ab_ts or dd_dgemm_ab_narrow
+// (buffer layout A,B,C,M,N,K,alpha,beta,gridW,gridH).
 static void encode_dgemm_scaled_dispatch(id<MTLComputeCommandEncoder> encoder,
                                           ABContextImpl* ctx,
                                           double alpha, ABMatrix A, ABMatrix B,
@@ -1296,9 +1452,20 @@ static void encode_dgemm_scaled_dispatch(id<MTLComputeCommandEncoder> encoder,
     uint32_t M = A->rows, N = B->cols, K = A->cols;
     DDFloat alpha_dd = fp64_to_dd(alpha);
     DDFloat beta_dd = fp64_to_dd(beta);
-    bool use_ts = (M >= 4 * N);
-    if (use_ts) {
+    bool use_ts = use_tall_skinny(M, N);
+    bool narrow = use_narrow_tiles(M, N, use_ts);
+    // Tile rows × columns and threadgroup: 64×64 and narrow use 16×16 threads,
+    // tall-skinny (TM=4, TN=2) 8×32
+    uint32_t bm = 64, bn = 64;
+    MTLSize threads = MTLSizeMake(16, 16, 1);
+    if (narrow) {
+        [encoder setComputePipelineState:ctx.dgemmABNarrowPipeline];
+        bm = bn = 32;
+    } else if (use_ts) {
         [encoder setComputePipelineState:ctx.dgemmABTSPipeline];
+        bm = 128;
+        bn = 16;
+        threads = MTLSizeMake(8, 32, 1);
     } else {
         [encoder setComputePipelineState:ctx.dgemmABPipeline];
     }
@@ -1310,19 +1477,20 @@ static void encode_dgemm_scaled_dispatch(id<MTLComputeCommandEncoder> encoder,
     [encoder setBytes:&K length:sizeof(K) atIndex:5];
     [encoder setBytes:&alpha_dd length:sizeof(alpha_dd) atIndex:6];
     [encoder setBytes:&beta_dd length:sizeof(beta_dd) atIndex:7];
-    if (use_ts) {
-        uint32_t gridW = (N + 15) / 16, gridH = (M + 127) / 128;
-        [encoder setBytes:&gridW length:sizeof(gridW) atIndex:8];
-        [encoder setBytes:&gridH length:sizeof(gridH) atIndex:9];
-        [encoder dispatchThreadgroups:MTLSizeMake(gridW, gridH, 1)
-                 threadsPerThreadgroup:MTLSizeMake(8, 32, 1)];
-    } else {
-        uint32_t gridW = (N + 63) / 64, gridH = (M + 63) / 64;
-        [encoder setBytes:&gridW length:sizeof(gridW) atIndex:8];
-        [encoder setBytes:&gridH length:sizeof(gridH) atIndex:9];
-        [encoder dispatchThreadgroups:MTLSizeMake(gridW, gridH, 1)
-                 threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
-    }
+    uint32_t gridW = (N + bn - 1) / bn, gridH = (M + bm - 1) / bm;
+    [encoder setBytes:&gridW length:sizeof(gridW) atIndex:8];
+    [encoder setBytes:&gridH length:sizeof(gridH) atIndex:9];
+    [encoder dispatchThreadgroups:MTLSizeMake(gridW, gridH, 1) threadsPerThreadgroup:threads];
+}
+
+// C = A*B. Tall-skinny shapes reuse the scaled kernels with alpha=1, beta=0.
+static void encode_dgemm_dispatch(id<MTLComputeCommandEncoder> encoder,
+                                   ABContextImpl* ctx,
+                                   ABMatrix A, ABMatrix B, ABMatrix C) {
+    if (use_tall_skinny(A->rows, B->cols))
+        encode_dgemm_scaled_dispatch(encoder, ctx, 1.0, A, B, 0.0, C);
+    else
+        encode_dgemm_square_dispatch(encoder, ctx, A, B, C);
 }
 
 static void encode_elemwise_dispatch(id<MTLComputeCommandEncoder> encoder,
@@ -1390,46 +1558,12 @@ ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMa
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return AB_ERROR_NO_DEVICE;
 
-    uint32_t M = A->rows, N = B->cols, K = A->cols;
-    DDFloat alpha_dd = fp64_to_dd(alpha);
-    DDFloat beta_dd = fp64_to_dd(beta);
     double t0 = get_time_ms();
 
     uint64_t encode_ns = host_ns();
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
-    // Select kernel based on aspect ratio: tall-skinny for M >= 4*N
-    // For N = 150, BN=64 computes 192 columns (~22% padding); BN_TS=16
-    // computes 160 (~6%).
-    // Pure aspect-ratio dispatch catches all domain-science tall-skinny shapes.
-    bool use_ts = (M >= 4 * N);
-    if (use_ts) {
-        [encoder setComputePipelineState:ctx.dgemmABTSPipeline];
-    } else {
-        [encoder setComputePipelineState:ctx.dgemmABPipeline];
-    }
-    [encoder setBuffer:A->buffer offset:0 atIndex:0];
-    [encoder setBuffer:B->buffer offset:0 atIndex:1];
-    [encoder setBuffer:C->buffer offset:0 atIndex:2];
-    [encoder setBytes:&M length:sizeof(M) atIndex:3];
-    [encoder setBytes:&N length:sizeof(N) atIndex:4];
-    [encoder setBytes:&K length:sizeof(K) atIndex:5];
-    [encoder setBytes:&alpha_dd length:sizeof(alpha_dd) atIndex:6];
-    [encoder setBytes:&beta_dd length:sizeof(beta_dd) atIndex:7];
-    if (use_ts) {
-        // Tall-skinny: BM=128, BN=16, TM=4, TN=2 → threadgroup 8×32 = 256 threads
-        uint32_t gridW = (N + 15) / 16, gridH = (M + 127) / 128;
-        [encoder setBytes:&gridW length:sizeof(gridW) atIndex:8];
-        [encoder setBytes:&gridH length:sizeof(gridH) atIndex:9];
-        [encoder dispatchThreadgroups:MTLSizeMake(gridW, gridH, 1)
-                 threadsPerThreadgroup:MTLSizeMake(8, 32, 1)];
-    } else {
-        uint32_t gridW = (N + 63) / 64, gridH = (M + 63) / 64;
-        [encoder setBytes:&gridW length:sizeof(gridW) atIndex:8];
-        [encoder setBytes:&gridH length:sizeof(gridH) atIndex:9];
-        [encoder dispatchThreadgroups:MTLSizeMake(gridW, gridH, 1)
-                 threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
-    }
+    encode_dgemm_scaled_dispatch(encoder, ctx, alpha, A, B, beta, C);
     [encoder endEncoding];
     if (!commit_and_wait(cmdBuf, encode_ns)) return AB_ERROR_KERNEL_FAILED;
 

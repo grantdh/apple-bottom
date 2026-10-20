@@ -2062,8 +2062,9 @@ static void test_morton_qe_realistic_dims(void) {
 
 // K-P0-1: power-of-2 tile grids that are neither square nor 2:1 wide, where
 // the Morton remap is not a bijection and used to leave tiles of C unwritten.
-// 64x64 tiles: 512x256 (grid 4x8), 256x1024 (16x4), 1024x256 (4x16).
-// Tall-skinny 128x16 tiles (ab_dgemm_scaled with M >= 4N): 1024x64 (4x8),
+// 64x64 tiles: 256x1024 (grid 16x4), 1024x256 (4x16). 32x32 tiles (C of at
+// most 480x480 elements): 256x128 (4x8), 512x256 (8x16), 128x512 (16x4),
+// 1024x64 (2x32). Tall-skinny 128x16 tiles (ab_dgemm_scaled with M >= 4N):
 // 2048x128 (8x16). ab_dgemm_async also covers K-P1-3 under MTL_DEBUG_LAYER=1.
 typedef enum { MR_DGEMM, MR_DGEMM_SCALED, MR_DGEMM_ASYNC } MortonRectOp;
 
@@ -2112,6 +2113,7 @@ static void test_morton_rect_pow2_grids(void) {
 
     static const struct { int M, N; } shapes[] = {
         {512, 256}, {256, 1024}, {1024, 256}, {1024, 64}, {2048, 128},
+        {256, 128}, {128, 512},
     };
     static const MortonRectOp ops[] = {MR_DGEMM, MR_DGEMM_SCALED, MR_DGEMM_ASYNC};
 
@@ -2132,7 +2134,8 @@ static void test_morton_rect_pow2_grids(void) {
 }
 
 // K-P0-1 downstream: the MPIR residual (1024x64) and the first DTRSM trailing
-// update (960x64) both run on the tall-skinny 4x8 grid.
+// update (960x64), first found on the tall-skinny 4x8 grid; both now take the
+// 32x32 tiles.
 static void test_morton_mpir_panel(void) {
     TEST("K-P0-1: MPIR N=1024 NRHS=64");
     ab_init();
