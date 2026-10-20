@@ -11,8 +11,10 @@ name: CI
 on:
   push:
     branches: [ main ]
+  # Feature work merges into a release/* branch before that branch's own PR
+  # into main, so PRs into release branches get the same checks.
   pull_request:
-    branches: [ main ]
+    branches: [ main, 'release/**' ]
 
 permissions:
   contents: read
