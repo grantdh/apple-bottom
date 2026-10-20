@@ -3,7 +3,7 @@
 ## Adding a new test to a registry-based file
 
 The registry-based test runners (`test_correctness.c`, `test_chaos.c`,
-`test_device_api.c`, `test_dispatch.c`, `test_trace.c`) dispatch via a
+`test_device_api.c`, `test_dispatch.c`, `test_trace.c`, `test_strassen.c`) dispatch via a
 `TESTS[]` registry array of `{name, fn}` pairs declared just above
 `main()`. To add a test:
 
@@ -44,8 +44,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 148, every test but
-the chaos ones, and `make ci-local` all 166 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 156, every test but
+the chaos ones, and `make ci-local` all 174 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -64,6 +64,16 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
   - `tests/test_blas_abi.c` — 31 suites (1028 cases), see below
   - `tests/test_trace.c` — 5 tests of `AB_TRACE` and
     `AB_TEST_FAIL_STAGE`, see below
+  - `tests/test_strassen.c` — 8 tests of the opt-in Strassen-Winograd
+    GEMM (`ab_dgemm_strassen`, `ab_zgemm_strassen`, `AB_STRASSEN`): error
+    against a compensated Dot2 reference within the normwise bound of
+    `docs/STRASSEN.md` over odd, tiny and rectangular shapes, alpha and
+    beta, ZGEMM and badly scaled rows (whose componentwise errors it
+    prints); argument checks; bitwise determinism across workspace reuse and
+    `ab_shutdown()`; and, in child processes with their own environment,
+    that `AB_STRASSEN` unset or 0 leaves every GEMM bitwise classical and
+    `AB_STRASSEN=1` routes calls with M, N, K ≥ `AB_STRASSEN_MIN`, native
+    and through `dgemm_` / `zgemm_`
 
 - **Not yet registry-based (one `main`, no ghost guard):**
   - `tests/test_precision.c` — 14 tests; needs decomposition strategy

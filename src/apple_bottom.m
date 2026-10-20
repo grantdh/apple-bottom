@@ -25,6 +25,8 @@
 #include <pthread.h>
 #include "apple_bottom.h"
 #include "profiling/blas_profiler.h"
+#include "apple_bottom_internal.h"
+#include "strassen.h"
 
 // =============================================================================
 // Double-Float Primitives (Host Side)
@@ -1049,6 +1051,7 @@ ABStatus ab_init(void) {
 
 void ab_shutdown(void) {
     if ([ABContextImpl shared]) {  // a forked child must not release the parent's Metal objects
+        ab_internal_strassen_release();
         [ABContextImpl shutdown];
         os_unfair_lock_lock(&g_stats_lock);
         memset(&g_stats, 0, sizeof(g_stats));
@@ -1313,6 +1316,7 @@ ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C) {
     if (A->cols != B->rows || A->rows != C->rows || B->cols != C->cols) return AB_ERROR_DIMENSION_MISMATCH;
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return AB_ERROR_NO_DEVICE;
+    if (ab_internal_strassen_wanted(A->rows, B->cols, A->cols)) return ab_dgemm_strassen(1.0, A, B, 0.0, C);
     
     double t0 = get_time_ms();
     
@@ -1335,6 +1339,7 @@ ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMa
     if (A->cols != B->rows || A->rows != C->rows || B->cols != C->cols) return AB_ERROR_DIMENSION_MISMATCH;
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return AB_ERROR_NO_DEVICE;
+    if (ab_internal_strassen_wanted(A->rows, B->cols, A->cols)) return ab_dgemm_strassen(alpha, A, B, beta, C);
 
     uint32_t M = A->rows, N = B->cols, K = A->cols;
     DDFloat alpha_dd = fp64_to_dd(alpha);
@@ -1641,6 +1646,7 @@ static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatri
     int M = Ar->rows, N = Br->cols, K = Ar->cols;
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return AB_ERROR_NO_DEVICE;
+    if (ab_internal_strassen_wanted(M, N, K)) return ab_zgemm_strassen(Ar, Ai, Br, Bi, Cr, Ci);
 
     // Allocate all temporaries upfront
     uint64_t temps_ns = host_ns();
@@ -2893,6 +2899,45 @@ ABStatus ab_session_zgemm(ABSession s, const char* Ar, const char* Ai, const cha
     ABMatrix mCr = ab_session_get(s, Cr);
     ABMatrix mCi = ab_session_get(s, Ci);
     return (mAr && mAi && mBr && mBi && mCr && mCi) ? ab_zgemm(mAr, mAi, mBr, mBi, mCr, mCi) : AB_ERROR_INVALID_ARG;
+}
+
+// =============================================================================
+// Internal Hooks for strassen.m (apple_bottom_internal.h)
+// =============================================================================
+// The opt-in Strassen-Winograd GEMM runs its half-size products on the kernels
+// above, dispatched as the classical ZGEMM dispatches its products, in command
+// buffers that are run and accounted as the classical GEMMs' are.
+
+id<MTLBuffer> ab_internal_matrix_buffer(ABMatrix m) { return m->buffer; }
+
+// The row-major rows x cols matrix at the start of buf, as an ABMatrix.
+static struct ABMatrix_s matrix_view(id<MTLBuffer> buf, int rows, int cols) {
+    return {buf, rows, cols, (size_t)rows * cols, buf.length / sizeof(DDFloat), true};
+}
+
+void ab_internal_encode_dgemm(id<MTLComputeCommandEncoder> encoder, id<MTLBuffer> A,
+                              id<MTLBuffer> B, id<MTLBuffer> C, int M, int N, int K) {
+    struct ABMatrix_s a = matrix_view(A, M, K), b = matrix_view(B, K, N), c = matrix_view(C, M, N);
+    encode_dgemm_dispatch(encoder, [ABContextImpl shared], &a, &b, &c);
+}
+
+ABStatus ab_internal_run_gemm(bool complex_gemm, uint64_t temps_ns,
+                              void (^encode)(id<MTLComputeCommandEncoder> encoder)) {
+    ABContextImpl* ctx = [ABContextImpl shared];
+    if (!ctx) return AB_ERROR_NO_DEVICE;
+    t_kernel_split.temps_ns += temps_ns;
+    double t0 = get_time_ms();
+
+    uint64_t encode_ns = host_ns();
+    id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+    encode(encoder);
+    [encoder endEncoding];
+    if (!commit_and_wait(cmdBuf, encode_ns)) return AB_ERROR_KERNEL_FAILED;
+
+    stats_add_kernel(get_time_ms() - t0);
+    if (complex_gemm) stats_add_zgemm(); else stats_add_dgemm();
+    return AB_OK;
 }
 
 // =============================================================================

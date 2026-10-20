@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Opt-in Strassen-Winograd GEMM**: `ab_dgemm_strassen` and
+  `ab_zgemm_strassen`, and `AB_STRASSEN=1`, which sends `ab_dgemm`,
+  `ab_dgemm_scaled`, `ab_zgemm` and `ab_zgemm_ex` (with the BLAS-ABI and
+  device-API GEMMs that the routing puts on the GPU) there when M, N and K
+  are all at least `AB_STRASSEN_MIN` (default 4096). One level of Winograd's
+  variant: 7 half-size products on the existing DD GEMM kernels and 15 block
+  additions, in one command buffer, for any shape (odd dimensions are
+  zero-padded). ZGEMM applies it to each of Gauss-3M's three real products.
+  The GPU workspace (1.75 N² DD values for a square N, 4.75 N² for ZGEMM) is
+  kept between calls and freed by `ab_shutdown()`. The error bound is
+  normwise only: rows or columns much smaller than the rest lose relative
+  accuracy. See `docs/STRASSEN.md`. With `AB_STRASSEN` unset every result is
+  bitwise unchanged. `make test` adds `test_strassen` (8 tests), and
+  `benchmarks/bench_strassen.c` measures speed and accuracy.
 - **`AB_TRACE=<path>`**: every BLAS-ABI call (`dgemm_`, `zgemm_`,
   `ab_*gemm_`, `ab_*gemm_blas`; Accelerate and GPU, every `AB_MODE`) appends
   one `key=value` line to `<path>.<pid>` when it returns (a call with an

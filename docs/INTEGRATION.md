@@ -394,7 +394,9 @@ grep -E '/_[dz]gemm_>'` shows where each one went.
 
 The BLAS-ABI entry points (`dgemm_`, `zgemm_`, `ab_dgemm_`, `ab_zgemm_`,
 `ab_dgemm_blas`, `ab_zgemm_blas`) read these once per process, at their first
-call. The native `ABMatrix` and device APIs do not use them.
+call. The native `ABMatrix` and device APIs do not use them, except
+`AB_STRASSEN` and `AB_STRASSEN_MIN`, which `ab_dgemm`, `ab_dgemm_scaled`,
+`ab_zgemm` and `ab_zgemm_ex` read at the first such call.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
@@ -409,6 +411,8 @@ call. The native `ABMatrix` and device APIs do not use them.
 | `AB_PROFILE_THRESHOLD_NS` | `0` | Count only calls that took at least this many ns, in both reports. |
 | `AB_TRACE` | unset | A path: each process appends one line per call to `<path>.<pid>` (see [Per-call trace](#per-call-trace-ab_trace)). Unset or empty: no trace. |
 | `AB_TRACE_HASH` | off | With `AB_TRACE`, `1`: also hash the operands each call reads. |
+| `AB_STRASSEN` | off | `1`: GPU GEMMs with M, N and K ≥ `AB_STRASSEN_MIN` use one level of Strassen-Winograd (7 half-size products instead of 8; normwise error bound only), through the BLAS ABI and the native and device APIs. See [Strassen-Winograd](STRASSEN.md). |
+| `AB_STRASSEN_MIN` | `4096` | With `AB_STRASSEN=1`: the smallest M, N and K that use it. |
 | `AB_TEST_FAIL_STAGE` | unset | Test-only. `alloc`: every GPU buffer allocation (`ab_matrix_create()`) fails; `kernel`: the command buffer of every `ab_dgemm_scaled()` and `ab_zgemm()`, the GEMMs of the GPU path, reports an error. A GPU-routed call then fails as it would on a real failure there and runs on Accelerate instead (a `gpu_failed` fallback). Never set it in production. |
 
 ### Routing (AB_MODE=auto)
