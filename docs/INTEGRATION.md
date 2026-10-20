@@ -489,16 +489,16 @@ BLAS-2 calls (`dgemv_`, `zgemv_`, `zhemv_`) follow steps 1-4 (with alpha
 or beta NaN or Inf also on Accelerate), then in `auto` a built-in rule in
 `src/blas2_abi.c` from the same kind of measurement, taken twice
 (`benchmarks/bench_gemv.c --sweep` and `--rect`; data in
-`benchmarks/results/2026-10-19-317bb91-gemv/` and, for ZHEMV,
+`benchmarks/results/2026-10-19-ba345df-gemv/` and, for ZHEMV,
 `2026-10-19-1bc503a-zhemv/`, which `tests/test_blas2.c` checks the rule
 against): the GPU for DGEMV `'N'` with 2048² ≤ M·N ≤ 16384²
-and min(M, N) ≥ 256, ZGEMV `'N'` with 2048² ≤ M·N ≤ 12288² and min(M, N) ≥
-512, and ZHEMV with 2048 ≤ N ≤ 16384. DGEMV `'T'` and `'C'` were 1.04–1.32×
-faster on the GPU, too close to 1.10× to route, and ZGEMV `'T'` and `'C'`
-slower at every size (at most 0.79×). Calls larger than those measured stay
-on Accelerate, because mapping the matrix for one call costs more per
-gigabyte as it grows. The measurement ran one process; MPI ranks sharing the
-GPU each map their own matrices, so expect less there.
+and min(M, N) ≥ 256, ZGEMV `'N'` with 3072² ≤ M·N ≤ 12288² and min(M, N) ≥
+512, and ZHEMV with 2048 ≤ N ≤ 16384. DGEMV `'T'` and `'C'` were 0.94–1.40×
+as fast on the GPU from 4096², too close to 1.10× to route, and ZGEMV `'T'`
+and `'C'` slower at every size (at most 0.82×). Calls larger than those
+measured stay on Accelerate, because mapping the matrix for one call costs
+more per gigabyte as it grows. The measurement ran one process; MPI ranks
+sharing the GPU each map their own matrices, so expect less there.
 
 ### Reading a run report
 

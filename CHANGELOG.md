@@ -25,10 +25,10 @@ All notable changes to this project will be documented in this file.
     symbols `dgemv_`, `zgemv_`, `zhemv_`, routed like GEMM: `AB_MODE=auto`
     sends a call to the GPU only for shapes measured at least 1.10× faster
     end to end in two runs, mapping the matrix for the call included
-    (DGEMV `'N'` 2048²–16384² elements, ZGEMV `'N'` 2048²–12288², ZHEMV
-    2048–16384; data in `benchmarks/results/2026-10-19-317bb91-gemv/` and,
+    (DGEMV `'N'` 2048²–16384² elements, ZGEMV `'N'` 3072²–12288², ZHEMV
+    2048–16384; data in `benchmarks/results/2026-10-19-ba345df-gemv/` and,
     for ZHEMV, `2026-10-19-1bc503a-zhemv/`).
-    Smaller calls, DGEMV `'T'`/`'C'` (1.04–1.32×), ZGEMV `'T'`/`'C'` and
+    Smaller calls, DGEMV `'T'`/`'C'` (0.94–1.40×), ZGEMV `'T'`/`'C'` and
     calls beyond the measured sizes stay on Accelerate. Counted in
     `AB_REPORT` and `AB_PROFILE`; not traced.
   - A range guard computed by the kernels from the FP64 exponents, at no
@@ -36,11 +36,13 @@ All notable changes to this project will be documented in this file.
     full-precision range (FP32's exponents, subnormals flushed on the GPU),
     or that involves NaN or Inf, runs on Accelerate instead, before y is
     written (counted as a `range` fallback).
-  - `tests/test_blas2.c` (18 tests, 945 cases; in `make test` and
+  - `tests/test_blas2.c` (19 tests, 957 cases; in `make test` and
     `make ci-local`, including a check of the `AB_MODE=auto` rule against
-    its measurements) and `benchmarks/bench_gemv.c` (`make bench-gemv`;
-    `--sweep` and `--rect` for the routing data). The Fortran binding probe
-    (`make test-fortran`) also calls `DGEMV`, `ZGEMV` and `ZHEMV`.
+    its measurements and of the kernels' FP64-to-double-float conversion,
+    bit for bit, on 4.2 million inputs) and `benchmarks/bench_gemv.c`
+    (`make bench-gemv`; `--sweep` and `--rect` for the routing data). The
+    Fortran binding probe (`make test-fortran`) also calls `DGEMV`, `ZGEMV`
+    and `ZHEMV`.
 - `ab_get_last_dispatch_path()` also reports BLAS-2 calls; `make
   test-symbols` also checks `_dgemv_`, `_zgemv_` and `_zhemv_`.
 - **`AB_TRACE=<path>`**: every BLAS-ABI call (`dgemm_`, `zgemm_`,

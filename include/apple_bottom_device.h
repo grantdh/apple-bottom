@@ -219,7 +219,7 @@ ABStatus ab_dev_zgemm_offset(ABTranspose transA, ABTranspose transB,
 // NULL x or y, or a matrix extending past its buffer.
 //
 // Speed (M2 Max): each call costs about 0.2 ms of submit and wait on top of
-// reading A, which GEMV does at 214-359 GB/s on 4096^2-16384^2 matrices and
+// reading A, which GEMV does at 223-359 GB/s on 4096^2-16384^2 matrices and
 // ZHEMV, reading its stored triangle once, at 156-316 GB/s, so the GPU wins
 // for large matrices that stay in a device buffer across many products
 // (README.md, "BLAS-2").

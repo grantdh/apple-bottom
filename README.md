@@ -40,8 +40,8 @@ It depends on where the matrices live.
   hardware, not a speed-up.
 - **Matrix-vector products** (DGEMV, ZGEMV, ZHEMV) **on a matrix kept on the
   GPU**: yes, by a lot. They are bound by memory bandwidth, not arithmetic,
-  and at 8192²–16384² the GPU runs them at 260–360 GB/s, 2.7–36× Accelerate's
-  speed and 2.6–4.8× a threaded C loop's. One-shot BLAS-ABI calls pay to
+  and at 8192²–16384² the GPU runs them at 260–360 GB/s, 2.8–36× Accelerate's
+  speed and 2.7–4.4× a threaded C loop's. One-shot BLAS-ABI calls pay to
   map the matrix each time; `AB_MODE=auto` sends only the large DGEMV `'N'`,
   ZGEMV `'N'` and ZHEMV calls that still win to the GPU
   ([BLAS-2](#blas-2-matrix-vector-products)).
@@ -138,28 +138,30 @@ ab_dev_free(hA);   // before A is freed
 ```
 
 M2 Max, y = A x for square A of side 4096 / 8192 / 16384: GB/s of A read
-(ZHEMV: of one triangle) per call, median wall time with the GPU warmed up
-([data](benchmarks/results/2026-10-19-317bb91-gemv/), ZHEMV
+(ZHEMV: of one triangle) per call, median wall time with the GPU warmed up;
+GEMV: the median of five runs at 4096 and 8192 and two at 16384
+([data](benchmarks/results/2026-10-19-ba345df-gemv/), ZHEMV
 [data](benchmarks/results/2026-10-19-1bc503a-zhemv/), `make bench-gemv`):
 
 | y = A x | GPU, A resident | GPU, A mapped per call (`dgemv_`) | Accelerate | plain C, best of 4/8/12 threads |
 |---|---:|---:|---:|---:|
-| DGEMV `'N'` | 214 / 291 / 304 | 62–65 | 19–21 | 56 / 61 / 86 |
-| DGEMV `'T'` | 242 / 321 / 359 | 61–68 | 52–58 | 108 / 124 / 127 |
-| ZGEMV `'N'` | 255 / 302 / 304 | 46–67 | 38–40 | 58 / 91 / 97 |
-| ZGEMV `'T'`, `'C'` | 273–275 / 334–337 / 358–359 | 52–67 | 108–121 | 107–109 / 108–123 / 114–126 |
+| DGEMV `'N'` | 223 / 302 / 317 | 59–65 | 19–21 | 53 / 68 / 85 |
+| DGEMV `'T'` | 229 / 320 / 354 | 60–72 | 51–60 | 115 / 116 / 114 |
+| ZGEMV `'N'` | 274 / 316 / 320 | 42–64 | 37–39 | 77 / 77 / 86 |
+| ZGEMV `'T'`, `'C'` | 276–277 / 334–336 / 358–359 | 43–66 | 108–120 | 123–124 / 112–123 / 117–119 |
 | ZHEMV `'U'`, `'L'` | 156–162 / 264–274 / 305–316 | 29–38 | 8.2–8.8 | 66–70 / 76–89 / 87–97 |
 
-- **Resident:** 4.2–16× Accelerate's speed for DGEMV, 2.3–7.9× for ZGEMV
-  and 18–36× for ZHEMV, and 2.2–4.8× the best threaded C loop. At 16384² the
-  GPU reads A at 304–359 GB/s of the M2 Max's 400. ZHEMV reads its stored
+- **Resident:** 3.8–16× Accelerate's speed for DGEMV, 2.4–8.6× for ZGEMV
+  and 18–36× for ZHEMV, and 2.0–4.4× the best threaded C loop. At 16384²
+  GEMV reads A at 317–359 GB/s of the M2 Max's 400. ZHEMV reads its stored
   triangle once, adding each element into its row's sum and, conjugated,
   into its column's: twice GEMV's arithmetic per byte, which holds it to
   305–316 GB/s.
 - **Per call** there are about 0.2 ms of submit and wait on top, so 4096²
-  (0.55–1.05 ms per call) runs at 214–275 GB/s, ZHEMV's triangle
-  (0.83–0.86 ms) at 156–162 GB/s, and smaller matrices lose more. A cold GPU runs about the first 0.3 s of calls at half speed while
-  its clocks rise.
+  (0.59–0.98 ms per call) runs at 223–277 GB/s, ZHEMV's triangle
+  (0.83–0.86 ms) at 156–162 GB/s, and smaller matrices lose more. A cold
+  GPU runs about the first 0.3 s of calls at half speed while its clocks
+  rise.
 - **Accuracy:** 2.5×10⁻¹⁶ to 1×10⁻¹⁵ relative to |A||x| on these matrices,
   against 2×10⁻¹⁷ to 2×10⁻¹⁶ for Accelerate: double-float level, about ten
   times FP64's error. The kernels also track the FP64 exponents of every
@@ -169,13 +171,13 @@ M2 Max, y = A x for square A of side 4096 / 8192 / 16384: GB/s of A read
 - **One-shot calls** (`dgemv_`, `zgemv_`, `zhemv_`, `ab_*gemv_blas`) map A
   for the GPU on every call, at 10–22 ms/GB. `AB_MODE=auto` sends one to the
   GPU only where that was measured at least 1.10× faster than Accelerate in
-  two runs: DGEMV `'N'` from 2048² to 16384² elements (3.1–3.4× in the
-  table), ZGEMV `'N'` from 2048² to 12288², and ZHEMV from 2048 to 16384
-  (3.2–4.6×). DGEMV `'T'` (1.04–1.32×, too close to call) and ZGEMV `'T'`
-  and `'C'` (0.5–0.6×) stay on Accelerate, as do smaller and larger calls;
+  two runs: DGEMV `'N'` from 2048² to 16384² elements (3.0–3.2× in the
+  table), ZGEMV `'N'` from 3072² to 12288², and ZHEMV from 2048 to 16384
+  (3.2–4.6×). DGEMV `'T'` (0.94–1.40×, too close to call) and ZGEMV `'T'`
+  and `'C'` (0.4–0.6×) stay on Accelerate, as do smaller and larger calls;
   most one-shot calls in a real program are small. These are one-process
   numbers: MPI ranks sharing the GPU should expect less
-  ([routing data](benchmarks/results/2026-10-19-317bb91-gemv/README.md),
+  ([routing data](benchmarks/results/2026-10-19-ba345df-gemv/README.md),
   [ZHEMV's](benchmarks/results/2026-10-19-1bc503a-zhemv/README.md),
   [Integration Guide](docs/INTEGRATION.md#routing-ab_modeauto)).
 
