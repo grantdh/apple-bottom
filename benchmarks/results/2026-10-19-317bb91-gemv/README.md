@@ -52,6 +52,11 @@ The ZHEMV rows here measure the first, two-pass kernel. The kernel that
 replaced it reads the triangle once; its measurements, and the data behind
 the ZHEMV routing row since, are in `../2026-10-19-1bc503a-zhemv/`.
 
+The GEMV rows measure kernels that converted A's elements with branches
+and `ldexp`. Their successors convert as the single-read ZHEMV kernel
+does, with bitwise-identical results; their measurements, and the data
+behind the GEMV routing rows since, are in `../2026-10-19-ba345df-gemv/`.
+
 Mapping A costs about 10 ms/GB for a 1 GB matrix and 22 ms/GB for a 4 GB
 one, so the GPU's lead in one-shot calls shrinks at the largest sizes; the
 rows stop at the largest size measured as a win. A matrix kept resident

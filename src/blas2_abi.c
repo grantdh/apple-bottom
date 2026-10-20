@@ -43,7 +43,7 @@
 // Measured on an M2 Max (38-core GPU, macOS 27.0.1), staged GPU calls
 // (ab_*_blas, AB_MODE=gpu, each call mapping A) against Accelerate cblas in
 // one process, alpha 1, beta 0, tight lda, 3 warm-ups and the median of 7,
-// twice: benchmarks/results/2026-10-19-317bb91-gemv/ for GEMV (sweep_square:
+// twice: benchmarks/results/2026-10-19-ba345df-gemv/ for GEMV (sweep_square:
 // 256-16384 square; sweep_rect: 4096 x 1024 to 262144 x 1024 and their
 // transposes) and 2026-10-19-1bc503a-zhemv/ for ZHEMV (sweep_square, the
 // single-read kernel); *_run1: the first run; tests/test_blas2.c checks the
@@ -52,13 +52,15 @@
 // shape inside it, and stops at the largest such size: the cost of mapping A
 // grows with its size (about 10 ms/GB at 1 GB, 22 ms/GB at 4 GB), so larger
 // calls stay on Accelerate.
-//   dgemv N   1.63-1.78x at 2048^2, 2.8-3.7x from 3072^2 to 16384^2;
-//             rectangles of 2048^2 elements and up 1.12-3.46x
-//   dgemv T   1.04-1.32x from 4096^2, 12288^2 at 1.12x and 1.096x: too close
-//             to the line to route; no row
-//   zgemv N   1.22-1.83x from 2048^2 to 12288^2; 16384^2 1.10x and 1.32x
-//             (1.02x in a third run); 256 x 65536 1.07-1.08x
-//   zgemv T,C at most 0.79x: no row
+//   dgemv N   1.59-1.69x at 2048^2, 2.1-3.6x from 3072^2 to 16384^2;
+//             rectangles of 2048^2 elements and up 1.19-3.48x
+//   dgemv T   0.94-1.40x from 4096^2: 1.10x at 12288^2 in one run, and
+//             0.90-1.03x on rectangles as large as the wins: too close to
+//             the line to route; no row
+//   zgemv N   1.39-1.87x from 3072^2 to 12288^2 (rectangles 1.31-1.86x);
+//             2048^2 1.17x and 1.02x (1.22x and 1.28x in 317bb91-gemv),
+//             16384^2 1.06x and 1.24x, 256 x 65536 1.06x
+//   zgemv T,C at most 0.82x: no row
 //   zhemv     2.35-4.51x from 2048 to 16384 (1.07-1.14x at 1536)
 typedef struct {
     ab_b2_routine_t routine;
@@ -69,7 +71,7 @@ typedef struct {
 
 static const Route kRoutes[] = {
     {AB_B2_DGEMV, 'N', 2048.0 * 2048, 16384.0 * 16384, 256},
-    {AB_B2_ZGEMV, 'N', 2048.0 * 2048, 12288.0 * 12288, 512},
+    {AB_B2_ZGEMV, 'N', 3072.0 * 3072, 12288.0 * 12288, 512},
     {AB_B2_ZHEMV, 'N', 2048.0 * 2048, 16384.0 * 16384, 2048},
 };
 

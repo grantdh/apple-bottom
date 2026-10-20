@@ -434,6 +434,103 @@ static void test_zhemv_tiling(void) {
 }
 
 // =============================================================================
+// FP64 to double-float conversion of A's elements
+// =============================================================================
+
+static double from_bits(uint64_t u) {
+    double d;
+    memcpy(&d, &u, sizeof d);
+    return d;
+}
+
+// The (hi, lo) the kernels must give an element x of A: the host's
+// fp64_to_dd (src/apple_bottom.m: hi = (float)x, lo = (float)(x - hi)) with
+// FP32 subnormals flushed as the GPU flushes them. x below FP32's normal
+// range gives (+-0, +0), and lo is x - hi rounded to 24 bits, then +-0 if
+// under 2^-126 (the host rounds such a lo onto the subnormal grid instead,
+// and from 2^-126 - 2^-150 up to 2^-126). False if hi is not finite.
+static bool dd_expect(double x, float want[2]) {
+    if (fabs(x) < 0x1p-126) {
+        want[0] = copysignf(0.0f, (float)x);
+        want[1] = 0.0f;
+        return true;
+    }
+    want[0] = (float)x;
+    if (!isfinite(want[0])) return false;
+    int e;
+    double r = frexp(x - (double)want[0], &e);   // x - hi is exact
+    r = ldexp((double)(float)r, e);              // rounded to 24 bits
+    want[1] = fabs(r) < 0x1p-126 ? copysignf(0.0f, (float)r) : (float)r;
+    return true;
+}
+
+#define CONV_PER_EXPONENT 1024   // inputs per sign and FP64 exponent
+#define CONV_INPUTS ((size_t)4096 * CONV_PER_EXPONENT + 29 * 25 * 4)
+
+// For each sign and FP64 exponent (zero, FP64 subnormals, Inf and NaN among
+// them): FP32 mantissas 0, 1, 0x2AAAAA, all ones but the last bit and all
+// ones, each with the 29 bits below them 0, 1, just under half, half (a
+// tie, which rounds to the even mantissa), just over half, 0x15555555 and
+// all ones, rounding all ones up carrying into the exponent; then random
+// mantissas. Last, residuals x - hi within 12 units of 2^-126, where lo
+// starts to flush. Returns the count, at most CONV_INPUTS.
+static size_t conversion_inputs(uint64_t *v) {
+    static const uint32_t top[] = {0, 1, 0x2AAAAA, 0x7FFFFE, 0x7FFFFF};
+    static const uint32_t low[] = {0, 1, 0x0FFFFFFF, 0x10000000, 0x10000001, 0x15555555, 0x1FFFFFFF};
+    uint64_t rng = 0xC0417;
+    size_t n = 0;
+    for (uint64_t se = 0; se < 4096; se++) {   // sign and exponent
+        const size_t end = n + CONV_PER_EXPONENT;
+        for (size_t t = 0; t < sizeof top / sizeof *top; t++)
+            for (size_t l = 0; l < sizeof low / sizeof *low; l++) v[n++] = se << 52 | (uint64_t)top[t] << 29 | low[l];
+        while (n < end) v[n++] = se << 52 | splitmix(rng++) >> 12;
+    }
+    // x - hi = rem 2^(E - 52), |rem| = R near 2^(-74 - E): rem = R from low
+    // bits R, rem = -R from 2^29 - R, which round up (R = 2^28, the tie, is
+    // among the patterns above).
+    for (int E = -102; E <= -74; E++)
+        for (int64_t R = ((int64_t)1 << (-74 - E)) - 12; R <= ((int64_t)1 << (-74 - E)) + 12; R++) {
+            if (R < 1 || R >= 1 << 28) continue;
+            for (uint64_t s = 0; s < 2; s++) {
+                const uint64_t base = s << 63 | (uint64_t)(E + 1023) << 52 | (uint64_t)0x123456 << 29;
+                v[n++] = base | (uint64_t)R;
+                v[n++] = base | (uint64_t)((1 << 29) - R);
+            }
+        }
+    return n;
+}
+
+// The kernels' conversion on the GPU (ab_internal_b2_convert) against
+// dd_expect, bit for bit wherever hi is finite. Elsewhere (|x| >= 2^128 or
+// rounding to it, Inf, NaN) hi must be Inf or NaN, which makes the
+// element's output non-finite and sends the call to Accelerate
+// (test_range_guard, RG_FLT_OVERFLOW).
+static void test_conversion(void) {
+    uint64_t *v = malloc(CONV_INPUTS * sizeof *v);
+    const size_t n = conversion_inputs(v);
+    float *dd = malloc(n * 2 * sizeof *dd);
+    size_t exact = 0;
+    if (!ab_internal_b2_convert((const double *)v, n, dd)) fail_case("the conversion kernel did not run");
+    else
+        for (size_t i = 0; i < n; i++) {
+            const double x = from_bits(v[i]);
+            const float *got = &dd[2 * i];
+            float want[2];
+            if (dd_expect(x, want)) {
+                exact++;
+                if (memcmp(got, want, sizeof want))
+                    fail_case("%a (%016llx): (%a, %a), expected (%a, %a)", x, (unsigned long long)v[i],
+                              got[0], got[1], want[0], want[1]);
+            } else if (isfinite(got[0])) {
+                fail_case("%a (%016llx): hi %a, not Inf or NaN", x, (unsigned long long)v[i], got[0]);
+            }
+        }
+    printf("%zu inputs, %zu bit for bit, the rest Inf or NaN ... ", n, exact);
+    free(v); free(dd);
+    finish();
+}
+
+// =============================================================================
 // Special values
 // =============================================================================
 
@@ -503,11 +600,12 @@ static void test_nonfinite_propagation(void) {
 // =============================================================================
 
 typedef enum { RG_HUGE_ELEM, RG_ALL_TINY, RG_NEAR_FLT_MAX, RG_SCALED_UP, RG_X_HUGE, RG_X_TINY,
-               RG_X_WIDE, RG_ZEROS, RG_SUBNORMALS, RG_TINY_ROWS, RG_COUNT } RangeKind;
+               RG_X_WIDE, RG_ZEROS, RG_SUBNORMALS, RG_TINY_ROWS, RG_FLT_EDGE, RG_FLT_OVERFLOW,
+               RG_COUNT } RangeKind;
 // Where each must run (RG_TINY_ROWS: the guard may keep it on the GPU or not).
 static const Expect RG_WANT[] = {
     EXPECT_CPU, EXPECT_CPU, EXPECT_CPU, EXPECT_GPU, EXPECT_GPU, EXPECT_GPU,
-    EXPECT_GPU, EXPECT_GPU, EXPECT_GPU, EXPECT_EITHER,
+    EXPECT_GPU, EXPECT_GPU, EXPECT_GPU, EXPECT_EITHER, EXPECT_GPU, EXPECT_CPU,
 };
 
 // Multiplies every number in v (NaN stays NaN) by s.
@@ -544,6 +642,11 @@ static void test_range_guard(void) {
             case RG_TINY_ROWS:    // every third row 1e-25 of the rest
                 for (int i = 0; i < d.rows; i += 3)
                     for (int j = 0; j < c.n; j++) scale_all(aelem(&d, i, j), d.w, 1e-25);
+                break;
+            case RG_FLT_EDGE:       // one element just under what rounds to 2^128 in FP32,
+            case RG_FLT_OVERFLOW:   // or the least that does (hi Inf); x_9 small keeps pmax in range
+                aelem(&d, 9, 9)[0] = rg == RG_FLT_EDGE ? 0x1.fffffefffffffp+127 : 0x1.ffffffp+127;
+                for (int k = 0; k < d.w; k++) d.x[b2_vidx(d.xlen, c.incx, 9) * d.w + k] = 0x1.8p-71;
                 break;
             }
             check(&c, &d, RG_WANT[rg], -1, NULL);
@@ -765,15 +868,15 @@ static void test_invalid_dev_args(void) {
 
 // Every shape of both committed sweep runs that the auto rule sends to the
 // GPU was measured >= 1.10x faster there, and the rule routes some shapes of
-// exactly the classes DGEMV 'N', ZGEMV 'N' and ZHEMV. ZHEMV's runs are those
-// of its single-read kernel; the GEMV directory's ZHEMV rows measured the
-// two-pass kernel it replaced and are not used.
+// exactly the classes DGEMV 'N', ZGEMV 'N' and ZHEMV. The runs are those of
+// the current kernels: GEMV's in 2026-10-19-ba345df-gemv, ZHEMV's (the
+// single-read kernel) in 2026-10-19-1bc503a-zhemv.
 static void test_auto_rule_matches_data(void) {
     const struct { const char *file; bool hemv; } files[] = {
-        {"2026-10-19-317bb91-gemv/sweep_square.csv", false},
-        {"2026-10-19-317bb91-gemv/sweep_rect.csv", false},
-        {"2026-10-19-317bb91-gemv/sweep_square_run1.csv", false},
-        {"2026-10-19-317bb91-gemv/sweep_rect_run1.csv", false},
+        {"2026-10-19-ba345df-gemv/sweep_square.csv", false},
+        {"2026-10-19-ba345df-gemv/sweep_rect.csv", false},
+        {"2026-10-19-ba345df-gemv/sweep_square_run1.csv", false},
+        {"2026-10-19-ba345df-gemv/sweep_rect_run1.csv", false},
         {"2026-10-19-1bc503a-zhemv/sweep_square.csv", true},
         {"2026-10-19-1bc503a-zhemv/sweep_square_run1.csv", true},
     };
@@ -974,6 +1077,7 @@ static const TestCase TESTS[] = {
     {"zgemv semantics ('N', 'T', 'C'; all entry points)", test_zgemv_semantics},
     {"zhemv semantics ('U', 'L'; all entry points)", test_zhemv_semantics},
     {"zhemv tiling: panel and chunk edges", test_zhemv_tiling},
+    {"FP64 to double-float conversion on the GPU, bit for bit", test_conversion},
     {"beta = 0 with NaN and Inf in y", test_beta0_nonfinite_y},
     {"NaN and Inf propagate as in Accelerate", test_nonfinite_propagation},
     {"range guard", test_range_guard},

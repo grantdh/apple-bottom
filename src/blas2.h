@@ -79,6 +79,11 @@ void ab_internal_b2_hemv_override(int rows_per_lane, int chunk_panels);
 // The panel height and chunk width, in rows and columns, of an n x n ZHEMV.
 void ab_internal_b2_hemv_layout(int n, int *panel, int *chunk);
 
+// For tests: x[0 .. n) converted on the GPU as the kernels convert A's
+// elements (blas2.m, f64_to_dd), (hi, lo) of x[i] in dd[2 i] and
+// dd[2 i + 1]; false if the GPU could not run it.
+bool ab_internal_b2_convert(const double *x, size_t n, float *dd);
+
 #ifdef __cplusplus
 }
 #endif

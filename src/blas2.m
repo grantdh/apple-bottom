@@ -7,11 +7,12 @@
 // memory bandwidth, where the GPU (~400 GB/s) is well ahead of the CPU and
 // double-float arithmetic costs nothing extra. The kernels read A in the
 // caller's FP64 column-major layout, convert each element to DD in registers
-// (bit-exact with the host's fp64_to_dd for values in FP32's normal range)
-// and accumulate in DD. A therefore needs no conversion pass and can stay
-// where the caller keeps it: in an ab_dev_malloc() or ab_dev_register()
-// buffer for repeated products, or, through the BLAS ABI, behind a no-copy
-// wrapper made for that one call.
+// (f64_to_dd: the host's fp64_to_dd within FP32's range, bit for bit, but
+// for FP32 subnormals, which the GPU flushes) and accumulate in DD. A
+// therefore needs no conversion pass and can stay where the caller keeps
+// it: in an ab_dev_malloc() or ab_dev_register() buffer for repeated
+// products, or, through the BLAS ABI, behind a no-copy wrapper made for
+// that one call.
 //
 // Kernels, one MSL library compiled on first use; real and complex are one
 // template each, instantiated under the names below:
@@ -26,6 +27,7 @@
 //            conjugated, into its column's (zhemv_tiles); zhemv_reduce_*
 //            adds each output's partial results.
 //   reduce_* adds a call's partial results, slot by slot.
+//   convert_dd, for tests: the conversion alone (ab_internal_b2_convert).
 // Every sum runs in an order fixed by the shape alone, so results are
 // bitwise reproducible.
 //
@@ -40,8 +42,11 @@
 //     L - 75 <= pmax <= 124 - L   and   lmax <= pmax - 51 - L,
 // which keeps overflow out and bounds what flushing can lose, at most
 // 2^-124 per term and all of a lossy term (< 2^(lmax+2)), by 2^-49 of the
-// largest product. Otherwise y is left alone and the caller runs the whole
-// call on Accelerate: NaN and Inf therefore propagate as Accelerate does.
+// largest product. (An element of A beyond FP32's range passes the pmax
+// test when its x_j is small enough; f64_to_dd makes it Inf or NaN, so its
+// output is not finite.) If any output fails, y is left alone and the
+// caller runs the whole call on Accelerate: NaN and Inf therefore propagate
+// as Accelerate does.
 // =============================================================================
 
 #import <Foundation/Foundation.h>
@@ -125,35 +130,18 @@ inline DD dd_fma(DD a, DD b, DD c) {   // DWTimesDW2 + add
 
 inline DD dd_neg(DD a) { return {-a.hi, -a.lo}; }
 
-// The FP64 value with 32-bit words w = (low, high) as DD, hi rounded to
-// nearest-even and lo = RN(x - hi), as the host's fp64_to_dd does; +-0
-// below FP32's normal range, +-Inf above it, NaN kept. f64_to_dd_fast
-// computes the same bits wherever hi is finite: change both together.
+// The FP64 value with 32-bit words w = (low, high) as DD: hi = x and lo =
+// x - hi, each rounded to nearest-even, as the host's fp64_to_dd gives
+// them, with FP32 subnormals flushed as the GPU flushes them: +-0 below
+// FP32's normal range, and lo +-0 where x - hi rounds below 2^-126 (lo =
+// float(rem) * 2^-52 * 2^E, two exact multiplies, the second flushing).
+// Where hi would not be finite (|x| >= 2^128 or rounding to it, Inf, NaN)
+// it is Inf or NaN, which leaves every output the element enters
+// non-finite, even times zero, so the call runs on Accelerate. Selects in
+// place of early returns, and no ldexp: a version with both, keeping Inf
+// and NaN apart, was the ZHEMV kernel's largest cost after the products
+// themselves. tests/test_blas2.c checks it bit for bit.
 inline DD f64_to_dd(uint2 w) {
-    uint hw = w.y, lw = w.x, sgn = hw & 0x80000000u;
-    int E = int((hw >> 20) & 0x7FFu) - 1023;
-    if (E < -126) return {as_type<float>(sgn), 0.0f};
-    if (E > 127) {
-        bool nan = E == 1024 && ((hw & 0xFFFFFu) | lw) != 0u;
-        return {as_type<float>(sgn | (nan ? 0x7FC00000u : 0x7F800000u)), 0.0f};
-    }
-    uint mant = ((hw & 0xFFFFFu) << 3) | (lw >> 29), r = lw & 0x1FFFFFFFu;
-    bool up = r > 0x10000000u || (r == 0x10000000u && (mant & 1u));
-    uint hb = (sgn | (uint(E + 127) << 23) | mant) + (up ? 1u : 0u);
-    if ((hb << 1) == 0xFF000000u) return {as_type<float>(hb), 0.0f};   // rounded up to Inf
-    int rem = up ? int(r) - 0x20000000 : int(r);                        // x - hi in units of 2^(E-52)
-    float lo = rem == 0 ? 0.0f : ldexp(float(sgn ? -rem : rem), E - 52);
-    return {as_type<float>(hb), lo};
-}
-
-// f64_to_dd's bits wherever its hi is finite, without its branches and
-// ldexp: lo = float(rem) * 2^-52 * 2^E, two exact multiplies, flushed to
-// zero exactly where ldexp flushes (the GPU flushes FP32 subnormal results
-// of both). Elsewhere (|x| >= 2^128 or rounding to it, Inf, NaN) hi is NaN
-// or Inf, which leaves every output it enters non-finite, even times zero,
-// so the call runs on Accelerate. f64_to_dd was the ZHEMV kernel's largest
-// cost after the products themselves.
-inline DD f64_to_dd_fast(uint2 w) {
     uint hw = w.y, lw = w.x, sgn = hw & 0x80000000u;
     int E = int((hw >> 20) & 0x7FFu) - 1023;
     uint mant = ((hw & 0xFFFFFu) << 3) | (lw >> 29), r = lw & 0x1FFFFFFFu;
@@ -406,7 +394,7 @@ inline void hemv_cols(device const uint2 *A, device const DD2 *x, device const i
                 wr = a[0];
                 wi = a[1];
             }
-            const DD ar = f64_to_dd_fast(wr), ai = f64_to_dd_fast(wi);
+            const DD ar = f64_to_dd(wr), ai = f64_to_dd(wi);
             const Code ca = acode(wr, wi);
             zmac<false>(rows[k], ar, ai, xj);   // row i += a x_j
             hemv_note(rows[k].g, ca, cx);
@@ -496,6 +484,12 @@ template <bool UPPER>
     out[k] = hemv_final(acc);
 }
 
+// For tests: element i converted as the kernels convert A's elements.
+[[kernel]] void convert_dd(device const uint2 *in [[buffer(0)]], device DD *out [[buffer(1)]],
+                           uint i [[thread_position_in_grid]]) {
+    out[i] = f64_to_dd(in[i]);
+}
+
 template [[host_name("dgemv_n")]] [[kernel]] decltype(gemv_rows<AccD, DD>) gemv_rows<AccD, DD>;
 template [[host_name("zgemv_n")]] [[kernel]] decltype(gemv_rows<AccZ, DD2>) gemv_rows<AccZ, DD2>;
 template [[host_name("dgemv_t")]] [[kernel]] decltype(gemv_cols<AccD, DD, false>) gemv_cols<AccD, DD, false>;
@@ -520,12 +514,14 @@ typedef enum {
     K_DGEMV_T, K_ZGEMV_T, K_ZGEMV_C,       // cols kernels
     K_REDUCE_D, K_REDUCE_Z,
     K_ZHEMV_U1, K_ZHEMV_L1, K_ZHEMV_U3, K_ZHEMV_L3, K_ZHEMV_REDUCE_U, K_ZHEMV_REDUCE_L,
+    K_CONVERT_DD,                          // for tests
     K_COUNT
 } KernelId;
 
 static const char *const kKernelNames[K_COUNT] = {
     "dgemv_n", "zgemv_n", "dgemv_t", "zgemv_t", "zgemv_c", "reduce_d", "reduce_z",
     "zhemv_u1", "zhemv_l1", "zhemv_u3", "zhemv_l3", "zhemv_reduce_u", "zhemv_reduce_l",
+    "convert_dd",
 };
 
 static bool is_rows_kernel(KernelId k) { return k <= K_ZGEMV_N; }
@@ -1038,5 +1034,30 @@ ab_b2_result_t ab_internal_b2_dev(const ab_b2_call_t *c, ab_dev_buffer_t A, size
         if (!x_scale(c, x_length(c), c->routine == AB_B2_DGEMV ? 1 : 2, &sx)) return AB_B2_RANGE;
         size_t a_byte = A->base + a_offset * ab_b2_elem_size(c->routine);
         return run_gpu(c, queue, A->mtl, a_byte, lda, sx, NULL, NULL);
+    }
+}
+
+bool ab_internal_b2_convert(const double *x, size_t n, float *dd) {
+    @autoreleasepool {
+        id<MTLCommandQueue> queue = library_queue();
+        const Pipelines *pl = queue ? pipelines_for(queue.device) : NULL;
+        if (!pl || n > UINT32_MAX) return false;
+        if (n == 0) return true;
+        id<MTLDevice> dev = queue.device;
+        id<MTLBuffer> in = [dev newBufferWithBytes:x length:n * sizeof(double) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> out = [dev newBufferWithLength:n * sizeof(DDf) options:MTLResourceStorageModeShared];
+        if (!in || !out) return false;
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:pl->pso[K_CONVERT_DD]];
+        [enc setBuffer:in offset:0 atIndex:0];
+        [enc setBuffer:out offset:0 atIndex:1];
+        [enc dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (cb.status != MTLCommandBufferStatusCompleted) return false;
+        memcpy(dd, out.contents, n * sizeof(DDf));
+        return true;
     }
 }

@@ -228,8 +228,9 @@ $(BUILD)/test_convergence: tests/verification/test_convergence.c lib | $(BUILD)
 	@echo "Built: $@"
 
 # BLAS-2 (GEMV, HEMV): every entry point against Accelerate and a compensated
-# reference, special values, the range guard, routing, xerbla and forced
-# failures (tests/test_blas2.c; re-executes itself for the routing modes).
+# reference, the GPU's FP64-to-DD conversion bit for bit, special values, the
+# range guard, routing, xerbla and forced failures (tests/test_blas2.c;
+# re-executes itself for the routing modes).
 $(BUILD)/test_blas2: tests/test_blas2.c tests/test_blas2_ref.h tests/test_dot2.h tests/test_blas_check.h tests/test_spawn.h tests/test_registry.h $(SRC)/blas2.h $(SRC)/device_internal.h lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
