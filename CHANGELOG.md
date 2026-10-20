@@ -65,7 +65,7 @@ All notable changes to this project will be documented in this file.
 - `make version-check` skips an `[Unreleased]` section at the top of
   `CHANGELOG.md` and checks the first versioned entry.
 
-## [1.4.0] - Unreleased
+## [1.4.0] - 2026-10-19
 
 ### Added
 - **`ab_build_info()`** returns the library version and the git commit it
