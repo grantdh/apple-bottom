@@ -64,6 +64,11 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - `make version-check` skips an `[Unreleased]` section at the top of
   `CHANGELOG.md` and checks the first versioned entry.
+- **ZGEMM runs Gauss-3M's three real products concurrently** (one encoder
+  with `MTLDispatchTypeConcurrent`) in every ZGEMM path, so the products of
+  a small C share the GPU instead of running one after another. A call whose
+  `Ci` shares a buffer with an input keeps the serial order. Results are
+  bitwise unchanged.
 
 ## [1.4.0] - Unreleased
 

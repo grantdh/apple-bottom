@@ -1303,6 +1303,24 @@ static void encode_elemwise_dispatch(id<MTLComputeCommandEncoder> encoder,
              threadsPerThreadgroup:MTLSizeMake(MIN((size_t)256, threads), 1, 1)];
 }
 
+// Gauss-3M's products T1 = Ar*Br, T2 = Ai*Bi and Ci = T3*T4 in an encoder of
+// their own. They write distinct buffers, so the encoder is concurrent and the
+// products of a small C share the GPU. If Ci shares a buffer with Ar, Ai, Br
+// or Bi, writing it could race T1's or T2's reads: keep those serial.
+static void encode_gauss3m_products(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
+                                    ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
+                                    ABMatrix T1, ABMatrix T2, ABMatrix T3, ABMatrix T4,
+                                    ABMatrix Ci) {
+    bool ci_is_input = Ci->buffer == Ar->buffer || Ci->buffer == Ai->buffer ||
+                       Ci->buffer == Br->buffer || Ci->buffer == Bi->buffer;
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoderWithDispatchType:
+        ci_is_input ? MTLDispatchTypeSerial : MTLDispatchTypeConcurrent];
+    encode_dgemm_dispatch(enc, ctx, Ar, Br, T1);
+    encode_dgemm_dispatch(enc, ctx, Ai, Bi, T2);
+    encode_dgemm_dispatch(enc, ctx, T3, T4, Ci);
+    [enc endEncoding];
+}
+
 // =============================================================================
 // Public API: BLAS Operations
 // =============================================================================
@@ -1671,13 +1689,7 @@ static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatri
 
     // --- Encoder 2: three DGEMMs (T1=Ar*Br, T2=Ai*Bi, Ci=T3*T4) ---
     // Encoder boundary guarantees T3 and T4 are written before reads begin
-    {
-        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-        encode_dgemm_dispatch(enc, ctx, Ar, Br, T1);
-        encode_dgemm_dispatch(enc, ctx, Ai, Bi, T2);
-        encode_dgemm_dispatch(enc, ctx, T3, T4, Ci);
-        [enc endEncoding];
-    }
+    encode_gauss3m_products(cmdBuf, ctx, Ar, Ai, Br, Bi, T1, T2, T3, T4, Ci);
 
     // --- Encoder 3: Ci = Ci - T1, Cr = T1 - T2 ---
     // Different output buffers (Ci vs Cr) so these are parallel-safe
@@ -1745,13 +1757,7 @@ static ABStatus ab_zgemm_internal_async(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, A
         encode_elemwise_dispatch(enc, ctx.addPipeline, Br, Bi, T4);
         [enc endEncoding];
     }
-    {
-        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-        encode_dgemm_dispatch(enc, ctx, Ar, Br, T1);
-        encode_dgemm_dispatch(enc, ctx, Ai, Bi, T2);
-        encode_dgemm_dispatch(enc, ctx, T3, T4, Ci);
-        [enc endEncoding];
-    }
+    encode_gauss3m_products(cmdBuf, ctx, Ar, Ai, Br, Bi, T1, T2, T3, T4, Ci);
     {
         id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
         encode_elemwise_dispatch(enc, ctx.subPipeline, Ci, T1, Ci);
@@ -2439,13 +2445,7 @@ ABStatus ab_zgemm_batched(
         }
 
         // Encoder 2: three DGEMMs (T1=Ar*Br, T2=Ai*Bi, Ci=T3*T4)
-        {
-            id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-            encode_dgemm_dispatch(enc, ctx, Ars[i], Brs[i], T1);
-            encode_dgemm_dispatch(enc, ctx, Ais[i], Bis[i], T2);
-            encode_dgemm_dispatch(enc, ctx, T3, T4, Cis[i]);
-            [enc endEncoding];
-        }
+        encode_gauss3m_products(cmdBuf, ctx, Ars[i], Ais[i], Brs[i], Bis[i], T1, T2, T3, T4, Cis[i]);
 
         // Encoder 3: Ci = Ci - T1, Cr = T1 - T2 (different outputs → parallel-safe)
         {
@@ -2766,11 +2766,7 @@ ABStatus ab_batch_zgemm(ABBatch batch, ABMatrix Ar, ABMatrix Ai, ABMatrix Br, AB
     [batch->currentEncoder endEncoding];
 
     // Enc 2: T1 = Ar*Br, T2 = Ai*Bi, Ci = T3*T4
-    batch->currentEncoder = [batch->cmdBuffer computeCommandEncoder];
-    encode_dgemm_dispatch(batch->currentEncoder, ctx, Ar, Br, T1);
-    encode_dgemm_dispatch(batch->currentEncoder, ctx, Ai, Bi, T2);
-    encode_dgemm_dispatch(batch->currentEncoder, ctx, T3, T4, Ci);
-    [batch->currentEncoder endEncoding];
+    encode_gauss3m_products(batch->cmdBuffer, ctx, Ar, Ai, Br, Bi, T1, T2, T3, T4, Ci);
 
     // Enc 3: Ci = Ci - T1, Cr = T1 - T2
     batch->currentEncoder = [batch->cmdBuffer computeCommandEncoder];
