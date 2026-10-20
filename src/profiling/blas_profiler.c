@@ -284,8 +284,14 @@ static const char* bin_labels[AB_PROF_HISTOGRAM_BINS] = {
     "1K-2K", "2K-4K", "4K-8K",  "8K+"
 };
 
+// " AB_PRECISION=fast" for the report headers in fast mode, else nothing, so
+// default-mode reports read as before.
+static const char* precision_token(void) {
+    return strcmp(ab_precision_mode(), "fast") == 0 ? " AB_PRECISION=fast" : "";
+}
+
 void ab_prof_dump(FILE* out) {
-    fprintf(out, "=== %s BLAS profile, pid %d", ab_build_info(), (int)getpid());
+    fprintf(out, "=== %s%s BLAS profile, pid %d", ab_build_info(), precision_token(), (int)getpid());
     if (g_threshold_ns)
         fprintf(out, ", calls under %llu ns not counted", (unsigned long long)g_threshold_ns);
     fprintf(out, " ===\n");
@@ -421,8 +427,8 @@ void ab_prof_report(FILE* out) {
     int pid = (int)getpid();
     report_line_t l = { .n = 0 };
     l.buf[0] = '\0';
-    line_add(&l, "AB_REPORT[%d] %s AB_MODE=%s", pid, ab_build_info(),
-             mode && *mode ? mode : "unset");
+    line_add(&l, "AB_REPORT[%d] %s AB_MODE=%s%s", pid, ab_build_info(),
+             mode && *mode ? mode : "unset", precision_token());
     if (g_threshold_ns)
         line_add(&l, " AB_PROFILE_THRESHOLD_NS=%llu", (unsigned long long)g_threshold_ns);
     line_add(&l, "\n");
@@ -485,8 +491,8 @@ static void trace_header(int fd, pid_t pid) {
     l.buf[0] = '\0';
     line_add(&l, "# %s AB_TRACE pid=%d\n", ab_build_info(), (int)pid);
     // AB_MIN_GPU_DIM as the routing resolved it, so a replay routes as this run did.
-    line_add(&l, "# AB_MODE=%s AB_TRACE_HASH=%d AB_MIN_GPU_DIM=%d\n", mode && *mode ? mode : "unset",
-             g_trace_hash, ab_dispatch_process_config()->min_dim);
+    line_add(&l, "# AB_MODE=%s AB_TRACE_HASH=%d AB_MIN_GPU_DIM=%d%s\n", mode && *mode ? mode : "unset",
+             g_trace_hash, ab_dispatch_process_config()->min_dim, precision_token());
     // The MPI rank and size one launcher exported (Open MPI, else PMI), so a
     // replay can map the files of one run to its ranks; -1 when not under MPI.
     const char *rank = getenv("OMPI_COMM_WORLD_RANK"), *size = getenv("OMPI_COMM_WORLD_SIZE");
@@ -618,6 +624,7 @@ void ab_prof_dump_json(const char* path) {
 
     fprintf(f, "{\n");
     fprintf(f, "  \"build\": \"%s\",\n", ab_build_info());
+    if (*precision_token()) fprintf(f, "  \"precision\": \"fast\",\n");
     fprintf(f, "  \"timestamp\": \"%s\",\n", ts);
     fprintf(f, "  \"pid\": %d,\n", (int)getpid());
     fprintf(f, "  \"threshold_ns\": %llu,\n", (unsigned long long)g_threshold_ns);

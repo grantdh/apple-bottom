@@ -457,6 +457,12 @@ int main(int argc, char **argv) {
         fprintf(stderr, "calibrate: no Metal device\n");
         return 1;
     }
+    // The built-in table routes the default kernels
+    if (strcmp(ab_precision_mode(), "default") != 0) {
+        fprintf(stderr, "calibrate: AB_PRECISION=%s is set; calibrate the default kernels\n",
+                ab_precision_mode());
+        return 1;
+    }
     build_grid();
 
     FILE *raw = open_out(out, "calibrate_raw.csv");

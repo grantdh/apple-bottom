@@ -9,6 +9,12 @@
 //   - With the macOS 15 SDK (Xcode 16+) on macOS 15+, shaders use MTLMathModeSafe;
 //     otherwise they are compiled with fastMathEnabled = NO. Both keep full DD precision.
 //
+// Precision mode: AB_PRECISION=fast, read each time the library initializes,
+// makes every GPU GEMM-family kernel (all APIs) accumulate lazily, Dot2-style:
+// a few percent faster and about 1 bit less accurate, with results that differ
+// from the default mode's in the last bits (docs/INTEGRATION.md, Environment
+// Variables). Otherwise the kernels give the bits of release 1.4.0.
+//
 // Storage: ABMatrix data passed to ab_matrix_upload / ab_matrix_download is
 // row-major (C order). The BLAS ABI (ab_*gemm_blas, dgemm_/zgemm_) and the
 // device-buffer API (apple_bottom_device.h) are column-major, as in BLAS.
@@ -290,6 +296,10 @@ const char* ab_get_last_dispatch_path(void);
 // "unknown" in place of the commit when built outside a git checkout or from a copy
 // vendored inside another repository. Static string.
 const char* ab_build_info(void);
+
+// "fast" if the library was initialized with AB_PRECISION=fast, else "default"
+// (also before ab_init). Static string.
+const char* ab_precision_mode(void);
 
 // BLAS-ABI diagnostics (dgemm_, zgemm_, ab_*gemm_, ab_*gemm_blas), read once
 // per process from the environment; both reports start with ab_build_info():

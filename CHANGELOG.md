@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **`AB_PRECISION=fast`** (opt-in, read when the library initializes, every
+  API): the GEMM kernels accumulate lazily (Dot2-style). Each product's high
+  part goes into a running sum through TwoSum and every rounding error into a
+  separate running error, renormalized once per 16 terms of K. On M2 Max
+  1.05-1.11× faster for DGEMM and ZGEMM of N = 2048-4096, about 1 bit less
+  accurate: normwise error 1.8-1.9× and componentwise error 1.4-2.8× the
+  default's on `tests/test_precision.c`, whose new last case re-initializes
+  in fast mode, runs every case again and fails one above 4×.
+  `ab_precision_mode()` returns the mode, the `AB_REPORT`, `AB_PROFILE` and
+  `AB_TRACE` headers add `AB_PRECISION=fast` in fast mode, and
+  `make calibrate` refuses it. The default kernels are compiled as before and
+  keep the 1.4.0 bits (`test_qe_golden`).
 - **`AB_TRACE=<path>`**: every BLAS-ABI call (`dgemm_`, `zgemm_`,
   `ab_*gemm_`, `ab_*gemm_blas`; Accelerate and GPU, every `AB_MODE`) appends
   one `key=value` line to `<path>.<pid>` when it returns (a call with an

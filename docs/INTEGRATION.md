@@ -394,12 +394,15 @@ grep -E '/_[dz]gemm_>'` shows where each one went.
 
 The BLAS-ABI entry points (`dgemm_`, `zgemm_`, `ab_dgemm_`, `ab_zgemm_`,
 `ab_dgemm_blas`, `ab_zgemm_blas`) read these once per process, at their first
-call. The native `ABMatrix` and device APIs do not use them.
+call. The native `ABMatrix` and device APIs do not use them, except
+`AB_PRECISION`, which the library reads when it initializes and which applies
+to every API.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `AB_MODE` | `auto` | `cpu`: every call on Accelerate. `gpu`: on the GPU unless a dimension is ≤ `AB_MIN_GPU_DIM`. `auto` (or any other value): by the calibrated dispatch table, or by a FLOP threshold if one is set (see [Routing](#routing-ab_modeauto)). |
 | `AB_MIN_GPU_DIM` | `32` | Calls with M, N or K ≤ this run on Accelerate in every mode. |
+| `AB_PRECISION` | unset | `fast`: every GPU GEMM kernel accumulates lazily, Dot2-style (each product's high part goes into a running sum through TwoSum and every rounding error into a separate sum, renormalized once per 16 terms of K). On an M2 Max 1.05-1.11× faster for DGEMM and ZGEMM of N = 2048-4096 and about 1 bit less accurate: on `tests/test_precision.c` the normwise error is 1.8-1.9× and the componentwise error 1.4-2.8× the default's (up to 2.2 √K·2⁻⁴⁸ of \|A\|\|B\|, default 1.0). Results differ from the default in the last bits; `ab_precision_mode()` returns the mode and the report and trace headers show `AB_PRECISION=fast`. Any other value: the default kernels, with the bits of 1.4.0. |
 | `AB_DISPATCH_TABLE` | unset | `auto`: read the dispatch table from this file (the `dispatch_table.txt` that `make calibrate` writes) instead of using the built-in one. A file that cannot be read or parsed is reported on stderr and the built-in table is used. |
 | `AB_CROSSOVER_FLOPS` | unset | `auto`: replaces the table by a FLOP threshold. Calls with at least this many FLOPs (2·M·N·K real, 8·M·N·K complex) go to the GPU: ZGEMM, and DGEMM unless `AB_CROSSOVER_FLOPS_REAL` is set. |
 | `AB_CROSSOVER_FLOPS_REAL` | unset | `auto`: the same for DGEMM only. |

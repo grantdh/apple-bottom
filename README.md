@@ -165,6 +165,7 @@ LIBS = -L/path/to/apple-bottom/build -Wl,-rpath,/path/to/apple-bottom/build -lap
 | `AB_REPORT=1` | at exit: calls and time by route, GPU stage costs, fallbacks |
 | `AB_TRACE=<path>` | a line per call in `<path>.<pid>`: arguments, timestamps, route, GPU stages |
 | `AB_DISPATCH_TABLE=<file>` | route from another calibration, e.g. one from your own machine |
+| `AB_PRECISION=fast` | every GPU GEMM (all APIs) accumulates lazily: a few percent faster, about 1 bit less accurate ([numbers](docs/INTEGRATION.md#environment-variables-and-run-reports)) |
 
 The [Integration Guide](docs/INTEGRATION.md) covers C, Fortran, Python
 (experimental bindings in [`python/`](python/)) and a Quantum ESPRESSO
@@ -203,6 +204,10 @@ determinism, concurrency, memory and fork checks), and the per-call trace
 and forced GPU failures; it also holds GPU-routed BLAS results to the bits
 1.4.0 produced. `make ci-local` adds adversarial inputs and the
 convergence study; [tests/README.md](tests/README.md) gives the test counts.
+
+The opt-in `AB_PRECISION=fast` trades about one bit for a few percent of
+speed ([numbers](docs/INTEGRATION.md#environment-variables-and-run-reports));
+without it the kernels give the bits of 1.4.0.
 
 [V&V report](docs/vv/VV_REPORT.md) · [precision envelope](docs/vv/PRECISION_ENVELOPE.md) ·
 [limitations and scope](docs/vv/LIMITATIONS.md) ·

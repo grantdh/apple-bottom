@@ -182,7 +182,7 @@ bench-report: bench
 # Tests
 # =============================================================================
 
-$(BUILD)/test_precision: tests/test_precision.c tests/test_dot2.h lib | $(BUILD)
+$(BUILD)/test_precision: tests/test_precision.c tests/test_dot2.h tests/test_blas_check.h lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
