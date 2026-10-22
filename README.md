@@ -198,8 +198,9 @@ DGEMM's normwise relative error grows like √N·10⁻¹⁵ on random matrices,
 about 5 × 10⁻¹⁴ at N = 4096 (V-2 convergence study). `make test` checks
 precision against a compensated FP64 reference, correctness of every API
 against Accelerate, the device-buffer API, the routing rules, the BLAS-ABI
-entry points in a conformance harness (with long-K precision,
-determinism, concurrency, memory and fork checks), and the per-call trace
+entry points in a conformance harness (with long-K precision, data far
+outside FP32's exponent range, determinism, concurrency, memory and fork
+checks), and the per-call trace
 and forced GPU failures; it also holds GPU-routed BLAS results to the bits
 1.4.0 produced. `make ci-local` adds adversarial inputs and the
 convergence study; [tests/README.md](tests/README.md) gives the test counts.
@@ -217,9 +218,20 @@ convergence study; [tests/README.md](tests/README.md) gives the test counts.
 
 ## Limitations
 
-- **Not IEEE FP64.** About 48 significant bits instead of 53, FP32's
-  exponent range (about 10⁻³⁸ to 10³⁸) instead of FP64's, and no
+- **Not IEEE FP64.** About 48 significant bits instead of 53, and no
   bit-for-bit agreement with CPU BLAS.
+- **FP32's exponent range, worked around.** DD values are FP32 pairs.
+  Products below about 2⁻⁷⁸ lose their low part, values below 2⁻¹²⁶ flush to
+  zero on the GPU, and sums overflow at 2¹²⁸.
+  - The BLAS ABI scales each row of op(A) and column of op(B) whose largest
+    entry lies outside 2^±20 by an exact power of two, and undoes it in C.
+    It runs on Accelerate whatever that cannot keep in range, and any call
+    with NaN or Inf in A or B (or in C, for DGEMM with beta ≠ 0).
+  - The native `ABMatrix` API keeps one power-of-two scale per matrix, so a
+    matrix whose nonzero entries span more than about 2⁷⁸ (10²³) can still
+    lose precision in its products there.
+  - Data inside those windows computes exactly as before.
+  - [Details](docs/vv/LIMITATIONS.md#exponent-range).
 - **Per-call overhead.** Through the BLAS ABI every measured shape is
   slower than Accelerate except ZGEMM with both operands transposed at
   N ≥ 4096; see the table above.

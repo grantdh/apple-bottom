@@ -2217,6 +2217,329 @@ static void test_morton_dtrsm_panel(void) {
 }
 
 // =============================================================================
+// Exponent Range: Native API
+// =============================================================================
+// Every native operation on data far outside FP32's exponent range, which DD
+// shares. Entries of magnitude [0.5, 1) times XR_HI and XR_LO upload with
+// power-of-two scales 2^80 and 2^64 (ab_matrix_upload's multiples of 16 near
+// the data's centre), so the operations must carry the scales, and bring a
+// complex matrix's parts to one where real and imaginary parts differ;
+// products of two such matrices, about 2^145, overflow FP32 unless they do.
+// Results must match Accelerate to XR_TOL, relative in the Frobenius norm.
+
+#define XR_HI 0x1p73
+#define XR_LO 0x1p72
+#define XR_TOL 1e-13
+
+static uint64_t xr_seed = 0x2545F4914F6CDD1DULL;
+
+// n entries of magnitude [0.5, 1) times s, with random signs.
+static double* xr_data(size_t n, double s) {
+    double* x = malloc(n * sizeof *x);
+    for (size_t i = 0; i < n; i++) {
+        xr_seed = xr_seed * 6364136223846793005ULL + 1442695040888963407ULL;
+        double m = 0.5 + (double)(xr_seed >> 12) * 0x1p-53;
+        x[i] = (xr_seed & 0x800 ? -m : m) * s;
+    }
+    return x;
+}
+
+// A rows x cols matrix holding row-major x (left as created if x is NULL).
+static ABMatrix xr_matrix(int rows, int cols, const double* x) {
+    ABMatrix m = ab_matrix_create(rows, cols);
+    if (m && x && ab_matrix_upload(m, x, false) != AB_OK) { ab_matrix_destroy(m); m = NULL; }
+    return m;
+}
+
+// ||C - ref||_F / ||ref||_F for the n entries of Cr (+ i Ci, unless Ci is NULL).
+static double xr_error(ABMatrix Cr, ABMatrix Ci, const double* rr, const double* ri, size_t n) {
+    double* x = malloc(n * sizeof *x);
+    double e = 0.0, r = 0.0;
+    for (int p = 0; p < (Ci ? 2 : 1); p++) {
+        const double* ref = p ? ri : rr;
+        if (ab_matrix_download(p ? Ci : Cr, x, false) != AB_OK) { free(x); return INFINITY; }
+        for (size_t i = 0; i < n; i++) {
+            double d = x[i] - ref[i];
+            e += d * d;
+            r += ref[i] * ref[i];
+        }
+    }
+    free(x);
+    return sqrt(e / r);
+}
+
+// Row-major cr + i ci = op(ar + i ai) op(br + i bi), op(A) M x K and op(B) K x N.
+static void xr_zgemm_ref(enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
+                         int M, int N, int K, const double* ar, const double* ai,
+                         const double* br, const double* bi, double* cr, double* ci) {
+    const size_t na = (size_t)M * K, nb = (size_t)K * N, nc = (size_t)M * N;
+    double complex *a = malloc(na * sizeof *a), *b = malloc(nb * sizeof *b);
+    double complex* c = malloc(nc * sizeof *c);
+    for (size_t i = 0; i < na; i++) a[i] = CMPLX(ar[i], ai[i]);
+    for (size_t i = 0; i < nb; i++) b[i] = CMPLX(br[i], bi[i]);
+    const double complex one = 1.0, zero = 0.0;
+    cblas_zgemm(CblasRowMajor, ta, tb, M, N, K, &one, a, ta == CblasNoTrans ? K : M,
+                b, tb == CblasNoTrans ? N : K, &zero, c, N);
+    for (size_t i = 0; i < nc; i++) { cr[i] = creal(c[i]); ci[i] = cimag(c[i]); }
+    free(a); free(b); free(c);
+}
+
+// One complex product C = op(A) op(B) and its reference: op(A) M x K and
+// op(B) K x N, stored row-major, with parts of magnitude [0.5, 1) times the
+// given factors.
+typedef struct {
+    int M, N, K;
+    double *ar, *ai, *br, *bi, *cr, *ci;
+    ABMatrix Ar, Ai, Br, Bi, Cr, Ci;
+} XrZgemm;
+
+static void xr_zgemm_init(XrZgemm* z, enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
+                          int M, int N, int K, double sar, double sai, double sbr, double sbi) {
+    const size_t na = (size_t)M * K, nb = (size_t)K * N, nc = (size_t)M * N;
+    const bool a_nt = ta == CblasNoTrans, b_nt = tb == CblasNoTrans;
+    z->M = M; z->N = N; z->K = K;
+    z->ar = xr_data(na, sar); z->ai = xr_data(na, sai);
+    z->br = xr_data(nb, sbr); z->bi = xr_data(nb, sbi);
+    z->cr = malloc(nc * sizeof *z->cr); z->ci = malloc(nc * sizeof *z->ci);
+    xr_zgemm_ref(ta, tb, M, N, K, z->ar, z->ai, z->br, z->bi, z->cr, z->ci);
+    z->Ar = xr_matrix(a_nt ? M : K, a_nt ? K : M, z->ar);
+    z->Ai = xr_matrix(a_nt ? M : K, a_nt ? K : M, z->ai);
+    z->Br = xr_matrix(b_nt ? K : N, b_nt ? N : K, z->br);
+    z->Bi = xr_matrix(b_nt ? K : N, b_nt ? N : K, z->bi);
+    z->Cr = xr_matrix(M, N, NULL); z->Ci = xr_matrix(M, N, NULL);
+}
+
+static double xr_zgemm_error(const XrZgemm* z) {
+    return xr_error(z->Cr, z->Ci, z->cr, z->ci, (size_t)z->M * z->N);
+}
+
+static void xr_zgemm_free(XrZgemm* z) {
+    free(z->ar); free(z->ai); free(z->br); free(z->bi); free(z->cr); free(z->ci);
+    ab_matrix_destroy(z->Ar); ab_matrix_destroy(z->Ai); ab_matrix_destroy(z->Br);
+    ab_matrix_destroy(z->Bi); ab_matrix_destroy(z->Cr); ab_matrix_destroy(z->Ci);
+}
+
+// Reports the worst of n errors (NaN worst of all) against XR_TOL, naming
+// the entry point.
+static void xr_verdict(const char* const* names, const double* err, int n) {
+    int worst = 0;
+    for (int i = 1; i < n; i++)
+        if (isnan(err[i]) || err[i] > err[worst]) worst = i;
+    if (err[worst] <= XR_TOL) { PASS(); return; }
+    char buf[96];
+    snprintf(buf, sizeof buf, "%s err=%.2e", names[worst], err[worst]);
+    FAIL(buf);
+}
+
+static void test_xr_zgemm_paths(void) {
+    TEST("Exponent range: ZGEMM entry points");
+    ab_init();
+    // Parts on different scales (2^80 and 2^64), and an in-window ZGEMM of
+    // another shape between two such ones in the batched call; z[6] is
+    // op(A) = A^H, op(B) = B^T, for ab_zgemm_ex.
+    const enum CBLAS_TRANSPOSE NT = CblasNoTrans;
+    XrZgemm z[7], w;
+    for (int i = 0; i < 6; i++)
+        xr_zgemm_init(&z[i], NT, NT, 96, 80, 72, XR_HI, XR_LO, XR_LO, XR_HI);
+    xr_zgemm_init(&z[6], CblasConjTrans, CblasTrans, 96, 80, 72, XR_HI, XR_LO, XR_LO, XR_HI);
+    xr_zgemm_init(&w, NT, NT, 64, 48, 32, 1.0, 1.0, 1.0, 1.0);
+
+    ab_zgemm(z[0].Ar, z[0].Ai, z[0].Br, z[0].Bi, z[0].Cr, z[0].Ci);
+    ABFuture f = ab_zgemm_async(z[1].Ar, z[1].Ai, z[1].Br, z[1].Bi, z[1].Cr, z[1].Ci);
+    ab_future_wait(f);
+    ab_future_destroy(f);
+    ABMatrix Ars[] = {z[2].Ar, w.Ar, z[3].Ar}, Ais[] = {z[2].Ai, w.Ai, z[3].Ai};
+    ABMatrix Brs[] = {z[2].Br, w.Br, z[3].Br}, Bis[] = {z[2].Bi, w.Bi, z[3].Bi};
+    ABMatrix Crs[] = {z[2].Cr, w.Cr, z[3].Cr}, Cis[] = {z[2].Ci, w.Ci, z[3].Ci};
+    ABStatus sb = ab_zgemm_batched(3, Ars, Ais, Brs, Bis, Crs, Cis);
+    ABBatch batch = ab_batch_create();
+    ab_batch_zgemm(batch, z[4].Ar, z[4].Ai, z[4].Br, z[4].Bi, z[4].Cr, z[4].Ci);
+    ab_batch_zgemm(batch, z[5].Ar, z[5].Ai, z[5].Br, z[5].Bi, z[5].Cr, z[5].Ci);
+    ab_batch_commit(batch);
+    ab_batch_wait(batch);
+    ab_batch_destroy(batch);
+    ab_zgemm_ex(AB_CONJ_TRANS, AB_TRANS, z[6].Ar, z[6].Ai, z[6].Br, z[6].Bi, z[6].Cr, z[6].Ci);
+
+    static const char* const names[] = {
+        "ab_zgemm", "ab_zgemm_async", "ab_zgemm_batched[0]", "ab_zgemm_batched[2]",
+        "ab_batch_zgemm[0]", "ab_batch_zgemm[1]", "ab_zgemm_ex(C,T)", "ab_zgemm_batched[1]",
+    };
+    double err[8];
+    for (int i = 0; i < 7; i++) err[i] = xr_zgemm_error(&z[i]);
+    err[7] = sb == AB_OK ? xr_zgemm_error(&w) : INFINITY;
+    xr_verdict(names, err, 8);
+
+    for (int i = 0; i < 7; i++) xr_zgemm_free(&z[i]);
+    xr_zgemm_free(&w);
+    ab_shutdown();
+}
+
+// Row-major c = alpha a b + beta c (a M x K, b K x N).
+static void xr_dgemm_ref(int M, int N, int K, double alpha, const double* a, const double* b,
+                         double beta, double* c) {
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, M, N, K, alpha, a, K, b, N, beta, c, N);
+}
+
+static void test_xr_dgemm_paths(void) {
+    TEST("Exponent range: DGEMM entry points");
+    ab_init();
+    enum { M = 96, N = 80, K = 72, PATHS = 8 };
+    const size_t na = (size_t)M * K, nb = (size_t)K * N, nc = (size_t)M * N;
+    // Path 6 (the second batched DGEMM) multiplies 2^-73-sized data; the
+    // scaled paths take alpha = 1e30 and beta = 1e-30 with C0 of about 2^346
+    // (beta C0 and alpha A B both near 2^246).
+    const double alpha = 1e30, beta = 1e-30;
+    double *a[PATHS], *b[PATHS], *ref[PATHS];
+    ABMatrix A[PATHS], B[PATHS], C[PATHS];
+    for (int p = 0; p < PATHS; p++) {
+        const double s = p == 6 ? 0x1p-73 : XR_HI;
+        a[p] = xr_data(na, s);
+        b[p] = xr_data(nb, s);
+        bool scaled = p == 1 || p == 5;
+        ref[p] = scaled ? xr_data(nc, 0x1p346) : calloc(nc, sizeof(double));
+        A[p] = xr_matrix(M, K, a[p]);
+        B[p] = xr_matrix(K, N, b[p]);
+        C[p] = xr_matrix(M, N, scaled ? ref[p] : NULL);
+        xr_dgemm_ref(M, N, K, scaled ? alpha : 1.0, a[p], b[p], scaled ? beta : 0.0, ref[p]);
+    }
+    ab_dgemm(A[0], B[0], C[0]);
+    ab_dgemm_scaled(alpha, A[1], B[1], beta, C[1]);
+    ABFuture f = ab_dgemm_async(A[2], B[2], C[2]);
+    ab_future_wait(f);
+    ab_future_destroy(f);
+    ABBatch batch = ab_batch_create();
+    ab_batch_dgemm(batch, A[3], B[3], C[3]);
+    ab_batch_dgemm(batch, A[4], B[4], C[4]);
+    ab_batch_dgemm_scaled(batch, alpha, A[5], B[5], beta, C[5]);
+    ab_batch_commit(batch);
+    ab_batch_wait(batch);
+    ab_batch_destroy(batch);
+    ABMatrix As[] = {A[6], A[7]}, Bs[] = {B[6], B[7]}, Cs[] = {C[6], C[7]};
+    ab_dgemm_batched(2, As, Bs, Cs);
+
+    static const char* const names[PATHS] = {
+        "ab_dgemm", "ab_dgemm_scaled", "ab_dgemm_async", "ab_batch_dgemm[0]",
+        "ab_batch_dgemm[1]", "ab_batch_dgemm_scaled", "ab_dgemm_batched[0]", "ab_dgemm_batched[1]",
+    };
+    double err[PATHS];
+    for (int p = 0; p < PATHS; p++) err[p] = xr_error(C[p], NULL, ref[p], NULL, nc);
+    xr_verdict(names, err, PATHS);
+
+    for (int p = 0; p < PATHS; p++) {
+        free(a[p]); free(b[p]); free(ref[p]);
+        ab_matrix_destroy(A[p]); ab_matrix_destroy(B[p]); ab_matrix_destroy(C[p]);
+    }
+    ab_shutdown();
+}
+
+static void test_xr_syrk_herk(void) {
+    TEST("Exponent range: DSYRK and ZHERK");
+    ab_init();
+    enum { N = 96, K = 72 };
+    const size_t na = (size_t)N * K, nc = (size_t)N * N;
+    // DSYRK writes C's upper triangle; its lower triangle (here of about
+    // 2^100) must keep its values, bit for bit.
+    double *a = xr_data(na, XR_HI), *ai = xr_data(na, XR_LO), *c0 = xr_data(nc, 0x1p100);
+    double* ref = calloc(nc, sizeof *ref);
+    double *before = malloc(nc * sizeof *before), *after = malloc(nc * sizeof *after);
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans, N, N, K, 1.0, a, K, a, K, 0.0, ref, N);
+    ABMatrix A = xr_matrix(N, K, a), Ai = xr_matrix(N, K, ai), C = xr_matrix(N, N, c0);
+    ab_matrix_download(C, before, false);
+    ABStatus s = ab_dsyrk(A, C);
+    ab_matrix_download(C, after, false);
+    bool lower_kept = true;
+    double e = 0.0, r = 0.0;
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < N; j++) {
+            size_t x = (size_t)i * N + j;
+            if (j < i) {
+                lower_kept = lower_kept && !memcmp(&before[x], &after[x], sizeof after[x]);
+            } else {
+                e += (after[x] - ref[x]) * (after[x] - ref[x]);
+                r += ref[x] * ref[x];
+            }
+        }
+    double err_syrk = s == AB_OK ? sqrt(e / r) : INFINITY;
+
+    // ZHERK of A + i Ai (parts on different scales): its upper triangle.
+    double complex* z = malloc(na * sizeof *z);
+    double complex* zc = calloc(nc, sizeof *zc);
+    for (size_t i = 0; i < na; i++) z[i] = CMPLX(a[i], ai[i]);
+    cblas_zherk(CblasRowMajor, CblasUpper, CblasNoTrans, N, K, 1.0, z, K, 0.0, zc, N);
+    ABMatrix Cr = xr_matrix(N, N, NULL), Ci = xr_matrix(N, N, NULL);
+    s = ab_zherk(A, Ai, Cr, Ci);
+    double *cr = malloc(nc * sizeof *cr), *ci = malloc(nc * sizeof *ci);
+    ab_matrix_download(Cr, cr, false);
+    ab_matrix_download(Ci, ci, false);
+    e = r = 0.0;
+    for (int i = 0; i < N; i++)
+        for (int j = i; j < N; j++) {
+            size_t x = (size_t)i * N + j;
+            double dr = cr[x] - creal(zc[x]), di = ci[x] - cimag(zc[x]);
+            e += dr * dr + di * di;
+            r += creal(zc[x]) * creal(zc[x]) + cimag(zc[x]) * cimag(zc[x]);
+        }
+    double err_herk = s == AB_OK ? sqrt(e / r) : INFINITY;
+
+    static const char* const names[] = {"ab_dsyrk", "ab_zherk"};
+    const double err[] = {err_syrk, err_herk};
+    if (!lower_kept) FAIL("ab_dsyrk changed C's lower triangle");
+    else xr_verdict(names, err, 2);
+
+    ab_matrix_destroy(A); ab_matrix_destroy(Ai); ab_matrix_destroy(C);
+    ab_matrix_destroy(Cr); ab_matrix_destroy(Ci);
+    free(a); free(ai); free(c0); free(ref); free(before); free(after);
+    free(z); free(zc); free(cr); free(ci);
+    ab_shutdown();
+}
+
+static void test_xr_elementwise(void) {
+    TEST("Exponent range: add, sub, scale, copy");
+    ab_init();
+    enum { R = 64, C = 48 };
+    const size_t n = (size_t)R * C;
+    // A and B on scales 2^80 and 2^64; C = A + B and A - B, also in place.
+    double *a = xr_data(n, XR_HI), *b = xr_data(n, XR_LO);
+    double *sum = malloc(n * sizeof *sum), *diff = malloc(n * sizeof *diff);
+    double *big = malloc(n * sizeof *big), *small = malloc(n * sizeof *small);
+    for (size_t i = 0; i < n; i++) {
+        sum[i] = a[i] + b[i];
+        diff[i] = a[i] - b[i];
+        big[i] = a[i] * 1e30;
+        small[i] = b[i] * 1e-30;
+    }
+    ABMatrix A = xr_matrix(R, C, a), B = xr_matrix(R, C, b);
+    ABMatrix S = xr_matrix(R, C, NULL), D = xr_matrix(R, C, NULL);
+    ABMatrix A2 = xr_matrix(R, C, a), B2 = xr_matrix(R, C, b), Ac = xr_matrix(R, C, NULL);
+    ab_matrix_add(A, B, S);
+    ab_matrix_sub(A, B, D);
+    ab_matrix_copy(A, Ac);
+    ab_matrix_add(A2, B2, B2);        // B2 = A2 + B2: the output is the lower-scale input
+    ab_matrix_scale(1e30, A2);        // A2 = 1e30 A, above FP32's range
+    ab_matrix_scale(1e-30, A);        // then back: A = 1e-30 A ...
+    ab_matrix_scale(1e30, A);         // ... A = A again, on a new scale
+    ABMatrix Bs = xr_matrix(R, C, b);
+    ab_matrix_scale(1e-30, Bs);
+
+    static const char* const names[] = {
+        "ab_matrix_add", "ab_matrix_sub", "ab_matrix_copy", "ab_matrix_add (in place)",
+        "ab_matrix_scale(1e30)", "ab_matrix_scale(1e-30, 1e30)", "ab_matrix_scale(1e-30)",
+    };
+    const double err[] = {
+        xr_error(S, NULL, sum, NULL, n), xr_error(D, NULL, diff, NULL, n),
+        xr_error(Ac, NULL, a, NULL, n), xr_error(B2, NULL, sum, NULL, n),
+        xr_error(A2, NULL, big, NULL, n), xr_error(A, NULL, a, NULL, n),
+        xr_error(Bs, NULL, small, NULL, n),
+    };
+    xr_verdict(names, err, 7);
+
+    ab_matrix_destroy(A); ab_matrix_destroy(B); ab_matrix_destroy(S); ab_matrix_destroy(D);
+    ab_matrix_destroy(A2); ab_matrix_destroy(B2); ab_matrix_destroy(Ac); ab_matrix_destroy(Bs);
+    free(a); free(b); free(sum); free(diff); free(big); free(small);
+    ab_shutdown();
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 
@@ -2329,6 +2652,10 @@ static const TestCase TESTS[] = {
     {"test_morton_rect_pow2_grids",           test_morton_rect_pow2_grids},
     {"test_morton_mpir_panel",                test_morton_mpir_panel},
     {"test_morton_dtrsm_panel",               test_morton_dtrsm_panel},
+    {"test_xr_zgemm_paths",                   test_xr_zgemm_paths},
+    {"test_xr_dgemm_paths",                   test_xr_dgemm_paths},
+    {"test_xr_syrk_herk",                     test_xr_syrk_herk},
+    {"test_xr_elementwise",                   test_xr_elementwise},
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
 

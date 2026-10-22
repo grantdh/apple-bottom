@@ -21,9 +21,12 @@
 #import <dispatch/dispatch.h>
 #import <os/lock.h>
 #include <fenv.h>
+#include <limits.h>
+#include <math.h>
 #include <mach/mach_time.h>
 #include <pthread.h>
 #include "apple_bottom.h"
+#include "ab_internal.h"
 #include "profiling/blas_profiler.h"
 
 // =============================================================================
@@ -1128,43 +1131,133 @@ id<MTLComputePipelineState> ab_internal_sub_pipeline(void) {
 #define AB_CONVERT_PARALLEL_MIN ((size_t)1 << 20)  // elements; serial below this
 #define AB_CONVERT_CHUNKS 8
 
-static void convert_fp64_to_dd(const double* src, DDFloat* dst, size_t count) {
-    for (size_t i = 0; i < count; i++) dst[i] = fp64_to_dd(src[i]);
-}
-
-static void convert_dd_to_fp64(const DDFloat* src, double* dst, size_t count) {
-    for (size_t i = 0; i < count; i++) dst[i] = dd_to_fp64(src[i]);
-}
-
-// Runs body(offset, n) over [0, count) in contiguous ranges.
-static void for_each_chunk(size_t count, void (^body)(size_t offset, size_t n)) {
-    if (count < AB_CONVERT_PARALLEL_MIN) { body(0, count); return; }
+// Runs body(offset, n) over [0, count) units of `work` elements each, in
+// contiguous ranges, in parallel when there are enough elements, and returns
+// the merge of the ranges the bodies return.
+static ab_range_t for_each_chunk(size_t count, size_t work,
+                                 ab_range_t (^body)(size_t offset, size_t n)) {
+    if (count * work < AB_CONVERT_PARALLEL_MIN || count < 2) return body(0, count);
+    ab_range_t part_storage[AB_CONVERT_CHUNKS], *parts = part_storage;  // blocks write through it
     size_t chunk = (count + AB_CONVERT_CHUNKS - 1) / AB_CONVERT_CHUNKS;
     dispatch_apply(AB_CONVERT_CHUNKS, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t c) {
         size_t offset = c * chunk;
-        body(offset, MIN(chunk, count - offset));
+        parts[c] = offset < count ? body(offset, MIN(chunk, count - offset)) : AB_RANGE_EMPTY;
+    });
+    ab_range_t r = AB_RANGE_EMPTY;
+    for (int c = 0; c < AB_CONVERT_CHUNKS; c++) {
+        r.max = parts[c].max > r.max ? parts[c].max : r.max;
+        r.min = parts[c].min < r.min ? parts[c].min : r.min;
+    }
+    return r;
+}
+
+// src * 2^-e to DD, each value rounded once; with range, also returns the range
+// of the converted values (in the same vectorized loop; AB_RANGE_EMPTY without).
+static ab_range_t convert_fp64_to_dd(const double* __restrict src, DDFloat* __restrict dst,
+                                     size_t count, int e, bool range) {
+    uint32_t mx = 0, mn = UINT32_MAX;
+    if (e < -1023 || e > 1022) {                // 2^-e is not a normal double
+        for (size_t i = 0; i < count; i++) {
+            double v = ldexp(src[i], -e);
+            if (range) AB_RANGE_ADD(v, mx, mn);
+            dst[i] = fp64_to_dd(v);
+        }
+    } else if (e == 0) {
+        if (range) {
+            for (size_t i = 0; i < count; i++) {
+                AB_RANGE_ADD(src[i], mx, mn);
+                dst[i] = fp64_to_dd(src[i]);
+            }
+        } else {
+            for (size_t i = 0; i < count; i++) dst[i] = fp64_to_dd(src[i]);
+        }
+    } else {
+        double f = ab_pow2(-e);
+        if (range) {
+            for (size_t i = 0; i < count; i++) {
+                double v = src[i] * f;
+                AB_RANGE_ADD(v, mx, mn);
+                dst[i] = fp64_to_dd(v);
+            }
+        } else {
+            for (size_t i = 0; i < count; i++) dst[i] = fp64_to_dd(src[i] * f);
+        }
+    }
+    return range ? (ab_range_t){mx, mn} : AB_RANGE_EMPTY;
+}
+
+// src * 2^e to FP64.
+static void convert_dd_to_fp64(const DDFloat* src, double* dst, size_t count, int e) {
+    if (e == 0)
+        for (size_t i = 0; i < count; i++) dst[i] = dd_to_fp64(src[i]);
+    else
+        for (size_t i = 0; i < count; i++) dst[i] = ab_scale2(dd_to_fp64(src[i]), e);
+}
+
+static ab_range_t convert_fp64_to_dd_parallel(const double* src, DDFloat* dst, size_t count,
+                                              int e, bool range) {
+    return for_each_chunk(count, 1, ^(size_t offset, size_t n) {
+        return convert_fp64_to_dd(src + offset, dst + offset, n, e, range);
     });
 }
 
-static void convert_fp64_to_dd_parallel(const double* src, DDFloat* dst, size_t count) {
-    for_each_chunk(count, ^(size_t offset, size_t n) { convert_fp64_to_dd(src + offset, dst + offset, n); });
-}
-
-static void convert_dd_to_fp64_parallel(const DDFloat* src, double* dst, size_t count) {
-    for_each_chunk(count, ^(size_t offset, size_t n) { convert_dd_to_fp64(src + offset, dst + offset, n); });
+static void convert_dd_to_fp64_parallel(const DDFloat* src, double* dst, size_t count, int e) {
+    for_each_chunk(count, 1, ^(size_t offset, size_t n) {
+        convert_dd_to_fp64(src + offset, dst + offset, n, e);
+        return AB_RANGE_EMPTY;
+    });
 }
 
 // =============================================================================
 // Matrix Handle
 // =============================================================================
 
+// A matrix holds value / 2^exp2 in DD: one power-of-two scale per matrix,
+// which ab_matrix_upload chooses (native_scale_exp) and the GPU operations
+// carry to their results, so that data far outside FP32's exponent range
+// keeps DD precision. It is 0 for data inside AB_NATIVE_WINDOW, so such
+// data is stored and computed exactly as before the scale existed.
 struct ABMatrix_s {
     id<MTLBuffer> buffer;
     int rows, cols;
     size_t count;     // logical elements, rows * cols
     size_t capacity;  // elements the buffer holds (>= count after pool reuse)
     bool uploaded;
+    int exp2;         // power-of-two scale: element = DD * 2^exp2
 };
+
+// floor(s / q) * q for any int s and q > 0.
+static inline int floor_to(int s, int q) { return s >= 0 ? s / q * q : -((q - 1 - s) / q) * q; }
+
+// FP32 holds a DD value with its low part from about 2^-102 up, and its sums
+// to 2^AB_SUM_MAX_EXP; a matrix spanning more than the window is kept there.
+#define AB_STORE_MIN_EXP (-100)
+#define AB_STORE_MAX_EXP 120
+
+// The power-of-two scale e for a matrix whose entries have range r; it stores
+// value * 2^-e. The scales that bring every nonzero magnitude into
+// 2^±AB_NATIVE_WINDOW are [hi - W, lo + W] (none if the span exceeds 2W):
+//   - 0 if it is one of them (data inside the window, as before), or if an
+//     entry is NaN or Inf (which no scale helps);
+//   - else the multiple of 16 nearest the centre, so that real and imaginary
+//     parts of a similar range get the same scale and need no alignment
+//     before Gauss-3M's sums; else the centre itself;
+//   - a wider span stays at 0 if FP32 holds it (as before), else is centred
+//     when FP32 can hold it at all, else keeps its top at 2^AB_STORE_MAX_EXP.
+static int native_scale_exp(ab_range_t r) {
+    if (r.max == 0 || ab_range_nonfinite(r)) return 0;
+    int hi = ab_hiword_ilogb(r.max), lo = ab_hiword_ilogb(r.min);
+    int centre = floor_to(lo + hi, 2) / 2;
+    if (hi - lo <= 2 * AB_NATIVE_WINDOW) {
+        int elo = hi - AB_NATIVE_WINDOW, ehi = lo + AB_NATIVE_WINDOW;
+        if (elo <= 0 && 0 <= ehi) return 0;
+        int e = floor_to(centre + 8, 16);
+        return e >= elo && e <= ehi ? e : centre;
+    }
+    if (lo >= AB_STORE_MIN_EXP && hi <= AB_STORE_MAX_EXP) return 0;
+    if (hi - lo <= AB_STORE_MAX_EXP - AB_STORE_MIN_EXP) return centre;
+    return hi - AB_STORE_MAX_EXP;
+}
 
 // =============================================================================
 // Session Handle
@@ -1293,6 +1386,7 @@ ABMatrix ab_matrix_create(int rows, int cols) {
     m->count = (size_t)rows * cols;
     m->capacity = m->count;
     m->uploaded = false;
+    m->exp2 = 0;
 
     size_t alloc_size = m->count * sizeof(DDFloat);
     // AB_TEST_FAIL_STAGE=alloc (test-only): no buffer, as when Metal refuses one.
@@ -1323,14 +1417,21 @@ size_t ab_matrix_count(ABMatrix m) { return m ? m->count : 0; }
 // Public API: Data Transfer
 // =============================================================================
 
+// Converts and measures the data in one pass; data outside AB_NATIVE_WINDOW
+// is converted again with its power-of-two scale (native_scale_exp).
 ABStatus ab_matrix_upload(ABMatrix m, const double* data, bool parallel) {
     if (!m || !data) return AB_ERROR_INVALID_ARG;
     double t0 = get_time_ms();
     DDFloat* dst = (DDFloat*)m->buffer.contents;
-    if (parallel)
-        convert_fp64_to_dd_parallel(data, dst, m->count);
-    else
-        convert_fp64_to_dd(data, dst, m->count);
+    ab_range_t range = parallel ? convert_fp64_to_dd_parallel(data, dst, m->count, 0, true)
+                                : convert_fp64_to_dd(data, dst, m->count, 0, true);
+    m->exp2 = native_scale_exp(range);
+    if (m->exp2 != 0) {
+        if (parallel)
+            convert_fp64_to_dd_parallel(data, dst, m->count, m->exp2, false);
+        else
+            convert_fp64_to_dd(data, dst, m->count, m->exp2, false);
+    }
     m->uploaded = true;
     stats_add_upload(get_time_ms() - t0, m->count);
     return AB_OK;
@@ -1341,11 +1442,109 @@ ABStatus ab_matrix_download(ABMatrix m, double* data, bool parallel) {
     double t0 = get_time_ms();
     DDFloat* src = (DDFloat*)m->buffer.contents;
     if (parallel)
-        convert_dd_to_fp64_parallel(src, data, m->count);
+        convert_dd_to_fp64_parallel(src, data, m->count, m->exp2);
     else
-        convert_dd_to_fp64(src, data, m->count);
+        convert_dd_to_fp64(src, data, m->count, m->exp2);
     stats_add_download(get_time_ms() - t0, m->count);
     return AB_OK;
+}
+
+// Without exponents this is a flat (parallel) conversion. With row exponents,
+// each row is converted as a whole at its exponent. With column exponents
+// each element has its own: 2^-(row's + column's) is formed from the
+// column's 2^-col_exp[j] (exact) when every such exponent of the row is a
+// normal double's, else by ldexp.
+extern "C" ABStatus ab_internal_upload_scaled(ABMatrix m, const double* data, const int* row_exp,
+                                              const int* col_exp, int shift, ab_range_t* range) {
+    if (!m || !data) return AB_ERROR_INVALID_ARG;
+    double t0 = get_time_ms();
+    DDFloat* dst = (DDFloat*)m->buffer.contents;
+    const size_t rows = (size_t)m->rows, cols = (size_t)m->cols;
+    const bool want = range != NULL;
+    double* colf = NULL;
+    int cmin = 0, cmax = 0;
+    if (col_exp) {
+        if (!(colf = (double*)malloc(cols * sizeof *colf))) return AB_ERROR_ALLOC_FAILED;
+        cmin = cmax = col_exp[0];
+        for (size_t j = 0; j < cols; j++) {
+            cmin = MIN(cmin, col_exp[j]);
+            cmax = MAX(cmax, col_exp[j]);
+            colf[j] = col_exp[j] >= -1023 && col_exp[j] <= 1022 ? ab_pow2(-col_exp[j]) : 0.0;
+        }
+    }
+    ab_range_t r;
+    if (!row_exp && !col_exp) {
+        r = convert_fp64_to_dd_parallel(data, dst, m->count, shift, want);
+    } else {
+        r = for_each_chunk(rows, cols, ^(size_t r0, size_t nr) {
+            ab_range_t part = AB_RANGE_EMPTY;
+            for (size_t i = r0; i < r0 + nr; i++) {
+                const double* x = data + i * cols;
+                DDFloat* d = dst + i * cols;
+                int ei = (row_exp ? row_exp[i] : 0) + shift;
+                ab_range_t ri;
+                if (!col_exp) {
+                    ri = convert_fp64_to_dd(x, d, cols, ei, want);
+                } else {
+                    uint32_t mx = 0, mn = UINT32_MAX;
+                    bool exact = ei >= -1023 && ei <= 1022 && cmin >= -1023 && cmax <= 1022 &&
+                                 ei + cmin >= -1023 && ei + cmax <= 1022;
+                    double rf = exact ? ab_pow2(-ei) : 0.0;
+                    for (size_t j = 0; j < cols; j++) {
+                        double v = exact ? x[j] * (rf * colf[j]) : ldexp(x[j], -(ei + col_exp[j]));
+                        if (want) AB_RANGE_ADD(v, mx, mn);
+                        d[j] = fp64_to_dd(v);
+                    }
+                    ri = (ab_range_t){mx, mn};
+                }
+                part.max = ri.max > part.max ? ri.max : part.max;
+                part.min = ri.min < part.min ? ri.min : part.min;
+            }
+            return part;
+        });
+    }
+    free(colf);
+    if (range) *range = r;
+    m->exp2 = 0;
+    m->uploaded = true;
+    stats_add_upload(get_time_ms() - t0, m->count);
+    return AB_OK;
+}
+
+// dd_matrix_copy (dst = src) and dd_matrix_scale (X *= f), each in an encoder
+// of its own in cmdBuf.
+static void encode_copy(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx, ABMatrix src,
+                        ABMatrix dst) {
+    id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+    [encoder setComputePipelineState:ctx.matCopyPipeline];
+    [encoder setBuffer:src->buffer offset:0 atIndex:0];
+    [encoder setBuffer:dst->buffer offset:0 atIndex:1];
+    uint32_t count = (uint32_t)src->count;
+    [encoder setBytes:&count length:sizeof(count) atIndex:2];
+    [encoder dispatchThreads:MTLSizeMake(src->count, 1, 1) threadsPerThreadgroup:MTLSizeMake(MIN((size_t)256, src->count), 1, 1)];
+    [encoder endEncoding];
+}
+
+static void encode_scale(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx, ABMatrix X, DDFloat f) {
+    id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+    [encoder setComputePipelineState:ctx.scalePipeline];
+    [encoder setBuffer:X->buffer offset:0 atIndex:0];
+    [encoder setBytes:&f length:sizeof(f) atIndex:1];
+    uint32_t count = (uint32_t)X->count;
+    [encoder setBytes:&count length:sizeof(count) atIndex:2];
+    [encoder dispatchThreads:MTLSizeMake(X->count, 1, 1) threadsPerThreadgroup:MTLSizeMake(MIN((size_t)256, X->count), 1, 1)];
+    [encoder endEncoding];
+}
+
+// Encodes X's DD values *= 2^d, exactly, in passes by powers of two FP32
+// holds; a value leaving FP32's range overflows or flushes as it would in
+// one step.
+static void encode_rescale(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx, ABMatrix X, int d) {
+    while (d != 0) {
+        int step = d < -126 ? -126 : d > 127 ? 127 : d;
+        encode_scale(cmdBuf, ctx, X, (DDFloat){ldexpf(1.0f, step), 0.0f});
+        d -= step;
+    }
 }
 
 ABStatus ab_matrix_zero(ABMatrix m) {
@@ -1363,6 +1562,7 @@ ABStatus ab_matrix_zero(ABMatrix m) {
     [encoder endEncoding];
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
+    m->exp2 = 0;
     return AB_OK;
 }
 
@@ -1373,17 +1573,72 @@ ABStatus ab_matrix_copy(ABMatrix src, ABMatrix dst) {
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return AB_ERROR_NO_DEVICE;
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
-    [encoder setComputePipelineState:ctx.matCopyPipeline];
-    [encoder setBuffer:src->buffer offset:0 atIndex:0];
-    [encoder setBuffer:dst->buffer offset:0 atIndex:1];
-    uint32_t count = (uint32_t)src->count;
-    [encoder setBytes:&count length:sizeof(count) atIndex:2];
-    [encoder dispatchThreads:MTLSizeMake(src->count, 1, 1) threadsPerThreadgroup:MTLSizeMake(MIN((size_t)256, src->count), 1, 1)];
-    [encoder endEncoding];
+    encode_copy(cmdBuf, ctx, src, dst);
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
+    dst->exp2 = src->exp2;
     return AB_OK;
+}
+
+// =============================================================================
+// Power-of-Two Scales of GPU Results
+// =============================================================================
+// Data inside AB_NATIVE_WINDOW has scale 0, so for it these keep every
+// operation exactly as it was; they matter only for data that upload scaled.
+
+// The scalars the kernel multiplies by, and the result's scale, for
+// C = alpha*A*B + beta*C: alpha and beta themselves, and A's + B's scale, when
+// A*B and C have the same scale and alpha and beta are inside the window (as
+// before). Otherwise the result takes the scale of the larger of the two
+// terms and each scalar absorbs its term's difference from it, so both stay
+// in FP32's range; a term below FP32's range relative to the other flushes,
+// as it would round away in FP64.
+static int scaled_gemm_scalars(ABMatrix A, ABMatrix B, ABMatrix C, double* alpha, double* beta) {
+    int ep = A->exp2 + B->exp2, ec = C->exp2;
+    if (ep == ec && ab_scalar_exp(*alpha, AB_NATIVE_WINDOW) == 0 &&
+        ab_scalar_exp(*beta, AB_NATIVE_WINDOW) == 0)
+        return ep;
+    bool a = *alpha != 0.0, b = *beta != 0.0;
+    int ta = ep + (a && isfinite(*alpha) ? ilogb(*alpha) : 0);
+    int tb = ec + (b && isfinite(*beta) ? ilogb(*beta) : 0);
+    int e = a && b ? MAX(ta, tb) : a ? ta : b ? tb : ep;
+    *alpha = ab_scale2(*alpha, ep - e);
+    *beta = ab_scale2(*beta, ec - e);
+    return e;
+}
+
+// Gives *X and *Y one scale for an elementwise combination: if they differ,
+// encodes into cmdBuf a copy of the one with the smaller scale, multiplied by
+// 2^(its scale - the other's), and points *X or *Y at it; the caller destroys
+// *temp once cmdBuf has completed. Returns the common scale, or INT_MIN if
+// the copy could not be allocated.
+static int encode_align_pair(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
+                             ABMatrix* X, ABMatrix* Y, ABMatrix* temp) {
+    *temp = NULL;
+    if ((*X)->exp2 == (*Y)->exp2) return (*X)->exp2;
+    ABMatrix* low = (*X)->exp2 < (*Y)->exp2 ? X : Y;
+    int high = MAX((*X)->exp2, (*Y)->exp2);
+    ABMatrix t = ab_matrix_create((*low)->rows, (*low)->cols);
+    if (!t) return INT_MIN;
+    encode_copy(cmdBuf, ctx, *low, t);
+    encode_rescale(cmdBuf, ctx, t, (*low)->exp2 - high);
+    t->exp2 = high;
+    t->uploaded = true;
+    *low = t;
+    *temp = t;
+    return high;
+}
+
+// The real and imaginary parts of A, and of B, on one scale each for
+// Gauss-3M's sums (encode_align_pair); returns the scale of the products, or
+// INT_MIN if a copy could not be allocated. The caller destroys temps[0] and
+// temps[1] (NULL if unused) once cmdBuf has completed.
+static int encode_align_zgemm(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
+                              ABMatrix* Ar, ABMatrix* Ai, ABMatrix* Br, ABMatrix* Bi,
+                              ABMatrix temps[2]) {
+    int ea = encode_align_pair(cmdBuf, ctx, Ar, Ai, &temps[0]);
+    int eb = encode_align_pair(cmdBuf, ctx, Br, Bi, &temps[1]);
+    return ea == INT_MIN || eb == INT_MIN ? INT_MIN : ea + eb;
 }
 
 // =============================================================================
@@ -1544,6 +1799,7 @@ ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C) {
     [encoder endEncoding];
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
+    C->exp2 = A->exp2 + B->exp2;
     if (cmdBuf.status == MTLCommandBufferStatusError) return AB_ERROR_KERNEL_FAILED;
 
     stats_add_kernel(get_time_ms() - t0);
@@ -1558,6 +1814,7 @@ ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMa
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return AB_ERROR_NO_DEVICE;
 
+    int exp2 = scaled_gemm_scalars(A, B, C, &alpha, &beta);
     double t0 = get_time_ms();
 
     uint64_t encode_ns = host_ns();
@@ -1565,10 +1822,29 @@ ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMa
     id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
     encode_dgemm_scaled_dispatch(encoder, ctx, alpha, A, B, beta, C);
     [encoder endEncoding];
-    if (!commit_and_wait(cmdBuf, encode_ns)) return AB_ERROR_KERNEL_FAILED;
+    bool completed = commit_and_wait(cmdBuf, encode_ns);
+    C->exp2 = exp2;
+    if (!completed) return AB_ERROR_KERNEL_FAILED;
 
     stats_add_kernel(get_time_ms() - t0);
     stats_add_dgemm();
+    return AB_OK;
+}
+
+// C = A + B or A - B elementwise (pipeline), on one power-of-two scale.
+static ABStatus elementwise_aligned(id<MTLComputePipelineState> pipeline, ABContextImpl* ctx,
+                                    ABMatrix A, ABMatrix B, ABMatrix C) {
+    id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
+    ABMatrix a = A, b = B, temp;
+    int e = encode_align_pair(cmdBuf, ctx, &a, &b, &temp);
+    if (e == INT_MIN) return AB_ERROR_ALLOC_FAILED;
+    id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+    encode_elemwise_dispatch(encoder, pipeline, a, b, C);
+    [encoder endEncoding];
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+    ab_matrix_destroy(temp);
+    C->exp2 = e;
     return AB_OK;
 }
 
@@ -1578,20 +1854,7 @@ ABStatus ab_matrix_add(ABMatrix A, ABMatrix B, ABMatrix C) {
     if (A->count != B->count || A->count != C->count) return AB_ERROR_DIMENSION_MISMATCH;
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return AB_ERROR_NO_DEVICE;
-    
-    id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
-    [encoder setComputePipelineState:ctx.addPipeline];
-    [encoder setBuffer:A->buffer offset:0 atIndex:0];
-    [encoder setBuffer:B->buffer offset:0 atIndex:1];
-    [encoder setBuffer:C->buffer offset:0 atIndex:2];
-    uint32_t count = (uint32_t)A->count;
-    [encoder setBytes:&count length:sizeof(count) atIndex:3];
-    [encoder dispatchThreads:MTLSizeMake(A->count, 1, 1) threadsPerThreadgroup:MTLSizeMake(MIN((size_t)256, A->count), 1, 1)];
-    [encoder endEncoding];
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
-    return AB_OK;
+    return elementwise_aligned(ctx.addPipeline, ctx, A, B, C);
 }
 
 ABStatus ab_matrix_sub(ABMatrix A, ABMatrix B, ABMatrix C) {
@@ -1600,38 +1863,21 @@ ABStatus ab_matrix_sub(ABMatrix A, ABMatrix B, ABMatrix C) {
     if (A->count != B->count || A->count != C->count) return AB_ERROR_DIMENSION_MISMATCH;
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return AB_ERROR_NO_DEVICE;
-    
-    id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
-    [encoder setComputePipelineState:ctx.subPipeline];
-    [encoder setBuffer:A->buffer offset:0 atIndex:0];
-    [encoder setBuffer:B->buffer offset:0 atIndex:1];
-    [encoder setBuffer:C->buffer offset:0 atIndex:2];
-    uint32_t count = (uint32_t)A->count;
-    [encoder setBytes:&count length:sizeof(count) atIndex:3];
-    [encoder dispatchThreads:MTLSizeMake(A->count, 1, 1) threadsPerThreadgroup:MTLSizeMake(MIN((size_t)256, A->count), 1, 1)];
-    [encoder endEncoding];
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
-    return AB_OK;
+    return elementwise_aligned(ctx.subPipeline, ctx, A, B, C);
 }
 
+// An alpha outside AB_NATIVE_WINDOW goes into A's power-of-two scale, so that
+// the DD multiplier stays in FP32's range.
 ABStatus ab_matrix_scale(double alpha, ABMatrix A) {
     ABAutoreleaseScope pool;
     if (!A) return AB_ERROR_INVALID_ARG;
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return AB_ERROR_NO_DEVICE;
 
-    DDFloat alpha_dd = fp64_to_dd(alpha);
+    int e = ab_scalar_exp(alpha, AB_NATIVE_WINDOW);
+    A->exp2 += e;
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
-    [encoder setComputePipelineState:ctx.scalePipeline];
-    [encoder setBuffer:A->buffer offset:0 atIndex:0];
-    [encoder setBytes:&alpha_dd length:sizeof(alpha_dd) atIndex:1];
-    uint32_t count = (uint32_t)A->count;
-    [encoder setBytes:&count length:sizeof(count) atIndex:2];
-    [encoder dispatchThreads:MTLSizeMake(A->count, 1, 1) threadsPerThreadgroup:MTLSizeMake(MIN((size_t)256, A->count), 1, 1)];
-    [encoder endEncoding];
+    encode_scale(cmdBuf, ctx, A, fp64_to_dd(ab_scale2(alpha, -e)));
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
     return AB_OK;
@@ -1734,6 +1980,8 @@ ABStatus ab_zgemm_ex(
 
         A_work_r->uploaded = true;
         A_work_i->uploaded = true;
+        A_work_r->exp2 = Ar->exp2;
+        A_work_i->exp2 = Ai->exp2;
     }
 
     // Transpose B if needed
@@ -1792,6 +2040,8 @@ ABStatus ab_zgemm_ex(
 
         B_work_r->uploaded = true;
         B_work_i->uploaded = true;
+        B_work_r->exp2 = Br->exp2;
+        B_work_i->exp2 = Bi->exp2;
     }
 
     // Call internal ZGEMM with (possibly transposed) matrices
@@ -1821,6 +2071,9 @@ cleanup:
 //   Enc 3: Ci=Ci-T1, Cr=T1-T2                        (barrier ensures T1,T2,Ci ready)
 //   Enc 4: Ci=Ci-T2                                   (barrier ensures Ci from enc3)
 // This eliminates ~350μs of command buffer commit+wait overhead per ZGEMM call.
+// Real and imaginary parts with different power-of-two scales (upload scales
+// each on its own) are first brought to one (encode_align_pair); C's two
+// parts take the sum of A's and B's.
 //
 // NOTE: This is the internal implementation - ab_zgemm is now a wrapper
 static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci) {
@@ -1848,6 +2101,15 @@ static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatri
 
     uint64_t encode_ns = host_ns();
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
+
+    ABMatrix aligned[2];
+    int e = encode_align_zgemm(cmdBuf, ctx, &Ar, &Ai, &Br, &Bi, aligned);
+    if (e == INT_MIN) {
+        ab_matrix_destroy(aligned[0]); ab_matrix_destroy(aligned[1]);
+        ab_matrix_destroy(T1); ab_matrix_destroy(T2);
+        ab_matrix_destroy(T3); ab_matrix_destroy(T4);
+        return AB_ERROR_ALLOC_FAILED;
+    }
 
     // --- Encoder 1: element-wise additions (T3 = Ar + Ai, T4 = Br + Bi) ---
     {
@@ -1879,6 +2141,7 @@ static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatri
     }
 
     bool completed = commit_and_wait(cmdBuf, encode_ns);
+    Cr->exp2 = Ci->exp2 = e;
 
     stats_add_kernel(get_time_ms() - t0);
     stats_add_zgemm();
@@ -1888,6 +2151,8 @@ static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatri
     ab_matrix_destroy(T2);
     ab_matrix_destroy(T3);
     ab_matrix_destroy(T4);
+    ab_matrix_destroy(aligned[0]);
+    ab_matrix_destroy(aligned[1]);
     t_kernel_split.temps_ns += host_ns() - temps_ns;
 
     if (!completed) {
@@ -1920,6 +2185,17 @@ static ABStatus ab_zgemm_internal_async(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, A
 
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
 
+    ABMatrix aligned[2];
+    int e = encode_align_zgemm(cmdBuf, ctx, &Ar, &Ai, &Br, &Bi, aligned);
+    if (e == INT_MIN) {
+        ab_matrix_destroy(aligned[0]); ab_matrix_destroy(aligned[1]);
+        ab_matrix_destroy(T1); ab_matrix_destroy(T2);
+        ab_matrix_destroy(T3); ab_matrix_destroy(T4);
+        return AB_ERROR_ALLOC_FAILED;
+    }
+    ABMatrix alignA = aligned[0], alignB = aligned[1];   // blocks capture no arrays
+    Cr->exp2 = Ci->exp2 = e;
+
     // Same 4-encoder structure as sync version
     {
         id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
@@ -1946,6 +2222,8 @@ static ABStatus ab_zgemm_internal_async(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, A
         ab_matrix_destroy(T2);
         ab_matrix_destroy(T3);
         ab_matrix_destroy(T4);
+        ab_matrix_destroy(alignA);
+        ab_matrix_destroy(alignB);
     }];
 
     [cmdBuf commit];
@@ -1971,6 +2249,9 @@ ABStatus ab_dsyrk(ABMatrix A, ABMatrix C) {
     double t0 = get_time_ms();
     
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
+    // The kernel writes C's upper triangle only; the rest is brought to the
+    // result's scale first, so that it keeps its values.
+    encode_rescale(cmdBuf, ctx, C, C->exp2 - 2 * A->exp2);
     id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
     [encoder setComputePipelineState:ctx.dsyrkPipeline];
     [encoder setBuffer:A->buffer offset:0 atIndex:0];
@@ -1984,6 +2265,7 @@ ABStatus ab_dsyrk(ABMatrix A, ABMatrix C) {
     [encoder endEncoding];
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
+    C->exp2 = 2 * A->exp2;
 
     stats_add_kernel(get_time_ms() - t0);
     return AB_OK;
@@ -2475,6 +2757,8 @@ ABStatus ab_zherk(ABMatrix Ar, ABMatrix Ai, ABMatrix Cr, ABMatrix Ci) {
 
         ArT->uploaded = true;
         AiT->uploaded = true;
+        ArT->exp2 = Ar->exp2;
+        AiT->exp2 = Ai->exp2;
     }
 
     // Ci = Ai × Arᵀ
@@ -2523,6 +2807,7 @@ ABStatus ab_dgemm_batched(
         id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
         encode_dgemm_dispatch(encoder, ctx, As[i], Bs[i], Cs[i]);
         [encoder endEncoding];
+        Cs[i]->exp2 = As[i]->exp2 + Bs[i]->exp2;
     }
 
     [cmdBuf commit];
@@ -2579,8 +2864,13 @@ ABStatus ab_zgemm_batched(
 
     double t0 = get_time_ms();
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
+    // Copies that bring real and imaginary parts to one scale, destroyed at
+    // the end. After an error, the work encoded so far still completes first.
+    ABMatrix* aligned = (ABMatrix*)calloc(2 * (size_t)batch_count, sizeof *aligned);
+    ABStatus status = aligned ? AB_OK : AB_ERROR_ALLOC_FAILED;
+    int encoded = 0;
 
-    for (int i = 0; i < batch_count; i++) {
+    for (int i = 0; i < batch_count && status == AB_OK; i++) {
         int M = Ars[i]->rows, N = Brs[i]->cols, K = Ars[i]->cols;
 
         // Reallocate temps if dimensions changed (rare for QE workloads)
@@ -2599,23 +2889,30 @@ ABStatus ab_zgemm_batched(
             T3 = ab_matrix_create(M, K);
             T4 = ab_matrix_create(K, N);
             if (!T1 || !T2 || !T3 || !T4) {
-                ab_matrix_destroy(T1); ab_matrix_destroy(T2);
-                ab_matrix_destroy(T3); ab_matrix_destroy(T4);
-                return AB_ERROR_ALLOC_FAILED;
+                status = AB_ERROR_ALLOC_FAILED;
+                break;
             }
             cur_M = M; cur_N = N; cur_K = K;
         }
 
+        ABMatrix Ar = Ars[i], Ai = Ais[i], Br = Brs[i], Bi = Bis[i];
+        int e = encode_align_zgemm(cmdBuf, ctx, &Ar, &Ai, &Br, &Bi, &aligned[2 * i]);
+        if (e == INT_MIN) {
+            status = AB_ERROR_ALLOC_FAILED;
+            break;
+        }
+        Crs[i]->exp2 = Cis[i]->exp2 = e;
+
         // Encoder 1: element-wise additions (T3 = Ar + Ai, T4 = Br + Bi)
         {
             id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-            encode_elemwise_dispatch(enc, ctx.addPipeline, Ars[i], Ais[i], T3);
-            encode_elemwise_dispatch(enc, ctx.addPipeline, Brs[i], Bis[i], T4);
+            encode_elemwise_dispatch(enc, ctx.addPipeline, Ar, Ai, T3);
+            encode_elemwise_dispatch(enc, ctx.addPipeline, Br, Bi, T4);
             [enc endEncoding];
         }
 
         // Encoder 2: three DGEMMs (T1=Ar*Br, T2=Ai*Bi, Ci=T3*T4)
-        encode_gauss3m_products(cmdBuf, ctx, Ars[i], Ais[i], Brs[i], Bis[i], T1, T2, T3, T4, Cis[i]);
+        encode_gauss3m_products(cmdBuf, ctx, Ar, Ai, Br, Bi, T1, T2, T3, T4, Cis[i]);
 
         // Encoder 3: Ci = Ci - T1, Cr = T1 - T2 (different outputs → parallel-safe)
         {
@@ -2633,21 +2930,24 @@ ABStatus ab_zgemm_batched(
         }
         // Encoder boundary here guarantees T1-T4 are fully consumed before
         // the next iteration's Encoder 1 overwrites T3/T4.
+        encoded++;
     }
 
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
 
     stats_add_kernel(get_time_ms() - t0);
-    for (int i = 0; i < batch_count; i++) stats_add_zgemm();
+    for (int i = 0; i < encoded; i++) stats_add_zgemm();
 
     ab_matrix_destroy(T1); ab_matrix_destroy(T2);
     ab_matrix_destroy(T3); ab_matrix_destroy(T4);
+    for (int i = 0; aligned && i < 2 * batch_count; i++) ab_matrix_destroy(aligned[i]);
+    free(aligned);
 
-    if (cmdBuf.status == MTLCommandBufferStatusError) {
+    if (status == AB_OK && cmdBuf.status == MTLCommandBufferStatusError) {
         return AB_ERROR_KERNEL_FAILED;
     }
-    return AB_OK;
+    return status;
 }
 
 // =============================================================================
@@ -2694,6 +2994,7 @@ ABMatrix ab_pool_get_matrix(ABMemoryPool pool, int rows, int cols) {
             if (m->rows == rows && m->cols == cols) {
                 pool->entries[i].in_use = true;
                 m->uploaded = false;
+                m->exp2 = 0;
                 return m;
             }
         }
@@ -2709,6 +3010,7 @@ ABMatrix ab_pool_get_matrix(ABMemoryPool pool, int rows, int cols) {
                 m->cols = cols;
                 m->count = needed;  // upload/download/elementwise ops use count
                 m->uploaded = false;
+                m->exp2 = 0;
                 return m;
             }
         }
@@ -2774,6 +3076,7 @@ ABFuture ab_dgemm_async(ABMatrix A, ABMatrix B, ABMatrix C) {
 
     [cmdBuf commit];
     C->uploaded = true;
+    C->exp2 = A->exp2 + B->exp2;
 
     ABFuture f = create_future_with_buffer(cmdBuf);
     return f;
@@ -2893,6 +3196,7 @@ ABStatus ab_batch_dgemm(ABBatch batch, ABMatrix A, ABMatrix B, ABMatrix C) {
         return AB_ERROR_DIMENSION_MISMATCH;
 
     encode_dgemm_dispatch(batch->currentEncoder, batch->ctx, A, B, C);
+    C->exp2 = A->exp2 + B->exp2;
     batch->op_count++;
     stats_add_dgemm();
     return AB_OK;
@@ -2904,7 +3208,9 @@ ABStatus ab_batch_dgemm_scaled(ABBatch batch, double alpha, ABMatrix A, ABMatrix
     if (A->cols != B->rows || A->rows != C->rows || B->cols != C->cols)
         return AB_ERROR_DIMENSION_MISMATCH;
 
+    int exp2 = scaled_gemm_scalars(A, B, C, &alpha, &beta);
     encode_dgemm_scaled_dispatch(batch->currentEncoder, batch->ctx, alpha, A, B, beta, C);
+    C->exp2 = exp2;
     batch->op_count++;
     stats_add_dgemm();
     return AB_OK;
@@ -2929,6 +3235,24 @@ ABStatus ab_batch_zgemm(ABBatch batch, ABMatrix Ar, ABMatrix Ai, ABMatrix Br, AB
         ab_matrix_destroy(T3); ab_matrix_destroy(T4);
         return AB_ERROR_ALLOC_FAILED;
     }
+
+    // Real and imaginary parts on different power-of-two scales are brought
+    // to one first, in encoders of their own (encode_align_zgemm).
+    ABMatrix aligned[2] = {NULL, NULL};
+    int e = Ar->exp2 + Br->exp2;
+    if (Ar->exp2 != Ai->exp2 || Br->exp2 != Bi->exp2) {
+        [batch->currentEncoder endEncoding];
+        e = encode_align_zgemm(batch->cmdBuffer, ctx, &Ar, &Ai, &Br, &Bi, aligned);
+        batch->currentEncoder = [batch->cmdBuffer computeCommandEncoder];
+        if (e == INT_MIN) {
+            ab_matrix_destroy(aligned[0]); ab_matrix_destroy(aligned[1]);
+            ab_matrix_destroy(T1); ab_matrix_destroy(T2);
+            ab_matrix_destroy(T3); ab_matrix_destroy(T4);
+            return AB_ERROR_ALLOC_FAILED;
+        }
+    }
+    ABMatrix alignA = aligned[0], alignB = aligned[1];   // blocks capture no arrays
+    Cr->exp2 = Ci->exp2 = e;
 
     // Enc 1: T3 = Ar + Ai, T4 = Br + Bi
     encode_elemwise_dispatch(batch->currentEncoder, ctx.addPipeline, Ar, Ai, T3);
@@ -2955,6 +3279,8 @@ ABStatus ab_batch_zgemm(ABBatch batch, ABMatrix Ar, ABMatrix Ai, ABMatrix Br, AB
         ab_matrix_destroy(T2);
         ab_matrix_destroy(T3);
         ab_matrix_destroy(T4);
+        ab_matrix_destroy(alignA);
+        ab_matrix_destroy(alignB);
     }];
 
     batch->op_count++;

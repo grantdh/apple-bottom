@@ -395,10 +395,10 @@ apple-bottom is suitable for production use in:
 
 | Condition | Status | Behavior |
 |-----------|--------|----------|
-| **Exponents outside [10⁻³⁰, 10³⁰]** | ❌ Undefined | FP32 overflow/underflow |
+| **Exponents far from 1** | ✓ Scaled by powers of two | BLAS ABI: rows/columns rescaled, Accelerate where no scaling suffices; native: one scale per matrix, spans up to 2⁷⁸ ([LIMITATIONS.md](LIMITATIONS.md#exponent-range)) |
 | **Condition number κ > 10¹²** | ❌ Insufficient precision | Error becomes `κ·N·2⁻⁴⁸ > 10⁻³` |
-| **Denormals (< 10⁻³⁸)** | ⚠ Flushed to zero | Document if critical |
-| **NaN, ±Infinity** | ⚠ Propagates | Document behavior |
+| **FP32 subnormals (< 2⁻¹²⁶ after scaling)** | ⚠ Flushed to zero by the GPU | The scaling keeps data clear of them |
+| **NaN, ±Infinity** | ⚠ BLAS ABI: Accelerate; native: propagates | Native: DD's `∞ − ∞` gives NaN |
 
 ### 5.3 Algorithmic Limitations
 

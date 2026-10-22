@@ -85,10 +85,10 @@ $(BUILD):
 # Library
 # =============================================================================
 
-$(BUILD)/apple_bottom.o: $(SRC)/apple_bottom.m $(INCLUDE)/apple_bottom.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
+$(BUILD)/apple_bottom.o: $(SRC)/apple_bottom.m $(SRC)/ab_internal.h $(INCLUDE)/apple_bottom.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
 	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $@
 
-$(BUILD)/blas_wrapper.o: $(SRC)/blas_wrapper.c $(SRC)/blas_trans.h $(SRC)/dispatch.h $(INCLUDE)/apple_bottom.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
+$(BUILD)/blas_wrapper.o: $(SRC)/blas_wrapper.c $(SRC)/ab_internal.h $(SRC)/blas_trans.h $(SRC)/dispatch.h $(INCLUDE)/apple_bottom.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $@
 
 $(BUILD)/fortran_bridge.o: $(SRC)/fortran_bridge.c $(INCLUDE)/apple_bottom.h | $(BUILD)

@@ -83,6 +83,42 @@ All notable changes to this project will be documented in this file.
   200×40×18277). The rule is `use_narrow_tiles` in `src/apple_bottom.m`.
   Results are bitwise unchanged. `tests/test_precision.c` gains a 64×64 scaled case and a
   tall-skinny ZGEMM case (16 tests), so every kernel stays covered.
+- `tests/test_blas_abi` takes test names (`./build/test_blas_abi
+  test_exponent_range`) to run only those suites.
+
+### Fixed
+- **Data outside FP32's exponent range no longer gives silently wrong GPU
+  results.** DD shares FP32's exponent range: products below about 2⁻⁷⁸
+  lost their low part, values below 2⁻¹²⁶ flushed to zero, and sums
+  overflowed at 2¹²⁸, all without a warning. Values of 1e±25 gave relative
+  errors near 1 or NaN, and an Inf in A gave NaN where cblas gives Inf.
+  - **BLAS ABI** (`dgemm_`, `zgemm_`, `ab_*gemm_blas`):
+    - Rows of op(A) and columns of op(B) whose largest entry lies outside
+      2^±20 are scaled by exact powers of two as they are converted, their
+      largest entry to about 2³⁰, which leaves room for both the products
+      of smaller entries and the sums; C is scaled back. A DGEMM alpha or
+      beta outside 2^±20 joins C's scale.
+    - A guard certifies from the scaled data that no sum can overflow and
+      every product keeps DD precision. Calls it cannot certify run on
+      Accelerate, as do calls with NaN or Inf in A or B (or in C for DGEMM
+      with beta ≠ 0). They are counted as a new fallback reason, `range`;
+      the `AB_REPORT` fallback line ends `other=… range=…`.
+  - **Native `ABMatrix` API**: a matrix carries one power-of-two scale,
+    which `ab_matrix_upload` chooses. It is 0 inside 2^±39, and otherwise
+    centres entries that span up to 2⁷⁸. The GPU operations carry it and
+    `ab_matrix_download` removes it; `ab_dsyrk` keeps the lower triangle of
+    C it does not write. The device-buffer API (`ab_dev_dgemm`,
+    `ab_dev_zgemm`) converts through `ABMatrix` handles and behaves the same.
+  - Data inside those windows computes exactly as before: the golden bits
+    of 1.4.0 hold. The new exponent-range suite of `tests/test_blas_abi.c`
+    covers dgemm_, zgemm_ and the native GEMMs with 1e±25 data, row and
+    column scales from 2⁻¹²⁰ to 2¹²⁰, wide spans, Inf, alpha outside FP32's
+    range, and bit-for-bit power-of-two scaling. Four new tests in
+    `tests/test_correctness.c` run every native operation that carries a
+    scale (the ZGEMM, DGEMM, batch and async entry points, `ab_zgemm_ex`,
+    `ab_dsyrk`, `ab_zherk`, add, sub, scale, copy) on data near 2^±73
+    whose real and imaginary parts get different scales. Limits:
+    `docs/vv/LIMITATIONS.md`, "Exponent range".
 
 ## [1.4.0] - Unreleased
 

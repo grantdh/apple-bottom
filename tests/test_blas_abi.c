@@ -43,6 +43,8 @@
 // The long-K, determinism, concurrency, memory and fork-exit suites guard
 // properties a faster GPU path must keep (Kind, and the gen_* function of
 // each); the bit-for-bit results themselves are test_qe_golden.c's job.
+// The exponent-range suite gives the GEMMs data far outside FP32's exponent
+// range, which DD shares (gen_range).
 //
 // Known failures live in the XFAIL table below, tagged with audit IDs. An
 // XFAIL does not fail the run; an XFAIL case that passes (XPASS), an XFAIL
@@ -125,11 +127,53 @@ typedef enum {
     KIND_REPEAT,        // bitwise the same when repeated, also after other GPU calls
     KIND_THREADS,       // N_THREADS threads at once, each bitwise its single-threaded result
     KIND_MEMORY,        // footprint growth over MEM_CALLS GPU calls
+    KIND_RANGE,         // one call on data outside FP32's exponent range (RangeData)
 } Kind;
 
 static const char *const KIND_TAG[] = {
     [KIND_CALL] = "call", [KIND_LONG_K] = "long-k", [KIND_REPEAT] = "repeat",
-    [KIND_THREADS] = "threads", [KIND_MEMORY] = "memory",
+    [KIND_THREADS] = "threads", [KIND_MEMORY] = "memory", [KIND_RANGE] = "range",
+};
+
+// KIND_RANGE data. Every entry first becomes a magnitude in [0.5, 1) with a
+// random sign (real and imaginary parts alike), so that the pattern alone
+// sets how far apart the magnitudes are; then op(A)_ik, op(B)_kj and C0_ij
+// are multiplied by the pattern's factors (range_factors). The native-API
+// patterns act on row-major A (M x K), B (K x N) and C (M x N).
+typedef enum {
+    RANGE_TINY,         // every entry x 1e-25, C0 x 1e-50: the products underflow FP32
+    RANGE_HUGE,         // every entry x 1e25, C0 x 1e50: the products overflow FP32
+    RANGE_ROWCOL,       // row i of op(A) x 2^e_i, column j of op(B) x 2^f_j, C0_ij x 2^(e_i+f_j),
+                        // e and f spread evenly over [-120, 120]
+    RANGE_ALIGNED,      // op(A)_ik and op(B)_kj x 2^70 for even k and 2^-70 for odd k,
+                        // C0 x 2^140: the even-k products dominate
+    RANGE_MISALIGNED,   // op(A)_ik x 2^70 for even k and 2^-70 for odd k, op(B)_kj the
+                        // reverse: every product is about 1, but scaling op(A)'s rows and
+                        // op(B)'s columns to 1 would leave them all at 2^-140
+    RANGE_INF,          // op(A)_00 = +Inf: C as cblas gives it (Inf, not DD's Inf - Inf = NaN)
+    RANGE_ALPHA_TINY,   // alpha = 1e-45, below FP32's smallest normal; beta = 0
+    RANGE_ALPHA_HUGE,   // alpha = 1e45, above FP32's largest; beta = 0
+    RANGE_EXACT,        // row i of op(A) x 2^e_i, column j of op(B) x 2^f_j, e and f in
+                        // {-100, 0, 100}: C must be 2^(e_i+f_j) times C of the unscaled
+                        // data, bit for bit
+    RANGE_ROWS_LOW,     // native: row i of A x 2^e_i, e_i spread over [-100, -60], C0 alike
+    RANGE_COLS_HIGH,    // native: column j of B x 2^f_j, f_j over [60, 100], A x 2^30, C0 alike
+    RANGE_UNIFORM_EXACT,// native: A and B x 2^90, C0 x 2^180: C must be 2^180 times C of the
+                        // unscaled data, bit for bit
+    RANGE_C_ZERO_ROW,   // row 0 of op(A) zero, row 0 of C0 x 2^-100: there beta C0 is all of C,
+                        // below DD's precision (Accelerate must take it)
+    RANGE_C_TINY,       // row 0 of op(A) zero, the other rows of C0 x 2^-100: they only round
+                        // away beside the products (the GPU must certify it)
+    RANGE_C_HUGE,       // C0 x 2^135, beta = 2^-20: beta C0 fits FP32, C0 does not (Accelerate)
+} RangeData;
+
+static const char *const RANGE_TAG[] = {
+    [RANGE_TINY] = "tiny", [RANGE_HUGE] = "huge", [RANGE_ROWCOL] = "rowcol",
+    [RANGE_ALIGNED] = "aligned-span", [RANGE_MISALIGNED] = "misaligned-span",
+    [RANGE_INF] = "inf", [RANGE_ALPHA_TINY] = "alpha-tiny", [RANGE_ALPHA_HUGE] = "alpha-huge",
+    [RANGE_EXACT] = "exact", [RANGE_ROWS_LOW] = "rows-low", [RANGE_COLS_HIGH] = "cols-high",
+    [RANGE_UNIFORM_EXACT] = "uniform-exact", [RANGE_C_ZERO_ROW] = "c-zero-row",
+    [RANGE_C_TINY] = "c-tiny", [RANGE_C_HUGE] = "c-huge",
 };
 
 typedef struct {
@@ -175,6 +219,7 @@ typedef struct {
     bool child_exit;                    // that child ends with exit(), not _exit()
     bool same_shape;                    // KIND_THREADS: every thread makes thread 0's calls
     Kind kind;
+    RangeData data;                     // KIND_RANGE only
     const void *sym;                    // OP_SYMBOL only
 } AbiCase;
 
@@ -472,6 +517,81 @@ static void gen_memory(const Suite *s) {
     c->kind = KIND_MEMORY;
 }
 
+// Exponent range. DD has FP32's exponent range: entries or products below
+// about 2^-126 flush to zero, low parts below about 2^-78 times the result
+// are lost, and above about 2^128 they overflow, silently in 1.4.
+//   - Through dgemm_ / zgemm_ (AB_MODE=gpu, no ab_init()), each call must
+//     run on the GPU where power-of-two scaling of op(A)'s rows and op(B)'s
+//     columns puts every product back in range (ROUTE_GPU), and on Accelerate
+//     where no such scaling can (ROUTE_CPU: NaN or Inf, or RANGE_MISALIGNED).
+//   - The native ABMatrix cases call ab_init() and run on the GPU; a matrix
+//     keeps one power-of-two scale there.
+// Every case must give C within TOL of cblas, with Inf and NaN where cblas
+// has them; the EXACT cases must give C bit for bit as a power of two times
+// C of the unscaled data.
+static AbiCase *add_range(const Suite *s, Op op, char ta, char tb, RangeData data, Route route) {
+    const int M = 96, N = 80, K = 72;
+    AbiCase *c = add_blas(s, op, ta, tb, M, N, K, 3, SC_GEN, route);
+    c->kind = KIND_RANGE;
+    c->data = data;
+    if (data == RANGE_ALPHA_TINY || data == RANGE_ALPHA_HUGE) {
+        c->alpha = data == RANGE_ALPHA_TINY ? 1e-45 : 1e45;
+        c->beta = 0.0;
+    }
+    if (data == RANGE_C_HUGE) c->beta = 0x1p-20;
+    if (op == OP_DGEMM || op == OP_DGEMM_SCALED || op == OP_ZGEMM) {
+        c->pad = 0;
+        snprintf(c->name, sizeof c->name, "%s/%dx%dx%d/range-%s", OP_NAME[op], M, N, K,
+                 RANGE_TAG[data]);
+    } else {
+        snprintf(c->name, sizeof c->name, "%s/%s/%c%c/%dx%dx%d/range-%s", OP_NAME[op], s->label,
+                 ta, tb, M, N, K, RANGE_TAG[data]);
+    }
+    return c;
+}
+
+static void gen_range(const Suite *s) {
+    static const struct { Op op; char ta, tb; RangeData data; Route route; } R[] = {
+        {OP_DGEMM_SYM, 'N', 'N', RANGE_TINY, ROUTE_GPU},
+        {OP_ZGEMM_SYM, 'N', 'N', RANGE_TINY, ROUTE_GPU},
+        {OP_DGEMM_SYM, 'T', 'N', RANGE_HUGE, ROUTE_GPU},
+        {OP_ZGEMM_SYM, 'C', 'N', RANGE_HUGE, ROUTE_GPU},
+        {OP_DGEMM_SYM, 'N', 'N', RANGE_ROWCOL, ROUTE_GPU},
+        {OP_DGEMM_SYM, 'T', 'T', RANGE_ROWCOL, ROUTE_GPU},
+        {OP_ZGEMM_SYM, 'N', 'C', RANGE_ROWCOL, ROUTE_GPU},
+        {OP_ZGEMM_SYM, 'C', 'T', RANGE_ROWCOL, ROUTE_GPU},
+        {OP_DGEMM_SYM, 'N', 'T', RANGE_ALIGNED, ROUTE_GPU},
+        {OP_ZGEMM_SYM, 'T', 'N', RANGE_ALIGNED, ROUTE_GPU},
+        {OP_DGEMM_SYM, 'N', 'N', RANGE_MISALIGNED, ROUTE_CPU},
+        {OP_ZGEMM_SYM, 'N', 'N', RANGE_MISALIGNED, ROUTE_CPU},
+        {OP_DGEMM_SYM, 'N', 'N', RANGE_INF, ROUTE_CPU},
+        {OP_ZGEMM_SYM, 'C', 'N', RANGE_INF, ROUTE_CPU},
+        {OP_DGEMM_SYM, 'N', 'N', RANGE_ALPHA_TINY, ROUTE_GPU},
+        {OP_DGEMM_SYM, 'T', 'N', RANGE_ALPHA_HUGE, ROUTE_GPU},
+        {OP_DGEMM_SYM, 'N', 'N', RANGE_C_ZERO_ROW, ROUTE_CPU},
+        {OP_DGEMM_SYM, 'T', 'T', RANGE_C_TINY, ROUTE_GPU},
+        {OP_DGEMM_SYM, 'N', 'T', RANGE_C_HUGE, ROUTE_CPU},
+        {OP_DGEMM_SYM, 'N', 'N', RANGE_EXACT, ROUTE_GPU},
+        {OP_DGEMM_SYM, 'T', 'T', RANGE_EXACT, ROUTE_GPU},
+        {OP_ZGEMM_SYM, 'N', 'N', RANGE_EXACT, ROUTE_GPU},
+        {OP_ZGEMM_SYM, 'C', 'T', RANGE_EXACT, ROUTE_GPU},
+        {OP_DGEMM, 'N', 'N', RANGE_TINY, ROUTE_GPU},
+        {OP_DGEMM, 'N', 'N', RANGE_HUGE, ROUTE_GPU},
+        {OP_DGEMM_SCALED, 'N', 'N', RANGE_TINY, ROUTE_GPU},
+        {OP_DGEMM_SCALED, 'N', 'N', RANGE_HUGE, ROUTE_GPU},
+        {OP_DGEMM_SCALED, 'N', 'N', RANGE_ROWS_LOW, ROUTE_GPU},
+        {OP_DGEMM_SCALED, 'N', 'N', RANGE_COLS_HIGH, ROUTE_GPU},
+        {OP_ZGEMM, 'N', 'N', RANGE_TINY, ROUTE_GPU},
+        {OP_ZGEMM, 'N', 'N', RANGE_HUGE, ROUTE_GPU},
+        {OP_ZGEMM, 'N', 'N', RANGE_ROWS_LOW, ROUTE_GPU},
+        {OP_ZGEMM, 'N', 'N', RANGE_COLS_HIGH, ROUTE_GPU},
+        {OP_DGEMM, 'N', 'N', RANGE_UNIFORM_EXACT, ROUTE_GPU},
+        {OP_ZGEMM, 'N', 'N', RANGE_UNIFORM_EXACT, ROUTE_GPU},
+    };
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(R); i++)
+        add_range(s, R[i].op, R[i].ta, R[i].tb, R[i].data, R[i].route);
+}
+
 static void add_native(Op op, int M, int N, int K) {
     AbiCase *c = new_case();
     snprintf(c->name, sizeof c->name, "%s/%dx%dx%d", OP_NAME[op], M, N, K);
@@ -528,7 +648,7 @@ enum {
     SU_AUTO,
     SU_DGEMM_BLAS_NOINIT, SU_ZGEMM_BLAS_NOINIT, SU_DGEMM_F_NOINIT, SU_ZGEMM_F_NOINIT,
     SU_DGEMM_SYM_NOINIT, SU_ZGEMM_SYM_NOINIT, SU_ILLEGAL, SU_FORK, SU_FORK_EXIT, SU_QE,
-    SU_LONG_K, SU_REPEAT, SU_THREADS, SU_MEMORY,
+    SU_LONG_K, SU_REPEAT, SU_THREADS, SU_MEMORY, SU_RANGE,
     SU_PROFILE, SU_REPORT, SU_NATIVE, SU_SYMBOLS, SU_COUNT
 };
 
@@ -569,6 +689,7 @@ static Suite SUITES[SU_COUNT] = {
     [SU_REPEAT]  = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_repeat},
     [SU_THREADS] = {.label = "gpu-noinit", .ab_mode = "gpu", .show = true, .gen = gen_threads},
     [SU_MEMORY]  = {.label = "gpu-noinit", .ab_mode = "gpu", .show = true, .gen = gen_memory},
+    [SU_RANGE]   = {.label = "gpu-noinit", .ab_mode = "gpu", .show = true, .gen = gen_range},
     [SU_PROFILE] = {.label = "auto-table-profile", .ab_mode = "auto", .test_table = true,
                     .profile = true, .gen = gen_profile},
     [SU_REPORT]  = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_report},
@@ -1054,7 +1175,7 @@ static void pack_rows(const void *X, Layout l, char t, bool cplx, int rows, int 
                       double *re, double *im) {
     for (int i = 0; i < rows; i++)
         for (int j = 0; j < cols; j++) {
-            size_t x = is_notrans(t) ? (size_t)j * l.ld + i : (size_t)i * l.ld + j;
+            size_t x = op_index(t, l, i, j);
             size_t y = (size_t)i * cols + j;
             if (!cplx) {
                 re[y] = ((const double *)X)[x];
@@ -1304,6 +1425,304 @@ static bool run_memory(const AbiCase *c, char *detail, size_t n) {
     }
     return measured && !not_gpu && gpu_calls == MEM_CALLS && phys < MEM_FOOTPRINT_LIMIT_KB &&
            mall < MEM_MALLOC_LIMIT_KB;
+}
+
+// --- Exponent range -------------------------------------------------------------
+
+// x's sign, with a magnitude in [0.5, 1).
+static double half_to_one(double x) { return copysign(0.5 + 0.5 * fabs(x), x); }
+
+// i of n (0 <= i < n) spread evenly over the integers [lo, hi].
+static int spread(int i, int n, int lo, int hi) {
+    return n > 1 ? lo + (int)lround((double)(hi - lo) * i / (n - 1)) : lo;
+}
+
+// RANGE_EXACT's exponents of op(A)'s row i and op(B)'s column j.
+static int exact_row_exp(int i) { static const int E[] = {-100, 0, 100}; return E[i % 3]; }
+static int exact_col_exp(int j) { static const int E[] = {100, -100, 0}; return E[j % 3]; }
+
+// The factors of pattern d for op(A)_ik (M rows), op(B)_kj (N columns) and C0_ij.
+static double range_a(RangeData d, int i, int k, int M) {
+    switch (d) {
+    case RANGE_TINY:          return 1e-25;
+    case RANGE_HUGE:          return 1e25;
+    case RANGE_ROWCOL:        return ldexp(1.0, spread(i, M, -120, 120));
+    case RANGE_ALIGNED:
+    case RANGE_MISALIGNED:    return ldexp(1.0, k % 2 ? -70 : 70);
+    case RANGE_EXACT:         return ldexp(1.0, exact_row_exp(i));
+    case RANGE_ROWS_LOW:      return ldexp(1.0, spread(i, M, -100, -60));
+    case RANGE_COLS_HIGH:     return 0x1p30;
+    case RANGE_UNIFORM_EXACT: return 0x1p90;
+    case RANGE_C_ZERO_ROW:
+    case RANGE_C_TINY:        return i == 0 ? 0.0 : 1.0;
+    default:                  return 1.0;
+    }
+}
+
+static double range_b(RangeData d, int k, int j, int N) {
+    switch (d) {
+    case RANGE_TINY:          return 1e-25;
+    case RANGE_HUGE:          return 1e25;
+    case RANGE_ROWCOL:        return ldexp(1.0, spread(j, N, -120, 120));
+    case RANGE_ALIGNED:       return ldexp(1.0, k % 2 ? -70 : 70);
+    case RANGE_MISALIGNED:    return ldexp(1.0, k % 2 ? 70 : -70);
+    case RANGE_EXACT:         return ldexp(1.0, exact_col_exp(j));
+    case RANGE_COLS_HIGH:     return ldexp(1.0, spread(j, N, 60, 100));
+    case RANGE_UNIFORM_EXACT: return 0x1p90;
+    default:                  return 1.0;
+    }
+}
+
+static double range_c(RangeData d, int i, int j, int M, int N) {
+    switch (d) {
+    case RANGE_TINY:          return 1e-50;
+    case RANGE_HUGE:          return 1e50;
+    case RANGE_ALIGNED:       return 0x1p140;
+    case RANGE_MISALIGNED:    return 1.0;
+    case RANGE_C_ZERO_ROW:    return i == 0 ? 0x1p-100 : 1.0;
+    case RANGE_C_TINY:        return i == 0 ? 1.0 : 0x1p-100;
+    case RANGE_C_HUGE:        return 0x1p135;
+    default:                  return range_a(d, i, 0, M) * range_b(d, 0, j, N);
+    }
+}
+
+static inline void range_set(double *x, bool base, double f) {
+    *x = base ? half_to_one(*x) : *x * f;
+}
+
+// Makes the magnitudes of a Call's data [0.5, 1) (base: the M x K, K x N and
+// M x N blocks, both parts of complex ones; the padding stays NaN), or else
+// multiplies them by pattern d's factors.
+static void range_apply(Call *k, RangeData d, bool base) {
+    const AbiCase *c = &k->c;
+    const int w = k->cplx ? 2 : 1;
+    double *A = k->A, *B = k->B, *C0 = k->C0;
+    for (int i = 0; i < c->M; i++)
+        for (int kk = 0; kk < c->K; kk++)
+            for (int p = 0; p < w; p++)
+                range_set(&A[op_index(c->ta, k->la, i, kk) * w + p], base, range_a(d, i, kk, c->M));
+    for (int kk = 0; kk < c->K; kk++)
+        for (int j = 0; j < c->N; j++)
+            for (int p = 0; p < w; p++)
+                range_set(&B[op_index(c->tb, k->lb, kk, j) * w + p], base, range_b(d, kk, j, c->N));
+    for (int j = 0; j < c->N; j++)
+        for (int i = 0; i < c->M; i++)
+            for (int p = 0; p < w; p++)
+                range_set(&C0[((size_t)j * k->lc.ld + i) * w + p], base,
+                          range_c(d, i, j, c->M, c->N));
+    if (!base && d == RANGE_INF) A[op_index(c->ta, k->la, 0, 0) * w] = INFINITY;
+}
+
+// True if x is finite where r is, and else non-finite as r is: the same
+// infinity, or NaN.
+static bool same_class(double x, double r) {
+    return isfinite(r) ? isfinite(x) : isnan(r) ? isnan(x) : x == r;
+}
+
+// out's componentwise error against cblas, as blas_error measures it, over
+// the entries where cblas's C is finite; *nonfinite_ok: wherever a part of
+// cblas's C is not finite, out's is non-finite in the same way.
+static double range_error(const Call *k, const void *out, bool *nonfinite_ok) {
+    const AbiCase *c = &k->c;
+    const int M = c->M, N = c->N, K = c->K;
+    const double complex alpha = k->cplx ? c->alpha : creal(c->alpha);
+    const double complex beta = k->cplx ? c->beta : creal(c->beta);
+    void *Cref = malloc(k->nc * k->es);
+    double *absAB = calloc((size_t)M * N, sizeof *absAB);
+    memcpy(Cref, k->C0, k->nc * k->es);
+    blas_reference(k->cplx, c->ta, c->tb, M, N, K, alpha, beta, k->A, k->la, k->B, k->lb, k->C0,
+                   k->lc.ld, Cref, absAB);
+    double worst = 0.0;
+    *nonfinite_ok = true;
+    for (int j = 0; j < N; j++)
+        for (int i = 0; i < M; i++) {
+            const size_t x = (size_t)j * k->lc.ld + i;
+            double complex r, v, c0;
+            if (k->cplx) {
+                r = ((const double complex *)Cref)[x];
+                v = ((const double complex *)out)[x];
+                c0 = ((const double complex *)k->C0)[x];
+            } else {
+                r = ((const double *)Cref)[x];
+                v = ((const double *)out)[x];
+                c0 = ((const double *)k->C0)[x];
+            }
+            if (!isfinite(creal(r)) || !isfinite(cimag(r))) {
+                *nonfinite_ok = *nonfinite_ok && same_class(creal(v), creal(r)) &&
+                                same_class(cimag(v), cimag(r));
+                continue;
+            }
+            double d = DBL_MIN;
+            if (alpha != 0.0) d += cabs(alpha) * absAB[(size_t)j * M + i];
+            if (beta != 0.0) d += cabs(beta) * cabs(c0);
+            double e = cabs(v - r) / d;
+            if (isnan(e) || e > worst) worst = e;   // a NaN result stays NaN
+        }
+    free(Cref);
+    free(absAB);
+    return worst;
+}
+
+// True if out is bit for bit 2^(e_i+f_j) times base in every element of the
+// M x N block (RANGE_EXACT's row and column exponents).
+static bool exact_multiple(const Call *k, const void *base, const void *out) {
+    const AbiCase *c = &k->c;
+    const int w = k->cplx ? 2 : 1;
+    for (int j = 0; j < c->N; j++)
+        for (int i = 0; i < c->M; i++)
+            for (int p = 0; p < w; p++) {
+                const size_t x = ((size_t)j * k->lc.ld + i) * w + p;
+                double want = ldexp(((const double *)base)[x], exact_row_exp(i) + exact_col_exp(j));
+                if (memcmp(&want, (const double *)out + x, sizeof want)) return false;
+            }
+    return true;
+}
+
+static bool run_range_blas(const AbiCase *c, char *detail, size_t n) {
+    Call k;
+    call_init_case(&k, c);
+    range_apply(&k, c->data, true);
+    const size_t bytes = k.nc * k.es;
+    void *C = malloc(bytes), *base = NULL;
+    bool base_gpu = true;
+    if (c->data == RANGE_EXACT) {               // C of the unscaled data first
+        base = malloc(bytes);
+        base_gpu = call_run(&k, base);
+    }
+    range_apply(&k, c->data, false);
+    void *A0 = malloc(nelem(k.la) * k.es), *B0 = malloc(nelem(k.lb) * k.es);
+    memcpy(A0, k.A, nelem(k.la) * k.es);
+    memcpy(B0, k.B, nelem(k.lb) * k.es);
+
+    uint64_t g0 = gpu_gemm_count();
+    call_run(&k, C);
+    uint64_t gpu_gemms = gpu_gemm_count() - g0;
+
+    bool nonfinite_ok, exact = true;
+    double err = range_error(&k, C, &nonfinite_ok);
+    if (base) exact = base_gpu && exact_multiple(&k, base, C);
+    bool inputs_ok = !memcmp(k.A, A0, nelem(k.la) * k.es) && !memcmp(k.B, B0, nelem(k.lb) * k.es);
+    bool outside_ok = outside_block_unchanged(C, k.C0, k.nc, k.lc, k.es);
+    bool ok = blas_verdict(c, err, inputs_ok, outside_ok, gpu_gemms, detail, n);
+    size_t len = strlen(detail);
+    snprintf(detail + len, n - len, "%s%s%s", nonfinite_ok ? "" : " [Inf/NaN differ from cblas]",
+             exact ? "" : base_gpu ? " [not 2^(e_i+f_j) times the unscaled C, bitwise]"
+                                   : " [unscaled call not on the GPU]",
+             err <= TOL ? "" : " [outside tolerance]");
+    free(C); free(base); free(A0); free(B0);
+    call_free(&k);
+    return ok && nonfinite_ok && exact;
+}
+
+// The native ABMatrix GEMMs on row-major data shaped as in range_apply, with
+// w doubles per entry (2: real and imaginary parts); RANGE_UNIFORM_EXACT also
+// runs the unscaled data and compares. C = A*B (ab_dgemm, ab_zgemm) or
+// alpha*A*B + beta*C0 (ab_dgemm_scaled).
+typedef struct {
+    int M, N, K, w;
+    double *A, *B, *C0;
+} NativeData;
+
+static void native_fill(NativeData *x, RangeData d, bool scale) {
+    const int M = x->M, N = x->N, K = x->K, w = x->w;
+    for (int i = 0; i < M; i++)
+        for (int k = 0; k < K; k++)
+            for (int p = 0; p < w; p++)
+                x->A[((size_t)i * K + k) * w + p] =
+                    half_to_one(rnd()) * (scale ? range_a(d, i, k, M) : 1.0);
+    for (int k = 0; k < K; k++)
+        for (int j = 0; j < N; j++)
+            for (int p = 0; p < w; p++)
+                x->B[((size_t)k * N + j) * w + p] =
+                    half_to_one(rnd()) * (scale ? range_b(d, k, j, N) : 1.0);
+    for (int i = 0; i < M; i++)
+        for (int j = 0; j < N; j++)
+            for (int p = 0; p < w; p++)
+                x->C0[((size_t)i * N + j) * w + p] =
+                    half_to_one(rnd()) * (scale ? range_c(d, i, j, M, N) : 1.0);
+}
+
+// Uploads count entries of w doubles each into re (and im, for w == 2).
+static ABStatus native_upload(ABMatrix re, ABMatrix im, const double *x, size_t count, int w) {
+    return w == 2 ? upload_split(re, im, (const double complex *)x, count)
+                  : ab_matrix_upload(re, x, false);
+}
+
+// Runs the native GEMM of op on x into C (row-major); the GPU must count it.
+static ABStatus native_range_call(Op op, double alpha, double beta, const NativeData *x,
+                                  double *C, bool *counted) {
+    const int M = x->M, N = x->N, K = x->K, w = x->w;
+    const size_t nc = (size_t)M * N;
+    ABMatrix m[6] = {ab_matrix_create(M, K), ab_matrix_create(M, K), ab_matrix_create(K, N),
+                     ab_matrix_create(K, N), ab_matrix_create(M, N), ab_matrix_create(M, N)};
+    ABStatus st = AB_OK;
+    for (int i = 0; i < 6; i++) if (!m[i]) st = AB_ERROR_ALLOC_FAILED;
+    double *re = malloc(nc * sizeof *re), *im = malloc(nc * sizeof *im);
+    uint64_t g0 = gpu_gemm_count();
+    if (st == AB_OK) st = native_upload(m[0], m[1], x->A, (size_t)M * K, w);
+    if (st == AB_OK) st = native_upload(m[2], m[3], x->B, (size_t)K * N, w);
+    if (st == AB_OK) st = native_upload(m[4], m[5], x->C0, nc, w);
+    if (st == AB_OK)
+        st = op == OP_ZGEMM ? ab_zgemm(m[0], m[1], m[2], m[3], m[4], m[5])
+           : op == OP_DGEMM ? ab_dgemm(m[0], m[2], m[4])
+                            : ab_dgemm_scaled(alpha, m[0], m[2], beta, m[4]);
+    *counted = gpu_gemm_count() > g0;
+    if (st == AB_OK) st = ab_matrix_download(m[4], re, false);
+    if (st == AB_OK && w == 2) st = ab_matrix_download(m[5], im, false);
+    for (size_t k = 0; st == AB_OK && k < nc; k++) {
+        C[k * w] = re[k];
+        if (w == 2) C[k * w + 1] = im[k];
+    }
+    for (int i = 0; i < 6; i++) ab_matrix_destroy(m[i]);
+    free(re); free(im);
+    return st;
+}
+
+static bool run_range_native(const AbiCase *c, char *detail, size_t n) {
+    const int M = c->M, N = c->N, K = c->K, w = c->op == OP_ZGEMM ? 2 : 1;
+    const bool scaled = c->op == OP_DGEMM_SCALED;
+    const double alpha = scaled ? creal(c->alpha) : 1.0, beta = scaled ? creal(c->beta) : 0.0;
+    const size_t nc = (size_t)M * N * w;
+    NativeData x = {M, N, K, w, malloc((size_t)M * K * w * sizeof(double)),
+                    malloc((size_t)K * N * w * sizeof(double)), malloc(nc * sizeof(double))};
+    double *C = malloc(nc * sizeof *C), *base = NULL;
+    bool counted = false, base_counted = true, exact = true;
+    ABStatus st = ab_init();
+    if (c->data == RANGE_UNIFORM_EXACT && st == AB_OK) {
+        const uint64_t seed = rng_state;
+        native_fill(&x, c->data, false);
+        base = malloc(nc * sizeof *base);
+        st = native_range_call(c->op, alpha, beta, &x, base, &base_counted);
+        rng_state = seed;                           // the same values, scaled
+    }
+    if (st == AB_OK) {
+        native_fill(&x, c->data, true);
+        st = native_range_call(c->op, alpha, beta, &x, C, &counted);
+    }
+
+    // Reference: row-major M x K, K x N, M x N are column-major K x M, N x K,
+    // N x M, so C = A*B is the column-major C^T = B^T A^T.
+    double err = NAN;
+    if (st == AB_OK) {
+        const Layout la = {K, M, K}, lb = {N, K, N}, lc = {N, M, N};
+        err = blas_error(w == 2, 'N', 'N', N, M, K, alpha, beta, x.B, lb, x.A, la, x.C0, lc, C);
+        for (size_t i = 0; base && exact && i < nc; i++) {
+            double want = ldexp(base[i], 180);
+            exact = !memcmp(&want, &C[i], sizeof want);
+        }
+        exact = exact && base_counted;
+    }
+    snprintf(detail, n, "err=%.1e status=%s%s%s%s", err, ab_status_string(st),
+             counted || st != AB_OK ? "" : " [GPU GEMM not counted]",
+             exact ? "" : " [not 2^180 times the unscaled C, bitwise]",
+             err <= TOL || st != AB_OK ? "" : " [outside tolerance]");
+    free(x.A); free(x.B); free(x.C0); free(C); free(base);
+    return st == AB_OK && counted && exact && err <= TOL;
+}
+
+static bool run_range(const AbiCase *c, char *detail, size_t n) {
+    return c->op == OP_DGEMM || c->op == OP_DGEMM_SCALED || c->op == OP_ZGEMM
+               ? run_range_native(c, detail, n) : run_range_blas(c, detail, n);
 }
 
 // =============================================================================
@@ -1580,6 +1999,7 @@ static bool run_case(int idx, char *detail, size_t n) {
     case KIND_REPEAT:  return run_repeat(c, detail, n);
     case KIND_THREADS: return run_threads(c, detail, n);
     case KIND_MEMORY:  return run_memory(c, detail, n);
+    case KIND_RANGE:   return run_range(c, detail, n);
     case KIND_CALL:    break;
     }
     if (c->fork) return run_fork(c, detail, n);
@@ -1805,6 +2225,7 @@ static void test_long_k_precision(void) { run_suite(SU_LONG_K); }
 static void test_determinism(void)      { run_suite(SU_REPEAT); }
 static void test_concurrency(void)      { run_suite(SU_THREADS); }
 static void test_memory_growth(void)    { run_suite(SU_MEMORY); }
+static void test_exponent_range(void)   { run_suite(SU_RANGE); }
 static void test_profile_path(void)     { run_suite(SU_PROFILE); }
 static void test_exit_reports(void)     { run_suite(SU_REPORT); }
 static void test_native_morton(void)    { run_suite(SU_NATIVE); }
@@ -1838,6 +2259,7 @@ static const TestCase TESTS[] = {
     {"test_determinism",      test_determinism},
     {"test_concurrency",      test_concurrency},
     {"test_memory_growth",    test_memory_growth},
+    {"test_exponent_range",   test_exponent_range},
     {"test_profile_path",     test_profile_path},
     {"test_exit_reports",     test_exit_reports},
     {"test_native_morton",    test_native_morton},
@@ -1851,7 +2273,10 @@ int main(int argc, char **argv) {
         return child_main(atoi(argv[2]), atoi(argv[3]));
     if (argc == 2 && !strcmp(argv[1], "--report-child"))
         return report_child_main();
+    // test_blas_abi [-v] [test_name ...]: with names, only those TESTS[] entries.
     verbose = argc > 1 && !strcmp(argv[1], "-v");
+    char **only = argv + 1 + verbose;
+    const int n_only = argc - 1 - verbose;
 
     uint32_t len = sizeof self_path;
     if (_NSGetExecutablePath(self_path, &len) != 0) {
@@ -1874,6 +2299,9 @@ int main(int argc, char **argv) {
     printf("╚══════════════════════════════════════════════════════════════════╝\n");
 
     for (int i = 0; i < N_TESTS; i++) {
+        bool selected = n_only == 0;
+        for (int o = 0; o < n_only; o++) selected = selected || !strcmp(only[o], TESTS[i].name);
+        if (!selected) continue;
         printf("[%d/%d] %-22s ... ", i + 1, N_TESTS, TESTS[i].name);
         fflush(stdout);
         int pre = tests_passed + tests_failed + tests_xfailed + tests_xpassed;
@@ -1891,9 +2319,10 @@ int main(int argc, char **argv) {
     int stale = 0;
     printf("\nXFAIL table (audit ID, cases matched, pattern):\n");
     for (size_t i = 0; i < TEST_REGISTRY_SIZE(XFAIL); i++) {
+        bool is_stale = !xfail_hits[i] && n_only == 0;     // a partial run cannot tell
         printf("  %-14s %4d  %s%s\n", XFAIL[i].id, xfail_hits[i], XFAIL[i].pattern,
-               xfail_hits[i] ? "" : "  <-- STALE: matches no case");
-        if (!xfail_hits[i]) stale++;
+               is_stale ? "  <-- STALE: matches no case" : "");
+        if (is_stale) stale++;
     }
 
     printf("\n═══════════════════════════════════════════════════════════════════\n");
