@@ -18,7 +18,14 @@ All notable changes to this project will be documented in this file.
   normwise only: rows or columns much smaller than the rest lose relative
   accuracy. See `docs/STRASSEN.md`. With `AB_STRASSEN` unset every result is
   bitwise unchanged. `make test` adds `test_strassen` (8 tests), and
-  `benchmarks/bench_strassen.c` measures speed and accuracy.
+  `benchmarks/bench_strassen.c` measures speed and accuracy. On an M2 Max
+  (`benchmarks/results/2026-10-20-274e778-strassen/`), resident DGEMMs run
+  1.08× faster at N = 4096 and 1.12× at 8192, ZGEMMs 1.10–1.16×, with about
+  10% less energy per product. At N = 2048 it is slower (0.94×). The
+  normwise error is 1.9× the classical GEMM's on mixed-sign data and half of
+  it on positive data. With rows of A and columns of B scaled by 2^±16, the
+  componentwise error (relative to |A||B|) rises from 1.5×10⁻¹⁴ to
+  2–7×10⁴.
 - **`AB_TRACE=<path>`**: every BLAS-ABI call (`dgemm_`, `zgemm_`,
   `ab_*gemm_`, `ab_*gemm_blas`; Accelerate and GPU, every `AB_MODE`) appends
   one `key=value` line to `<path>.<pid>` when it returns (a call with an

@@ -1,0 +1,6 @@
+apple-bottom 1.4.0 (274e778d5065) on Apple M2 Max
+dgemm 2048x2048x2048
+dgemm 2560x2560x2560
+dgemm 3072x3072x3072
+dgemm 3584x3584x3584
+dgemm 4096x4096x4096

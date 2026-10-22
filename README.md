@@ -74,6 +74,15 @@ ZGEMM rates count 8N³ operations for both; the GPU uses Gauss's
 three-multiplication form, which performs 25% fewer. Normwise relative
 error of the GPU result: 1.8×10⁻¹⁴ at N = 512 to 5.1×10⁻¹⁴ at N = 4096.
 
+**Opt-in Strassen-Winograd** (`AB_STRASSEN=1`, or `ab_dgemm_strassen` and
+`ab_zgemm_strassen`). One level of recursion makes resident DGEMMs 1.08×
+faster at N = 4096 and 1.12× at 8192, 1.20× Accelerate's speed. ZGEMMs get
+1.10–1.16×, 1.5× Accelerate. Energy per product is about 10% lower. The
+price is a normwise-only error bound. On mixed-sign data the error is 1.9×
+the classical one; on badly scaled products the small elements of C have no
+correct digits ([details](docs/STRASSEN.md),
+[data](benchmarks/results/2026-10-20-274e778-strassen/)).
+
 **Through the BLAS ABI** (`ab_*gemm_blas`, i.e. `dgemm_`/`zgemm_`:
 conversion and transfer included), Accelerate time ÷ GPU time, median of
 7 after 3 warm-ups ([data](benchmarks/results/2026-10-14-52f1880-calibrate/)):
