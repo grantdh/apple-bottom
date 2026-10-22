@@ -531,6 +531,10 @@ static bool get_scalar(const TraceLine *t, const char *key, double complex want,
                   "%s=%s, expected %a%s%a", key, s, wr, z ? "," : "", z ? wi : 0.0);
 }
 
+// Whether the children run with AB_HOST_PACK=1 (the host path, whose ZGEMM
+// makes GPU temporaries) rather than on the staged path.
+static bool g_host_pack;
+
 // One line against the call it records: the arguments exactly, the path, and
 // for a GPU call stages that sum to the call's time and a split that sums to
 // other_ns, with the GPU's start and end inside the call.
@@ -573,7 +577,9 @@ static bool check_line(const TraceLine *t, const Call *c, const char *path,
                   "temps+encode+submit+wake+rest != other_ns %llu", other) &&
            expect(kernel > 0, "no kernel time") &&
            expect(encode > 0, "no encode time") &&
-           expect(z ? temps > 0 : temps == 0, "temps_ns=%llu for %s", temps, get(t, "routine")) &&
+           expect(g_host_pack ? temps > 0 || !z : temps == 0,
+                  "temps_ns=%llu for %s (only the host path's ZGEMM makes GPU temporaries)",
+                  temps, get(t, "routine")) &&
            expect(gs > 0 && *t0 <= gs && gs <= ge && ge <= *t1,
                   "GPU start %llu / end %llu outside the call [%llu, %llu]", gs, ge, *t0, *t1) &&
            expect(ge - gs <= kernel + 1000 && kernel <= ge - gs + 1000,
@@ -641,14 +647,14 @@ static int check_file(const char *dir, pid_t pid, const Call *calls, const char 
 // =============================================================================
 
 // AB_MODE=gpu, AB_TRACE: GPU and CPU calls, then a fork()ed child's fallback
-// with a file of its own on the inherited trace file's descriptor.
-static void test_trace_lines(void) {
-    begin();
+// with a file of its own on the inherited trace file's descriptor; on the
+// staged path, then on the host path (AB_HOST_PACK=1).
+static void trace_lines(void) {
     char dir[PATH_MAX], trace[PATH_MAX + 16], path[32], data_path[PATH_MAX];
     char names[8][NAME_MAX + 1], want[3][64];
     test_dir("lines", dir, sizeof dir);
     snprintf(trace, sizeof trace, "AB_TRACE=%s/trace", dir);
-    const char *env[] = {"AB_MODE=gpu", trace, NULL};
+    const char *env[] = {"AB_MODE=gpu", trace, g_host_pack ? "AB_HOST_PACK=1" : NULL, NULL};
     const char *fork_path[] = {"fallback:no_device"};
     const size_t n = TEST_REGISTRY_SIZE(LINE_CALLS);
     ChildRun r = {0};
@@ -691,6 +697,15 @@ out:
     free(data);
     free(r.out);
     clean_dir(dir);
+}
+
+static void test_trace_lines(void) {
+    begin();
+    for (int host = 0; host < 2 && !first_failure[0]; host++) {
+        g_host_pack = host;
+        trace_lines();
+    }
+    g_host_pack = false;
     finish();
 }
 

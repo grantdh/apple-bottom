@@ -116,19 +116,25 @@ matrices computed on the GPU. Details: [LIMITATIONS.md](vv/LIMITATIONS.md#comple
 
 ```
 BLAS ABI, one call at a time (dgemm_, ab_dgemm_blas):
-  [pack + FP64→DD] → [upload] → [GPU GEMM] → [download + DD→FP64]   every call
+  [copy into reused GPU buffers] → [GPU: FP64→DD, GEMM, DD→FP64, alpha/beta] → [copy into C]
+  every call (1.4.0: host pack and FP64→DD, upload, GEMM, DD→FP64, host epilogue)
 
 Native API, matrices resident (ABMatrix):
   [FP64→DD, upload] → [GPU GEMM] → [GPU GEMM] → … → [download, DD→FP64]
         once                many products                   once
 ```
 
-Only the second pattern beats Accelerate, and only for large products: on
-an M2 Max from about N = 1,500 for DGEMM and N = 1,000 for ZGEMM
-([README](../README.md#performance)). Uploading an N × N operand costs
-O(N²) against the product's O(N³), so uploading one new operand per
-product is fine at those sizes; converting and transferring everything for
-every call, as the BLAS ABI must, is not.
+With the 1.4.0 BLAS ABI only the second pattern beat Accelerate, and only
+for large products: on an M2 Max from about N = 1,500 for DGEMM and
+N = 1,000 for ZGEMM ([README](../README.md#performance)). Uploading an
+N × N operand costs O(N²) against the product's O(N³), so uploading one new
+operand per product is fine at those sizes; converting and transferring
+everything for every call on the host is not. The staged path of the BLAS
+ABI leaves the host a plain copy of each operand into GPU buffers it
+reuses (about 50-100 GB/s; none for memory registered with
+`ab_register_host_memory`, see [Zero-copy operands](#zero-copy-operands))
+and converts on the GPU. It has not been calibrated for `AB_MODE=auto`
+yet: the routing table is still 1.4.0's.
 
 ### Pattern 1: a chain of large products
 
@@ -449,7 +455,9 @@ call. The native `ABMatrix` and device APIs do not use them.
 | `AB_PROFILE_THRESHOLD_NS` | `0` | Count only calls that took at least this many ns, in both reports. |
 | `AB_TRACE` | unset | A path: each process appends one line per call to `<path>.<pid>` (see [Per-call trace](#per-call-trace-ab_trace)). Unset or empty: no trace. |
 | `AB_TRACE_HASH` | off | With `AB_TRACE`, `1`: also hash the operands each call reads. |
-| `AB_TEST_FAIL_STAGE` | unset | Test-only. `alloc`: every GPU buffer allocation (`ab_matrix_create()`) fails; `kernel`: the command buffer of every `ab_dgemm_scaled()` and `ab_zgemm()`, the GEMMs of the GPU path, reports an error. A GPU-routed call then fails as it would on a real failure there and runs on Accelerate instead (a `gpu_failed` fallback). Never set it in production. |
+| `AB_HOST_PACK` | off | `1`: every GPU call takes the host path (host pack, FP64 → DD and epilogue) instead of the staged path. The results are the same bits either way. |
+| `AB_STAGING_MB` | `2048` | The staged path's GPU buffers kept between calls, at most this many MB per process; `0`: none kept, each call makes its own (and pays for fresh buffers). |
+| `AB_TEST_FAIL_STAGE` | unset | Test-only. `alloc`: every GPU buffer allocation (`ab_matrix_create()`, and the staged path's buffers) fails; `kernel`: the command buffer of every `ab_dgemm_scaled()`, `ab_zgemm()` and staged call, the GEMMs of the GPU path, reports an error. A GPU-routed call then fails as it would on a real failure there and runs on Accelerate instead (a `gpu_failed` fallback). Never set it in production. |
 
 ### Routing (AB_MODE=auto)
 
@@ -497,6 +505,33 @@ calibrate another machine, run `make calibrate` and set
 `AB_DISPATCH_TABLE` to the `dispatch_table.txt` it writes, or rebuild:
 it also rewrites `src/dispatch_table.h`.
 
+### Zero-copy operands
+
+`ab_register_host_memory(ptr, nbytes)` makes the GPU read an operand of a
+BLAS-ABI call in place when it lies wholly inside the registered range and
+starts on a multiple of its element size (8 bytes for DGEMM, 16 for
+ZGEMM), and write C there when it does not read it (DGEMM with beta = 0,
+ZGEMM with alpha = 1 and beta = 0); other operands are copied as usual. Registering
+maps the pages for the GPU, about 10 ms per GB, so it pays for arrays that
+many calls use, such as a solver's work arrays:
+
+```c
+double complex *psi = malloc(bytes);
+ab_register_host_memory(psi, bytes);
+for (...) zgemm_(..., psi, &lda, ...);     // psi is read in place
+ab_unregister_host_memory(psi);            // before free(psi)
+free(psi);
+```
+
+The library does not copy, retain or watch the memory: keep it allocated
+at the same address and size until `ab_unregister_host_memory()` has
+returned, and do not unregister it while a call that uses it runs. Memory
+freed or reallocated while registered leaves the GPU reading its old pages,
+and the results are wrong without an error. Up to
+`AB_MAX_HOST_REGISTRATIONS` (64) ranges, which must not overlap;
+`ab_shutdown()` drops them all. The results are the same bits as without
+registration.
+
 ### Reading a run report
 
 `AB_REPORT=1` prints, when the process exits:
@@ -526,7 +561,15 @@ AB_REPORT[<pid>] <routine> fallbacks no_device=… too_large=… gpu_failed=… 
   none), `download` (DD → FP64), `epilogue` (the row-major result into
   column-major C, with alpha and beta for ZGEMM) and `other`, the rest:
   mostly command-buffer encode, submit and wait latency, and ZGEMM's GPU
-  temporaries. `AB_TRACE` splits it per call (below).
+  temporaries. `AB_TRACE` splits it per call (below). That is the host
+  path (`AB_HOST_PACK=1`). On the staged path, the default, `alloc` is the
+  pool's buffers, `pack` the exponent-range check (on statistics the GPU
+  gathers), `upload` the copies of the operands into the GPU buffers,
+  `kernel` includes the GPU's FP64 ↔ DD conversion and epilogue, `download`
+  is the copy of the result into C, and `epilogue` only ZGEMM's host alpha
+  and beta when they are not 1 and 0 or 1. A call the staged path gives
+  back to the host path (data the check does not pass, Inf or NaN in the
+  GPU epilogue) adds both paths' stages.
 - **Fallbacks** are calls the routing sent to the GPU that ran on Accelerate
   instead: `no_device` (no Metal context: no GPU, or a `fork()`ed child),
   `too_large` (an operand beyond the size limits), `gpu_failed` (an
@@ -579,7 +622,8 @@ seq=2 t0_ns=411972254072166 t1_ns=411972258538707 routine=zgemm ta=C tb=N M=96 N
 - **GPU calls** add the stages of the run report in ns (`init_ns` …
   `epilogue_ns`, then `other_ns`), which sum exactly to `t1_ns - t0_ns`, and
   split `other_ns` exactly into `temps_ns` (creating and destroying ZGEMM's
-  GPU temporaries; 0 for DGEMM, which has none), `encode_ns` (building the
+  GPU temporaries on the host path; 0 for DGEMM, which has none, and on the
+  staged path, whose buffers are in `alloc_ns`), `encode_ns` (building the
   command buffer), `submit_ns` (from commit until the GPU started it:
   scheduling, and waiting behind other GPU work, including other
   processes'), `wake_ns` (from the GPU's end until `waitUntilCompleted`

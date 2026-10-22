@@ -29,7 +29,9 @@
 //   DSYRK: not re-measured for 1.4.0
 //
 // End-to-end regime — BLAS-ABI (ab_*_blas, raw pointers, no handle persistence; this is
-// the path Fortran host codes hit through dgemm_/zgemm_):
+// the path Fortran host codes hit through dgemm_/zgemm_), measured on 1.4.0, which
+// packed and converted every operand on the host (the staged path below does that
+// on the GPU and has not been calibrated yet):
 //   The GPU is >= 1.10x faster than Accelerate only for ZGEMM with both operands
 //   transposed or conjugated, M = N = K >= 4096 (1.11x at 4096, 1.20x at 6144). Every
 //   DGEMM through N=6144 and every Quantum ESPRESSO si64 shape is slower on the GPU
@@ -276,6 +278,19 @@ const char* ab_status_string(ABStatus status);
 // These are the entry points host codes reach via the dgemm_/zgemm_ Fortran symbols;
 // benchmarks use them directly to measure end-to-end dispatch behavior.
 // They create the Metal context on first GPU use, so callers need not call ab_init().
+// A GPU call copies its operands into GPU buffers the library keeps and
+// reuses (or reads them in place, see ab_register_host_memory), converts
+// them to double-float, multiplies, and converts and applies alpha and beta
+// on the GPU (the "staged path"), with results bit for bit those of the
+// host path: host packing, host conversion and the host epilogue. A ZGEMM
+// with alpha != 1 or beta other than 0 and 1 applies them on the host, as
+// 1.4.0 did. The staged result stands where the BLAS ABI's exponent-range
+// guard scales nothing and certifies the call from statistics the GPU
+// gathers. Every other call, one that meets Inf or NaN, and one whose staged
+// run fails are redone on the host path, as is every call when
+// AB_HOST_PACK=1 or the CPU's floating-point control is not the default
+// (rounding, flush to zero, default NaN), on which the host conversion's
+// bits depend.
 void ab_dgemm_blas(char transA, char transB, int M, int N, int K,
                    double alpha, const double* A, int ldA,
                    const double* B, int ldB,
@@ -292,6 +307,30 @@ void ab_zgemm_blas(char transA, char transB, int M, int N, int K,
 // (including a fallback after a GPU failure), or "none" before any call. Thread-local.
 const char* ab_get_last_dispatch_path(void);
 
+// Zero-copy operands for the BLAS-ABI entry points. A GPU-routed call copies
+// each operand into GPU buffers the library reuses (memcpy speed, ~50-100
+// GB/s). An operand lying wholly inside memory registered here (and aligned
+// to its element) is read in place by the GPU instead, and C is written in
+// place when the GPU does not read it (DGEMM with beta = 0, ZGEMM with
+// alpha = 1 and beta = 0).
+// Registering maps the pages for the GPU, ~10 ms per GB, so it pays only
+// for arrays used in many calls.
+// The library never copies, retains or frees the memory, and does not track
+// it: keep it allocated at the same address and size until
+// ab_unregister_host_memory(ptr) has returned, and do not unregister it
+// while a call that uses it runs. Memory freed or reallocated while
+// registered leaves the GPU reading the old pages, with no error.
+// ab_register_host_memory returns AB_ERROR_INVALID_ARG for NULL, 0 bytes or
+// a range overlapping a registered one, AB_ERROR_TOO_LARGE beyond the
+// device's maxBufferLength or AB_MAX_HOST_REGISTRATIONS ranges,
+// AB_ERROR_ALLOC_FAILED if part of the range is not mapped or Metal refuses
+// it, AB_ERROR_NO_DEVICE without Metal. ab_unregister_host_memory(ptr) takes
+// the ptr a registration was made with; AB_ERROR_INVALID_ARG for any other.
+// ab_shutdown() drops every registration.
+#define AB_MAX_HOST_REGISTRATIONS 64
+ABStatus ab_register_host_memory(const void* ptr, size_t nbytes);
+ABStatus ab_unregister_host_memory(const void* ptr);
+
 // Library version and the git commit it was built from, "-dirty" if tracked
 // files differed from that commit, e.g. "apple-bottom 1.4.0 (428f1cc1a1d3)";
 // "unknown" in place of the commit when built outside a git checkout or from a copy
@@ -306,7 +345,11 @@ const char* ab_build_info(void);
 //                 of time), the GPU calls' stage costs (init, alloc, pack,
 //                 upload, kernel = command-buffer GPU time, download,
 //                 epilogue, other) and fallbacks to cblas by reason
-//                 (no_device, too_large, gpu_failed, other, range).
+//                 (no_device, too_large, gpu_failed, other, range). On the
+//                 staged path, pack is the exponent-range check, upload the
+//                 copies into the GPU buffers, kernel includes the GPU's
+//                 conversion and epilogue, and download is the copy of the
+//                 result into C.
 //   AB_PROFILE=1  the same counts as a detailed table with dimension
 //                 histograms at exit, plus a stderr line per GPU call and per
 //                 fallback. AB_PROFILE_JSON=path also writes JSON at exit.
@@ -321,10 +364,15 @@ const char* ab_build_info(void);
 //   AB_TRACE_HASH=1  with AB_TRACE: also a hash of op(A), op(B) and C on
 //                 entry (when read), FNV-1a over the 64-bit words of the
 //                 referenced elements, to spot repeated operands.
-//   AB_TEST_FAIL_STAGE=alloc|kernel  test-only: every ab_matrix_create()
-//                 (alloc), or the command buffer of every ab_dgemm_scaled()
-//                 and ab_zgemm() (kernel), fails, so GPU-routed BLAS-ABI
-//                 calls fall back to cblas.
+//   AB_TEST_FAIL_STAGE=alloc|kernel  test-only: every ab_matrix_create() and
+//                 staging buffer (alloc), or the command buffer of every
+//                 ab_dgemm_scaled(), ab_zgemm() and staged call (kernel),
+//                 fails, so GPU-routed BLAS-ABI calls fall back to cblas.
+//   AB_HOST_PACK=1  every GPU call takes the host path (host pack,
+//                 conversion and epilogue) instead of the staged path.
+//   AB_STAGING_MB=n  the GPU buffers the staged path keeps between calls,
+//                 at most n MB per process (default 2048; 0: none, each
+//                 call makes its own).
 // A call that falls back counts as a CPU call, its wall time including the
 // failed GPU attempt. A fork()ed child starts with empty counters, reports
 // only calls of its own and traces to a file of its own. The native ABMatrix
