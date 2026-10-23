@@ -3,7 +3,7 @@
 ## Adding a new test to a registry-based file
 
 The registry-based test runners (`test_correctness.c`, `test_chaos.c`,
-`test_device_api.c`, `test_dispatch.c`, `test_trace.c`) dispatch via a
+`test_device_api.c`, `test_dispatch.c`, `test_trace.c`, `test_fft.c`) dispatch via a
 `TESTS[]` registry array of `{name, fn}` pairs declared just above
 `main()`. To add a test:
 
@@ -44,8 +44,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 148, every test but
-the chaos ones, and `make ci-local` all 166 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 162, every test but
+the chaos ones, and `make ci-local` all 180 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -64,6 +64,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
   - `tests/test_blas_abi.c` — 31 suites (1028 cases), see below
   - `tests/test_trace.c` — 5 tests of `AB_TRACE` and
     `AB_TEST_FAIL_STAGE`, see below
+  - `tests/test_fft.c` — 14 tests of the double-float FFT, see below
 
 - **Not yet registry-based (one `main`, no ghost guard):**
   - `tests/test_precision.c` — 14 tests; needs decomposition strategy
@@ -259,6 +260,29 @@ it never calls `ab_init()`. Each call must reach the GPU path
 counter advanced) and match a reference loop within 1e-11. The target is
 skipped, with a message, when neither `gfortran-15` nor `gfortran` is on
 `PATH`; set `GFORTRAN=` to pick a compiler.
+
+## Double-float FFT
+
+`tests/test_fft.c` checks `apple_bottom_fft.h` two ways for every case.
+Against a reference in double-double arithmetic (`tests/fft_ref.h`, about
+106 bits: a mixed-radix FFT validated against the O(n²) sum to 5e-32), the
+relative L2 and max errors must stay within 4e-15 × (1 + log₂N / 4) and
+twice that, about three times the worst measured. Against
+`tests/fft_emu.cpp`, which runs the GPU's double-float arithmetic
+(`src/fft/fft_device.h`) on the CPU in the same order, every output bit
+must match: this pins the kernels' indexing, pass order, conversions and
+scaling exactly. The cases: 1D lengths from 1 to 2048 with every radix
+(2, 3, 4, 5, 7, 8, 11, 13), four-step lengths up to 2048² (and 2049, which
+has no split, rejected), 2D and 3D batches up to 72³, FFTW-style strides,
+embeddings and gaps, interleaved batches in and out, with the padding
+between output elements left untouched, in place (staged and zero copy),
+`ab_fft_malloc` and `ab_fft_register`d memory (bitwise the staged result,
+nothing kept after `ab_fft_unregister`, new data at a reused address read
+afresh), batches split into chunks (bitwise the unsplit result), the three
+normalizations, the FP64 ↔ double-float conversions on 4 million values and
+pairs (ties, powers of two), bad arguments, the FP32 exponent range, six
+threads on shared and own plans, and a `fork()`ed child, which gets
+`AB_ERROR_NO_DEVICE` instead of a crash.
 
 ## Meta-test
 

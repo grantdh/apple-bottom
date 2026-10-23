@@ -411,6 +411,10 @@ call. The native `ABMatrix` and device APIs do not use them.
 | `AB_TRACE_HASH` | off | With `AB_TRACE`, `1`: also hash the operands each call reads. |
 | `AB_TEST_FAIL_STAGE` | unset | Test-only. `alloc`: every GPU buffer allocation (`ab_matrix_create()`) fails; `kernel`: the command buffer of every `ab_dgemm_scaled()` and `ab_zgemm()`, the GEMMs of the GPU path, reports an error. A GPU-routed call then fails as it would on a real failure there and runs on Accelerate instead (a `gpu_failed` fallback). Never set it in production. |
 
+The FFT (`apple_bottom_fft.h`) reads one variable, when a plan is created:
+`AB_FFT_WORK_MB` (default 256) caps the double-float work buffer of a plan
+with more than one GPU pass; larger batches run in groups that fit it.
+
 ### Routing (AB_MODE=auto)
 
 One function (`src/dispatch.c`) decides where each BLAS-ABI call runs, in

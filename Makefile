@@ -11,6 +11,7 @@
 # =============================================================================
 
 CC = clang
+CXX = clang++
 OBJC = clang
 
 CFLAGS = -Wall -Wextra -O3 -std=c11 -DACCELERATE_NEW_LAPACK
@@ -107,9 +108,23 @@ $(BUILD)/blas_profiler.o: $(SRC)/profiling/blas_profiler.c $(SRC)/profiling/blas
 $(BUILD)/device_api.o: $(SRC)/device_api.m $(INCLUDE)/apple_bottom.h $(INCLUDE)/apple_bottom_device.h | $(BUILD)
 	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/device_api.m -o $@
 
+# Double-float FFT (apple_bottom_fft.h). Its Metal source is embedded as one
+# NUL-terminated byte array; fft.m compiles it once per pass configuration,
+# behind a block of #defines.
+FFT_OBJCFLAGS = -std=gnu11 -Wall -Wextra -O3 -fobjc-arc
+FFT_MSL = $(SRC)/fft/fft_types.h $(SRC)/fft/fft_device.h $(SRC)/fft/fft_kernel.metal
+
+$(BUILD)/fft_metal_src.h: $(FFT_MSL) | $(BUILD)
+	@{ echo '/* generated from src/fft/ by the Makefile: do not edit */'; \
+	   echo 'static const unsigned char ab_fft_msl[] = {'; \
+	   cat $(FFT_MSL) | xxd -i; echo ', 0x00};'; } > $@
+
+$(BUILD)/fft.o: $(SRC)/fft.m $(INCLUDE)/apple_bottom_fft.h $(INCLUDE)/apple_bottom.h $(SRC)/fft/fft_host.h $(SRC)/fft/fft_types.h $(BUILD)/fft_metal_src.h | $(BUILD)
+	$(OBJC) $(FFT_OBJCFLAGS) -I$(INCLUDE) -I$(SRC) -I$(BUILD) -c $(SRC)/fft.m -o $@
+
 LIB_OBJS = $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o \
            $(BUILD)/fortran_bridge.o $(BUILD)/blas_profiler.o \
-           $(BUILD)/device_api.o $(BUILD)/dispatch.o
+           $(BUILD)/device_api.o $(BUILD)/dispatch.o $(BUILD)/fft.o
 
 $(BUILD)/libapplebottom.a: $(LIB_OBJS)
 	ar rcs $@ $^
@@ -219,13 +234,24 @@ $(BUILD)/test_convergence: tests/verification/test_convergence.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
+# Double-float FFT: tests/test_fft.c against a double-double reference
+# (tests/fft_ref.h) and, bit for bit, the CPU emulator tests/fft_emu.cpp,
+# which replays src/fft/fft_device.h: it must not contract to FMA.
+FFT_EMU_FLAGS = -std=c++14 -O2 -ffp-contract=off -fno-strict-aliasing -Wall -Wextra
+$(BUILD)/fft_emu.o: tests/fft_emu.cpp $(SRC)/fft/fft_device.h $(SRC)/fft/fft_host.h | $(BUILD)
+	$(CXX) $(FFT_EMU_FLAGS) -c $< -o $@
+
+$(BUILD)/test_fft: tests/test_fft.c tests/fft_ref.h tests/test_blas_check.h $(SRC)/fft/fft_host.h $(BUILD)/fft_emu.o lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) $< $(BUILD)/fft_emu.o -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
 # Routing unit tests: dispatch.c alone, no library or GPU. They check the
 # built-in table against its calibration data, found under AB_SOURCE_ROOT.
 $(BUILD)/test_dispatch: tests/test_dispatch.c $(BUILD)/dispatch.o $(SRC)/dispatch.h $(SRC)/dispatch_table.h | $(BUILD)
 	$(CC) $(CFLAGS) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' $< $(BUILD)/dispatch.o -o $@
 	@echo "Built: $@"
 
-test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden test-ghost-detection test-symbols test-fortran
+test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_fft test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "Running Tests"
@@ -237,6 +263,7 @@ test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api
 	./$(BUILD)/test_blas_abi
 	./$(BUILD)/test_trace
 	./$(BUILD)/test_qe_golden
+	./$(BUILD)/test_fft
 	@echo ""
 	@echo "✓ All tests passed!"
 
@@ -379,6 +406,7 @@ install: lib
 	install -m 755 $(BUILD)/libapplebottom.dylib $(PREFIX)/lib/
 	install -m 644 $(INCLUDE)/apple_bottom.h $(PREFIX)/include/
 	install -m 644 $(INCLUDE)/apple_bottom_device.h $(PREFIX)/include/
+	install -m 644 $(INCLUDE)/apple_bottom_fft.h $(PREFIX)/include/
 	@sed -e 's|@PREFIX@|$(PREFIX)|g' \
 	     -e 's|@VERSION@|$(VERSION)|g' \
 	     applebottom.pc.in > $(PREFIX)/lib/pkgconfig/applebottom.pc
@@ -389,6 +417,7 @@ uninstall:
 	rm -f $(PREFIX)/lib/libapplebottom.dylib
 	rm -f $(PREFIX)/include/apple_bottom.h
 	rm -f $(PREFIX)/include/apple_bottom_device.h
+	rm -f $(PREFIX)/include/apple_bottom_fft.h
 	rm -f $(PREFIX)/lib/pkgconfig/applebottom.pc
 	@echo "Uninstalled from $(PREFIX)"
 
@@ -451,6 +480,21 @@ $(BUILD)/bench_rect_dgemm: benchmarks/bench_rect_dgemm.c lib | $(BUILD)
 $(BUILD)/bench_rect_zgemm: benchmarks/bench_rect_zgemm.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
+
+# Double-float FFT against FFTW and vDSP (benchmarks/bench_fft.c); FFTW is
+# linked statically from FFTW_PREFIX (Homebrew's by default; build another
+# copy with e.g. FFTW_PREFIX=<NEON build> FFTW_LABEL=fftw-neon BENCH_FFT=build/bench_fft_neon).
+FFTW_PREFIX ?= /opt/homebrew/opt/fftw
+FFTW_LABEL ?= fftw
+BENCH_FFT ?= $(BUILD)/bench_fft
+
+$(BENCH_FFT): benchmarks/bench_fft.c tests/fft_ref.h tests/test_blas_check.h $(SRC)/fft/fft_host.h lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(FFTW_PREFIX)/include '-DFFTW_LABEL="$(FFTW_LABEL)"' $< -o $@ -L$(BUILD) \
+	    -lapplebottom $(FFTW_PREFIX)/lib/libfftw3_threads.a $(FFTW_PREFIX)/lib/libfftw3.a $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
+.PHONY: bench-fft
+bench-fft: $(BENCH_FFT)
 
 bench-rect: $(BUILD)/bench_rect_dgemm $(BUILD)/bench_rect_zgemm
 	@echo ""
@@ -561,7 +605,7 @@ test-symbols: $(BUILD)/libapplebottom.dylib $(BUILD)/libapplebottom.a
 $(BUILD)/check:
 	mkdir -p $@
 
-build-check: | $(BUILD)/check
+build-check: $(BUILD)/fft_metal_src.h | $(BUILD)/check
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "Build Check (compile only, no linking)"
@@ -578,6 +622,11 @@ build-check: | $(BUILD)/check
 	@$(CC) $(CFLAGS) -c $(SRC)/dispatch.c -o $(BUILD)/check/dispatch.o
 	@echo "Compiling device_api.m..."
 	@$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/device_api.m -o $(BUILD)/check/device_api.o
+	@echo "Compiling fft.m..."
+	@$(OBJC) $(FFT_OBJCFLAGS) -I$(INCLUDE) -I$(SRC) -I$(BUILD) -c $(SRC)/fft.m -o $(BUILD)/check/fft.o
+	@echo "Compiling fft_emu.cpp and test_fft.c..."
+	@$(CXX) $(FFT_EMU_FLAGS) -c tests/fft_emu.cpp -o $(BUILD)/check/fft_emu.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_fft.c -o $(BUILD)/check/test_fft.o
 	@echo "Compiling test_correctness.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_correctness.c -o $(BUILD)/check/test_correctness.o
 	@echo "Compiling test_precision.c..."
@@ -610,12 +659,12 @@ build-check: | $(BUILD)/check
 # Counting rule (also README.md, tests/README.md): TEST_TOTAL counts tests.
 # A test is one test_precision case, one TESTS[] registry entry of
 # test_correctness / test_chaos / test_device_api / test_dispatch /
-# test_trace, or one test_blas_abi suite. Device-API CHECKs and BLAS-ABI cases
+# test_trace / test_fft, or one test_blas_abi suite. Device-API CHECKs and BLAS-ABI cases
 # are reported on their own lines and are not part of TEST_TOTAL, nor is
 # test_qe_golden (its TEST_QE_GOLDEN line says PASS, or SKIP on another device).
 # The report is written only after every binary passed, so TEST_PASSED =
 # TEST_TOTAL and TEST_FAILED = 0.
-ci-local: version-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
+ci-local: version-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_fft $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "CI Local Validation"
@@ -630,6 +679,7 @@ ci-local: version-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUIL
 	@./$(BUILD)/test_blas_abi > $(BUILD)/test_blas_abi.log 2>&1 && echo "✓ test_blas_abi: PASS" || (echo "✗ test_blas_abi: FAIL" && cat $(BUILD)/test_blas_abi.log && exit 1)
 	@./$(BUILD)/test_trace > $(BUILD)/test_trace.log 2>&1 && echo "✓ test_trace: PASS" || (echo "✗ test_trace: FAIL" && cat $(BUILD)/test_trace.log && exit 1)
 	@./$(BUILD)/test_qe_golden > $(BUILD)/test_qe_golden.log 2>&1 && echo "✓ test_qe_golden: $$(sed -nE 's/^Golden bits: ([A-Z]+).*/\1/p' $(BUILD)/test_qe_golden.log)" || (echo "✗ test_qe_golden: FAIL" && cat $(BUILD)/test_qe_golden.log && exit 1)
+	@./$(BUILD)/test_fft > $(BUILD)/test_fft.log 2>&1 && echo "✓ test_fft: PASS" || (echo "✗ test_fft: FAIL" && cat $(BUILD)/test_fft.log && exit 1)
 	@echo ""
 	@echo "Running convergence study (V-2)..."
 	@rm -f $(BUILD)/convergence_data.csv
@@ -645,12 +695,13 @@ ci-local: version-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUIL
 		DISPATCH=$$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_dispatch.log); \
 		BLAS_ABI=$$(grep -cE "^\[[0-9]+/[0-9]+\] " $(BUILD)/test_blas_abi.log); \
 		TRACE=$$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_trace.log); \
+		FFT=$$(sed -nE "s/^Summary: ([0-9]+) test.*/\1/p" $(BUILD)/test_fft.log); \
 		GOLDEN=$$(sed -nE "s/^Golden bits: //p" $(BUILD)/test_qe_golden.log); \
 		[ -n "$$GOLDEN" ] || { echo "✗ CI report: no Golden bits line in test_qe_golden.log"; exit 1; }; \
-		for n in "$$PRECISION" "$$CORRECTNESS" "$$CHAOS" "$$DEVICE_API" "$$DEVICE_API_CHECKS" "$$DISPATCH" "$$BLAS_ABI" "$$TRACE"; do \
+		for n in "$$PRECISION" "$$CORRECTNESS" "$$CHAOS" "$$DEVICE_API" "$$DEVICE_API_CHECKS" "$$DISPATCH" "$$BLAS_ABI" "$$TRACE" "$$FFT"; do \
 			case "$$n" in ""|*[!0-9]*|0) echo "✗ CI report: could not read a test count from the logs"; exit 1;; esac; \
 		done; \
-		TOTAL=$$((PRECISION + CORRECTNESS + CHAOS + DEVICE_API + DISPATCH + BLAS_ABI + TRACE)); \
+		TOTAL=$$((PRECISION + CORRECTNESS + CHAOS + DEVICE_API + DISPATCH + BLAS_ABI + TRACE + FFT)); \
 		echo "GIT_SHA: $$(git rev-parse HEAD)" > $(BUILD)/CI_REPORT.txt; \
 		echo "GIT_BRANCH: $$(git rev-parse --abbrev-ref HEAD)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "AB_BUILD_SHA: $(AB_BUILD_SHA)" >> $(BUILD)/CI_REPORT.txt; \
@@ -663,6 +714,7 @@ ci-local: version-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUIL
 		echo "TEST_DISPATCH: PASS ($$DISPATCH tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_BLAS_ABI: PASS ($$BLAS_ABI tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_TRACE: PASS ($$TRACE tests)" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_FFT: PASS ($$FFT tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_QE_GOLDEN: $$GOLDEN" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_CONVERGENCE: PASS" >> $(BUILD)/CI_REPORT.txt; \
 		echo "test-ghost-detection: PASS" >> $(BUILD)/CI_REPORT.txt; \
