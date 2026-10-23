@@ -140,9 +140,9 @@ taken out of its gaps (`removed_s`).
     own routing decides it in the worker, run as the native
     `ab_dgemm_scaled()`/`ab_zgemm()` on operands resident on the GPU. Each
     call skips the allocation, pack, upload, download and epilogue.
-    `ab_zgemm()` still creates its four GPU temporaries per call (`temps`
-    in "other"). The other calls go through `dgemm_`/`zgemm_`, which keep
-    them on Accelerate.
+    `ab_zgemm()` takes its four GPU temporaries from the buffer pool
+    (`temps` in "other"). The other calls go through `dgemm_`/`zgemm_`,
+    which keep them on Accelerate.
 - **Operands.** Contents do not change the timing. Each worker fills one
   buffer each for A, B and C, sized for its largest call, and every call
   uses them with its own leading dimensions. Buffers per distinct shape

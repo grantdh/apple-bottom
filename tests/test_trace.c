@@ -532,7 +532,7 @@ static bool get_scalar(const TraceLine *t, const char *key, double complex want,
 }
 
 // Whether the children run with AB_HOST_PACK=1 (the host path, whose ZGEMM
-// makes GPU temporaries) rather than on the staged path.
+// times its GPU temporaries in temps_ns) rather than on the staged path.
 static bool g_host_pack;
 
 // One line against the call it records: the arguments exactly, the path, and
@@ -578,7 +578,7 @@ static bool check_line(const TraceLine *t, const Call *c, const char *path,
            expect(kernel > 0, "no kernel time") &&
            expect(encode > 0, "no encode time") &&
            expect(g_host_pack ? temps > 0 || !z : temps == 0,
-                  "temps_ns=%llu for %s (only the host path's ZGEMM makes GPU temporaries)",
+                  "temps_ns=%llu for %s (only the host path's ZGEMM times GPU temporaries)",
                   temps, get(t, "routine")) &&
            expect(gs > 0 && *t0 <= gs && gs <= ge && ge <= *t1,
                   "GPU start %llu / end %llu outside the call [%llu, %llu]", gs, ge, *t0, *t1) &&

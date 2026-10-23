@@ -149,6 +149,20 @@ All notable changes to this project will be documented in this file.
   unchanged:
   `tests/test_correctness.c` gains `test_prefetch_same_bits` (79 tests),
   which runs every prefetch kernel (`AB_PREFETCH=1`) against the plain ones.
+- **The native ZGEMMs keep their temporaries between calls.** `ab_zgemm`,
+  `ab_zgemm_ex`, `ab_zgemm_batched`, `ab_zgemm_async` and `ab_batch_zgemm`
+  used to make their four temporaries (Gauss-3M's two products and two
+  sums, or 4M's four products) as fresh GPU buffers every call. They now
+  take them from the staged path's pool (at most `AB_STAGING_MB`), so a
+  call no longer pays for those buffers between commit and the GPU's
+  start: on an M2 Max, `ab_zgemm` at M = N = K waited 3.1 ms there at
+  2048, 16.6 ms at 4096 and 36 ms at 6144, now 0.2 ms. At 8192 the four
+  (2.25 GB with the pool's margin) exceed the default cap and one is
+  remade each call: 65 ms → 18 ms, or 0.2 ms with `AB_STAGING_MB=4096`.
+  Results are bitwise unchanged. Only these four are pooled: `ab_zgemm_ex`'s
+  transposed copies of A and B, the copies that bring real and imaginary
+  parts to one scale, and the operands that the host path of the BLAS ABI
+  (`AB_HOST_PACK=1`) and `ab_dev_zgemm` copy in are still made every call.
 
 ### Fixed
 - **Data outside FP32's exponent range no longer gives silently wrong GPU

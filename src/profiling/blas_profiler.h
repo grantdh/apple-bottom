@@ -18,7 +18,7 @@
 //   AB_TRACE_HASH=1                         with AB_TRACE: hash the operands read
 //   AB_TEST_FAIL_STAGE=alloc|kernel         test-only: fail GPU allocations or GEMMs
 //   AB_HOST_PACK=1                          GPU calls take the host path (gpu_stage.h)
-//   AB_STAGING_MB=n                         the staged path's pool keeps at most n MB
+//   AB_STAGING_MB=n                         the GPU buffer pool keeps at most n MB
 //
 // Both reports start with ab_build_info(). "gpu_calls%" is a share of calls,
 // "gpu_time%" a share of wall time; a call counts as GPU only if the GPU
@@ -140,8 +140,8 @@ int  ab_prof_active(void);
 // thread completes; the BLAS-ABI layer takes the record once per call, with
 // their GPU time.
 typedef struct {
-    uint64_t temps_ns;      // creating and destroying the call's GPU temporaries (ZGEMM on
-                            // the host path; the staged path's are its pool's, in alloc)
+    uint64_t temps_ns;      // taking the call's GPU temporaries from the pool and back
+                            // (ZGEMM on the host path; the staged path's are in alloc)
     uint64_t encode_ns;     // building the command buffer and its encoders
     uint64_t submit_ns;     // from commit until the GPU started (GPUStartTime)
     uint64_t wake_ns;       // from GPUEndTime until waitUntilCompleted returned
@@ -196,8 +196,8 @@ int  ab_test_fail_stage(void);
 
 // AB_HOST_PACK=1 (as the other flags: set, not empty, not starting with 0):
 // every GPU-routed BLAS-ABI call takes the host path. AB_STAGING_MB=n: the
-// bytes the staged path's pool keeps between calls, n MB (default 2048; 0
-// or less: none). Read with the other settings, once.
+// bytes the pool of GPU buffers (gpu_stage.h) keeps between calls, n MB
+// (default 2048; 0 or less: none). Read with the other settings, once.
 int  ab_host_pack(void);
 size_t ab_staging_cap_bytes(void);
 
