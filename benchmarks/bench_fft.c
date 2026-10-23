@@ -6,15 +6,16 @@
 //   gpu-staged  ab_fft_execute on malloc'd arrays (copies in and out included)
 //   gpu-zc      arrays from ab_fft_malloc (zero copy, Metal-allocated memory)
 //   gpu-reg     the malloc'd arrays registered with ab_fft_register (zero copy)
-//   fftw-1      FFTW, one thread, FFTW_MEASURE plan of one transform
+//   fftw-1      FFTW, one thread, plan of one transform (FFTW_PATIENT with
+//               --patient, else FFTW_MEASURE)
 //   fftw-8      FFTW, one plan with 8 threads (fftw3_threads)
 //   fftw-8x1    8 workers, each running single-thread plans on 1/8 of the
 //               batch, as MPI ranks with QE_FFTW_THREADS=1 do
 //   vdsp-1/-8   vDSP_DFT_Interleaved_ExecuteD line by line (1 or 8 threads),
 //               for the lengths vDSP supports (f * 2^k, f in 2,3,5,9,15,25)
-// Each method gets a time-based warm-up (the GPU raises its clock only after
-// ~0.3 s of load), then the median of at least --reps calls (as many as fit
-// in a second, up to 64). Its first output transform is then compared with
+// Each method gets a time-based warm-up (--warm, default 3 s: the GPU raises
+// its clock only after sustained load, and short calls are bursty), then the
+// median of at least --reps calls (as many as fit in a second, up to 64). Its first output transform is then compared with
 // FFTW's (relative L2 difference in the note), so a method that computes the
 // wrong thing cannot post a time.
 //
@@ -69,6 +70,7 @@ static void fill(double* x, long n)   // n values in [-1, 1), 53 random bits
 
 typedef struct {
     int grids[16], ngrids, batches[8], nbatches, reps, threads, accuracy, speed;
+    unsigned plan_flags;
     double warm;
     const char* only;
     FILE* csv;
@@ -230,8 +232,9 @@ static void bench_gpu(const opts* o, int n, int B, double* in, double* out, cons
     ab_fft_destroy(p);
 }
 
-// FFTW_MEASURE plan of one transform with nthreads threads, run over the
-// batch by `workers` concurrent workers.
+// Plan of one transform with nthreads threads, run over the batch by
+// `workers` concurrent workers. Wisdom carries over within the process, so
+// the second batch size reuses the plan search.
 static void bench_fftw(const opts* o, int n, int B, int nthreads, int workers, const char* label, double* in,
                        double* out, const double* ref)
 {
@@ -239,7 +242,7 @@ static void bench_fftw(const opts* o, int n, int B, int nthreads, int workers, c
     fftw_plan_with_nthreads(nthreads);
     double* scratch = malloc((size_t)N * 32);   // MEASURE overwrites its arrays
     fftw_plan fp = fftw_plan_dft_3d(n, n, n, (fftw_complex*)scratch, (fftw_complex*)(scratch + 2 * N), FFTW_FORWARD,
-                                    FFTW_MEASURE);
+                                    o->plan_flags);
     free(scratch);
     const double s = time_job(^{
         dispatch_apply((size_t)workers, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t t) {
@@ -353,7 +356,7 @@ static int parse_list(const char* s, int* v, int max)
 
 int main(int argc, char** argv)
 {
-    opts o = {.reps = 3, .threads = 8, .warm = 0.5};
+    opts o = {.reps = 3, .threads = 8, .warm = 3.0, .plan_flags = FFTW_MEASURE};
     o.ngrids = parse_list("48,64,72,96,120,128", o.grids, 16);
     o.nbatches = parse_list("1,128", o.batches, 8);
     for (int i = 1; i < argc; ++i) {
@@ -365,18 +368,19 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--only") && i + 1 < argc) o.only = argv[++i];
         else if (!strcmp(argv[i], "--accuracy")) o.accuracy = 1;
         else if (!strcmp(argv[i], "--speed")) o.speed = 1;
+        else if (!strcmp(argv[i], "--patient")) o.plan_flags = FFTW_PATIENT;
         else if (!strcmp(argv[i], "--csv") && i + 1 < argc) o.csv = fopen(argv[++i], "w");
         else {
             fprintf(stderr, "usage: %s [--speed] [--accuracy] [--grids 48,72,...] [--batch 1,128] [--reps R] "
-                            "[--threads T] [--warm S] [--only gpu,fftw,8x1,vdsp] [--csv FILE]\n", argv[0]);
+                            "[--threads T] [--warm S] [--patient] [--only gpu,fftw,8x1,vdsp] [--csv FILE]\n", argv[0]);
             return 2;
         }
     }
     if (!o.speed && !o.accuracy) o.speed = 1;
     if (o.threads < 1 || o.threads > 64) o.threads = 8;
     fftw_init_threads();
-    printf("bench_fft: %s; FFTW %s (%s), %d threads, reps %d, warm-up %.1f s\n", ab_build_info(), fftw_version,
-           FFTW_LABEL, o.threads, o.reps, o.warm);
+    printf("bench_fft: %s; FFTW %s (%s, %s plans), %d threads, reps %d, warm-up %.1f s\n", ab_build_info(),
+           fftw_version, FFTW_LABEL, o.plan_flags == FFTW_PATIENT ? "PATIENT" : "MEASURE", o.threads, o.reps, o.warm);
     if (o.accuracy) {
         printf("accuracy (forward, batch 1, random 53-bit inputs in [-1,1)):\n");
         if (o.csv) fprintf(o.csv, "n,gpu_l2,gpu_max,fftw_l2,fftw_max,gpu_transform_l2,gpu_transform_max\n");
