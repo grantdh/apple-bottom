@@ -101,7 +101,7 @@ static const GoldenCase CASES[] = {
     {'d', 'C', 'N', 75, 53, 47, 3, S_AXBX, D_UNIFORM},
     {'d', 'N', 'C', 75, 53, 47, 3, S_A1B1, D_UNIFORM},
     {'d', 'C', 'C', 75, 53, 47, 3, S_A1B0, D_UNIFORM},
-    // Several tiles with ragged edges; the tall-skinny kernel (M >= 4N)
+    // Several tiles with ragged edges; a tall C (M >= 4N)
     {'d', 'N', 'T', 513, 257, 129, 2, S_AXBX, D_UNIFORM},
     {'d', 'N', 'N', 600, 48, 40, 3, S_AXBX, D_UNIFORM},
     {'z', 'N', 'N', 600, 48, 40, 3, S_AXBX, D_UNIFORM},

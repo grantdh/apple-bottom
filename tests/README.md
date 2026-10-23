@@ -44,8 +44,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 148, every test but
-the chaos ones, and `make ci-local` all 166 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 150, every test but
+the chaos ones, and `make ci-local` all 168 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -66,7 +66,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     `AB_TEST_FAIL_STAGE`, see below
 
 - **Not yet registry-based (one `main`, no ghost guard):**
-  - `tests/test_precision.c` — 14 tests; needs decomposition strategy
+  - `tests/test_precision.c` — 16 tests; needs decomposition strategy
   - `tests/test_qe_golden.c` — 32 golden-bits cases, see below
   - `tests/verification/test_convergence.c` — monolithic numerical
     V&V file; decomposition needs care because behavior changes are
@@ -121,8 +121,8 @@ to cblas. Both processes' exit reports must start with `ab_build_info()`
 Five suites guard what a faster GPU path must keep, all through `dgemm_` /
 `zgemm_` in `AB_MODE=gpu` without `ab_init()`; the long-K, concurrency and
 memory suites print their measured values on every run:
-- `test_long_k_precision`: dgemm ('T','N' on the square-tile kernel,
-  'N','N' on the tall-skinny one) and zgemm ('C','N') with small M, N and
+- `test_long_k_precision`: dgemm ('T','N' and 'N','N', both on the
+  32 × 32 kernel) and zgemm ('C','N') with small M, N and
   K up to 143666 (QE's 2*ngm_l per rank), against a compensated Dot2
   reference (`test_dot2.h`, shared with `test_precision.c`). The error is
   max |C − R| / (|A||B|), componentwise, in units of the DD unit roundoff

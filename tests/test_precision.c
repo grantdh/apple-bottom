@@ -246,22 +246,25 @@ int main(void) {
     printf("─────────────────────────────────────┼───────────────────┼───────────────────┼────────\n");
 
     static const PrecisionCase cases[] = {
-        // ab_dgemm always runs the square-tile kernel dd_dgemm
-        {"ab_dgemm 64x64 K=64 (dd_dgemm)",       OP_DGEMM,   64,   64,   64, 0, 0},
+        // ab_dgemm: dd_dgemm, or dd_dgemm_narrow for a C of at most 480x480
+        {"ab_dgemm 64x64 K=64 (narrow)",         OP_DGEMM,   64,   64,   64, 0, 0},
         {"ab_dgemm 128x128 K=128",               OP_DGEMM,  128,  128,  128, 0, 0},
         {"ab_dgemm 256x256 K=256",               OP_DGEMM,  256,  256,  256, 0, 0},
-        {"ab_dgemm 512x512 K=512",               OP_DGEMM,  512,  512,  512, 0, 0},
+        {"ab_dgemm 512x512 K=512 (dd_dgemm)",    OP_DGEMM,  512,  512,  512, 0, 0},
         {"ab_dgemm 1024x1024 K=1024",            OP_DGEMM, 1024, 1024, 1024, 0, 0},
         {"ab_dgemm 2048x2048 K=2048",            OP_DGEMM, 2048, 2048, 2048, 0, 0},
-        {"ab_dgemm 100x100 K=4096",              OP_DGEMM,  100, 4096,  100, 0, 0},
-        {"ab_dgemm 1000x50 K=200",               OP_DGEMM, 1000,  200,   50, 0, 0},
-        // ab_dgemm_scaled: dd_dgemm_ab, or dd_dgemm_ab_ts when M >= 4N
-        {"scaled 500x300 K=700 (dd_dgemm_ab)",   OP_DGEMM_SCALED,   500, 700, 300, 0.7, -1.3},
-        {"scaled 1000x50 K=200 a=1 b=0 (ts)",    OP_DGEMM_SCALED,  1000, 200,  50, 1.0,  0.0},
+        {"ab_dgemm 100x100 K=4096 (narrow)",     OP_DGEMM,  100, 4096,  100, 0, 0},
+        {"ab_dgemm 1000x50 K=200 (narrow)",      OP_DGEMM, 1000,  200,   50, 0, 0},
+        // ab_dgemm_scaled: dd_dgemm_ab, dd_dgemm_ab_ts when M >= 4N, or
+        // dd_dgemm_ab_narrow for a small C (see use_narrow_tiles)
+        {"scaled 700x600 K=500 (dd_dgemm_ab)",   OP_DGEMM_SCALED,   700, 500, 600, 0.7, -1.3},
+        {"scaled 500x300 K=700 (narrow)",        OP_DGEMM_SCALED,   500, 700, 300, 0.7, -1.3},
+        {"scaled 1000x50 K=200 a1b0 (narrow)",   OP_DGEMM_SCALED,  1000, 200,  50, 1.0,  0.0},
         {"scaled 18277x150 K=300 (ts, QE)",      OP_DGEMM_SCALED, 18277, 300, 150, 0.7, -1.3},
         // ab_zgemm: Gauss 3M, three real GEMMs plus DD add/sub
-        {"ab_zgemm 256x256 K=256 (dd_dgemm)",    OP_ZGEMM,  256,  256,  256, 0, 0},
-        {"ab_zgemm 1024x64 K=512 (ts)",          OP_ZGEMM, 1024,  512,   64, 0, 0},
+        {"ab_zgemm 256x256 K=256 (narrow)",      OP_ZGEMM,  256,  256,  256, 0, 0},
+        {"ab_zgemm 1024x64 K=512 (narrow)",      OP_ZGEMM, 1024,  512,   64, 0, 0},
+        {"ab_zgemm 1024x40 K=512 (ts)",          OP_ZGEMM, 1024,  512,   40, 0, 0},
     };
     const int n_cases = (int)(sizeof(cases) / sizeof(cases[0]));
     const int n_total = n_cases + 1;   // + the smoke test

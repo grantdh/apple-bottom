@@ -402,9 +402,10 @@ static AbiCase *add_kind(const Suite *s, Kind kind, Op op, char ta, char tb, int
 // Long K: QE's PAW and Davidson reductions run over K up to 2*ngm_l =
 // 143666 per rank. C = op(A) op(B) (alpha = 1, beta = 0) with inputs uniform
 // in [-1, 1) is compared with a compensated FP64 reference (Dot2, as in
-// test_precision.c, accurate to ~u64 = u²/32). dgemm_ runs once on each
-// kernel (square tiles; tall-skinny for M >= 4N), zgemm_ ('C','N') on the
-// Gauss 3M product. The error is max_ij |C - R|_ij / (|op(A)||op(B)|)_ij
+// test_precision.c, accurate to ~u64 = u²/32). dgemm_ runs on the 32x32 tiles
+// ('N','N' 144x36 is a tall C whose tall-skinny grid would have only 6
+// threadgroups), zgemm_ ('C','N') on the Gauss 3M product; the 64x64 and
+// tall-skinny kernels compute each output the same way. The error is max_ij |C - R|_ij / (|op(A)||op(B)|)_ij
 // (moduli for complex), printed in units of u² = 2⁻⁴⁸ and of √K·u².
 //
 // Bound: per term, converting both inputs to DD costs ≤ 2u² and the DD
@@ -431,7 +432,7 @@ static void gen_long_k(const Suite *s) {
 static void gen_repeat(const Suite *s) {
     add_kind(s, KIND_REPEAT, OP_DGEMM_SYM, 'T', 'N', 150, 150, 2000, 3, SC_GEN);   // cegterg-like
     add_kind(s, KIND_REPEAT, OP_ZGEMM_SYM, 'C', 'N', 150, 150, 2000, 3, SC_GEN);
-    add_kind(s, KIND_REPEAT, OP_DGEMM_SYM, 'N', 'N', 600, 48, 40, 3, SC_GEN);      // tall-skinny
+    add_kind(s, KIND_REPEAT, OP_DGEMM_SYM, 'N', 'N', 600, 48, 40, 3, SC_GEN);      // tall C
     add_kind(s, KIND_REPEAT, OP_ZGEMM_SYM, 'N', 'T', 96, 80, 72, 3, SC_B1);
 }
 
@@ -479,8 +480,9 @@ static void add_native(Op op, int M, int N, int K) {
 }
 
 // Native ABMatrix GEMMs (row-major) on tile grids that are powers of two but
-// neither square nor 2:1 wide (K-P0-1 regressions; 1024x64 and 2048x128 use the
-// 128x16 tall-skinny tiles where the entry point routes M >= 4N there).
+// neither square nor 2:1 wide (K-P0-1 regressions; 2048x128 uses the 128x16
+// tall-skinny tiles where the entry point routes M >= 4N there, 512x256 and
+// 1024x64 the 32x32 ones).
 // 256x512 (grid 8x4) is a control. The suite runs under MTL_DEBUG_LAYER=1,
 // which also catches unbound kernel buffers (K-P1-3).
 static void gen_native(const Suite *s) {
@@ -1117,7 +1119,7 @@ static bool run_long_k(const AbiCase *c, char *detail, size_t n) {
 // The GPU calls a KIND_REPEAT case makes between its second and third run.
 static const Shape REPEAT_OTHERS[] = {
     {OP_ZGEMM_SYM, 'N', 'T', 200, 120, 300},
-    {OP_DGEMM_SYM, 'N', 'N', 1024, 64, 64},     // tall-skinny kernel
+    {OP_DGEMM_SYM, 'N', 'N', 1024, 64, 64},     // 32x32 kernel (scaled), tall C
     {OP_DGEMM_SYM, 'T', 'N', 512, 256, 64},
     {OP_ZGEMM_SYM, 'C', 'N', 64, 64, 4096},
 };
@@ -1244,7 +1246,7 @@ static const Shape MEM_SHAPES[] = {
     {OP_DGEMM_SYM, 'N', 'N', 64, 64, 64},
     {OP_ZGEMM_SYM, 'C', 'N', 48, 40, 300},
     {OP_DGEMM_SYM, 'T', 'N', 96, 40, 200},
-    {OP_ZGEMM_SYM, 'N', 'N', 160, 40, 48},      // tall-skinny kernel
+    {OP_ZGEMM_SYM, 'N', 'N', 160, 40, 48},      // tall C
 };
 #define N_MEM_SHAPES ((int)TEST_REGISTRY_SIZE(MEM_SHAPES))
 

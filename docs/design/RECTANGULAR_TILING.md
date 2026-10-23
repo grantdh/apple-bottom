@@ -1,6 +1,6 @@
 # Rectangular Matrix Tile-Dispatch Design Note
 
-This note documents the rationale for apple-bottom's default tile configuration (BM=BN=64, TM=TN=4, TK=16) and the tall-skinny variant (BM=128, BN=16) used for QE's Davidson eigensolver shapes. It is intended as a reference for future tile-size tuning on new Apple Silicon generations or workloads with different aspect ratios.
+This note documents the rationale for apple-bottom's default tile configuration (BM=BN=64, TM=TN=4, TK=16), the tall-skinny variant (BM=128, BN=16) used for QE's Davidson eigensolver shapes and the narrow-output variant (BM=BN=32) for small C. It is intended as a reference for future tile-size tuning on new Apple Silicon generations or workloads with different aspect ratios.
 
 DD error stays within its O(K)·2⁻⁴⁸ componentwise bound for all tested aspect ratios from 121:1 (tall-skinny) to 1:100 (short-wide); `test_rectangular.c` checks this on tall, wide and thin-K shapes up to 18277 × 150 × 18277.
 
@@ -20,9 +20,16 @@ Each threadgroup computes a BM×BN tile of C by iterating TK-wide slabs across t
 - BM = 128, BN = 16
 - TM = 4, TN = 2
 - Threadgroup layout 8×32 = 256 threads
-- Selected on `M >= 4 * N` (`use_ts` in `src/apple_bottom.m`) by `ab_dgemm_scaled` (and so the DGEMM BLAS ABI) and by ZGEMM's three real products; `ab_dgemm` always uses the 64 × 64 kernel
+- Selected on `M >= 4 * N` (`use_tall_skinny` in `src/apple_bottom.m`) by `ab_dgemm_scaled` (and so the DGEMM BLAS ABI) and by ZGEMM's three real products, unless the narrow-output variant takes the shape; `ab_dgemm` never uses it
 
 The tall-skinny kernel reduces boundary waste for N = 150 from ~22% under BN=64 (3 tiles, 192 columns computed) to ~6% under BN=16 (10 tiles, 160 columns).
+
+**Narrow-output variant** (deployed; `BM_NW`/`BN_NW` in `src/apple_bottom.m`):
+- BM = BN = 32, TM = TN = 2, TK = 16
+- Threadgroup layout 16×16 = 256 threads
+- Selected by `use_narrow_tiles` for a C of at most 480 × 480 elements: in place of the 64 × 64 kernel, and in place of the tall-skinny one only where its 32 columns per tile add no padding to that kernel's 16 (N = 17-32, 49-64, ...) or where the tall-skinny grid would have at most 16 threadgroups, as for Davidson's overlaps with a small subspace (200 × 40 × 18277: 6 threadgroups, 2.1× faster on 32 × 32 tiles)
+- Four times the threadgroups of the 64 × 64 tiling: a 160 × 160 C is 25 threadgroups instead of 9, 2.6× faster on 160 × 160 × 18432 on a 38-core M2 Max. 512 × 512 breaks even, so larger outputs keep the 64 × 64 tiles
+- Each output gets the same dd_fma sequence and renormalizations as in the other kernels, so the results are bitwise the same
 
 **Tall-skinny stress shape used by the tests:**
 - M = 18,277, N = 150, K = 18,277: synthetic. Quantum ESPRESSO's Davidson
@@ -171,6 +178,7 @@ Summary: 6 passed, 0 failed
 ## References
 
 - Tall-skinny kernel parameters: `BM_TS`, `BN_TS`, `TM_TS`, `TN_TS` in `src/apple_bottom.m`
-- Dispatch rule: `use_ts = (M >= 4 * N)` in `src/apple_bottom.m`
+- Narrow-output kernel parameters: `BM_NW`, `BN_NW`, `TM_NW`, `TN_NW` in `src/apple_bottom.m`
+- Dispatch rules: `use_tall_skinny` (`M >= 4 * N`) and `use_narrow_tiles` in `src/apple_bottom.m`
 - QE integration: [`docs/INTEGRATION.md`](../INTEGRATION.md)
 - Main benchmarks: [`benchmarks/`](../../benchmarks/)
