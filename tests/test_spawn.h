@@ -14,17 +14,19 @@
 #include <string.h>
 #include <unistd.h>
 
-// The caller's environment minus every entry is_ab_env() matches, so a child
-// sees only the settings a test gives it, with room for `extra` more entries
-// and the terminating NULL. *n is the number of entries copied; the strings
-// are the caller's, the array is to free().
+// The caller's environment minus every entry is_ab_env() matches and its
+// MallocNanoZone (test_blas_abi's memory suite sets one), so a child sees
+// only the settings a test gives it, with room for `extra` more entries and
+// the terminating NULL. *n is the number of entries copied; the strings are
+// the caller's, the array is to free().
 static inline char **child_environ(size_t extra, size_t *n) {
     size_t ne = 0;
     while (environ[ne]) ne++;
     char **env = calloc(ne + extra + 1, sizeof *env);
     size_t k = 0;
     for (size_t i = 0; i < ne; i++)
-        if (!is_ab_env(environ[i])) env[k++] = environ[i];
+        if (!is_ab_env(environ[i]) && strncmp(environ[i], "MallocNanoZone=", 15))
+            env[k++] = environ[i];
     *n = k;
     return env;
 }
