@@ -85,6 +85,26 @@ All notable changes to this project will be documented in this file.
   tall-skinny ZGEMM case (16 tests), so every kernel stays covered.
 - `tests/test_blas_abi` takes test names (`./build/test_blas_abi
   test_exponent_range`) to run only those suites.
+- **Small grids prefetch the next K-tile into registers.** Each tiled GEMM
+  kernel has a register-prefetch instance (`dd_dgemm_pf`, `dd_dgemm_ab_pf`,
+  `dd_dgemm_ab_ts_pf`, `dd_dgemm_narrow_pf`, `dd_dgemm_ab_narrow_pf`,
+  `dd_dsyrk_pf`) that loads K-tile k+1 from device memory while it computes
+  tile k, which hides the load latency where a GPU core holds one or two
+  threadgroups. `use_prefetch` in `src/apple_bottom.m` picks it by the
+  grid: up to 64 threadgroups for the 64×64 kernels and DSYRK, and for the
+  64×64 kernels only in a serial encoder, since concurrent products share
+  the GPU; up to 512 for tall-skinny; every grid on the 32×32 tiles.
+  Kernel GPU time of one product on M2 Max: 1.43× on 160×160×18432 and 1.40× on 150×150×18277 (QE si64's
+  overlap), 1.09× on 512×512×18432, 1.04× on 384×384×18432, 1.16× on
+  4096×64×4608; up to 1.26× on 64×64 grids and 1.47× on tall-skinny ones.
+  ZGEMM's three concurrent products: 1.01-1.09× on the 32×32 tiles (1.09×
+  at 384×384×18432), unchanged on 64×64 ones. Through the BLAS ABI, where
+  packing and conversion take most of these calls, the gain is the GPU's
+  share (`dgemm_` 150×150×18277: 1.14× end to end). For timing
+  comparisons, `AB_PREFETCH=0` keeps the plain kernels and `AB_PREFETCH=1`
+  prefetches on every grid. Results are bitwise unchanged:
+  `tests/test_correctness.c` gains `test_prefetch_same_bits` (79 tests),
+  which runs every prefetch kernel (`AB_PREFETCH=1`) against the plain ones.
 
 ### Fixed
 - **Data outside FP32's exponent range no longer gives silently wrong GPU

@@ -434,7 +434,9 @@ grep -E '/_[dz]gemm_>'` shows where each one went.
 
 The BLAS-ABI entry points (`dgemm_`, `zgemm_`, `ab_dgemm_`, `ab_zgemm_`,
 `ab_dgemm_blas`, `ab_zgemm_blas`) read these once per process, at their first
-call. The native `ABMatrix` and device APIs do not use them.
+call. The native `ABMatrix` and device APIs do not use them, except
+`AB_PREFETCH`, which the library reads when it initializes and which applies
+to every API.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
@@ -443,6 +445,7 @@ call. The native `ABMatrix` and device APIs do not use them.
 | `AB_DISPATCH_TABLE` | unset | `auto`: read the dispatch table from this file (the `dispatch_table.txt` that `make calibrate` writes) instead of using the built-in one. A file that cannot be read or parsed is reported on stderr and the built-in table is used. |
 | `AB_CROSSOVER_FLOPS` | unset | `auto`: replaces the table by a FLOP threshold. Calls with at least this many FLOPs (2·M·N·K real, 8·M·N·K complex) go to the GPU: ZGEMM, and DGEMM unless `AB_CROSSOVER_FLOPS_REAL` is set. |
 | `AB_CROSSOVER_FLOPS_REAL` | unset | `auto`: the same for DGEMM only. |
+| `AB_PREFETCH` | unset | Which GPU GEMM kernels load the next K-tile into registers while they compute the current one (register prefetch). Unset or any other value: where the GPU holds few threadgroups, by `use_prefetch` in `src/apple_bottom.m` (on an M2 Max up to 1.43× faster there). `0`: never. `1`: on every grid. The results are bitwise the same in all three; `0` and `1` are for timing comparisons. |
 | `AB_REPORT` | off | `1`: a short summary on stderr at exit (below). |
 | `AB_PROFILE` | off | `1`: the same counts as a detailed table on stderr at exit, with a dimension histogram, plus one line per GPU call and per fallback. |
 | `AB_PROFILE_JSON` | unset | With `AB_PROFILE=1`: also write the profile as JSON to this path at exit. |
