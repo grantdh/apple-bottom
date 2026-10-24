@@ -1,0 +1,23 @@
+# Apple M2 Max, library compiled in 1 ms
+# dd_dgemm               maxThreads  832  staticTG 16384  pipeline 1.2 ms  (not run)
+# dd_dgemm_pf            maxThreads  512  staticTG 16384  pipeline 0.0 ms  (not run)
+# dd_dgemm_narrow        maxThreads 1024  staticTG  8192  pipeline 0.0 ms  (not run)
+# dd_dgemm_narrow_pf     maxThreads  896  staticTG  8192  pipeline 0.0 ms  (not run)
+# dd_dgemm_ab            maxThreads  832  staticTG 16384  pipeline 0.0 ms
+# dd_dgemm_ab_pf         maxThreads  512  staticTG 16384  pipeline 0.0 ms
+# dd_dgemm_ab_narrow     maxThreads 1024  staticTG  8192  pipeline 0.0 ms
+# dd_dgemm_ab_narrow_pf  maxThreads  896  staticTG  8192  pipeline 0.0 ms
+# dd_dgemm_ab_ts         maxThreads  896  staticTG 18432  pipeline 0.0 ms  (not run)
+# dd_dgemm_ab_ts_pf      maxThreads  576  staticTG 18432  pipeline 0.0 ms  (not run)
+# dd_dsyrk               maxThreads  768  staticTG 16384  pipeline 0.0 ms  (not run)
+# dd_dsyrk_pf            maxThreads  512  staticTG 16384  pipeline 0.0 ms  (not run)
+    M     N      K  np   t64   t32       ab      abp      nws     nwsp  |      ab/abp    nws/nwsp     nws/abp    nwsp/abp   MHz
+  256   256   4608  1x    16    64    3.067    2.620    1.448    1.316  | 1.171/1.172 1.100/1.099 0.553/0.553 0.502/0.502   1396
+  384   384   4608  1x    36   144    4.655    4.349    3.142    3.057  | 1.070/1.072 1.028/1.031 0.722/0.722 0.703/0.701   1397
+  448   448   4608  1x    49   196    4.653    4.358    3.823    3.628  | 1.068/1.071 1.054/1.058 0.877/0.879 0.833/0.830   1397
+  512   512   4608  1x    64   256    4.651    4.363    4.935    4.790  | 1.066/1.067 1.030/1.031 1.131/1.132 1.098/1.098   1398
+  576   576   4608  1x    81   324    6.454    6.551    5.518    5.386  | 0.985/0.989 1.024/1.029 0.842/0.843 0.822/0.819   1397
+  640   640   4608  1x   100   400    8.840    8.514    6.720    6.574  | 1.038/1.040 1.022/1.023 0.789/0.791 0.772/0.770   1395
+  704   704   4608  1x   121   484    8.802    8.530    8.495    8.301  | 1.032/1.034 1.023/1.023 0.996/0.997 0.973/0.973   1395
+  768   768   4608  1x   144   576   10.672   10.636    9.640    9.471  | 1.003/1.005 1.018/1.018 0.906/0.906 0.890/0.891   1392
+ 1024  1024   4608  1x   256  1024   16.726   16.708   16.633   16.460  | 1.001/1.003 1.010/1.010 0.995/0.998 0.985/0.985   1387

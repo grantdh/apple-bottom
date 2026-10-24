@@ -2562,6 +2562,121 @@ static void test_xr_elementwise(void) {
 }
 
 // =============================================================================
+// Register Prefetch: the *_pf kernels give the plain kernels' bits
+// =============================================================================
+// Each case runs with AB_PREFETCH=1, which puts every GEMM-family dispatch on
+// a register-prefetch kernel, and with AB_PREFETCH=0, which keeps them all on
+// the plain kernels, each pass on a freshly initialized library. The FP64
+// results must be bitwise equal, and each call must have dispatched as many
+// prefetch kernels as it has products (three for ZGEMM's Gauss-3M), none
+// with AB_PREFETCH=0. Together the cases run every prefetch kernel.
+
+extern uint64_t ab_internal_prefetch_dispatches(void);   // src/apple_bottom.m
+
+// op: 'd' ab_dgemm, 's' ab_dgemm_scaled (alpha -0.7, beta 1.3), 'z' ab_zgemm,
+// 'y' ab_dsyrk (A is M×K, C is M×M)
+typedef struct { char op; int M, N, K; } PrefetchCase;
+static const PrefetchCase PF_CASES[] = {
+    {'d',  520,  500,  300},   // dd_dgemm_pf
+    {'d',  300,  200,  513},   // dd_dgemm_narrow_pf
+    {'s',  490,  500,  129},   // dd_dgemm_ab_pf
+    {'s',  500,  300,  700},   // dd_dgemm_ab_narrow_pf
+    {'s', 2000,   40,  300},   // dd_dgemm_ab_ts_pf
+    {'z',  520,  500,  100},   // three concurrent products each: dd_dgemm_pf,
+    {'z',  256,  200,  300},   // dd_dgemm_narrow_pf,
+    {'z', 1024,   40,  513},   // dd_dgemm_ab_ts_pf
+    {'y',  500,  500, 1000},   // dd_dsyrk_pf
+    {'y',  130,  130,   64},
+};
+#define N_PF_CASES ((int)TEST_REGISTRY_SIZE(PF_CASES))
+
+static double *pf_data(size_t n, long seed) {
+    double *x = malloc(n * sizeof(double));
+    srand48(seed);
+    for (size_t i = 0; i < n; i++) x[i] = ldexp(drand48() * 2 - 1, (int)(drand48() * 13) - 6);
+    return x;
+}
+
+static ABMatrix pf_matrix(int rows, int cols, long seed) {
+    ABMatrix m = ab_matrix_create(rows, cols);
+    double *x = pf_data((size_t)rows * cols, seed);
+    if (m) ab_matrix_upload(m, x, true);
+    free(x);
+    return m;
+}
+
+// The case's result (C, or Cr then Ci), malloc'd; NULL on any failure
+static double *pf_case(const PrefetchCase *c, long seed, size_t *n) {
+    int M = c->M, N = c->N, K = c->K;
+    size_t mn = (size_t)M * N;
+    *n = c->op == 'z' ? 2 * mn : mn;
+    double *out = malloc(*n * sizeof(double));
+    ABStatus st = AB_ERROR_INVALID_ARG;
+    if (c->op == 'z') {
+        ABMatrix Ar = pf_matrix(M, K, seed), Ai = pf_matrix(M, K, seed + 1);
+        ABMatrix Br = pf_matrix(K, N, seed + 2), Bi = pf_matrix(K, N, seed + 3);
+        ABMatrix Cr = ab_matrix_create(M, N), Ci = ab_matrix_create(M, N);
+        st = ab_zgemm(Ar, Ai, Br, Bi, Cr, Ci);
+        if (st == AB_OK) { ab_matrix_download(Cr, out, true); ab_matrix_download(Ci, out + mn, true); }
+        ab_matrix_destroy(Ar); ab_matrix_destroy(Ai); ab_matrix_destroy(Br); ab_matrix_destroy(Bi);
+        ab_matrix_destroy(Cr); ab_matrix_destroy(Ci);
+    } else {
+        ABMatrix A = pf_matrix(M, K, seed);
+        ABMatrix B = c->op == 'y' ? NULL : pf_matrix(K, N, seed + 1);
+        ABMatrix C = c->op == 's' ? pf_matrix(M, N, seed + 2) : ab_matrix_create(M, N);
+        if (c->op == 'd') st = ab_dgemm(A, B, C);
+        else if (c->op == 's') st = ab_dgemm_scaled(-0.7, A, B, 1.3, C);
+        else if ((st = ab_matrix_zero(C)) == AB_OK) st = ab_dsyrk(A, C);   // its lower triangle stays 0
+        if (st == AB_OK) ab_matrix_download(C, out, true);
+        ab_matrix_destroy(A); ab_matrix_destroy(B); ab_matrix_destroy(C);
+    }
+    if (st != AB_OK) { free(out); return NULL; }
+    return out;
+}
+
+// Every case on a fresh library with AB_PREFETCH=mode: res[c] NULL where one
+// failed, pf[c] its prefetch dispatches
+static void pf_run(const char *mode, double **res, size_t *n, uint64_t *pf) {
+    setenv("AB_PREFETCH", mode, 1);
+    bool ok = ab_init() == AB_OK;
+    for (int c = 0; c < N_PF_CASES; c++) {
+        uint64_t before = ab_internal_prefetch_dispatches();
+        res[c] = ok ? pf_case(&PF_CASES[c], 4000 + 10 * c, &n[c]) : NULL;
+        pf[c] = ab_internal_prefetch_dispatches() - before;
+    }
+    if (ok) ab_shutdown();
+}
+
+static void test_prefetch_same_bits(void) {
+    TEST("prefetch kernels: same bits as the plain ones");
+    const char *saved = getenv("AB_PREFETCH");
+    char *keep = saved ? strdup(saved) : NULL;
+    double *on[N_PF_CASES], *off[N_PF_CASES];
+    size_t n_on[N_PF_CASES], n_off[N_PF_CASES];
+    uint64_t pf_on[N_PF_CASES], pf_off[N_PF_CASES];
+
+    pf_run("1", on, n_on, pf_on);
+    pf_run("0", off, n_off, pf_off);
+    if (keep) setenv("AB_PREFETCH", keep, 1); else unsetenv("AB_PREFETCH");
+    free(keep);
+
+    char msg[128] = "";
+    for (int c = 0; c < N_PF_CASES && !msg[0]; c++) {
+        const PrefetchCase *p = &PF_CASES[c];
+        uint64_t products = p->op == 'z' ? 3 : 1;
+        if (!on[c] || !off[c])
+            snprintf(msg, sizeof msg, "%c %dx%dx%d failed", p->op, p->M, p->N, p->K);
+        else if (n_on[c] != n_off[c] || memcmp(on[c], off[c], n_on[c] * sizeof(double)))
+            snprintf(msg, sizeof msg, "%c %dx%dx%d: bits differ", p->op, p->M, p->N, p->K);
+        else if (pf_on[c] != products || pf_off[c] != 0)
+            snprintf(msg, sizeof msg, "%c %dx%dx%d: %llu prefetch dispatches, %llu with AB_PREFETCH=0",
+                     p->op, p->M, p->N, p->K, (unsigned long long)pf_on[c], (unsigned long long)pf_off[c]);
+    }
+    for (int c = 0; c < N_PF_CASES; c++) { free(on[c]); free(off[c]); }
+    if (msg[0]) FAIL(msg); else PASS();
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 
@@ -2679,6 +2794,7 @@ static const TestCase TESTS[] = {
     {"test_xr_syrk_herk",                     test_xr_syrk_herk},
     {"test_xr_elementwise",                   test_xr_elementwise},
     {"test_imbalance_zgemm_paths",            test_imbalance_zgemm_paths},
+    {"test_prefetch_same_bits",               test_prefetch_same_bits},
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
 

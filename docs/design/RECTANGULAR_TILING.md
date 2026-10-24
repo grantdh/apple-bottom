@@ -31,6 +31,11 @@ The tall-skinny kernel reduces boundary waste for N = 150 from ~22% under BN=64 
 - Four times the threadgroups of the 64 × 64 tiling: a 160 × 160 C is 25 threadgroups instead of 9, 2.6× faster on 160 × 160 × 18432 on a 38-core M2 Max. 512 × 512 breaks even, so larger outputs keep the 64 × 64 tiles
 - Each output gets the same dd_fma sequence and renormalizations as in the other kernels, so the results are bitwise the same
 
+**Register prefetch** (deployed; the `*_pf` instances of every tiled kernel):
+- The kernel loads K-tile k+1 from device memory into registers while it computes tile k, and stores it to threadgroup memory at the top of the next iteration; the inner loop and every tile slot are those of the plain kernel, so the bits are the same
+- It hides the tile loads' latency where a GPU core holds one or two threadgroups, and costs occupancy otherwise (`maxTotalThreadsPerThreadgroup` 832 → 512 for 64 × 64, 896 → 576 tall-skinny, 1024 → 896 narrow)
+- Selected by `use_prefetch`: up to 64 threadgroups for the 64 × 64 kernels and DSYRK, and for 64 × 64 only in a serial encoder; up to 512 for tall-skinny; every narrow grid. On a 38-core M2 Max: 1.43× on 160 × 160 × 18432 (narrow), 1.09× on 512 × 512 × 18432 (64 × 64), up to 1.47× tall-skinny. Re-calibrate the limits on a GPU with another core count or register file
+
 **Tall-skinny stress shape used by the tests:**
 - M = 18,277, N = 150, K = 18,277: synthetic. Quantum ESPRESSO's Davidson
   GEMMs share the long M (plane waves) and short N (bands), but their K is a
@@ -179,6 +184,6 @@ Summary: 6 passed, 0 failed
 
 - Tall-skinny kernel parameters: `BM_TS`, `BN_TS`, `TM_TS`, `TN_TS` in `src/apple_bottom.m`
 - Narrow-output kernel parameters: `BM_NW`, `BN_NW`, `TM_NW`, `TN_NW` in `src/apple_bottom.m`
-- Dispatch rules: `use_tall_skinny` (`M >= 4 * N`) and `use_narrow_tiles` in `src/apple_bottom.m`
+- Dispatch rules: `use_tall_skinny` (`M >= 4 * N`), `use_narrow_tiles` and `use_prefetch` in `src/apple_bottom.m`
 - QE integration: [`docs/INTEGRATION.md`](../INTEGRATION.md)
 - Main benchmarks: [`benchmarks/`](../../benchmarks/)

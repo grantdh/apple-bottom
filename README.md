@@ -186,9 +186,11 @@ fused multiply-add of the GEMM inner loop has a conservative 8u² envelope
   decimal digits.
 - GEMM tiles are 64 × 64 with 4 × 4 outputs per thread, with a 128 × 16
   variant for tall-skinny shapes (M ≥ 4N) and a 32 × 32 one (2 × 2 per
-  thread) for outputs of at most 480 × 480 elements; every variant computes
-  each output the same way. Long dot products are renormalized every 128
-  terms.
+  thread) for outputs of at most 480 × 480 elements. On grids that leave
+  the GPU's cores with few threadgroups, and on the 32 × 32 tiles always,
+  a kernel loads the next K-tile into registers while it computes the
+  current one. Every variant computes each output the same way. Long dot
+  products are renormalized every 128 terms.
 - ZGEMM uses Gauss's three-multiplication form, three real DD GEMMs
   instead of four, unless its real and imaginary parts are imbalanced
   enough to cost the imaginary part its accuracy; then it takes four
