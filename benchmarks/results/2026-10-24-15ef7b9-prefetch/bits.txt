@@ -1,0 +1,116 @@
+# Apple M2 Max, library compiled in 1 ms
+# dd_dgemm               maxThreads  832  staticTG 16384  pipeline 1.4 ms
+# dd_dgemm_pf            maxThreads  512  staticTG 16384  pipeline 0.1 ms
+# dd_dgemm_narrow        maxThreads 1024  staticTG  8192  pipeline 0.0 ms
+# dd_dgemm_narrow_pf     maxThreads  896  staticTG  8192  pipeline 0.0 ms
+# dd_dgemm_ab            maxThreads  832  staticTG 16384  pipeline 0.0 ms
+# dd_dgemm_ab_pf         maxThreads  512  staticTG 16384  pipeline 0.0 ms
+# dd_dgemm_ab_narrow     maxThreads 1024  staticTG  8192  pipeline 0.0 ms
+# dd_dgemm_ab_narrow_pf  maxThreads  896  staticTG  8192  pipeline 0.0 ms
+# dd_dgemm_ab_ts         maxThreads  896  staticTG 18432  pipeline 0.1 ms
+# dd_dgemm_ab_ts_pf      maxThreads  576  staticTG 18432  pipeline 0.0 ms
+# dd_dsyrk               maxThreads  768  staticTG 16384  pipeline 0.0 ms
+# dd_dsyrk_pf            maxThreads  512  staticTG 16384  pipeline 0.0 ms
+    1     1     1 data0 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+    1     1     1 data0 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+    1     1     1 data1 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+    1     1     1 data1 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+    1     1     1 data2 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+    1     1     1 data2 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+    7     5     3 data0 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+    7     5     3 data0 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+    7     5     3 data1 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+    7     5     3 data1 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+    7     5     3 data2 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+    7     5     3 data2 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+   33    31    17 data0 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+   33    31    17 data0 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+   33    31    17 data1 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+   33    31    17 data1 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+   33    31    17 data2 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+   33    31    17 data2 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+   64    64    16 data0 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+   64    64    16 data0 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+   64    64    16 data1 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+   64    64    16 data1 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+   64    64    16 data2 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+   64    64    16 data2 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+   65    63   129 data0 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+   65    63   129 data0 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+   65    63   129 data1 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+   65    63   129 data1 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+   65    63   129 data2 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+   65    63   129 data2 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  100    77   513 data0 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  100    77   513 data0 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  100    77   513 data1 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  100    77   513 data1 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  100    77   513 data2 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  100    77   513 data2 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  191   383  1500 data0 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  191   383  1500 data0 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  191   383  1500 data1 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  191   383  1500 data1 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  191   383  1500 data2 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  191   383  1500 data2 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  256   256  1144 data0 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  256   256  1144 data0 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  256   256  1144 data1 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  256   256  1144 data1 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  256   256  1144 data2 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  256   256  1144 data2 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  480   480   513 data0 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  480   480   513 data0 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  480   480   513 data1 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  480   480   513 data1 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  480   480   513 data2 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  480   480   513 data2 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  513   257  1500 data0 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  513   257  1500 data0 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  513   257  1500 data1 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  513   257  1500 data1 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  513   257  1500 data2 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  513   257  1500 data2 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  640   640  1144 data0 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  640   640  1144 data0 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  640   640  1144 data1 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  640   640  1144 data1 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  640   640  1144 data2 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  640   640  1144 data2 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+ 1000   777  1144 data0 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+ 1000   777  1144 data0 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+ 1000   777  1144 data1 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+ 1000   777  1144 data1 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+ 1000   777  1144 data2 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+ 1000   777  1144 data2 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  704   576  1500 data0 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  704   576  1500 data0 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  704   576  1500 data1 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  704   576  1500 data1 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  704   576  1500 data2 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  704   576  1500 data2 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  600    48  1500 data0 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  600    48  1500 data0 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  600    48  1500 data1 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  600    48  1500 data1 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  600    48  1500 data2 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  600    48  1500 data2 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+ 2000   150   513 data0 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+ 2000   150   513 data0 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+ 2000   150   513 data1 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+ 2000   150   513 data1 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+ 2000   150   513 data2 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+ 2000   150   513 data2 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+ 4000   171    64 data0 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+ 4000   171    64 data0 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+ 4000   171    64 data1 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+ 4000   171    64 data1 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+ 4000   171    64 data2 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+ 4000   171    64 data2 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  300   300 18433 data0 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  300   300 18433 data0 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  300   300 18433 data1 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  300   300 18433 data1 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+  300   300 18433 data2 1x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0  ok
+  300   300 18433 data2 3x: sqp=0 nw=0 nwp=0 abp=0 nws=0 nwsp=0 ts=0 tsp=0 syp=0 sq(1x)=0 ab(1x)=0 sy(1x)=0  ok
+bits: 1071 comparisons, 0 with differing elements or errors

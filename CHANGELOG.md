@@ -94,15 +94,19 @@ All notable changes to this project will be documented in this file.
   grid: up to 64 threadgroups for the 64×64 kernels and DSYRK, and for the
   64×64 kernels only in a serial encoder, since concurrent products share
   the GPU; up to 512 for tall-skinny; every grid on the 32×32 tiles.
-  Kernel GPU time of one product on M2 Max: 1.43× on 160×160×18432 and 1.40× on 150×150×18277 (QE si64's
-  overlap), 1.09× on 512×512×18432, 1.04× on 384×384×18432, 1.16× on
-  4096×64×4608; up to 1.26× on 64×64 grids and 1.47× on tall-skinny ones.
-  ZGEMM's three concurrent products: 1.01-1.09× on the 32×32 tiles (1.09×
-  at 384×384×18432), unchanged on 64×64 ones. Through the BLAS ABI, where
-  packing and conversion take most of these calls, the gain is the GPU's
-  share (`dgemm_` 150×150×18277: 1.14× end to end). For timing
-  comparisons, `AB_PREFETCH=0` keeps the plain kernels and `AB_PREFETCH=1`
-  prefetches on every grid. Results are bitwise unchanged:
+  Kernel GPU time of one product on M2 Max: 1.43× on 160×160×18432 and
+  1.42× on 150×150×18277 (QE si64's overlap), 1.08× on 512×512×18432,
+  1.04× on 384×384×18432 and 1.18× on 4096×64×4608; up to 1.26× on 64×64
+  grids and 1.47× on tall-skinny ones. ZGEMM's three concurrent products:
+  1.01-1.11× on the 32×32 tiles (1.11× at 384×384×18432), unchanged on
+  64×64 ones. Through the BLAS ABI, where packing and conversion take most
+  of these calls, the gain is the GPU's share: `dgemm_` 150×150×18277 and
+  160×160×18432 run 1.09-1.10× end to end. When a host-bound caller leaves
+  the GPU's clock low, mid-size grids gain little (within ±6% of the
+  kernel time). For timing comparisons, `AB_PREFETCH=0` keeps the plain
+  kernels and `AB_PREFETCH=1` prefetches on every grid. Measurements:
+  `benchmarks/results/2026-10-24-15ef7b9-prefetch/`. Results are bitwise
+  unchanged:
   `tests/test_correctness.c` gains `test_prefetch_same_bits` (79 tests),
   which runs every prefetch kernel (`AB_PREFETCH=1`) against the plain ones.
 
