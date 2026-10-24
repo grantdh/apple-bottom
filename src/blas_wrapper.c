@@ -7,15 +7,18 @@
 #include <complex.h>
 #include <limits.h>
 #include <math.h>
+#include <dispatch/dispatch.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <sys/param.h>
 #include <Accelerate/Accelerate.h>
 #include <stdio.h>
 
 #include "ab_internal.h"
 #include "blas_trans.h"
 #include "dispatch.h"
+#include "gpu_stage.h"
 #include "profiling/blas_profiler.h"
 
 // Thread-local record of the path the last BLAS-ABI call on this thread
@@ -512,7 +515,8 @@ static void prof_stage(CallProf *p, ab_prof_stage_t s) {
 }
 
 // The kernel stage (ab_prof_take_kernel_ns); the rest of the kernel call is
-// left to "other", which AB_TRACE splits.
+// left to "other", which AB_TRACE splits. A call whose staged attempt gave
+// way to the host path has two kernel steps, which add up.
 static void prof_kernel(CallProf *p) {
     if (!p) return;
     uint64_t now = ab_prof_now_ticks();
@@ -634,6 +638,266 @@ static ab_prof_fallback_t fallback_reason(ABStatus st) {
          : st == AB_ERROR_TOO_LARGE ? AB_PROF_FB_TOO_LARGE : AB_PROF_FB_OTHER;
 }
 
+// How the BLAS ABI computes a ZGEMM's product from its lines' statistics:
+// 4M where some row of op(A) and column of op(B) give Gauss-3M a rho above
+// AB_GAUSS3M_MAX_RHO (ab_internal.h), else 3M. The staged path keeps a result
+// only where this is 3M.
+static ab_zgemm_method_t blas_zgemm_method(const ab_line_stats_t* sa, const ab_line_stats_t* sb) {
+    return ab_lines_rho(sa, sb) > AB_GAUSS3M_MAX_RHO ? AB_ZGEMM_4M : AB_ZGEMM_3M;
+}
+
+// The ZGEMM epilogue of the host path, C = alpha * P + beta * C, from the
+// product P = op(A) * op(B) as row-major real and imaginary parts (M x N).
+// Bit for bit (ab_internal.h): with the line scales re (rows of op(A)) and
+// ce (columns of op(B)), both NULL if none, each part of the product, as the
+// download made it FP64, times 2^(re[row] + ce[col]) in one rounding
+// (ab_scale2), then alpha and beta in FP64, in the order below.
+static void zgemm_epilogue(int M, int N, double complex alpha, double complex beta,
+                           const double *Cr_data, const double *Ci_data,
+                           double complex *C, int ldC, const int *re, const int *ce) {
+    double ar = creal(alpha), ai = cimag(alpha);
+    double br = creal(beta), bi = cimag(beta);
+    bool needs_beta = (br != 0.0 || bi != 0.0);
+    bool non_unit_alpha = (ar != 1.0 || ai != 0.0);
+
+    for (size_t col = 0; col < (size_t)N; col++) {
+        const int ec = ce ? ce[col] : 0;
+        for (size_t row = 0; row < (size_t)M; row++) {
+            size_t src = row * N + col;
+            size_t dst = col * ldC + row;
+            double pr = Cr_data[src], pi = Ci_data[src];
+            if (re) {
+                pr = ab_scale2(pr, re[row] + ec);
+                pi = ab_scale2(pi, re[row] + ec);
+            }
+
+            // Apply alpha: alpha * (A*B)
+            double result_r, result_i;
+            if (non_unit_alpha) {
+                result_r = ar * pr - ai * pi;
+                result_i = ar * pi + ai * pr;
+            } else {
+                result_r = pr;
+                result_i = pi;
+            }
+
+            // Apply beta: + beta * C_old
+            if (needs_beta) {
+                double complex c_old = C[dst];
+                result_r += br * creal(c_old) - bi * cimag(c_old);
+                result_i += br * cimag(c_old) + bi * creal(c_old);
+            }
+
+            C[dst] = result_r + I * result_i;
+        }
+    }
+}
+
+// =============================================================================
+// Staged path (gpu_stage.h)
+// =============================================================================
+// A GPU-routed call first copies its operands into reused GPU buffers and
+// leaves packing, FP64 <-> DD conversion and the epilogue to the GPU (the
+// host epilogue for a ZGEMM with other alpha or beta); gpu_stage.h has the
+// whole of it, and ab_prof_stage_t what its profile stages hold. A call the
+// exponent-range guard does not let stand, and one that fails or meets Inf
+// or NaN, takes the host path below instead.
+
+// This thread's last call: whether the staged path gave its result, and
+// with how many operands in place (ab_internal_last_staged).
+static __thread struct { bool staged; int in_place; } t_last_stage;
+
+bool ab_internal_last_staged(int *in_place) {
+    if (in_place) *in_place = t_last_stage.in_place;
+    return t_last_stage.staged;
+}
+
+// The staged path converts on the GPU what the host path converts on the
+// CPU, so the bits agree only under the CPU's default floating-point
+// control: round to nearest, no flush to zero, no default NaN (FPCR RMode,
+// FZ, DN, and FIZ/AH where implemented, all clear). A caller that changed it
+// keeps the host path, as does AB_HOST_PACK=1.
+static bool staged_path(void) {
+    if (ab_host_pack()) return false;
+#if defined(__aarch64__)
+    uint64_t fpcr;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+    return (fpcr & ((3ULL << 22) | (1ULL << 24) | (1ULL << 25) | 3ULL)) == 0;
+#else
+    return true;
+#endif
+}
+
+// Copies of at least STAGE_COPY_PARALLEL bytes run in STAGE_COPY_CHUNKS
+// pieces on the global queue (~54 GB/s on one thread, ~100 on several; cf.
+// AB_CONVERT_PARALLEL_MIN in apple_bottom.m for the host path's conversion).
+#define STAGE_COPY_PARALLEL ((size_t)4 << 20)
+#define STAGE_COPY_CHUNKS 4
+
+typedef struct {
+    char *dst;
+    const char *src;
+    size_t dst_ld, src_ld, col_bytes, cols;   // cols columns of col_bytes, strides in bytes
+    size_t per;                               // bytes (one column) or columns per piece
+} CopyJob;
+
+static void copy_piece(void *arg, size_t i) {
+    const CopyJob *j = arg;
+    if (j->cols == 1) {
+        size_t off = i * j->per;
+        memcpy(j->dst + off, j->src + off, MIN(j->per, j->col_bytes - off));
+        return;
+    }
+    for (size_t c = i * j->per, end = MIN(c + j->per, j->cols); c < end; c++)
+        memcpy(j->dst + c * j->dst_ld, j->src + c * j->src_ld, j->col_bytes);
+}
+
+// rows x cols elements of elem bytes from src (leading dimension src_ld) to
+// dst (dst_ld): one block when both are dense, else column by column, so
+// padding is neither read nor written.
+static void copy_matrix(void *dst, int dst_ld, const void *src, int src_ld, size_t elem,
+                        int rows, int cols) {
+    size_t c = (size_t)cols, col_bytes = (size_t)rows * elem;
+    CopyJob j = {dst, src, (size_t)dst_ld * elem, (size_t)src_ld * elem, col_bytes, c, 0};
+    if ((dst_ld == rows && src_ld == rows) || cols == 1) {
+        j.col_bytes = col_bytes * c;
+        j.cols = 1;
+    }
+    size_t pieces = col_bytes * c >= STAGE_COPY_PARALLEL ? STAGE_COPY_CHUNKS : 1;
+    if (j.cols == 1) {
+        j.per = (j.col_bytes / pieces + 63) & ~(size_t)63;
+        pieces = (j.col_bytes + j.per - 1) / j.per;
+    } else {
+        j.per = (c + pieces - 1) / pieces;
+        pieces = (c + j.per - 1) / j.per;
+    }
+    if (pieces == 1)
+        copy_piece(&j, 0);
+    else
+        dispatch_apply_f(pieces, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), &j,
+                         copy_piece);
+}
+
+// Whether the exponent-range guard (see "Exponent range") lets the staged
+// result stand: exactly where the host path would compute the call unscaled
+// on the GPU, a ZGEMM by Gauss-3M, which is what the staged path computed.
+// From the statistics the GPU gathered: no line of op(A) or op(B) to scale,
+// parts balanced enough for 3M, the product certified, and a DGEMM's C when
+// it is read, stage 2 reading the caller's operands as the host path does
+// (the staged run wrote none of them it reads). The host path makes every
+// other call itself: scaled, by 4M, or on Accelerate. (A DGEMM's alpha and
+// beta were checked before the run: dgemm_staged.)
+static bool staged_certified(ab_stage_t *s, const ab_stage_gemm_t *g) {
+    ab_line_stats_t sa, sb;
+    ab_range_t c;
+    ab_internal_stage_stats(s, g, &sa, &sb, &c);
+    bool z = g->routine == 'z';
+    const ab_stage_matrix_t *A = &g->x[0], *B = &g->x[1], *C = &g->x[2];
+    const ab_op_view_t va = {A->ptr, A->ld, g->M, g->K, g->ta != 'N', z};
+    const ab_op_view_t vb = {B->ptr, B->ld, g->K, g->N, g->tb != 'N', z};
+    if (ab_line_scales(&sa) || ab_line_scales(&sb) ||
+        (z && blas_zgemm_method(&sa, &sb) != AB_ZGEMM_3M) ||
+        !ab_range_guard(g->K, &sa, &sb, z ? 0 : ilogb(g->alpha[0]), &va, &vb))
+        return false;
+    return z || !g->c_in || ab_range_guard_c(&sa, &sb, c, ilogb(g->beta[0]), C->ptr, C->ld, 0);
+}
+
+static double ms_since(uint64_t ticks) {
+    return ab_prof_ticks_to_ns(ab_prof_now_ticks() - ticks) / 1e6;
+}
+
+// One staged call, g describing it: true if C holds the result; false
+// leaves C as it was.
+static bool run_staged(CallProf *p, const ab_stage_gemm_t *g) {
+    size_t elem = g->routine == 'z' ? sizeof(double complex) : sizeof(double);
+    ab_stage_t *s = ab_internal_stage_acquire(g);
+    prof_stage(p, AB_PROF_STAGE_ALLOC);
+    if (!s) return false;
+
+    uint64_t t = ab_prof_now_ticks();
+    for (int i = 0; i < 2 + g->c_in; i++) {
+        const ab_stage_matrix_t *x = &g->x[i];
+        int ld;
+        void *dst = ab_internal_stage_host(s, (ab_stage_operand_t)i, &ld);
+        if (dst) copy_matrix(dst, ld, x->ptr, x->ld, elem, x->rows, x->cols);
+    }
+    double in_ms = ms_since(t);
+    prof_stage(p, AB_PROF_STAGE_UPLOAD);
+
+    bool ok = ab_internal_stage_run(s, g);
+    prof_kernel(p);
+    ok = ok && staged_certified(s, g);
+    prof_stage(p, AB_PROF_STAGE_PACK);
+    if (ok) {
+        void *C = (void *)g->x[2].ptr;
+        int ldC = g->x[2].ld, ld;
+        t = ab_prof_now_ticks();
+        if (g->split) {
+            const double *Cr_data, *Ci_data;
+            ab_internal_stage_split(s, g, &Cr_data, &Ci_data);
+            double out_ms = ms_since(t);
+            prof_stage(p, AB_PROF_STAGE_DOWNLOAD);
+            zgemm_epilogue(g->M, g->N, CMPLX(g->alpha[0], g->alpha[1]),
+                           CMPLX(g->beta[0], g->beta[1]), Cr_data, Ci_data, C, ldC, NULL, NULL);
+            prof_stage(p, AB_PROF_STAGE_EPILOGUE);
+            ab_internal_stage_count(g, in_ms, out_ms);
+        } else {
+            const void *out = ab_internal_stage_host(s, AB_STAGE_C, &ld);
+            if (out) copy_matrix(C, ldC, out, ld, elem, g->M, g->N);
+            ab_internal_stage_count(g, in_ms, ms_since(t));
+            prof_stage(p, AB_PROF_STAGE_DOWNLOAD);
+        }
+        t_last_stage.staged = true;
+        t_last_stage.in_place = ab_internal_stage_in_place(s);
+    }
+    ab_internal_stage_release(s);
+    prof_stage(p, AB_PROF_STAGE_ALLOC);
+    return ok;
+}
+
+// op(X) is op_rows x op_cols: X as stored.
+static ab_stage_matrix_t stored_matrix(const void *X, int ld, enum CBLAS_TRANSPOSE t, int op_rows,
+                                       int op_cols) {
+    bool n = t == CblasNoTrans;
+    return (ab_stage_matrix_t){X, ld, n ? op_rows : op_cols, n ? op_cols : op_rows};
+}
+
+static char op_char(enum CBLAS_TRANSPOSE t) {
+    return t == CblasNoTrans ? 'N' : t == CblasConjTrans ? 'C' : 'T';
+}
+
+static bool zgemm_staged(CallProf *p, enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
+                         int M, int N, int K, double complex alpha,
+                         const double complex *A, int ldA, const double complex *B, int ldB,
+                         double complex beta, double complex *C, int ldC) {
+    bool beta0 = creal(beta) == 0.0 && cimag(beta) == 0.0;
+    bool beta1 = creal(beta) == 1.0 && cimag(beta) == 0.0;
+    bool gpu_epi = creal(alpha) == 1.0 && cimag(alpha) == 0.0 && (beta0 || beta1);
+    ab_stage_gemm_t g = {
+        .routine = 'z', .ta = op_char(ta), .tb = op_char(tb), .M = M, .N = N, .K = K,
+        .x = {stored_matrix(A, ldA, ta, M, K), stored_matrix(B, ldB, tb, K, N), {C, ldC, M, N}},
+        .c_in = gpu_epi && beta1, .split = !gpu_epi,
+        .alpha = {creal(alpha), cimag(alpha)}, .beta = {creal(beta), cimag(beta)},
+    };
+    return run_staged(p, &g);
+}
+
+static bool dgemm_staged(CallProf *p, enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
+                         int M, int N, int K, double alpha, const double *A, int ldA,
+                         const double *B, int ldB, double beta, double *C, int ldC) {
+    // An alpha or beta the host path would fold into C's scale, or one it
+    // rejects, is its own to handle.
+    if (!isfinite(alpha) || !isfinite(beta) || ab_scalar_exp(alpha, AB_SCALAR_WINDOW) ||
+        ab_scalar_exp(beta, AB_SCALAR_WINDOW))
+        return false;
+    ab_stage_gemm_t g = {
+        .routine = 'd', .ta = op_char(ta), .tb = op_char(tb), .M = M, .N = N, .K = K,
+        .x = {stored_matrix(A, ldA, ta, M, K), stored_matrix(B, ldB, tb, K, N), {C, ldC, M, N}},
+        .c_in = beta != 0.0, .alpha = {alpha, 0.0}, .beta = {beta, 0.0},
+    };
+    return run_staged(p, &g);
+}
+
 // =============================================================================
 // BLAS-compatible ZGEMM - this is what Fortran calls
 // Handles: transA, transB, alpha, beta, leading dimensions
@@ -650,6 +914,7 @@ static void zgemm_blas(
 ) {
     enum CBLAS_TRANSPOSE ta = ab_blas_trans(transA, true);
     enum CBLAS_TRANSPOSE tb = ab_blas_trans(transB, true);
+    t_last_stage.staged = false;
 
     if (!ab_internal_blas_routes_gpu('z', transA, transB, M, N, K, ldA, ldB, ldC, alpha != 0.0)) {
         ab_internal_zgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
@@ -663,8 +928,12 @@ static void zgemm_blas(
         return;
     }
     prof_stage(p, AB_PROF_STAGE_INIT);
+    if (staged_path() && zgemm_staged(p, ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC)) {
+        _ab_last_path = "gpu";
+        return;
+    }
 
-    // GPU path: compute op(A)*op(B) on GPU, apply alpha/beta in epilogue.
+    // The host path: compute op(A)*op(B) on GPU, apply alpha/beta in epilogue.
     // Rows of op(A) and columns of op(B) outside the window are scaled by
     // powers of two on upload, and C back here (see "Exponent range").
     bool ok = false, scaled = false;
@@ -726,8 +995,7 @@ static void zgemm_blas(
     // Compute C = op(A) * op(B), by 4M where some row of op(A) and column of
     // op(B) are imbalanced enough to cost Gauss-3M's imaginary part its
     // accuracy (ab_internal.h).
-    ab_zgemm_method_t method =
-        ab_lines_rho(&sa, &sb) > AB_GAUSS3M_MAX_RHO ? AB_ZGEMM_4M : AB_ZGEMM_3M;
+    ab_zgemm_method_t method = blas_zgemm_method(&sa, &sb);
     if (ab_internal_zgemm(mAr, mAi, mBr, mBi, mCr, mCi, method) != AB_OK) goto cleanup;
     prof_kernel(p);
 
@@ -741,46 +1009,9 @@ static void zgemm_blas(
     prof_stage(p, AB_PROF_STAGE_DOWNLOAD);
 
     // Convert row-major back to column-major with alpha/beta:
-    // C = alpha * (A*B) + beta * C_old. Bit for bit (ab_internal.h): each
-    // part of the product, as the download made it FP64, times
-    // 2^(ra[row] + cb[col]) in one rounding (ab_scale2), then alpha and beta
-    // in FP64, in the order below.
-    double ar = creal(alpha), ai = cimag(alpha);
-    double br = creal(beta), bi = cimag(beta);
-    bool needs_beta = (br != 0.0 || bi != 0.0);
-    bool non_unit_alpha = (ar != 1.0 || ai != 0.0);
-
-    for (size_t col = 0; col < (size_t)N; col++) {
-        const int ec = sb.e[col];
-        for (size_t row = 0; row < (size_t)M; row++) {
-            size_t src = row * N + col;
-            size_t dst = col * ldC + row;
-            double pr = Cr_data[src], pi = Ci_data[src];
-            if (scaled) {
-                pr = ab_scale2(pr, sa.e[row] + ec);
-                pi = ab_scale2(pi, sa.e[row] + ec);
-            }
-
-            // Apply alpha: alpha * (A*B)
-            double result_r, result_i;
-            if (non_unit_alpha) {
-                result_r = ar * pr - ai * pi;
-                result_i = ar * pi + ai * pr;
-            } else {
-                result_r = pr;
-                result_i = pi;
-            }
-
-            // Apply beta: + beta * C_old
-            if (needs_beta) {
-                double complex c_old = C[dst];
-                result_r += br * creal(c_old) - bi * cimag(c_old);
-                result_i += br * cimag(c_old) + bi * creal(c_old);
-            }
-
-            C[dst] = result_r + I * result_i;
-        }
-    }
+    // C = alpha * (A*B) + beta * C_old (zgemm_epilogue, scaled back first).
+    zgemm_epilogue(M, N, alpha, beta, Cr_data, Ci_data, C, ldC, scaled ? sa.e : NULL,
+                   scaled ? sb.e : NULL);
     ok = true;
     prof_stage(p, AB_PROF_STAGE_EPILOGUE);
 
@@ -820,6 +1051,7 @@ static void dgemm_blas(
 ) {
     enum CBLAS_TRANSPOSE ta = ab_blas_trans(transA, false);
     enum CBLAS_TRANSPOSE tb = ab_blas_trans(transB, false);
+    t_last_stage.staged = false;
 
     if (!ab_internal_blas_routes_gpu('d', transA, transB, M, N, K, ldA, ldB, ldC, alpha != 0.0)) {
         ab_internal_dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
@@ -833,8 +1065,12 @@ static void dgemm_blas(
         return;
     }
     prof_stage(p, AB_PROF_STAGE_INIT);
+    if (staged_path() && dgemm_staged(p, ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC)) {
+        _ab_last_path = "gpu";
+        return;
+    }
 
-    // GPU path: supports arbitrary alpha/beta and transpose via scaled kernel.
+    // The host path: supports arbitrary alpha/beta and transpose via scaled kernel.
     // Rows of op(A) and columns of op(B) outside the window are scaled by
     // powers of two on upload, alpha and beta outside theirs give their
     // exponents to C's scale, and C is scaled back here (see "Exponent range").

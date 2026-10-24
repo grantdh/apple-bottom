@@ -48,6 +48,8 @@ static int             g_reported     = 0;     // exit reports written
 static int             g_trace        = 0;     // AB_TRACE
 static int             g_trace_hash   = 0;     // AB_TRACE_HASH, with AB_TRACE
 static int             g_fail_stage   = -1;    // AB_TEST_FAIL_STAGE
+static int             g_host_pack    = 0;     // AB_HOST_PACK
+static size_t          g_staging_cap  = (size_t)2048 << 20;   // AB_STAGING_MB, in bytes
 
 // The trace file of this process, <AB_TRACE>.<pid>, opened at its first line.
 // A fork()ed child closes the one it inherits (ab_prof_atfork_child).
@@ -126,6 +128,12 @@ static void read_env(void) {
     }
     g_trace_hash = g_trace && env_flag("AB_TRACE_HASH");
     g_fail_stage = parse_fail_stage(getenv("AB_TEST_FAIL_STAGE"));
+    g_host_pack = env_flag("AB_HOST_PACK");
+    const char* staging = getenv("AB_STAGING_MB");
+    if (staging && *staging) {
+        long long mb = atoll(staging);
+        g_staging_cap = mb > 0 ? (size_t)mb << 20 : 0;
+    }
 }
 
 int ab_prof_enabled(void) {
@@ -156,6 +164,16 @@ int ab_trace_hash_enabled(void) {
 int ab_test_fail_stage(void) {
     pthread_once(&g_env_once, read_env);
     return g_fail_stage;
+}
+
+int ab_host_pack(void) {
+    pthread_once(&g_env_once, read_env);
+    return g_host_pack;
+}
+
+size_t ab_staging_cap_bytes(void) {
+    pthread_once(&g_env_once, read_env);
+    return g_staging_cap;
 }
 
 uint64_t ab_prof_now_ticks(void) {
@@ -472,10 +490,18 @@ void ab_prof_report(FILE* out) {
 // =============================================================================
 
 uint64_t ab_prof_take_kernel_ns(uint64_t wall_ns, ab_prof_kernel_split_t* split) {
-    uint64_t gpu = (uint64_t)(ab_internal_take_gpu_seconds(split) * 1e9);
-    if (gpu && gpu < wall_ns) return gpu;
-    split->temps_ns = split->encode_ns = split->submit_ns = split->wake_ns = 0;
-    return wall_ns;
+    ab_prof_kernel_split_t k;
+    uint64_t gpu = (uint64_t)(ab_internal_take_gpu_seconds(&k) * 1e9);
+    bool timed = gpu && gpu < wall_ns;
+    if (timed) {
+        split->temps_ns += k.temps_ns;
+        split->encode_ns += k.encode_ns;
+        split->submit_ns += k.submit_ns;
+        split->wake_ns += k.wake_ns;
+    }
+    if (!split->gpu_start_ns) split->gpu_start_ns = k.gpu_start_ns;
+    if (k.gpu_end_ns) split->gpu_end_ns = k.gpu_end_ns;
+    return timed ? gpu : wall_ns;
 }
 
 // The header of a new trace file: the build, the settings and the line format.

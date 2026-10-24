@@ -17,6 +17,8 @@
 //   AB_TRACE=/path/to/trace                 a line per call in /path/to/trace.<pid>
 //   AB_TRACE_HASH=1                         with AB_TRACE: hash the operands read
 //   AB_TEST_FAIL_STAGE=alloc|kernel         test-only: fail GPU allocations or GEMMs
+//   AB_HOST_PACK=1                          GPU calls take the host path (gpu_stage.h)
+//   AB_STAGING_MB=n                         the staged path's pool keeps at most n MB
 //
 // Both reports start with ab_build_info(). "gpu_calls%" is a share of calls,
 // "gpu_time%" a share of wall time; a call counts as GPU only if the GPU
@@ -39,15 +41,23 @@ extern "C" {
 #define AB_PROF_NAME_LEN          32
 #define AB_PROF_HISTOGRAM_BINS     8
 
-// Where the wall time of a GPU call went, in call order.
+// Where the wall time of a GPU call went, in call order. The host path
+// (host pack, conversion and epilogue) and the staged path (gpu_stage.h)
+// fill them differently.
 typedef enum {
     AB_PROF_STAGE_INIT,      // routing, size checks, Metal context creation on first use
-    AB_PROF_STAGE_ALLOC,     // ABMatrix and host scratch allocation and release
-    AB_PROF_STAGE_PACK,      // column-major op(A), op(B), C -> row-major host copies; range check
-    AB_PROF_STAGE_UPLOAD,    // FP64 -> DD conversion into the GPU buffers
-    AB_PROF_STAGE_KERNEL,    // command-buffer GPU time (wall time if Metal reports none)
-    AB_PROF_STAGE_DOWNLOAD,  // DD -> FP64 conversion out of the GPU buffers
-    AB_PROF_STAGE_EPILOGUE,  // row-major result -> column-major C (ZGEMM: with alpha, beta)
+    AB_PROF_STAGE_ALLOC,     // ABMatrix and host scratch allocation and release; staged:
+                             // the pool's buffers for the call
+    AB_PROF_STAGE_PACK,      // column-major op(A), op(B), C -> row-major host copies; range check;
+                             // staged: the range check
+    AB_PROF_STAGE_UPLOAD,    // FP64 -> DD conversion into the GPU buffers; staged: the
+                             // copies of the operands into them
+    AB_PROF_STAGE_KERNEL,    // command-buffer GPU time (wall time if Metal reports none);
+                             // staged: with the GPU's conversion and epilogue
+    AB_PROF_STAGE_DOWNLOAD,  // DD -> FP64 conversion out of the GPU buffers; staged: the
+                             // copy of the result into C
+    AB_PROF_STAGE_EPILOGUE,  // row-major result -> column-major C (ZGEMM: with alpha, beta);
+                             // staged: ZGEMM's host alpha and beta, when not 1 and 0 or 1
     AB_PROF_STAGE_COUNT
 } ab_prof_stage_t;
 
@@ -130,7 +140,8 @@ int  ab_prof_active(void);
 // thread completes; the BLAS-ABI layer takes the record once per call, with
 // their GPU time.
 typedef struct {
-    uint64_t temps_ns;      // creating and destroying the call's GPU temporaries (ZGEMM)
+    uint64_t temps_ns;      // creating and destroying the call's GPU temporaries (ZGEMM on
+                            // the host path; the staged path's are its pool's, in alloc)
     uint64_t encode_ns;     // building the command buffer and its encoders
     uint64_t submit_ns;     // from commit until the GPU started (GPUStartTime)
     uint64_t wake_ns;       // from GPUEndTime until waitUntilCompleted returned
@@ -144,12 +155,14 @@ typedef struct {
 // zero (apple_bottom.m).
 double ab_internal_take_gpu_seconds(ab_prof_kernel_split_t* split);
 
-// The kernel stage of a GPU call whose kernel step (ab_dgemm_scaled() or
-// ab_zgemm()) took wall_ns: the GPU time of the command buffers taken now,
-// with split getting the rest of their host time; or wall_ns if Metal
-// reported none or not less than wall_ns, and then nothing of the step is
-// in "other" and split's host parts are zero. The BLAS-ABI layer and
-// benchmarks/replay.c both stage a kernel call with it.
+// The kernel stage of a GPU call whose kernel step (ab_dgemm_scaled(),
+// ab_zgemm() or a staged run) took wall_ns: the GPU time of the command
+// buffers taken now, with the rest of their host time added to split
+// (which keeps its first GPU start and gets the last end, so a call with two
+// kernel steps adds up); or wall_ns if Metal reported none or not less than
+// wall_ns, and then nothing of the step is in "other" and split's host parts
+// get nothing. The BLAS-ABI layer and benchmarks/replay.c both stage a
+// kernel call with it.
 uint64_t ab_prof_take_kernel_ns(uint64_t wall_ns, ab_prof_kernel_split_t* split);
 
 // One BLAS-ABI call: its arguments as the entry point received them, and
@@ -180,6 +193,13 @@ void ab_trace_record(const ab_trace_call_t* call, uint64_t t0_ns, uint64_t elaps
 // ab_dgemm_scaled() and ab_zgemm() (apple_bottom.m), as real failures there
 // would; -1 when unset.
 int  ab_test_fail_stage(void);
+
+// AB_HOST_PACK=1 (as the other flags: set, not empty, not starting with 0):
+// every GPU-routed BLAS-ABI call takes the host path. AB_STAGING_MB=n: the
+// bytes the staged path's pool keeps between calls, n MB (default 2048; 0
+// or less: none). Read with the other settings, once.
+int  ab_host_pack(void);
+size_t ab_staging_cap_bytes(void);
 
 #ifdef __cplusplus
 }

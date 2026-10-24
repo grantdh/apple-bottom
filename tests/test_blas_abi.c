@@ -2005,6 +2005,15 @@ static bool parse_report_line(const char *line, const char *build, ProcessReport
     return true;
 }
 
+// Whether a gpu_time% printed with %.1f is 100 g / t for the times g and t
+// printed with %.3f ms: within their rounding, 0.05 for the share and
+// 100 d (t + g) / (t (t - d)) for the ratio, d = 0.0005 ms (wide for a
+// routine whose calls took under a millisecond in all).
+static bool time_share_matches(double pct, double g, double t) {
+    const double d = 0.0005;
+    return t <= d || fabs(pct - 100.0 * g / t) <= 0.05 + 100.0 * d * (t + g) / (t * (t - d)) + 1e-9;
+}
+
 // The AB_REPORT and AB_PROFILE lines of one process for one routine against
 // the calls it made. NULL if they agree.
 static const char *check_routine(const RoutineReport *r, unsigned long long calls,
@@ -2021,10 +2030,9 @@ static const char *check_routine(const RoutineReport *r, unsigned long long call
         !(r->prof_time_pct >= 0.0 && r->prof_time_pct <= 100.0))
         return "gpu_time% outside [0, 100]";
     // gpu_time% is the share of time, not of calls (the two differ by up to 30x in QE).
-    if (r->total > 0.0 && fabs(r->time_pct - 100.0 * r->gpu_ms / r->total) > 0.1)
+    if (!time_share_matches(r->time_pct, r->gpu_ms, r->total))
         return "AB_REPORT gpu_time% is not gpu_ms / total_ms";
-    if (r->prof_total > 0.0 &&
-        fabs(r->prof_time_pct - 100.0 * r->prof_gpu_ms / r->prof_total) > 0.1)
+    if (!time_share_matches(r->prof_time_pct, r->prof_gpu_ms, r->prof_total))
         return "AB_PROFILE gpu_time% is not gpu_ms / total_ms";
     if (fabs(r->total - r->gpu_ms - r->cpu_ms) > 0.002) return "gpu_ms + cpu_ms != total_ms";
     if (!gpu && (r->gpu_ms != 0.0 || r->time_pct != 0.0)) return "GPU time without GPU calls";

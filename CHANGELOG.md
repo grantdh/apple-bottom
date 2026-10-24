@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **The staged path of the BLAS ABI**: a GPU-routed `dgemm_`/`zgemm_` copies
+  each operand (`memcpy`, column by column unless it is dense) into GPU
+  buffers the library keeps and reuses between calls (per process, at most
+  `AB_STAGING_MB`, default 2048 MB), and the GPU does the rest in one
+  command buffer: transposing and conjugating op(A) and op(B) and converting
+  them to double-float (and Gauss-3M's Ar + Ai, Br + Bi), the GEMM kernels,
+  and the conversion back and, for ZGEMM with alpha = 1 and beta = 0 or 1
+  (and every DGEMM, whose alpha and beta the kernel applies), the epilogue.
+  The results are bit for bit those of the host path (host pack, FP64 ↔ DD
+  conversion and epilogue): the GPU's conversions and epilogue work on the
+  bit patterns with integer arithmetic, rounding as the host does, and
+  follow the operations of the compiled host epilogue, signed zeros
+  included. The conversion also gathers the exponent-range guard's
+  statistics (see Fixed), and the staged result stands only where the guard
+  scales nothing, keeps a ZGEMM on Gauss-3M and certifies the call from
+  them. Every other call, one that meets Inf or NaN in the GPU epilogue, and
+  one whose staged run fails are redone on the host path, as is every call
+  when the CPU's floating-point control is not the default (rounding mode,
+  flush to zero, default NaN). `AB_HOST_PACK=1` keeps every call on the host
+  path. A staged call's stages in the run report and trace: `pack` is the
+  guard's check, `upload` the copies into the GPU buffers, `kernel` includes
+  the GPU's conversion and epilogue, and `download` is the copy of the
+  result into C.
+- **`ab_register_host_memory(ptr, nbytes)` /
+  `ab_unregister_host_memory(ptr)`**: BLAS-ABI operands that lie in
+  registered memory are read in place by the GPU, without the copies, and C
+  is written in place when the GPU does not read it. The caller keeps the
+  memory alive and in place until it is unregistered; nothing is ever
+  wrapped or cached by address otherwise.
+- **`tests/test_staging.c`** (in `make test`): 127 cases run on the host
+  path, the staged path, the staged path with `AB_STAGING_MB=0` and with
+  registered operands must give the same bits, with every TRANS pair, alpha
+  and beta, padding, shapes from M = 1 to QE's, random bit patterns, signed
+  zeros, subnormal and cancelling C, and data the exponent-range guard
+  certifies only in its second stage, scales, runs as 4M (imbalanced complex
+  parts) or sends to Accelerate (Inf, NaN, overflow): the staged result must
+  stand exactly where the host path computes the call unscaled on the GPU.
 - **`AB_TRACE=<path>`**: every BLAS-ABI call (`dgemm_`, `zgemm_`,
   `ab_*gemm_`, `ab_*gemm_blas`; Accelerate and GPU, every `AB_MODE`) appends
   one `key=value` line to `<path>.<pid>` when it returns (a call with an
@@ -85,6 +122,8 @@ All notable changes to this project will be documented in this file.
   tall-skinny ZGEMM case (16 tests), so every kernel stays covered.
 - `tests/test_blas_abi` takes test names (`./build/test_blas_abi
   test_exponent_range`) to run only those suites.
+- `AB_TRACE`'s `temps_ns` is 0 on the staged path: ZGEMM's GPU temporaries
+  come from the reused buffers, counted in `alloc_ns`.
 
 ### Fixed
 - **Data outside FP32's exponent range no longer gives silently wrong GPU

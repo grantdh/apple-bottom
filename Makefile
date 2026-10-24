@@ -85,10 +85,10 @@ $(BUILD):
 # Library
 # =============================================================================
 
-$(BUILD)/apple_bottom.o: $(SRC)/apple_bottom.m $(SRC)/ab_internal.h $(INCLUDE)/apple_bottom.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
+$(BUILD)/apple_bottom.o: $(SRC)/apple_bottom.m $(SRC)/ab_internal.h $(INCLUDE)/apple_bottom.h $(SRC)/gpu_stage.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
 	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $@
 
-$(BUILD)/blas_wrapper.o: $(SRC)/blas_wrapper.c $(SRC)/ab_internal.h $(SRC)/blas_trans.h $(SRC)/dispatch.h $(INCLUDE)/apple_bottom.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
+$(BUILD)/blas_wrapper.o: $(SRC)/blas_wrapper.c $(SRC)/ab_internal.h $(SRC)/blas_trans.h $(SRC)/dispatch.h $(SRC)/gpu_stage.h $(INCLUDE)/apple_bottom.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $@
 
 $(BUILD)/fortran_bridge.o: $(SRC)/fortran_bridge.c $(INCLUDE)/apple_bottom.h | $(BUILD)
@@ -215,6 +215,13 @@ $(BUILD)/test_qe_golden: tests/test_qe_golden.c tests/test_blas_check.h lib | $(
 	$(CC) $(CFLAGS) -I$(INCLUDE) '-DAB_SOURCE_ROOT="$(CURDIR)"' $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
+# Staged path (src/gpu_stage.h) bitwise against the host path: every case in
+# child processes with AB_HOST_PACK=1, by default, with AB_STAGING_MB=0 and
+# with registered operands.
+$(BUILD)/test_staging: tests/test_staging.c tests/test_blas_check.h tests/test_spawn.h $(SRC)/gpu_stage.h lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
 $(BUILD)/test_convergence: tests/verification/test_convergence.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
@@ -225,7 +232,7 @@ $(BUILD)/test_dispatch: tests/test_dispatch.c $(BUILD)/dispatch.o $(SRC)/dispatc
 	$(CC) $(CFLAGS) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' $< $(BUILD)/dispatch.o -o $@
 	@echo "Built: $@"
 
-test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden test-ghost-detection test-symbols test-fortran
+test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_staging test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "Running Tests"
@@ -237,6 +244,7 @@ test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api
 	./$(BUILD)/test_blas_abi
 	./$(BUILD)/test_trace
 	./$(BUILD)/test_qe_golden
+	./$(BUILD)/test_staging
 	@echo ""
 	@echo "✓ All tests passed!"
 
@@ -588,6 +596,8 @@ build-check: | $(BUILD)/check
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_trace.c -o $(BUILD)/check/test_trace.o
 	@echo "Compiling test_qe_golden.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_qe_golden.c -o $(BUILD)/check/test_qe_golden.o
+	@echo "Compiling test_staging.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c tests/test_staging.c -o $(BUILD)/check/test_staging.o
 	@echo "Compiling test_dispatch.c..."
 	@$(CC) $(CFLAGS) -I$(SRC) -c tests/test_dispatch.c -o $(BUILD)/check/test_dispatch.o
 	@echo "Compiling test_device_api.c..."
@@ -615,7 +625,7 @@ build-check: | $(BUILD)/check
 # test_qe_golden (its TEST_QE_GOLDEN line says PASS, or SKIP on another device).
 # The report is written only after every binary passed, so TEST_PASSED =
 # TEST_TOTAL and TEST_FAILED = 0.
-ci-local: version-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
+ci-local: version-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_staging $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "CI Local Validation"
@@ -630,6 +640,7 @@ ci-local: version-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUIL
 	@./$(BUILD)/test_blas_abi > $(BUILD)/test_blas_abi.log 2>&1 && echo "✓ test_blas_abi: PASS" || (echo "✗ test_blas_abi: FAIL" && cat $(BUILD)/test_blas_abi.log && exit 1)
 	@./$(BUILD)/test_trace > $(BUILD)/test_trace.log 2>&1 && echo "✓ test_trace: PASS" || (echo "✗ test_trace: FAIL" && cat $(BUILD)/test_trace.log && exit 1)
 	@./$(BUILD)/test_qe_golden > $(BUILD)/test_qe_golden.log 2>&1 && echo "✓ test_qe_golden: $$(sed -nE 's/^Golden bits: ([A-Z]+).*/\1/p' $(BUILD)/test_qe_golden.log)" || (echo "✗ test_qe_golden: FAIL" && cat $(BUILD)/test_qe_golden.log && exit 1)
+	@./$(BUILD)/test_staging > $(BUILD)/test_staging.log 2>&1 && echo "✓ test_staging: PASS" || (echo "✗ test_staging: FAIL" && cat $(BUILD)/test_staging.log && exit 1)
 	@echo ""
 	@echo "Running convergence study (V-2)..."
 	@rm -f $(BUILD)/convergence_data.csv
@@ -664,6 +675,7 @@ ci-local: version-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUIL
 		echo "TEST_BLAS_ABI: PASS ($$BLAS_ABI tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_TRACE: PASS ($$TRACE tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_QE_GOLDEN: $$GOLDEN" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_STAGING: PASS ($$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_staging.log) cases, the staged path against the host path)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_CONVERGENCE: PASS" >> $(BUILD)/CI_REPORT.txt; \
 		echo "test-ghost-detection: PASS" >> $(BUILD)/CI_REPORT.txt; \
 		echo "test-symbols: PASS" >> $(BUILD)/CI_REPORT.txt; \

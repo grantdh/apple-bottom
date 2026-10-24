@@ -234,9 +234,10 @@ convergence study; [tests/README.md](tests/README.md) gives the test counts.
     lose precision in its products there.
   - Data inside those windows computes exactly as before.
   - [Details](docs/vv/LIMITATIONS.md#exponent-range).
-- **Per-call overhead.** Through the BLAS ABI every measured shape is
-  slower than Accelerate except ZGEMM with both operands transposed at
-  N ≥ 4096; see the table above.
+- **Per-call overhead.** Through the 1.4.0 BLAS ABI every measured shape
+  was slower than Accelerate except ZGEMM with both operands transposed at
+  N ≥ 4096; see the table above. The staged path (unreleased; CHANGELOG)
+  moves packing and conversion to the GPU and has not been calibrated yet.
 - **Threads.** Calls on different matrices may come from different
   threads; one matrix, pool or session must not be used by two threads at
   once. All work shares one Metal command queue.
@@ -249,7 +250,8 @@ convergence study; [tests/README.md](tests/README.md) gives the test counts.
 ```
 include/apple_bottom.h          public API (and apple_bottom_device.h)
 src/apple_bottom.m              Metal context and DD kernels
-src/blas_wrapper.c              BLAS ABI: packing, conversion, fallbacks
+src/blas_wrapper.c              BLAS ABI: the staged path, the host path, fallbacks
+src/gpu_stage.h                 the staged path's GPU buffers and conversion (internal)
 src/dispatch.c, dispatch_table.h  AB_MODE routing and the calibrated table
 src/fortran_bridge.c            dgemm_ / zgemm_ / ab_*gemm_ entry points
 src/profiling/                  AB_PROFILE / AB_REPORT accounting, AB_TRACE
