@@ -370,9 +370,10 @@ const char* ab_build_info(void);
 //                 fails, so GPU-routed BLAS-ABI calls fall back to cblas.
 //   AB_HOST_PACK=1  every GPU call takes the host path (host pack,
 //                 conversion and epilogue) instead of the staged path.
-//   AB_STAGING_MB=n  the GPU buffers the staged path keeps between calls,
-//                 at most n MB per process (default 2048; 0: none, each
-//                 call makes its own).
+//   AB_STAGING_MB=n  the GPU buffers the staged path, and the native
+//                 ZGEMMs for their temporaries, keep between calls, at
+//                 most n MB per process (default 2048; 0: none, each call
+//                 makes its own).
 // A call that falls back counts as a CPU call, its wall time including the
 // failed GPU attempt. A fork()ed child starts with empty counters, reports
 // only calls of its own and traces to a file of its own. The native ABMatrix

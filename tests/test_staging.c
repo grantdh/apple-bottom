@@ -25,8 +25,21 @@
 // their bits are not compared. The registered child also checks
 // ab_register_host_memory()'s refusals.
 //
-// Usage: test_staging            the test
-//        test_staging --child    one child: a line per case on stdout
+// The native ZGEMMs take their Gauss-3M or 4M temporaries from the same
+// pool, so after the run it must hold buffers in the host child (whose
+// ZGEMMs go through ab_internal_zgemm) and the staged one, and none with
+// AB_STAGING_MB=0. A fifth child (--child-native) checks those ZGEMMs on the
+// pool: ab_zgemm, ab_zgemm_async, ab_batch_zgemm and ab_zgemm_batched,
+// repeated after the pool served larger and smaller shapes and from threads
+// calling at once, must all give the bits of the first ab_zgemm, and on
+// nearly real data (4M) those of an explicit 4M call, also in a batch that
+// switches between 3M and 4M; the pool must keep the temporaries between
+// calls. ab_shutdown() must empty it, and after shapes that grow it must
+// hold what the largest alone leaves.
+//
+// Usage: test_staging                  the test
+//        test_staging --child          one child: a line per case on stdout
+//        test_staging --child-native   the native ZGEMMs: "native ok" or what failed
 // =============================================================================
 
 #include "apple_bottom.h"
@@ -36,6 +49,7 @@
 #include <complex.h>
 #include <inttypes.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -491,6 +505,190 @@ static int run_child(bool reg) {
 }
 
 // =============================================================================
+// Native ZGEMMs on the pool (--child-native)
+// =============================================================================
+
+typedef struct {
+    int M, N, K;
+    double *in[4];              // Ar, Ai (M x K), Br, Bi (K x N), row-major
+    uint64_t hash;              // of Cr then Ci, by the reference call
+} NativeShape;
+
+// The entry points, then ab_internal_zgemm by a given method.
+typedef enum { VIA_ZGEMM, VIA_ASYNC, VIA_BATCH, VIA_3M, VIA_4M } NativeVia;
+
+// sh's inputs from seed, uniform in [-1, 1), the imaginary parts times im.
+static void native_make(NativeShape *sh, int M, int N, int K, uint64_t seed, double im) {
+    sh->M = M; sh->N = N; sh->K = K;
+    const size_t n[4] = {(size_t)M * K, (size_t)M * K, (size_t)K * N, (size_t)K * N};
+    sm_state = seed;
+    for (int i = 0; i < 4; i++) {
+        sh->in[i] = malloc(n[i] * sizeof(double));
+        for (size_t j = 0; j < n[i]; j++) sh->in[i][j] = (i % 2 ? im : 1.0) * uniform();
+    }
+}
+
+// Ar, Ai, Br, Bi holding sh's inputs, then Cr, Ci.
+static void native_operands(const NativeShape *sh, ABMatrix m[6]) {
+    const int rows[6] = {sh->M, sh->M, sh->K, sh->K, sh->M, sh->M};
+    const int cols[6] = {sh->K, sh->K, sh->N, sh->N, sh->N, sh->N};
+    for (int i = 0; i < 6; i++) {
+        m[i] = ab_matrix_create(rows[i], cols[i]);
+        if (m[i] && i < 4) ab_matrix_upload(m[i], sh->in[i], true);
+    }
+}
+
+// The hash of Cr then Ci if ok, else 0; destroys m.
+static uint64_t native_result(const NativeShape *sh, ABMatrix m[6], bool ok) {
+    uint64_t h = 0;
+    if (ok) {
+        size_t mn = (size_t)sh->M * sh->N;
+        double *c = malloc(2 * mn * sizeof *c);
+        ab_matrix_download(m[4], c, true);
+        ab_matrix_download(m[5], c + mn, true);
+        h = fnv1a(c, 2 * mn * sizeof *c, FNV_OFFSET);
+        free(c);
+    }
+    for (int i = 0; i < 6; i++) ab_matrix_destroy(m[i]);
+    return h;
+}
+
+// The hash of Cr then Ci after sh's product through via; 0 if a call failed.
+static uint64_t native_hash(const NativeShape *sh, NativeVia via) {
+    ABMatrix m[6];
+    native_operands(sh, m);
+    ABStatus st;
+    if (via == VIA_ZGEMM) {
+        st = ab_zgemm(m[0], m[1], m[2], m[3], m[4], m[5]);
+    } else if (via == VIA_ASYNC) {
+        ABFuture f = ab_zgemm_async(m[0], m[1], m[2], m[3], m[4], m[5]);
+        st = f ? ab_future_wait(f) : AB_ERROR_KERNEL_FAILED;
+        ab_future_destroy(f);
+    } else if (via == VIA_BATCH) {
+        ABBatch b = ab_batch_create();
+        st = ab_batch_zgemm(b, m[0], m[1], m[2], m[3], m[4], m[5]);
+        if (st == AB_OK) st = ab_batch_commit(b);
+        if (st == AB_OK) st = ab_batch_wait(b);
+        ab_batch_destroy(b);
+    } else {
+        st = ab_internal_zgemm(m[0], m[1], m[2], m[3], m[4], m[5],
+                               via == VIA_4M ? AB_ZGEMM_4M : AB_ZGEMM_3M);
+    }
+    return native_result(sh, m, st == AB_OK);
+}
+
+// Whether ab_zgemm_batched over shapes sh[0..n), n <= 8, gives each product
+// its reference bits.
+static bool native_batched(NativeShape *const *sh, int n) {
+    ABMatrix m[8][6], role[6][8];       // by product, and the batched call's arrays
+    for (int b = 0; b < n; b++) {
+        native_operands(sh[b], m[b]);
+        for (int i = 0; i < 6; i++) role[i][b] = m[b][i];
+    }
+    bool ok = ab_zgemm_batched(n, role[0], role[1], role[2], role[3], role[4], role[5]) == AB_OK;
+    for (int b = 0; b < n; b++) ok = native_result(sh[b], m[b], ok) == sh[b]->hash && ok;
+    return ok;
+}
+
+typedef struct { NativeShape *sh[2]; int bad; } NativeThread;
+
+static void *native_thread(void *arg) {
+    NativeThread *t = arg;
+    for (int r = 0; r < 6; r++) {
+        const NativeShape *s = t->sh[r % 2];
+        t->bad += native_hash(s, VIA_ZGEMM) != s->hash;
+    }
+    return NULL;
+}
+
+static int run_native_child(void) {
+    if (ab_init() != AB_OK) {
+        printf("native: no Metal device\n");
+        return 1;
+    }
+    NativeShape small, mid, big, tilt;
+    native_make(&mid, 257, 193, 129, 11, 1.0);    // odd, several tiles
+    native_make(&big, 640, 576, 512, 12, 1.0);
+    native_make(&small, 40, 24, 33, 13, 1.0);
+    native_make(&tilt, 200, 168, 136, 14, 1e-6);  // nearly real: 4M
+    char problem[160] = "";
+#define NATIVE_CHECK(cond, ...) \
+    do { if (!problem[0] && !(cond)) snprintf(problem, sizeof problem, __VA_ARGS__); } while (0)
+
+    mid.hash = native_hash(&mid, VIA_ZGEMM);
+    size_t pool = ab_internal_stage_pool_bytes();
+    NATIVE_CHECK(mid.hash != 0, "ab_zgemm failed");
+    NATIVE_CHECK(pool > 0, "the pool kept no temporaries after ab_zgemm");
+    NATIVE_CHECK(native_hash(&mid, VIA_ZGEMM) == mid.hash, "a repeated ab_zgemm gave other bits");
+    NATIVE_CHECK(ab_internal_stage_pool_bytes() == pool,
+                 "the pool grew from %zu to %zu bytes on a repeated ab_zgemm", pool,
+                 ab_internal_stage_pool_bytes());
+    big.hash = native_hash(&big, VIA_ZGEMM);
+    small.hash = native_hash(&small, VIA_ZGEMM);
+    NATIVE_CHECK(big.hash && small.hash, "ab_zgemm failed");
+    NATIVE_CHECK(native_hash(&mid, VIA_ZGEMM) == mid.hash,
+                 "ab_zgemm gave other bits after larger and smaller shapes");
+    static const char *const via_name[] = {"ab_zgemm", "ab_zgemm_async", "ab_batch_zgemm"};
+    for (int v = VIA_ASYNC; v <= VIA_BATCH; v++)
+        NATIVE_CHECK(native_hash(&mid, (NativeVia)v) == mid.hash, "%s gave other bits than ab_zgemm",
+                     via_name[v]);
+
+    // Nearly real data runs as 4M, whose four M x N temporaries come from the
+    // same pool: every entry point must give the bits of an explicit 4M call,
+    // which differ from 3M's, also in a batch that changes shape and method.
+    tilt.hash = native_hash(&tilt, VIA_4M);
+    NATIVE_CHECK(tilt.hash && native_hash(&tilt, VIA_3M) != tilt.hash,
+                 "3M gave 4M's bits on nearly real data");
+    for (int v = VIA_ZGEMM; v <= VIA_BATCH; v++)
+        NATIVE_CHECK(native_hash(&tilt, (NativeVia)v) == tilt.hash,
+                     "%s on nearly real data gave other bits than 4M", via_name[v]);
+    NativeShape *batch[5] = {&mid, &tilt, &tilt, &big, &mid};
+    NATIVE_CHECK(native_batched(batch, 5),
+                 "ab_zgemm_batched gave other bits across shapes and between 3M and 4M");
+
+    NativeThread t[4];
+    pthread_t th[4];
+    for (int i = 0; i < 4; i++) {
+        t[i] = (NativeThread){{i % 2 ? &big : &mid, &small}, 0};
+        pthread_create(&th[i], NULL, native_thread, &t[i]);
+    }
+    int bad = 0;
+    for (int i = 0; i < 4; i++) {
+        pthread_join(th[i], NULL);
+        bad += t[i].bad;
+    }
+    NATIVE_CHECK(!bad, "%d of 24 ab_zgemm calls from 4 threads gave other bits", bad);
+
+    // ab_shutdown() empties the pool. Growing shapes remake a slot's buffers
+    // rather than add to them: after small, mid and big it holds what big
+    // alone leaves.
+    ab_shutdown();
+    NATIVE_CHECK(ab_internal_stage_pool_bytes() == 0, "ab_shutdown() left %zu bytes in the pool",
+                 ab_internal_stage_pool_bytes());
+    ab_init();
+    bool same = native_hash(&big, VIA_ZGEMM) == big.hash;
+    size_t alone = ab_internal_stage_pool_bytes();
+    ab_shutdown();
+    ab_init();
+    uint64_t hs = native_hash(&small, VIA_ZGEMM), hm = native_hash(&mid, VIA_ZGEMM),
+             hb = native_hash(&big, VIA_ZGEMM);
+    NATIVE_CHECK(same && hs == small.hash && hm == mid.hash && hb == big.hash,
+                 "ab_zgemm gave other bits after ab_shutdown() and ab_init()");
+    NATIVE_CHECK(alone && ab_internal_stage_pool_bytes() == alone,
+                 "the pool kept %zu bytes after small, mid and big, %zu after big alone",
+                 ab_internal_stage_pool_bytes(), alone);
+#undef NATIVE_CHECK
+
+    for (int i = 0; i < 4; i++) {
+        free(small.in[i]); free(mid.in[i]); free(big.in[i]); free(tilt.in[i]);
+    }
+    ab_shutdown();
+    if (problem[0]) printf("native: %s\n", problem);
+    else printf("native ok\n");
+    return 0;
+}
+
+// =============================================================================
 // Parent
 // =============================================================================
 
@@ -515,12 +713,12 @@ typedef struct {
     unsigned long long gemms;
 } Line;
 
-static char *run(const Child *ch, const char *self, int *status) {
+static char *run(const Child *ch, const char *self, const char *arg, int *status) {
     size_t n;
     char **env = child_environ(4, &n);
     for (int i = 0; ch->env[i]; i++) env[n++] = (char *)ch->env[i];
     env[n] = NULL;
-    char *argv[] = {(char *)self, ch->registered ? "--child-registered" : "--child", NULL};
+    char *argv[] = {(char *)self, (char *)arg, NULL};
     char why[256];
     pid_t pid;
     FILE *out = spawn_piped(argv, env, &pid, why, sizeof why);
@@ -548,8 +746,9 @@ static bool find_line(const char *out, const char *name, Line *l) {
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--child")) return run_child(false);
     if (argc == 2 && !strcmp(argv[1], "--child-registered")) return run_child(true);
+    if (argc == 2 && !strcmp(argv[1], "--child-native")) return run_native_child();
     if (argc != 1) {
-        fprintf(stderr, "usage: %s [--child | --child-registered]\n", argv[0]);
+        fprintf(stderr, "usage: %s [--child | --child-registered | --child-native]\n", argv[0]);
         return 2;
     }
     make_cases();
@@ -562,7 +761,8 @@ int main(int argc, char **argv) {
     int status[N_CHILDREN], failed = 0, passed = 0, paths[3] = {0};
     int kind_cases[D_COUNT][2] = {{0}}, kind_staged[D_COUNT][2] = {{0}};   // [kind][zgemm]
     for (int k = 0; k < N_CHILDREN; k++) {
-        out[k] = run(&CHILDREN[k], argv[0], &status[k]);
+        out[k] = run(&CHILDREN[k], argv[0],
+                     CHILDREN[k].registered ? "--child-registered" : "--child", &status[k]);
         if (!out[k] || !WIFEXITED(status[k]) || WEXITSTATUS(status[k]) != 0) {
             printf("✗ %s child failed (status %d):\n%s\n", CHILDREN[k].label, status[k],
                    out[k] ? out[k] : "");
@@ -634,10 +834,21 @@ int main(int argc, char **argv) {
         }
         printf("pool after the run: host %zu bytes, staged %zu, nopool %zu, registered %zu\n",
                pool[0], pool[1], pool[2], pool[3]);
-        if (pool[0] != 0 || pool[1] == 0 || pool[1] == (size_t)-1 || pool[2] != 0) {
-            printf("✗ expected none with AB_HOST_PACK=1 or AB_STAGING_MB=0, some by default\n");
+        // With AB_HOST_PACK=1 the pool keeps the native ZGEMM's temporaries.
+        bool kept = pool[0] && pool[0] != (size_t)-1 && pool[1] && pool[1] != (size_t)-1;
+        if (!kept || pool[2] != 0) {
+            printf("✗ expected some by default and with AB_HOST_PACK=1, none with AB_STAGING_MB=0\n");
             failed++;
         }
+        int st;
+        char *nout = run(&(Child){.label = "native"}, argv[0], "--child-native", &st);
+        if (nout && WIFEXITED(st) && !WEXITSTATUS(st) && strstr(nout, "native ok")) {
+            printf("✓ native ZGEMMs on the pool\n");
+        } else {
+            printf("✗ native ZGEMMs on the pool: %s", nout ? nout : "no output\n");
+            failed++;
+        }
+        free(nout);
     }
     for (int k = 0; k < N_CHILDREN; k++) free(out[k]);
 

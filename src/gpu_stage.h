@@ -32,6 +32,8 @@
 // The pool keeps at most AB_STAGING_MB MB between calls
 // (ab_staging_cap_bytes()). Slots are per call, so threads calling at once
 // each get their own. ab_shutdown() empties it.
+// The native ZGEMMs (ab_zgemm, ab_zgemm_ex, the batched and asynchronous
+// ones) take their Gauss-3M or 4M temporaries from it too.
 // =============================================================================
 #ifndef AB_GPU_STAGE_H
 #define AB_GPU_STAGE_H

@@ -268,6 +268,20 @@ shows in C), signed zeros, tiny and subnormal C, cancelling C, NaN, Inf
 and overflow; and Quantum ESPRESSO shapes large enough that the copies run
 in pieces.
 
+The native ZGEMMs take their Gauss-3M or 4M temporaries from the same
+pool, so after the run the pool must hold buffers in the host child and
+the staged one, and none with `AB_STAGING_MB=0`. A fifth child
+(`--child-native`) checks them directly. `ab_zgemm`, `ab_zgemm_async`,
+`ab_batch_zgemm` and `ab_zgemm_batched` (with a change of shape mid-batch)
+must give the bits of the first `ab_zgemm`. So must repeats after the pool
+served larger and smaller shapes, and 4 threads calling at once. On nearly
+real data (imaginary parts 1e-6 of the real ones), which runs as 4M, they
+must give the bits of an explicit 4M call, which differ from 3M's, also in
+a batch that switches between 3M and 4M. A repeated call must not grow
+the pool, `ab_shutdown()` must empty it, and after small, mid and big
+shapes in turn it must hold what big alone leaves (a slot remakes buffers
+that are too small rather than adding new ones).
+
 ## Per-call trace and forced GPU failures
 
 `tests/test_trace.c` re-executes itself (`--child <scenario> <dir>`, via

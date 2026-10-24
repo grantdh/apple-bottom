@@ -43,8 +43,6 @@ Candidates, each aimed at a measured stage:
 - `pack`: skip the repack of transposed operands where swapping the
   operands gives the same product; convert in the copy that packs.
 - `upload`: keep device copies of operands that repeat across calls.
-- `other`: reuse scratch buffers instead of allocating ZGEMM's four
-  temporaries on every call.
 
 ## Planned
 

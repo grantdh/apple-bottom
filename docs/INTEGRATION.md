@@ -459,8 +459,8 @@ to every API.
 | `AB_TRACE` | unset | A path: each process appends one line per call to `<path>.<pid>` (see [Per-call trace](#per-call-trace-ab_trace)). Unset or empty: no trace. |
 | `AB_TRACE_HASH` | off | With `AB_TRACE`, `1`: also hash the operands each call reads. |
 | `AB_HOST_PACK` | off | `1`: every GPU call takes the host path (host pack, FP64 → DD and epilogue) instead of the staged path. The results are the same bits either way. |
-| `AB_STAGING_MB` | `2048` | The staged path's GPU buffers kept between calls, at most this many MB per process; `0`: none kept, each call makes its own (and pays for fresh buffers). |
-| `AB_TEST_FAIL_STAGE` | unset | Test-only. `alloc`: every GPU buffer allocation (`ab_matrix_create()`, and the staged path's buffers) fails; `kernel`: the command buffer of every `ab_dgemm_scaled()`, `ab_zgemm()` and staged call, the GEMMs of the GPU path, reports an error. A GPU-routed call then fails as it would on a real failure there and runs on Accelerate instead (a `gpu_failed` fallback). Never set it in production. |
+| `AB_STAGING_MB` | `2048` | The GPU buffers kept between calls by the staged path and by the native ZGEMMs (their Gauss-3M or 4M temporaries), at most this many MB per process; `0`: none kept, each call makes its own (and pays for fresh buffers). |
+| `AB_TEST_FAIL_STAGE` | unset | Test-only. `alloc`: every GPU buffer allocation (`ab_matrix_create()`, and the buffer pool's) fails; `kernel`: the command buffer of every `ab_dgemm_scaled()`, `ab_zgemm()` and staged call, the GEMMs of the GPU path, reports an error. A GPU-routed call then fails as it would on a real failure there and runs on Accelerate instead (a `gpu_failed` fallback). Never set it in production. |
 
 ### Routing (AB_MODE=auto)
 
@@ -624,9 +624,10 @@ seq=2 t0_ns=411972254072166 t1_ns=411972258538707 routine=zgemm ta=C tb=N M=96 N
   `gpu_failed`, `other`, `range`; see the run report).
 - **GPU calls** add the stages of the run report in ns (`init_ns` …
   `epilogue_ns`, then `other_ns`), which sum exactly to `t1_ns - t0_ns`, and
-  split `other_ns` exactly into `temps_ns` (creating and destroying ZGEMM's
-  GPU temporaries on the host path; 0 for DGEMM, which has none, and on the
-  staged path, whose buffers are in `alloc_ns`), `encode_ns` (building the
+  split `other_ns` exactly into `temps_ns` (taking ZGEMM's GPU temporaries
+  from the buffer pool and handing them back on the host path, making any
+  the pool lacks; 0 for DGEMM, which has none, and on the staged path, whose
+  buffers are in `alloc_ns`), `encode_ns` (building the
   command buffer), `submit_ns` (from commit until the GPU started it:
   scheduling, and waiting behind other GPU work, including other
   processes'), `wake_ns` (from the GPU's end until `waitUntilCompleted`

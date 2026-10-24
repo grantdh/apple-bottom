@@ -2563,37 +2563,37 @@ static bool zgemm_uses_4m(ab_zgemm_method_t method, ABMatrix Ar, ABMatrix Ai, AB
     return ab_gauss3m_rho(p, q) > AB_GAUSS3M_MAX_RHO;
 }
 
+static ab_stage_t* stage_views(ABContextImpl* ctx, int n, const int rows[], const int cols[],
+                               ABMatrix out[]);     // BLAS-ABI Staging, below
+
 // One ZGEMM's temporaries, NULL where unused: T1..T4 for encode_zgemm_3m or
-// encode_zgemm_4m, and the copies encode_align_zgemm makes for 3M. Blocks
-// capture it by value.
+// encode_zgemm_4m, views of a staging-pool slot's buffers, and the copies
+// encode_align_zgemm makes for 3M. Blocks capture it by value.
 typedef struct {
     ABMatrix T[4];
     ABMatrix aligned[2];
+    ab_stage_t* slot;               // T's buffers, which the pool keeps between calls
 } ZgemmTemps;
 
 static void zgemm_temps_free(ZgemmTemps t) {
     for (int i = 0; i < 4; i++) ab_matrix_destroy(t.T[i]);
     for (int i = 0; i < 2; i++) ab_matrix_destroy(t.aligned[i]);
+    ab_internal_stage_release(t.slot);
 }
 
-// T1..T4 for 4M or 3M into t; false, with t all NULL, if one cannot be
-// allocated.
+// T1..T4 for 4M or 3M into t, from the staging pool (BLAS-ABI Staging);
+// false, with t all NULL, if one cannot be allocated.
 static bool zgemm_temps(bool four_m, int M, int N, int K, ZgemmTemps* t) {
     *t = ZgemmTemps();
-    t->T[0] = ab_matrix_create(M, N);
-    t->T[1] = ab_matrix_create(M, N);
-    t->T[2] = four_m ? ab_matrix_create(M, N) : ab_matrix_create(M, K);
-    t->T[3] = four_m ? ab_matrix_create(M, N) : ab_matrix_create(K, N);
-    if (t->T[0] && t->T[1] && t->T[2] && t->T[3]) return true;
-    zgemm_temps_free(*t);
-    *t = ZgemmTemps();
-    return false;
+    const int rows[4] = {M, M, M, four_m ? M : K}, cols[4] = {N, N, four_m ? N : K, N};
+    t->slot = stage_views([ABContextImpl shared], 4, rows, cols, t->T);
+    return t->slot != NULL;
 }
 
 // C = A B by 4M (four_m) or by Gauss-3M, which first brings A's parts, and
 // B's, to one scale into aligned (encode_align_zgemm), with T1..T4 from
-// zgemm_temps. False if such a copy could not be allocated. The caller
-// destroys T and aligned once cmdBuf has completed.
+// zgemm_temps. False if such a copy could not be allocated. The caller frees
+// T and aligned (zgemm_temps_free) once cmdBuf has completed.
 static bool encode_zgemm(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx, bool four_m,
                          ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
                          const ABMatrix T[4], ABMatrix aligned[2], ABMatrix Cr, ABMatrix Ci) {
@@ -4178,6 +4178,8 @@ static void registrations_shutdown(void) {
 // settles at about what its largest calls need, whatever their mix. A fresh buffer costs
 // first-touch page faults on the host and, in its first command buffer,
 // ~12-16 ms/GB between commit and the GPU's start; a reused one neither.
+// The native ZGEMMs' temporaries come from here too (stage_views): only the
+// GPU touches those, and a fresh one costs about 32 ms/GiB before it starts.
 
 typedef enum {
     STAGE_SA, STAGE_SB, STAGE_SC,   // FP64 staging copies of A, B, C (AB_STAGE_A + i)
@@ -4265,12 +4267,8 @@ static id<MTLBuffer> stage_buf(const struct ab_stage_s* s, int role) {
     return s->of[role] >= 0 ? s->buf[s->of[role]] : nil;
 }
 
-ab_stage_t* ab_internal_stage_acquire(const ab_stage_gemm_t* g) {
-    ABAutoreleaseScope pool;
-    ABContextImpl* ctx = [ABContextImpl shared];
-    // AB_TEST_FAIL_STAGE=alloc (test-only): no buffers, as for ab_matrix_create().
-    if (!ctx || ab_test_fail_stage() == AB_PROF_STAGE_ALLOC) return NULL;
-
+// An idle slot, or a new one; its roles get buffers from stage_fit().
+static struct ab_stage_s* stage_take(void) {
     os_unfair_lock_lock(&g_stage_lock);
     struct ab_stage_s* s = g_stage_idle;
     if (s) g_stage_idle = s->next;
@@ -4281,10 +4279,12 @@ ab_stage_t* ab_internal_stage_acquire(const ab_stage_gemm_t* g) {
         s->generation = generation;
     }
     s->next = NULL;
-    stage_layout(s, g);
+    return s;
+}
 
-    size_t need[STAGE_ROLES];
-    stage_needs(s, g, need);
+// Gives each role of s with a need a buffer of at least that many bytes (top
+// of section); false, with s released, if Metal refuses one.
+static bool stage_fit(ABContextImpl* ctx, struct ab_stage_s* s, const size_t need[STAGE_ROLES]) {
     int order[STAGE_ROLES];                  // roles by need, largest first
     int spare = 0;                           // the slot's buffers beyond the call's needs
     for (int r = 0; r < STAGE_ROLES; r++) {
@@ -4314,14 +4314,27 @@ ab_stage_t* ab_internal_stage_acquire(const ab_stage_gemm_t* g) {
                                                   options:MTLResourceStorageModeShared];
             if (!s->buf[fit]) {
                 ab_internal_stage_release(s);
-                return NULL;
+                return false;
             }
             g_stage_bytes += bytes;
         }
         taken[fit] = true;
         s->of[r] = fit;
     }
-    return s;
+    return true;
+}
+
+ab_stage_t* ab_internal_stage_acquire(const ab_stage_gemm_t* g) {
+    ABAutoreleaseScope pool;
+    ABContextImpl* ctx = [ABContextImpl shared];
+    // AB_TEST_FAIL_STAGE=alloc (test-only): no buffers, as for ab_matrix_create().
+    if (!ctx || ab_test_fail_stage() == AB_PROF_STAGE_ALLOC) return NULL;
+
+    struct ab_stage_s* s = stage_take();
+    stage_layout(s, g);
+    size_t need[STAGE_ROLES];
+    stage_needs(s, g, need);
+    return stage_fit(ctx, s, need) ? s : NULL;
 }
 
 void* ab_internal_stage_host(ab_stage_t* s, ab_stage_operand_t which, int* ld) {
@@ -4402,6 +4415,25 @@ static void stage_matrix(struct ABMatrix_s* m, id<MTLBuffer> b, int rows, int co
     m->count = m->capacity = (size_t)rows * cols;
     m->uploaded = true;
     set_scale_unmeasured(m, 0);
+}
+
+// n (at most STAGE_ROLES) DD matrices of the given shapes from one slot, each
+// seen through a new ABMatrix in out; view i takes role i (stage_fit matches
+// by size alone). The caller frees the views with ab_matrix_destroy() and the
+// slot with ab_internal_stage_release(). NULL if Metal refuses a buffer.
+static ab_stage_t* stage_views(ABContextImpl* ctx, int n, const int rows[], const int cols[],
+                               ABMatrix out[]) {
+    // AB_TEST_FAIL_STAGE=alloc (test-only): no buffers, as for ab_matrix_create().
+    if (!ctx || ab_test_fail_stage() == AB_PROF_STAGE_ALLOC) return NULL;
+    size_t need[STAGE_ROLES] = {};
+    for (int i = 0; i < n; i++) need[i] = (size_t)rows[i] * cols[i] * sizeof(DDFloat);
+    struct ab_stage_s* s = stage_take();
+    if (!stage_fit(ctx, s, need)) return NULL;
+    for (int i = 0; i < n; i++) {
+        out[i] = new struct ABMatrix_s();
+        stage_matrix(out[i], stage_buf(s, i), rows[i], cols[i]);
+    }
+    return s;
 }
 
 typedef struct { uint32_t rows, cols, ld, k, stat; } StageParams;   // ABStage
