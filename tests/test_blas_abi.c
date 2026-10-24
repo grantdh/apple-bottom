@@ -1950,7 +1950,8 @@ static bool parse_report_line(const char *line, const char *build, ProcessReport
         const char *rest = line + off;
         snprintf(head, sizeof head, "%s AB_MODE=gpu", build);
         if (!p) return false;
-        if (!strcmp(rest, head)) {
+        // The header line goes on with the chip and the routing table: chip="..." gpu_cores=N table=...
+        if (!strncmp(rest, head, strlen(head)) && (rest[strlen(head)] == '\0' || rest[strlen(head)] == ' ')) {
             p->headers++;
             return true;
         }

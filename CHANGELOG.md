@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Routing tables per chip.** `AB_MODE=auto` picks the built-in table
+  calibrated on this machine's chip (`machdep.cpu.brand_string`, which is
+  also the Metal device name) and GPU core count (the IORegistry's
+  `gpu-core-count`) from `src/dispatch_table.h`, which now holds one table
+  per calibrated chip. A chip without a table, or a sibling with another
+  core count (an M2 Max with 30 cores instead of 38), gets no rows: every
+  `auto` call runs on Accelerate until that chip is calibrated, instead of
+  being routed by the M2 Max's measurements. `AB_CHIP` and `AB_GPU_CORES`
+  override the detected identity. The tables live in
+  `benchmarks/calibration/<chip>/` (`M2-Max-38c`, the former single
+  built-in table, from `benchmarks/results/2026-10-14-52f1880-calibrate/`);
+  `make calibrate` files this machine's result there through the new
+  `scripts/ingest_calibration.py`, which also files a calibration made on
+  another machine, checks a table against its measurements and refuses one
+  from part of the grid, and `make dispatch-table-check` (in `ci-local` and
+  CI) verifies the header matches the filed tables. `dispatch_table.txt`
+  carries `# chip:`, `# gpu_cores:` and `# cpu_matrix:` (`AMX` or `SME`)
+  header keys, which the loader reads back: an `AB_DISPATCH_TABLE` from
+  another chip is used with a note on stderr. `AB_REPORT`'s first line and
+  the `AB_TRACE` header name the chip and the table a run used
+  (`table=builtin:M2-Max-38c`, `file:<path>` or `none:uncalibrated-chip`).
+  The library and `test_dispatch` now link IOKit; `test_dispatch` checks
+  every built-in table against its own measurements (13 tests, were 9).
 - **The staged path of the BLAS ABI**: a GPU-routed `dgemm_`/`zgemm_` copies
   each operand (`memcpy`, column by column unless it is dense) into GPU
   buffers the library keeps and reuses between calls (per process, at most

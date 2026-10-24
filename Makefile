@@ -15,7 +15,7 @@ OBJC = clang
 
 CFLAGS = -Wall -Wextra -O3 -std=c11 -DACCELERATE_NEW_LAPACK
 OBJCFLAGS = -std=c++11 -Wall -Wextra -O3 -fobjc-arc -DACCELERATE_NEW_LAPACK
-LDFLAGS = -lc++ -framework Metal -framework Foundation -framework Accelerate
+LDFLAGS = -lc++ -framework Metal -framework Foundation -framework Accelerate -framework IOKit
 
 # DD multiplication algorithm selector (v1.3 A/C investigation).
 #   Default: DWTimesDW2 (JMP 2017 Alg 11, MR 2022 Thm 2.7, error bound < 5u²).
@@ -30,7 +30,7 @@ endif
 # -lapplebottom still get the full 150+ BLAS/LAPACK symbols we don't
 # shadow ourselves. Our own dgemm_/zgemm_ win at link time via two-level
 # namespace ordering (libapplebottom appears before Accelerate).
-DYLIB_LDFLAGS = -lc++ -framework Metal -framework Foundation \
+DYLIB_LDFLAGS = -lc++ -framework Metal -framework Foundation -framework IOKit \
                 -Wl,-reexport_framework,Accelerate
 # Executables link against build/libapplebottom.dylib (install_name @rpath/…).
 # Adding @loader_path so in-tree binaries (build/test_*, build/examples/*, build/bench_*)
@@ -226,10 +226,11 @@ $(BUILD)/test_convergence: tests/verification/test_convergence.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
-# Routing unit tests: dispatch.c alone, no library or GPU. They check the
+# Routing unit tests: dispatch.c alone, no library or GPU. They check every
 # built-in table against its calibration data, found under AB_SOURCE_ROOT.
+# dispatch.c reads the chip from sysctl and the GPU core count from IOKit.
 $(BUILD)/test_dispatch: tests/test_dispatch.c $(BUILD)/dispatch.o $(SRC)/dispatch.h $(SRC)/dispatch_table.h | $(BUILD)
-	$(CC) $(CFLAGS) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' $< $(BUILD)/dispatch.o -o $@
+	$(CC) $(CFLAGS) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' $< $(BUILD)/dispatch.o -o $@ -framework IOKit -framework CoreFoundation
 	@echo "Built: $@"
 
 test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_staging test-ghost-detection test-symbols test-fortran
@@ -480,12 +481,15 @@ bench-paper-csv: $(BUILD)/bench_paper
 # one process, and derives the table that sends a BLAS-ABI call to the GPU
 # only where the GPU measured >= 1.10x faster. It writes the raw and summary
 # CSVs and dispatch_table.txt (use it at once with AB_DISPATCH_TABLE=<path>)
-# under CALIBRATE_DIR, and regenerates CALIBRATE_SOURCE, the built-in table:
-# rebuild to compile it in, and commit it with CALIBRATE_DIR.
-# CALIBRATE_ARGS passes options, e.g. --only qe-paw for one part of the grid
-# (which leaves CALIBRATE_SOURCE unchanged).
+# under CALIBRATE_DIR. scripts/ingest_calibration.py then files them as this
+# chip's table under benchmarks/calibration/<chip>/ and regenerates the
+# built-in tables, src/dispatch_table.h: rebuild to compile them in, and
+# commit the header with benchmarks/calibration/. The same script files a
+# calibration made on another machine. CALIBRATE_ARGS passes options, e.g.
+# --only qe-paw for one part of the grid; a partial grid is not filed as a
+# table (the script says so), but its dispatch_table.txt still works through
+# AB_DISPATCH_TABLE.
 CALIBRATE_DIR ?= benchmarks/results/$(shell date +%Y-%m-%d)-$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)-calibrate
-CALIBRATE_SOURCE ?= $(SRC)/dispatch_table.h
 CALIBRATE_ARGS ?=
 GPU_CORES = $(shell ioreg -rc AGXAccelerator -d1 2>/dev/null | sed -nE 's/.*"gpu-core-count" = ([0-9]+).*/\1/p' | head -1)
 
@@ -493,12 +497,21 @@ $(BUILD)/calibrate: benchmarks/calibrate.c $(SRC)/dispatch.h lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) '-DAB_CAL_SDK="$(shell xcrun --show-sdk-version 2>/dev/null)"' $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
-.PHONY: calibrate
+.PHONY: calibrate dispatch-table dispatch-table-check
 calibrate: $(BUILD)/calibrate
 	mkdir -p $(CALIBRATE_DIR)
-	caffeinate -is ./$(BUILD)/calibrate --out $(CALIBRATE_DIR) --source $(CALIBRATE_SOURCE) \
-	    --gpu-cores "$(GPU_CORES)" $(CALIBRATE_ARGS)
-	@echo "Use it now: export AB_DISPATCH_TABLE=$(abspath $(CALIBRATE_DIR))/dispatch_table.txt"
+	caffeinate -is ./$(BUILD)/calibrate --out $(CALIBRATE_DIR) --gpu-cores "$(GPU_CORES)" $(CALIBRATE_ARGS)
+	python3 scripts/ingest_calibration.py --force $(CALIBRATE_DIR) || \
+	    echo "Not filed as a built-in table (see above). Use it directly: export AB_DISPATCH_TABLE=$(abspath $(CALIBRATE_DIR))/dispatch_table.txt"
+
+# The built-in tables, src/dispatch_table.h, from the filed calibrations under
+# benchmarks/calibration/, and the check that the committed header matches
+# them (part of ci-local and CI).
+dispatch-table:
+	python3 scripts/ingest_calibration.py --regenerate
+
+dispatch-table-check:
+	@python3 scripts/ingest_calibration.py --regenerate --check && echo "✓ dispatch-table-check: src/dispatch_table.h matches benchmarks/calibration/"
 
 # QE call-mix replay, see "Replay" in benchmarks/qe/README.md; test-replay is not in `make test`.
 $(BUILD)/replay: benchmarks/replay.c $(SRC)/blas_trans.h $(SRC)/dispatch.h $(SRC)/profiling/blas_profiler.h tests/test_blas_check.h lib | $(BUILD)
@@ -625,7 +638,7 @@ build-check: | $(BUILD)/check
 # test_qe_golden (its TEST_QE_GOLDEN line says PASS, or SKIP on another device).
 # The report is written only after every binary passed, so TEST_PASSED =
 # TEST_TOTAL and TEST_FAILED = 0.
-ci-local: version-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_staging $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
+ci-local: version-check dispatch-table-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_staging $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "CI Local Validation"

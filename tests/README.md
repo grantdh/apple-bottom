@@ -44,8 +44,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 158, every test but
-the chaos ones, and `make ci-local` all 176 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 162, every test but
+the chaos ones, and `make ci-local` all 180 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -61,7 +61,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     cblas over all trans pairs, non-square and tall-skinny shapes,
     `ld > rows` and buffer offsets, and check that
     the device path is bitwise the host API on the transposed operands
-  - `tests/test_dispatch.c` — 9 tests of the BLAS-ABI routing, no GPU,
+  - `tests/test_dispatch.c` — 13 tests of the BLAS-ABI routing, no GPU,
     see below
   - `tests/test_blas_abi.c` — 33 suites (1069 cases), see below
   - `tests/test_trace.c` — 5 tests of `AB_TRACE` and
@@ -311,12 +311,17 @@ fallback and the trace must say `fallback:gpu_failed`.
 
 `tests/test_dispatch.c` tests the routing decision of the BLAS-ABI entry
 points (`src/dispatch.c`, see `dispatch.h`), built from that file alone,
-without the library or a GPU. It checks the built-in table
-(`src/dispatch_table.h`, written by `make calibrate`) against the
-`calibrate_summary.csv` it was derived from: every measured shape routes as
-recorded there, and no shape that was not at least 1.10x faster on the GPU
-goes there; each Quantum ESPRESSO si64 shape must have been measured. It
-also checks the precedence of `AB_MODE`, `AB_MIN_GPU_DIM` and
+without the library or a GPU. It checks every built-in table
+(`src/dispatch_table.h`, one per calibrated chip, generated from
+`benchmarks/calibration/<chip>/` by `scripts/ingest_calibration.py`) against
+the `calibrate_summary.csv` it was derived from: every measured shape routes
+as recorded there, and no shape that was not at least 1.10x faster on the
+GPU goes there; each Quantum ESPRESSO si64 shape must have been measured.
+It checks the choice of table by chip and GPU core count (`AB_CHIP`,
+`AB_GPU_CORES`; a sibling with another core count or an uncalibrated chip
+gets no rows), the chip slug and the `# chip:` / `# gpu_cores:` header
+keys of a table file. The host it runs on may have no table (a CI runner).
+It also checks the precedence of `AB_MODE`, `AB_MIN_GPU_DIM` and
 `AB_CROSSOVER_FLOPS[_REAL]` over the table, the row bounds and TRANS
 classes (`'C'` is `'T'`), and the `AB_DISPATCH_TABLE` format: parsing,
 loading, malformed and missing files.

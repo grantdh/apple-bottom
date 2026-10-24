@@ -87,9 +87,12 @@ conversion and transfer included), Accelerate time ÷ GPU time, median of
 | Quantum ESPRESSO si64 Davidson ZGEMMs | 0.14–0.76× | Accelerate |
 | Quantum ESPRESSO si64 PAW DGEMMs | 0.09–0.15× | Accelerate |
 
-`make calibrate` repeats this measurement on your machine and writes a new
-routing table: rebuild to compile it in, or point `AB_DISPATCH_TABLE` at its
-`dispatch_table.txt`.
+The built-in tables are keyed by chip and GPU core count, and so far only the
+M2 Max (38-core GPU) has one: on any other chip `auto` keeps every call on
+Accelerate. `make calibrate` repeats this measurement on your machine and
+files the result as your chip's table (`benchmarks/calibration/<chip>/`;
+rebuild to compile it in, and a pull request with it adds your chip for
+everyone), or point `AB_DISPATCH_TABLE` at its `dispatch_table.txt`.
 
 **Quantum ESPRESSO** (develop, 7.5), 64-atom Si, PAW
 ([VAL-1](tests/validation/VAL001_QE_Si64.md), QE compiled `-O0`, and the
@@ -160,7 +163,7 @@ LIBS = -L/path/to/apple-bottom/build -Wl,-rpath,/path/to/apple-bottom/build -lap
 
 | Variable | Effect |
 |----------|--------|
-| `AB_MODE=auto` (default) | GPU only for shapes measured ≥ 1.10× faster there (`src/dispatch_table.h`) |
+| `AB_MODE=auto` (default) | GPU only for shapes measured ≥ 1.10× faster there on this chip (`src/dispatch_table.h`, one table per calibrated chip; an uncalibrated chip stays on Accelerate) |
 | `AB_MODE=cpu` / `AB_MODE=gpu` | everything on Accelerate / everything above `AB_MIN_GPU_DIM` on the GPU |
 | `AB_REPORT=1` | at exit: calls and time by route, GPU stage costs, fallbacks |
 | `AB_TRACE=<path>` | a line per call in `<path>.<pid>`: arguments, timestamps, route, GPU stages |
@@ -254,7 +257,7 @@ include/apple_bottom.h          public API (and apple_bottom_device.h)
 src/apple_bottom.m              Metal context and DD kernels
 src/blas_wrapper.c              BLAS ABI: the staged path, the host path, fallbacks
 src/gpu_stage.h                 the staged path's GPU buffers and conversion (internal)
-src/dispatch.c, dispatch_table.h  AB_MODE routing and the calibrated table
+src/dispatch.c, dispatch_table.h  AB_MODE routing and the calibrated tables, one per chip
 src/fortran_bridge.c            dgemm_ / zgemm_ / ab_*gemm_ entry points
 src/profiling/                  AB_PROFILE / AB_REPORT accounting, AB_TRACE
 tests/                          test suites (tests/README.md)

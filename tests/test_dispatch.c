@@ -3,11 +3,13 @@
 // =============================================================================
 //
 // Pure: built from src/dispatch.c alone, without the library or a GPU. Checks
-// the built-in table against the measurements it was derived from
-// (AB_DISPATCH_BUILTIN_DATA, relative to AB_SOURCE_ROOT), the Quantum ESPRESSO
-// shapes, the precedence of AB_MODE, AB_MIN_GPU_DIM and
-// AB_CROSSOVER_FLOPS[_REAL] over the table, TRANS classes, and the
-// AB_DISPATCH_TABLE format and loading.
+// every built-in table against the measurements it was derived from (its
+// `data`, relative to AB_SOURCE_ROOT), the Quantum ESPRESSO shapes, the
+// choice of table by chip and GPU core count (AB_CHIP, AB_GPU_CORES), the
+// precedence of AB_MODE, AB_MIN_GPU_DIM and AB_CROSSOVER_FLOPS[_REAL] over the
+// table, TRANS classes, and the AB_DISPATCH_TABLE format, header keys and
+// loading. The host this runs on may have no table (a CI runner): nothing
+// here assumes one.
 // =============================================================================
 
 #include "dispatch.h"
@@ -18,6 +20,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/sysctl.h>
 #include <unistd.h>
 
 #ifndef AB_SOURCE_ROOT
@@ -47,19 +51,44 @@ static void finish(void) { if (first_failure[0]) FAIL(first_failure); else PASS(
 
 static const char *const ENV_VARS[] = {
     "AB_MODE", "AB_MIN_GPU_DIM", "AB_CROSSOVER_FLOPS", "AB_CROSSOVER_FLOPS_REAL",
-    "AB_DISPATCH_TABLE",
+    "AB_DISPATCH_TABLE", "AB_CHIP", "AB_GPU_CORES",
 };
 
 static void clear_env(void) {
     for (size_t i = 0; i < TEST_REGISTRY_SIZE(ENV_VARS); i++) unsetenv(ENV_VARS[i]);
 }
 
-// What a host gets with none of the routing variables set.
+// What this host gets with none of the routing variables set.
 static ab_dispatch_config_t builtin_auto(void) {
     ab_dispatch_config_t c;
     clear_env();
     ab_dispatch_config_from_env(&c);
     return c;
+}
+
+// What a machine with table t's chip gets with none of the routing variables set.
+static ab_dispatch_config_t auto_for(const ab_dispatch_table_t *t) {
+    ab_dispatch_config_t c;
+    char cores[16];
+    clear_env();
+    setenv("AB_CHIP", t->chip, 1);
+    snprintf(cores, sizeof cores, "%d", t->gpu_cores);
+    setenv("AB_GPU_CORES", cores, 1);
+    ab_dispatch_config_from_env(&c);
+    clear_env();
+    return c;
+}
+
+static int n_tables(void) {
+    int n = 0;
+    while (AB_DISPATCH_BUILTIN_TABLES[n].chip) n++;
+    return n;
+}
+
+static int n_rows(const ab_dispatch_row_t *rows) {
+    int n = 0;
+    while (rows[n].routine) n++;
+    return n;
 }
 
 static ab_dispatch_config_t with_rows(ab_dispatch_mode_t mode, const char *rows) {
@@ -106,7 +135,7 @@ static bool write_temp(const char *content, char *path, size_t len) {
 }
 
 // =============================================================================
-// The calibration: built-in table and its measurements
+// The calibrations: built-in tables and their measurements
 // =============================================================================
 
 typedef struct {
@@ -118,13 +147,13 @@ typedef struct {
 } Measured;
 
 static Measured measured[256];
-static int n_measured = -1;
+static int n_measured;
+static int shapes_checked;       // over every table, for the summary line
 
-// The calibrate_summary.csv rows behind the built-in table; -1 if unreadable.
-static int load_measured(void) {
-    if (n_measured >= 0) return n_measured;
+// The calibrate_summary.csv rows behind table t; -1 if unreadable.
+static int load_measured(const ab_dispatch_table_t *t) {
     char path[1024], line[512];
-    const char *data = AB_DISPATCH_BUILTIN_DATA;
+    const char *data = t->data ? t->data : "";
     snprintf(path, sizeof path, "%s%s%s", data[0] == '/' ? "" : AB_SOURCE_ROOT,
              data[0] == '/' ? "" : "/", data);
     FILE *f = fopen(path, "r");
@@ -154,45 +183,69 @@ static const Measured *find_measured(char routine, char ta, char tb, int M, int 
     return NULL;
 }
 
-static void test_builtin_table_loads(void) {
+// Every built-in table names a chip, a matrix unit and its data, has valid
+// rows, and is what a machine with that chip gets by default.
+static void test_builtin_tables_load(void) {
     begin();
-    ab_dispatch_config_t c = builtin_auto();
-    int n = 0;
-    while (AB_DISPATCH_BUILTIN[n].routine) n++;
-    expect(c.mode == AB_DISPATCH_AUTO, "AB_MODE unset is not auto");
-    expect(c.min_dim == AB_DISPATCH_DEFAULT_MIN_DIM, "default AB_MIN_GPU_DIM is %d", c.min_dim);
-    expect(!c.crossover_flops && !c.crossover_flops_real, "FLOP overrides set by default");
-    expect(c.nrows == n && !memcmp(c.rows, AB_DISPATCH_BUILTIN, (size_t)n * sizeof c.rows[0]),
-           "config has %d rows, the built-in table %d", c.nrows, n);
+    int n = n_tables();
+    expect(n >= 1, "no built-in table at all (benchmarks/calibration/ empty?)");
     for (int i = 0; i < n; i++) {
-        const ab_dispatch_row_t *r = &AB_DISPATCH_BUILTIN[i];
-        expect(strchr("dz", r->routine) && strchr("NT", r->ta) && strchr("NT", r->tb),
-               "built-in row %d is not a routine and TRANS classes", i);
+        const ab_dispatch_table_t *t = &AB_DISPATCH_BUILTIN_TABLES[i];
+        expect(t->chip && !strncmp(t->chip, "Apple ", 6), "table %d: chip '%s' is not an Apple chip", i,
+               t->chip ? t->chip : "(null)");
+        expect(t->gpu_cores >= 0, "table %d: negative core count", i);
+        expect(t->cpu_matrix && (!strcmp(t->cpu_matrix, "AMX") || !strcmp(t->cpu_matrix, "SME")),
+               "table %d: cpu_matrix '%s' is not AMX or SME", i, t->cpu_matrix ? t->cpu_matrix : "(null)");
+        expect(t->data && strstr(t->data, "calibrate_summary.csv"), "table %d names no summary CSV", i);
+        for (const ab_dispatch_row_t *r = t->rows; r->routine; r++)
+            expect(strchr("dz", r->routine) && strchr("NT", r->ta) && strchr("NT", r->tb) &&
+                   r->m >= 0 && r->n >= 0 && r->k >= 0, "table %d: a row is not a routine, TRANS classes "
+                   "and minimums", i);
+        for (int j = 0; j < i; j++)
+            expect(strcasecmp(t->chip, AB_DISPATCH_BUILTIN_TABLES[j].chip) ||
+                   t->gpu_cores != AB_DISPATCH_BUILTIN_TABLES[j].gpu_cores,
+                   "tables %d and %d are both %s/%d", j, i, t->chip, t->gpu_cores);
+        ab_dispatch_config_t c = auto_for(t);
+        char slug[AB_DISPATCH_CHIP_LEN], label[AB_DISPATCH_LABEL_LEN];
+        ab_dispatch_chip_slug(t->chip, t->gpu_cores, slug, sizeof slug);
+        snprintf(label, sizeof label, "builtin:%s", slug);
+        expect(c.mode == AB_DISPATCH_AUTO && c.min_dim == AB_DISPATCH_DEFAULT_MIN_DIM &&
+               !c.crossover_flops && !c.crossover_flops_real, "%s: defaults are not auto/32/no override", slug);
+        expect(c.nrows == n_rows(t->rows) && !memcmp(c.rows, t->rows, (size_t)c.nrows * sizeof c.rows[0]),
+               "%s: a machine with this chip gets %d rows, the table has %d", slug, c.nrows, n_rows(t->rows));
+        expect(!strcmp(c.table, label) && !strcmp(c.table_chip, t->chip) && c.table_gpu_cores == t->gpu_cores,
+               "%s: table label '%s', chip '%s'/%d", slug, c.table, c.table_chip, c.table_gpu_cores);
     }
     finish();
 }
 
-// Every measured shape routes as the calibration recorded, and none that
-// was not >= 1.10x faster on the GPU goes there.
+// Every measured shape routes as its calibration recorded, and none that was
+// not >= 1.10x faster on the GPU goes there, for every built-in table.
 static void test_builtin_matches_measurements(void) {
     begin();
-    ab_dispatch_config_t c = builtin_auto();
-    int n = load_measured();
-    expect(n > 0, "cannot read %s/%s", AB_SOURCE_ROOT, AB_DISPATCH_BUILTIN_DATA);
-    for (int i = 0; i < n; i++) {
-        const Measured *m = &measured[i];
-        bool gpu = ab_dispatch_gpu(&c, m->routine, m->ta, m->tb, m->M, m->N, m->K);
-        expect(gpu == !strcmp(m->auto_route, "gpu"),
-               "%cgemm %c %c %dx%dx%d routes to %s, the calibration says %s", m->routine,
-               m->ta, m->tb, m->M, m->N, m->K, gpu ? "gpu" : "cpu", m->auto_route);
-        expect(m->win || !gpu, "%cgemm %c %c %dx%dx%d measured %.2fx but routes to the GPU",
-               m->routine, m->ta, m->tb, m->M, m->N, m->K, m->speedup);
+    shapes_checked = 0;
+    for (int ti = 0; ti < n_tables(); ti++) {
+        const ab_dispatch_table_t *t = &AB_DISPATCH_BUILTIN_TABLES[ti];
+        ab_dispatch_config_t c = auto_for(t);
+        int n = load_measured(t);
+        if (!expect(n > 0, "cannot read %s/%s", AB_SOURCE_ROOT, t->data)) continue;
+        shapes_checked += n;
+        for (int i = 0; i < n; i++) {
+            const Measured *m = &measured[i];
+            bool gpu = ab_dispatch_gpu(&c, m->routine, m->ta, m->tb, m->M, m->N, m->K);
+            expect(gpu == !strcmp(m->auto_route, "gpu"),
+                   "%s: %cgemm %c %c %dx%dx%d routes to %s, the calibration says %s", t->chip,
+                   m->routine, m->ta, m->tb, m->M, m->N, m->K, gpu ? "gpu" : "cpu", m->auto_route);
+            expect(m->win || !gpu, "%s: %cgemm %c %c %dx%dx%d measured %.2fx but routes to the GPU",
+                   t->chip, m->routine, m->ta, m->tb, m->M, m->N, m->K, m->speedup);
+        }
     }
     finish();
 }
 
-// The Quantum ESPRESSO si64 shapes: each must have been measured, and each
-// that was not >= 1.10x faster on the GPU must run on Accelerate under auto.
+// The Quantum ESPRESSO si64 shapes: each must have been measured for every
+// table, and each that was not >= 1.10x faster on the GPU must run on
+// Accelerate under auto.
 static void test_qe_shapes(void) {
     static const struct { char routine, ta, tb; int M, N, K; } QE[] = {
         // PAW: newq 'T','N' and addusdens 'N','T' (also measured 'N','N');
@@ -216,22 +269,139 @@ static void test_qe_shapes(void) {
         {'z', 'C', 'N', 1152, 160, 9000},   {'z', 'N', 'N', 9000, 160, 1152},
     };
     begin();
-    ab_dispatch_config_t c = builtin_auto();
-    expect(load_measured() > 0, "cannot read the calibration data");
-    for (size_t i = 0; i < TEST_REGISTRY_SIZE(QE); i++) {
-        const char r = QE[i].routine, ta = QE[i].ta, tb = QE[i].tb;
-        const int M = QE[i].M, N = QE[i].N, K = QE[i].K;
-        const Measured *m = find_measured(r, ta, tb, M, N, K);
-        if (!expect(m != NULL, "QE shape %cgemm %c %c %dx%dx%d was not calibrated", r, ta, tb,
-                    M, N, K))
-            continue;
-        bool gpu = ab_dispatch_gpu(&c, r, ta, tb, M, N, K);
-        expect(m->win || !gpu, "QE shape %cgemm %c %c %dx%dx%d measured %.2fx but routes to "
-               "the GPU", r, ta, tb, M, N, K, m->speedup);
-        // Hosts pass 'T' or 'C' for a transposed complex operand: same class.
-        expect(ab_dispatch_gpu(&c, r, ta == 'C' ? 'T' : ta, tb, M, N, K) == gpu,
-               "'T' and 'C' route differently for %dx%dx%d", M, N, K);
+    for (int ti = 0; ti < n_tables(); ti++) {
+        const ab_dispatch_table_t *t = &AB_DISPATCH_BUILTIN_TABLES[ti];
+        ab_dispatch_config_t c = auto_for(t);
+        if (!expect(load_measured(t) > 0, "cannot read the calibration data of %s", t->chip)) continue;
+        for (size_t i = 0; i < TEST_REGISTRY_SIZE(QE); i++) {
+            const char r = QE[i].routine, ta = QE[i].ta, tb = QE[i].tb;
+            const int M = QE[i].M, N = QE[i].N, K = QE[i].K;
+            const Measured *m = find_measured(r, ta, tb, M, N, K);
+            if (!expect(m != NULL, "%s: QE shape %cgemm %c %c %dx%dx%d was not calibrated", t->chip, r,
+                        ta, tb, M, N, K))
+                continue;
+            bool gpu = ab_dispatch_gpu(&c, r, ta, tb, M, N, K);
+            expect(m->win || !gpu, "%s: QE shape %cgemm %c %c %dx%dx%d measured %.2fx but routes to "
+                   "the GPU", t->chip, r, ta, tb, M, N, K, m->speedup);
+            // Hosts pass 'T' or 'C' for a transposed complex operand: same class.
+            expect(ab_dispatch_gpu(&c, r, ta == 'C' ? 'T' : ta, tb, M, N, K) == gpu,
+                   "%s: 'T' and 'C' route differently for %dx%dx%d", t->chip, M, N, K);
+        }
     }
+    finish();
+}
+
+// =============================================================================
+// Choosing the table: chip, core count, slug
+// =============================================================================
+
+static void test_select_table(void) {
+    static const ab_dispatch_row_t R1[] = {{'z', 'T', 'T', 4096, 4096, 4096}, {0, 0, 0, 0, 0, 0}};
+    static const ab_dispatch_row_t R0[] = {{0, 0, 0, 0, 0, 0}};
+    static const ab_dispatch_table_t T[] = {
+        {"Apple M2 Max", 38, "AMX", "", R1},
+        {"Apple M2 Max", 30, "AMX", "", R0},
+        {"Apple M4 Pro", 0, "SME", "", R0},        // calibrated without a core count: every variant
+        {"Apple M3", 10, "AMX", "", R1},
+        {NULL, 0, NULL, NULL, NULL},
+    };
+    begin();
+    expect(ab_dispatch_select_table(T, "Apple M2 Max", 38) == &T[0], "M2 Max/38 -> its table");
+    expect(ab_dispatch_select_table(T, "Apple M2 Max", 30) == &T[1], "M2 Max/30 -> its table");
+    expect(ab_dispatch_select_table(T, "apple m2 max", 38) == &T[0], "chip names compare case-insensitively");
+    expect(ab_dispatch_select_table(T, "Apple M2 Max", 40) == NULL, "M2 Max/40: a sibling's table is not used");
+    expect(ab_dispatch_select_table(T, "Apple M2 Max", 0) == NULL, "M2 Max, unknown cores, two tables: none");
+    expect(ab_dispatch_select_table(T, "Apple M4 Pro", 16) == &T[2], "M4 Pro/16 -> the any-core table");
+    expect(ab_dispatch_select_table(T, "Apple M4 Pro", 0) == &T[2], "M4 Pro, unknown cores -> the any-core table");
+    expect(ab_dispatch_select_table(T, "Apple M3", 0) == &T[3], "M3, unknown cores, one table -> it");
+    expect(ab_dispatch_select_table(T, "Apple M3", 8) == NULL, "M3/8: the 10-core table is not used");
+    expect(ab_dispatch_select_table(T, "Apple M5 Max", 40) == NULL, "an uncalibrated chip gets no table");
+    expect(ab_dispatch_select_table(T, "", 38) == NULL && ab_dispatch_select_table(T, NULL, 38) == NULL,
+           "an unknown chip gets no table");
+    // The built-in set is a static array in a header, so this file holds its own copy:
+    // compare the chosen table's identity, not its address.
+    for (int i = 0; i < n_tables(); i++) {
+        const ab_dispatch_table_t *w = &AB_DISPATCH_BUILTIN_TABLES[i];
+        const ab_dispatch_table_t *g = ab_dispatch_builtin_table(w->chip, w->gpu_cores ? w->gpu_cores : 1);
+        expect(g && !strcasecmp(g->chip, w->chip) && g->gpu_cores == w->gpu_cores,
+               "ab_dispatch_builtin_table(%s, %d) is not that table", w->chip, w->gpu_cores);
+    }
+    expect(ab_dispatch_builtin_table("Apple M0 Nano", 1) == NULL, "the built-in set has no M0 Nano");
+    finish();
+}
+
+static void test_host_chip_and_slug(void) {
+    static const struct { const char *chip; int cores; const char *slug; } SLUGS[] = {
+        {"Apple M2 Max", 38, "M2-Max-38c"}, {"Apple M4 Pro", 0, "M4-Pro"}, {"Apple M5 Max", 40, "M5-Max-40c"},
+        {"apple M1", 8, "M1-8c"}, {"Apple M5 Max (Virtual)", 10, "M5-Max-Virtual-10c"}, {"", 0, "unknown"},
+        {"", 38, "unknown"}, {NULL, 0, "unknown"}, {"Apple ", 4, "unknown"},
+    };
+    char chip[AB_DISPATCH_CHIP_LEN], slug[AB_DISPATCH_CHIP_LEN], brand[256] = "";
+    int cores = -1;
+    begin();
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(SLUGS); i++) {
+        ab_dispatch_chip_slug(SLUGS[i].chip, SLUGS[i].cores, slug, sizeof slug);
+        expect(!strcmp(slug, SLUGS[i].slug), "slug of '%s'/%d is '%s', expected '%s'",
+               SLUGS[i].chip ? SLUGS[i].chip : "(null)", SLUGS[i].cores, slug, SLUGS[i].slug);
+    }
+    ab_dispatch_chip_slug("Apple M2 Max", 38, slug, 6);              // a short buffer truncates, no overrun
+    expect(strlen(slug) < 6, "slug truncation");
+
+    clear_env();
+    setenv("AB_CHIP", "  Apple M9 Ultra  ", 1);
+    setenv("AB_GPU_CORES", "80", 1);
+    ab_dispatch_host_chip(chip, sizeof chip, &cores);
+    expect(!strcmp(chip, "Apple M9 Ultra") && cores == 80, "AB_CHIP/AB_GPU_CORES override: '%s'/%d", chip, cores);
+    setenv("AB_GPU_CORES", "-3", 1);
+    ab_dispatch_host_chip(chip, sizeof chip, &cores);
+    expect(cores == 0, "AB_GPU_CORES=-3 reads as unknown, got %d", cores);
+    setenv("AB_GPU_CORES", "many", 1);
+    ab_dispatch_host_chip(chip, sizeof chip, &cores);
+    expect(cores == 0, "AB_GPU_CORES=many reads as unknown, got %d", cores);
+
+    clear_env();
+    ab_dispatch_host_chip(chip, sizeof chip, &cores);
+    size_t n = sizeof brand;
+    if (sysctlbyname("machdep.cpu.brand_string", brand, &n, NULL, 0) != 0) brand[0] = '\0';
+    expect(!strcmp(chip, brand), "host chip '%s' is not machdep.cpu.brand_string '%s'", chip, brand);
+    expect(cores >= 0, "host core count %d", cores);
+    // Whatever this host is, the default configuration is its table or none.
+    ab_dispatch_config_t c = builtin_auto();
+    const ab_dispatch_table_t *t = ab_dispatch_builtin_table(chip, cores);
+    expect(!strcmp(c.chip, chip) && c.gpu_cores == cores, "config records the host as '%s'/%d", c.chip, c.gpu_cores);
+    if (t)
+        expect(c.nrows == n_rows(t->rows) && !strncmp(c.table, "builtin:", 8),
+               "host %s/%d has a table but the config has %d rows (%s)", chip, cores, c.nrows, c.table);
+    else
+        expect(c.nrows == 0 && !strncmp(c.table, "none:", 5),
+               "host %s/%d has no table but the config has %d rows (%s)", chip, cores, c.nrows, c.table);
+    finish();
+}
+
+// An uncalibrated chip keeps every auto call on Accelerate; AB_MODE=gpu and
+// the FLOP overrides do not depend on a table.
+static void test_uncalibrated_chip(void) {
+    ab_dispatch_config_t c;
+    begin();
+    clear_env();
+    setenv("AB_CHIP", "Apple M9 Ultra", 1);
+    setenv("AB_GPU_CORES", "99", 1);
+    ab_dispatch_config_from_env(&c);
+    expect(c.nrows == 0 && !strcmp(c.table, "none:uncalibrated-chip") && !c.table_chip[0] && !c.table_gpu_cores,
+           "uncalibrated chip: %d rows, table '%s'", c.nrows, c.table);
+    EXPECT_ROUTES(&c, false, "uncalibrated chip, auto", "zgemm T T 8192 8192 8192", "dgemm N N 6144 6144 6144");
+    setenv("AB_MODE", "gpu", 1);
+    ab_dispatch_config_from_env(&c);
+    EXPECT_ROUTES(&c, true, "uncalibrated chip, AB_MODE=gpu", "zgemm T T 8192 8192 8192");
+    setenv("AB_MODE", "auto", 1);
+    setenv("AB_CROSSOVER_FLOPS", "1000", 1);
+    ab_dispatch_config_from_env(&c);
+    EXPECT_ROUTES(&c, true, "uncalibrated chip, AB_CROSSOVER_FLOPS", "zgemm N N 64 64 64");
+    clear_env();
+    setenv("AB_CHIP", "", 1);                      // empty: as unset
+    ab_dispatch_config_from_env(&c);
+    expect(c.chip[0] != '\0' || !strcmp(c.table, "none:unknown-chip"), "AB_CHIP= reads the host chip");
+    clear_env();
     finish();
 }
 
@@ -302,7 +472,7 @@ static void test_flop_overrides(void) {
 }
 
 // =============================================================================
-// AB_DISPATCH_TABLE format, loading, environment
+// AB_DISPATCH_TABLE format, header keys, loading, environment
 // =============================================================================
 
 static void test_parse_row(void) {
@@ -321,8 +491,31 @@ static void test_parse_row(void) {
     expect(ab_dispatch_parse_row("", &r) == 0, "empty line");
     expect(ab_dispatch_parse_row("  \t\r\n", &r) == 0, "blank line");
     expect(ab_dispatch_parse_row("# zgemm N N 1 1 1", &r) == 0, "comment line");
+    expect(ab_dispatch_parse_row("# chip: Apple M2 Max", &r) == 0, "a header key is a comment to the row parser");
     for (size_t i = 0; i < TEST_REGISTRY_SIZE(BAD); i++)
         expect(ab_dispatch_parse_row(BAD[i], &r) == -1, "'%s' should be malformed", BAD[i]);
+    finish();
+}
+
+static void test_parse_header(void) {
+    char key[32], value[64];
+    begin();
+    expect(ab_dispatch_parse_header("# chip: Apple M2 Max\n", key, sizeof key, value, sizeof value) == 1 &&
+           !strcmp(key, "chip") && !strcmp(value, "Apple M2 Max"), "'# chip: Apple M2 Max' -> '%s'='%s'", key, value);
+    expect(ab_dispatch_parse_header("#gpu_cores:38", key, sizeof key, value, sizeof value) == 1 &&
+           !strcmp(key, "gpu_cores") && !strcmp(value, "38"), "'#gpu_cores:38' -> '%s'='%s'", key, value);
+    expect(ab_dispatch_parse_header("  # cpu_matrix:  AMX   # inferred\r\n", key, sizeof key, value, sizeof value) == 1 &&
+           !strcmp(key, "cpu_matrix") && !strcmp(value, "AMX"), "a trailing note is not the value: '%s'", value);
+    expect(ab_dispatch_parse_header("# Machine:  Apple M2 Max, 38-core GPU", key, sizeof key, value, sizeof value) == 0,
+           "'# Machine:' (capitalized prose) is not a key");
+    expect(ab_dispatch_parse_header("# Accelerate time / GPU time per class (a win is >= 1.10x):", key, sizeof key,
+                                    value, sizeof value) == 0, "prose ending in a colon is not a key");
+    expect(ab_dispatch_parse_header("zgemm T T 4096 4096 4096", key, sizeof key, value, sizeof value) == 0,
+           "a row is not a header");
+    expect(ab_dispatch_parse_header("#", key, sizeof key, value, sizeof value) == 0 &&
+           ab_dispatch_parse_header("# :x", key, sizeof key, value, sizeof value) == 0, "empty comment, empty key");
+    expect(ab_dispatch_parse_header("# chip: Apple M2 Max with a very long name indeed", key, sizeof key, value, 8) == 1 &&
+           strlen(value) == 7, "a long value is truncated to the buffer");
     finish();
 }
 
@@ -330,18 +523,29 @@ static void test_load_table(void) {
     char path[1024], err[160], longline[400];
     begin();
     ab_dispatch_config_t c = with_rows(AB_DISPATCH_AUTO, "dgemm T T 7 7 7");
+    snprintf(c.table_chip, sizeof c.table_chip, "stale");
+    c.table_gpu_cores = 99;
 
     expect(write_temp("# header\nzgemm C N 1000 1000 9000\n\ndgemm N N 4096 4096 4096 # x",
                       path, sizeof path), "mkstemp");
     expect(ab_dispatch_load_table(&c, path, err, sizeof err) && c.nrows == 2 &&
            c.rows[0].routine == 'z' && c.rows[1].k == 4096, "valid file: %s", err);
+    expect(!c.table_chip[0] && !c.table_gpu_cores, "a file without identity keys clears the table's chip");
+    unlink(path);
+
+    expect(write_temp("# apple-bottom table\n# chip: Apple M5 Max\n# gpu_cores: 40\n# cpu_matrix: SME\n"
+                      "# Machine:  Apple M5 Max, 40-core GPU\nzgemm T T 2048 2048 2048\n", path, sizeof path), "mkstemp");
+    expect(ab_dispatch_load_table(&c, path, err, sizeof err) && c.nrows == 1 && c.rows[0].m == 2048 &&
+           !strcmp(c.table_chip, "Apple M5 Max") && c.table_gpu_cores == 40,
+           "identity keys are read: '%s'/%d (%s)", c.table_chip, c.table_gpu_cores, err);
     unlink(path);
 
     expect(write_temp("zgemm N N 1 1 1\ndgemm N N 1 1 1\nzgemm N Q 1 1 1\n", path, sizeof path),
            "mkstemp");
     err[0] = '\0';
     expect(!ab_dispatch_load_table(&c, path, err, sizeof err) && strstr(err, "line 3") &&
-           c.nrows == 2 && c.rows[0].routine == 'z' && c.rows[0].m == 1000,
+           c.nrows == 1 && c.rows[0].routine == 'z' && c.rows[0].m == 2048 &&
+           !strcmp(c.table_chip, "Apple M5 Max"),
            "a malformed line must fail with its number and leave the config alone: %s", err);
     unlink(path);
 
@@ -410,12 +614,16 @@ static void test_config_from_env(void) {
     expect(c.crossover_flops == 100000000 && c.crossover_flops_real == 0,
            "AB_CROSSOVER_FLOPS=100000000, AB_CROSSOVER_FLOPS_REAL empty");
 
-    expect(write_temp("dgemm T N 1 2 3\n", path, sizeof path), "mkstemp");
+    // A table file replaces the built-in rows, whatever chip this is.
+    expect(write_temp("# chip: Apple M9 Ultra\n# gpu_cores: 80\ndgemm T N 1 2 3\n", path, sizeof path), "mkstemp");
     clear_env();
     setenv("AB_DISPATCH_TABLE", path, 1);
     ab_dispatch_config_from_env(&c);
-    expect(c.nrows == 1 && c.rows[0].routine == 'd' && c.rows[0].k == 3,
-           "AB_DISPATCH_TABLE replaces the built-in rows");
+    char want[AB_DISPATCH_LABEL_LEN];
+    snprintf(want, sizeof want, "file:%s", path);
+    expect(c.nrows == 1 && c.rows[0].routine == 'd' && c.rows[0].k == 3 && !strcmp(c.table, want) &&
+           !strcmp(c.table_chip, "Apple M9 Ultra") && c.table_gpu_cores == 80,
+           "AB_DISPATCH_TABLE replaces the built-in rows (%d rows, %s)", c.nrows, c.table);
     unlink(path);
 
     ab_dispatch_config_t builtin = builtin_auto();
@@ -423,8 +631,8 @@ static void test_config_from_env(void) {
     fprintf(stderr, "(expected warning follows) ");
     ab_dispatch_config_from_env(&c);
     expect(c.nrows == builtin.nrows &&
-           !memcmp(c.rows, builtin.rows, (size_t)c.nrows * sizeof c.rows[0]),
-           "an unreadable AB_DISPATCH_TABLE must keep the built-in rows");
+           !memcmp(c.rows, builtin.rows, (size_t)c.nrows * sizeof c.rows[0]) && !strcmp(c.table, builtin.table),
+           "an unreadable AB_DISPATCH_TABLE must keep the built-in rows and label");
     clear_env();
     finish();
 }
@@ -434,13 +642,17 @@ static void test_config_from_env(void) {
 // =============================================================================
 
 static const TestCase TESTS[] = {
-    {"test_builtin_table_loads",          test_builtin_table_loads},
+    {"test_builtin_tables_load",          test_builtin_tables_load},
     {"test_builtin_matches_measurements", test_builtin_matches_measurements},
     {"test_qe_shapes",                    test_qe_shapes},
+    {"test_select_table",                 test_select_table},
+    {"test_host_chip_and_slug",           test_host_chip_and_slug},
+    {"test_uncalibrated_chip",            test_uncalibrated_chip},
     {"test_mode_precedence",              test_mode_precedence},
     {"test_row_bounds_and_classes",       test_row_bounds_and_classes},
     {"test_flop_overrides",               test_flop_overrides},
     {"test_parse_row",                    test_parse_row},
+    {"test_parse_header",                 test_parse_header},
     {"test_load_table",                   test_load_table},
     {"test_config_from_env",              test_config_from_env},
 };
@@ -466,7 +678,8 @@ int main(void) {
     printf("\n═══════════════════════════════════════════════════════════════════\n");
     printf("Results: %d passed, %d failed\n", tests_passed, tests_failed);
     if (tests_failed == 0) {
-        printf("✓ All %d tests PASSED (%d calibrated shapes checked)\n", tests_passed, n_measured);
+        printf("✓ All %d tests PASSED (%d built-in table%s, %d calibrated shapes checked)\n", tests_passed,
+               n_tables(), n_tables() == 1 ? "" : "s", shapes_checked);
         return 0;
     }
     printf("✗ Some tests FAILED\n");

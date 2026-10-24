@@ -50,8 +50,11 @@ Candidates, each aimed at a measured stage:
 
 - `AB_VERIFY`: optional randomized check (Freivalds) of GPU results.
 - Thread-safe contexts for concurrent callers.
-- Calibration tables for more chips (M1, M3, M4 families). `make calibrate`
-  results from other machines are welcome as pull requests.
+- Calibration tables for more chips (M1, M3, M4 and M5 families). The library
+  picks its built-in table by chip and GPU core count and leaves an
+  uncalibrated chip on Accelerate; `make calibrate` on your machine files
+  yours under `benchmarks/calibration/`, and a pull request with that
+  directory and the regenerated `src/dispatch_table.h` adds it for everyone.
 - Homebrew formula.
 
 ## Later

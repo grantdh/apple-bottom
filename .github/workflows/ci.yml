@@ -52,3 +52,6 @@ jobs:
 
     - name: Routing unit tests (no GPU)
       run: make build/test_dispatch && ./build/test_dispatch
+
+    - name: Built-in routing tables match the filed calibrations
+      run: make dispatch-table-check
