@@ -1,0 +1,11 @@
+# M N K tag: QE-like long-K / small-output shapes, plus controls (square, tall-skinny) that prefetch does not touch
+160   160   18432  ovlp_160_18432
+150   150   18277  qe_si64_ovlp
+256   256   18432  ovlp_256_18432
+384   384   18432  ovlp_384_18432
+500   500   18277  qe_si64_500b_ovlp
+512   512   18432  ovlp_512_18432
+512   512   4608   ovlp_512_4608
+640   640   9216   ovlp_640_9216
+2048  2048  2048   square_2048
+18277 150   150    qe_si64_rot

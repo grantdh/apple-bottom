@@ -393,10 +393,55 @@ inline uint2 morton_remap(uint2 tgid, uint gridW, uint gridH) {
 }
 
 // =============================================================================
+// Register Prefetch of the Next K-Tile (the *_pf kernels)
+// =============================================================================
+// The tiled kernels load each K-tile from device memory into threadgroup
+// memory and wait at a barrier for those loads. On a small grid, one or two
+// threadgroups per GPU core, nothing else runs to hide that latency. Each
+// tiled kernel is a template on PF: its PF instance (host name *_pf) loads
+// K-tile kt+1 into registers right after the barrier that publishes tile kt,
+// so the loads overlap tile kt's arithmetic, and stores those registers to
+// threadgroup memory at the top of the next iteration. Every tile element
+// reaches the same threadgroup slot as in the plain instance and the inner
+// loop is the same code, so each output gets the same dd_fma sequence and the
+// same bits. The registers cost occupancy: the PF instances are faster only
+// on small grids (routing: use_prefetch, host side).
+
+// One thread's share of a ROWS×COLS tile at (row0, col0) of the row-major
+// rows×cols matrix X: element flatId + q·NTH of the tile in q, 0 outside X.
+// These are the elements the plain kernels' cooperative loads
+// `for (i = flatId; i < ROWS*COLS; i += NTH)` read, in the same order.
+template <uint ROWS, uint COLS, uint NTH>
+inline void dd_fetch_tile(thread DD (&r)[ROWS * COLS / NTH], device const DD* X,
+                          uint rows, uint cols, uint row0, uint col0, uint flatId) {
+    static_assert(ROWS * COLS % NTH == 0, "every thread loads the same number of elements");
+    for (uint q = 0; q < ROWS * COLS / NTH; q++) {
+        uint i = flatId + q * NTH, gr = row0 + i / COLS, gc = col0 + i % COLS;
+        r[q] = (gr < rows && gc < cols) ? X[gr * cols + gc] : DD{0.0f, 0.0f};
+    }
+}
+
+// Stores a fetched share to a row-major tile (tile[i]) or to a k-major one,
+// tile[i % COLS][i / COLS] (the A tiles of the float4 kernels, and dd_dsyrk's
+// B = Aᵀ tile, fetched as the row block of A it transposes).
+template <uint ROWS, uint COLS, uint NTH>
+inline void dd_put_tile(threadgroup DD* tile, thread const DD (&r)[ROWS * COLS / NTH], uint flatId) {
+    for (uint q = 0; q < ROWS * COLS / NTH; q++) tile[flatId + q * NTH] = r[q];
+}
+template <uint ROWS, uint COLS, uint NTH>
+inline void dd_put_tile_kmajor(threadgroup DD* tile, thread const DD (&r)[ROWS * COLS / NTH], uint flatId) {
+    for (uint q = 0; q < ROWS * COLS / NTH; q++) {
+        uint i = flatId + q * NTH;
+        tile[(i % COLS) * ROWS + i / COLS] = r[q];
+    }
+}
+
+// =============================================================================
 // DGEMM Kernel: C = A × B
 // =============================================================================
 
-kernel void dd_dgemm(
+template <bool PF>
+kernel void dd_dgemm_t(
     device const DD* A [[buffer(0)]],
     device const DD* B [[buffer(1)]],
     device DD* C [[buffer(2)]],
@@ -426,21 +471,37 @@ kernel void dd_dgemm(
     threadgroup DD* tileA = (threadgroup DD*)tileA4;
     threadgroup DD* tileB = (threadgroup DD*)tileB4;
 
+    // PF: this thread's share of the next K-tile (see Register Prefetch)
+    DD ra[BM * TK / NT], rb[TK * BN / NT];
+    if (PF) {
+        dd_fetch_tile<BM, TK, NT>(ra, A, M, K, bRow, 0, flatId);
+        dd_fetch_tile<TK, BN, NT>(rb, B, K, N, 0, bCol, flatId);
+    }
+
     // Loop over K dimension in TK-sized chunks
     for (uint kt = 0; kt < (K + TK - 1) / TK; kt++) {
-        // Cooperative load of A tile
-        for (uint i = flatId; i < BM * TK; i += NT) {
-            uint r = i / TK, c = i % TK;
-            uint gr = bRow + r, gc = kt * TK + c;
-            tileA[c * BM + r] = (gr < M && gc < K) ? A[gr * K + gc] : DD{0.0f, 0.0f};
-        }
-        // Cooperative load of B tile
-        for (uint i = flatId; i < TK * BN; i += NT) {
-            uint r = i / BN, c = i % BN;
-            uint gr = kt * TK + r, gc = bCol + c;
-            tileB[i] = (gr < K && gc < N) ? B[gr * N + gc] : DD{0.0f, 0.0f};
+        if (PF) {
+            dd_put_tile_kmajor<BM, TK, NT>(tileA, ra, flatId);
+            dd_put_tile<TK, BN, NT>(tileB, rb, flatId);
+        } else {
+            // Cooperative load of A tile
+            for (uint i = flatId; i < BM * TK; i += NT) {
+                uint r = i / TK, c = i % TK;
+                uint gr = bRow + r, gc = kt * TK + c;
+                tileA[c * BM + r] = (gr < M && gc < K) ? A[gr * K + gc] : DD{0.0f, 0.0f};
+            }
+            // Cooperative load of B tile
+            for (uint i = flatId; i < TK * BN; i += NT) {
+                uint r = i / BN, c = i % BN;
+                uint gr = kt * TK + r, gc = bCol + c;
+                tileB[i] = (gr < K && gc < N) ? B[gr * N + gc] : DD{0.0f, 0.0f};
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (PF && (kt + 1) * TK < K) {
+            dd_fetch_tile<BM, TK, NT>(ra, A, M, K, bRow, (kt + 1) * TK, flatId);
+            dd_fetch_tile<TK, BN, NT>(rb, B, K, N, (kt + 1) * TK, bCol, flatId);
+        }
 
         // Compute partial products from tile
         for (uint k = 0; k < TK; k++) {
@@ -486,11 +547,16 @@ kernel void dd_dgemm(
         }
 }
 
+typedef decltype(dd_dgemm_t<false>) dd_dgemm_fn;
+template [[host_name("dd_dgemm")]] kernel dd_dgemm_fn dd_dgemm_t<false>;
+template [[host_name("dd_dgemm_pf")]] kernel dd_dgemm_fn dd_dgemm_t<true>;
+
 // =============================================================================
 // DGEMM Kernel with Scaling: C = α·A×B + β·C
 // =============================================================================
 
-kernel void dd_dgemm_ab(
+template <bool PF>
+kernel void dd_dgemm_ab_t(
     device const DD* A [[buffer(0)]],
     device const DD* B [[buffer(1)]],
     device DD* C [[buffer(2)]],
@@ -521,18 +587,34 @@ kernel void dd_dgemm_ab(
     threadgroup DD* tileA = (threadgroup DD*)tileA4;
     threadgroup DD* tileB = (threadgroup DD*)tileB4;
 
+    // PF: this thread's share of the next K-tile (see Register Prefetch)
+    DD ra[BM * TK / NT], rb[TK * BN / NT];
+    if (PF) {
+        dd_fetch_tile<BM, TK, NT>(ra, A, M, K, bRow, 0, flatId);
+        dd_fetch_tile<TK, BN, NT>(rb, B, K, N, 0, bCol, flatId);
+    }
+
     for (uint kt = 0; kt < (K + TK - 1) / TK; kt++) {
-        for (uint i = flatId; i < BM * TK; i += NT) {
-            uint r = i / TK, c = i % TK;
-            uint gr = bRow + r, gc = kt * TK + c;
-            tileA[c * BM + r] = (gr < M && gc < K) ? A[gr * K + gc] : DD{0.0f, 0.0f};
-        }
-        for (uint i = flatId; i < TK * BN; i += NT) {
-            uint r = i / BN, c = i % BN;
-            uint gr = kt * TK + r, gc = bCol + c;
-            tileB[i] = (gr < K && gc < N) ? B[gr * N + gc] : DD{0.0f, 0.0f};
+        if (PF) {
+            dd_put_tile_kmajor<BM, TK, NT>(tileA, ra, flatId);
+            dd_put_tile<TK, BN, NT>(tileB, rb, flatId);
+        } else {
+            for (uint i = flatId; i < BM * TK; i += NT) {
+                uint r = i / TK, c = i % TK;
+                uint gr = bRow + r, gc = kt * TK + c;
+                tileA[c * BM + r] = (gr < M && gc < K) ? A[gr * K + gc] : DD{0.0f, 0.0f};
+            }
+            for (uint i = flatId; i < TK * BN; i += NT) {
+                uint r = i / BN, c = i % BN;
+                uint gr = kt * TK + r, gc = bCol + c;
+                tileB[i] = (gr < K && gc < N) ? B[gr * N + gc] : DD{0.0f, 0.0f};
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (PF && (kt + 1) * TK < K) {
+            dd_fetch_tile<BM, TK, NT>(ra, A, M, K, bRow, (kt + 1) * TK, flatId);
+            dd_fetch_tile<TK, BN, NT>(rb, B, K, N, (kt + 1) * TK, bCol, flatId);
+        }
 
         for (uint k = 0; k < TK; k++) {
             DD av[TM], bv[TN];
@@ -582,12 +664,17 @@ kernel void dd_dgemm_ab(
         }
 }
 
+typedef decltype(dd_dgemm_ab_t<false>) dd_dgemm_ab_fn;
+template [[host_name("dd_dgemm_ab")]] kernel dd_dgemm_ab_fn dd_dgemm_ab_t<false>;
+template [[host_name("dd_dgemm_ab_pf")]] kernel dd_dgemm_ab_fn dd_dgemm_ab_t<true>;
+
 // =============================================================================
 // DGEMM Kernel (Tall-Skinny): C = α·A×B + β·C — optimized for M >> N
 // BM_TS=128, BN_TS=16, TM_TS=4, TN_TS=2, 256 threads per threadgroup
 // =============================================================================
 
-kernel void dd_dgemm_ab_ts(
+template <bool PF>
+kernel void dd_dgemm_ab_ts_t(
     device const DD* A [[buffer(0)]],
     device const DD* B [[buffer(1)]],
     device DD* C [[buffer(2)]],
@@ -616,18 +703,34 @@ kernel void dd_dgemm_ab_ts(
     threadgroup DD tileA[BM_TS * TK_TS];
     threadgroup DD tileB[TK_TS * BN_TS];
 
+    // PF: this thread's share of the next K-tile (see Register Prefetch)
+    DD ra[BM_TS * TK_TS / NT_TS], rb[TK_TS * BN_TS / NT_TS];
+    if (PF) {
+        dd_fetch_tile<BM_TS, TK_TS, NT_TS>(ra, A, M, K, bRow, 0, flatId);
+        dd_fetch_tile<TK_TS, BN_TS, NT_TS>(rb, B, K, N, 0, bCol, flatId);
+    }
+
     for (uint kt = 0; kt < (K + TK_TS - 1) / TK_TS; kt++) {
-        for (uint i = flatId; i < BM_TS * TK_TS; i += NT_TS) {
-            uint r = i / TK_TS, c = i % TK_TS;
-            uint gr = bRow + r, gc = kt * TK_TS + c;
-            tileA[i] = (gr < M && gc < K) ? A[gr * K + gc] : DD{0.0f, 0.0f};
-        }
-        for (uint i = flatId; i < TK_TS * BN_TS; i += NT_TS) {
-            uint r = i / BN_TS, c = i % BN_TS;
-            uint gr = kt * TK_TS + r, gc = bCol + c;
-            tileB[i] = (gr < K && gc < N) ? B[gr * N + gc] : DD{0.0f, 0.0f};
+        if (PF) {
+            dd_put_tile<BM_TS, TK_TS, NT_TS>(tileA, ra, flatId);
+            dd_put_tile<TK_TS, BN_TS, NT_TS>(tileB, rb, flatId);
+        } else {
+            for (uint i = flatId; i < BM_TS * TK_TS; i += NT_TS) {
+                uint r = i / TK_TS, c = i % TK_TS;
+                uint gr = bRow + r, gc = kt * TK_TS + c;
+                tileA[i] = (gr < M && gc < K) ? A[gr * K + gc] : DD{0.0f, 0.0f};
+            }
+            for (uint i = flatId; i < TK_TS * BN_TS; i += NT_TS) {
+                uint r = i / BN_TS, c = i % BN_TS;
+                uint gr = kt * TK_TS + r, gc = bCol + c;
+                tileB[i] = (gr < K && gc < N) ? B[gr * N + gc] : DD{0.0f, 0.0f};
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (PF && (kt + 1) * TK_TS < K) {
+            dd_fetch_tile<BM_TS, TK_TS, NT_TS>(ra, A, M, K, bRow, (kt + 1) * TK_TS, flatId);
+            dd_fetch_tile<TK_TS, BN_TS, NT_TS>(rb, B, K, N, (kt + 1) * TK_TS, bCol, flatId);
+        }
 
         for (uint k = 0; k < TK_TS; k++) {
             DD av[TM_TS], bv[TN_TS];
@@ -669,6 +772,10 @@ kernel void dd_dgemm_ab_ts(
         }
 }
 
+typedef decltype(dd_dgemm_ab_ts_t<false>) dd_dgemm_ab_ts_fn;
+template [[host_name("dd_dgemm_ab_ts")]] kernel dd_dgemm_ab_ts_fn dd_dgemm_ab_ts_t<false>;
+template [[host_name("dd_dgemm_ab_ts_pf")]] kernel dd_dgemm_ab_ts_fn dd_dgemm_ab_ts_t<true>;
+
 // =============================================================================
 // DGEMM Kernels (Narrow Output): dd_dgemm and dd_dgemm_ab with 32×32 blocks
 // BM_NW=32, BN_NW=32, TM_NW=2, TN_NW=2, 256 threads per threadgroup
@@ -677,6 +784,7 @@ kernel void dd_dgemm_ab_ts(
 // The main loop of the 64×64 kernels for a 32×32 block: each output gets the
 // same dd_fma sequence and renormalizations, so the results are bitwise the
 // same as those kernels'. acc ends renormalized.
+template <bool PF>
 inline void dd_gemm_narrow_mainloop(
     device const DD* A, device const DD* B, uint M, uint N, uint K,
     uint bRow, uint bCol, uint ty, uint tx, uint flatId,
@@ -690,18 +798,34 @@ inline void dd_gemm_narrow_mainloop(
         for (uint j = 0; j < TN_NW; j++)
             acc[i][j] = {0.0f, 0.0f};
 
+    // PF: this thread's share of the next K-tile (see Register Prefetch)
+    DD ra[BM_NW * TK / NT_NW], rb[TK * BN_NW / NT_NW];
+    if (PF) {
+        dd_fetch_tile<BM_NW, TK, NT_NW>(ra, A, M, K, bRow, 0, flatId);
+        dd_fetch_tile<TK, BN_NW, NT_NW>(rb, B, K, N, 0, bCol, flatId);
+    }
+
     for (uint kt = 0; kt < (K + TK - 1) / TK; kt++) {
-        for (uint i = flatId; i < BM_NW * TK; i += NT_NW) {
-            uint r = i / TK, c = i % TK;
-            uint gr = bRow + r, gc = kt * TK + c;
-            tileA[c * BM_NW + r] = (gr < M && gc < K) ? A[gr * K + gc] : DD{0.0f, 0.0f};
-        }
-        for (uint i = flatId; i < TK * BN_NW; i += NT_NW) {
-            uint r = i / BN_NW, c = i % BN_NW;
-            uint gr = kt * TK + r, gc = bCol + c;
-            tileB[i] = (gr < K && gc < N) ? B[gr * N + gc] : DD{0.0f, 0.0f};
+        if (PF) {
+            dd_put_tile_kmajor<BM_NW, TK, NT_NW>(tileA, ra, flatId);
+            dd_put_tile<TK, BN_NW, NT_NW>(tileB, rb, flatId);
+        } else {
+            for (uint i = flatId; i < BM_NW * TK; i += NT_NW) {
+                uint r = i / TK, c = i % TK;
+                uint gr = bRow + r, gc = kt * TK + c;
+                tileA[c * BM_NW + r] = (gr < M && gc < K) ? A[gr * K + gc] : DD{0.0f, 0.0f};
+            }
+            for (uint i = flatId; i < TK * BN_NW; i += NT_NW) {
+                uint r = i / BN_NW, c = i % BN_NW;
+                uint gr = kt * TK + r, gc = bCol + c;
+                tileB[i] = (gr < K && gc < N) ? B[gr * N + gc] : DD{0.0f, 0.0f};
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (PF && (kt + 1) * TK < K) {
+            dd_fetch_tile<BM_NW, TK, NT_NW>(ra, A, M, K, bRow, (kt + 1) * TK, flatId);
+            dd_fetch_tile<TK, BN_NW, NT_NW>(rb, B, K, N, (kt + 1) * TK, bCol, flatId);
+        }
 
         for (uint k = 0; k < TK; k++) {
             DD av[TM_NW], bv[TN_NW];
@@ -740,7 +864,8 @@ inline void dd_gemm_narrow_mainloop(
 }
 
 // C = A × B, as dd_dgemm (same buffers)
-kernel void dd_dgemm_narrow(
+template <bool PF>
+kernel void dd_dgemm_narrow_t(
     device const DD* A [[buffer(0)]],
     device const DD* B [[buffer(1)]],
     device DD* C [[buffer(2)]],
@@ -760,7 +885,7 @@ kernel void dd_dgemm_narrow(
     threadgroup float4 tileA4[BM_NW * TK / 2];
     threadgroup float4 tileB4[TK * BN_NW / 2];
     DD acc[TM_NW][TN_NW];
-    dd_gemm_narrow_mainloop(A, B, M, N, K, bRow, bCol, ty, tx, flatId, tileA4, tileB4, acc);
+    dd_gemm_narrow_mainloop<PF>(A, B, M, N, K, bRow, bCol, ty, tx, flatId, tileA4, tileB4, acc);
 
     for (uint i = 0; i < TM_NW; i++)
         for (uint j = 0; j < TN_NW; j++) {
@@ -769,8 +894,13 @@ kernel void dd_dgemm_narrow(
         }
 }
 
+typedef decltype(dd_dgemm_narrow_t<false>) dd_dgemm_narrow_fn;
+template [[host_name("dd_dgemm_narrow")]] kernel dd_dgemm_narrow_fn dd_dgemm_narrow_t<false>;
+template [[host_name("dd_dgemm_narrow_pf")]] kernel dd_dgemm_narrow_fn dd_dgemm_narrow_t<true>;
+
 // C = α·A×B + β·C, as dd_dgemm_ab and dd_dgemm_ab_ts (same buffers)
-kernel void dd_dgemm_ab_narrow(
+template <bool PF>
+kernel void dd_dgemm_ab_narrow_t(
     device const DD* A [[buffer(0)]],
     device const DD* B [[buffer(1)]],
     device DD* C [[buffer(2)]],
@@ -792,7 +922,7 @@ kernel void dd_dgemm_ab_narrow(
     threadgroup float4 tileA4[BM_NW * TK / 2];
     threadgroup float4 tileB4[TK * BN_NW / 2];
     DD acc[TM_NW][TN_NW];
-    dd_gemm_narrow_mainloop(A, B, M, N, K, bRow, bCol, ty, tx, flatId, tileA4, tileB4, acc);
+    dd_gemm_narrow_mainloop<PF>(A, B, M, N, K, bRow, bCol, ty, tx, flatId, tileA4, tileB4, acc);
 
     for (uint i = 0; i < TM_NW; i++)
         for (uint j = 0; j < TN_NW; j++) {
@@ -805,11 +935,16 @@ kernel void dd_dgemm_ab_narrow(
         }
 }
 
+typedef decltype(dd_dgemm_ab_narrow_t<false>) dd_dgemm_ab_narrow_fn;
+template [[host_name("dd_dgemm_ab_narrow")]] kernel dd_dgemm_ab_narrow_fn dd_dgemm_ab_narrow_t<false>;
+template [[host_name("dd_dgemm_ab_narrow_pf")]] kernel dd_dgemm_ab_narrow_fn dd_dgemm_ab_narrow_t<true>;
+
 // =============================================================================
 // DSYRK Kernel: C = A × Aᵀ (symmetric, upper triangle only)
 // =============================================================================
 
-kernel void dd_dsyrk(
+template <bool PF>
+kernel void dd_dsyrk_t(
     device const DD* A [[buffer(0)]],
     device DD* C [[buffer(1)]],
     constant uint& N [[buffer(2)]],
@@ -838,18 +973,35 @@ kernel void dd_dsyrk(
     threadgroup DD* tileA = (threadgroup DD*)tileA4;
     threadgroup DD* tileB = (threadgroup DD*)tileB4;
 
+    // PF: this thread's share of the next K-tile (see Register Prefetch); the
+    // B tile is rows bCol.. of A, stored transposed like the A tile
+    DD ra[BM * TK / NT], rb[BN * TK / NT];
+    if (PF) {
+        dd_fetch_tile<BM, TK, NT>(ra, A, N, K, bRow, 0, flatId);
+        dd_fetch_tile<BN, TK, NT>(rb, A, N, K, bCol, 0, flatId);
+    }
+
     for (uint kt = 0; kt < (K + TK - 1) / TK; kt++) {
-        for (uint i = flatId; i < BM * TK; i += NT) {
-            uint r = i / TK, c = i % TK;
-            uint gr = bRow + r, gc = kt * TK + c;
-            tileA[c * BM + r] = (gr < N && gc < K) ? A[gr * K + gc] : DD{0.0f, 0.0f};
-        }
-        for (uint i = flatId; i < TK * BN; i += NT) {
-            uint r = i / BN, c = i % BN;
-            uint gc_a = bCol + c, gr_a = kt * TK + r;
-            tileB[i] = (gc_a < N && gr_a < K) ? A[gc_a * K + gr_a] : DD{0.0f, 0.0f};
+        if (PF) {
+            dd_put_tile_kmajor<BM, TK, NT>(tileA, ra, flatId);
+            dd_put_tile_kmajor<BN, TK, NT>(tileB, rb, flatId);
+        } else {
+            for (uint i = flatId; i < BM * TK; i += NT) {
+                uint r = i / TK, c = i % TK;
+                uint gr = bRow + r, gc = kt * TK + c;
+                tileA[c * BM + r] = (gr < N && gc < K) ? A[gr * K + gc] : DD{0.0f, 0.0f};
+            }
+            for (uint i = flatId; i < TK * BN; i += NT) {
+                uint r = i / BN, c = i % BN;
+                uint gc_a = bCol + c, gr_a = kt * TK + r;
+                tileB[i] = (gc_a < N && gr_a < K) ? A[gc_a * K + gr_a] : DD{0.0f, 0.0f};
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (PF && (kt + 1) * TK < K) {
+            dd_fetch_tile<BM, TK, NT>(ra, A, N, K, bRow, (kt + 1) * TK, flatId);
+            dd_fetch_tile<BN, TK, NT>(rb, A, N, K, bCol, (kt + 1) * TK, flatId);
+        }
 
         for (uint k = 0; k < TK; k++) {
             DD av[TM], bv[TN];
@@ -892,6 +1044,10 @@ kernel void dd_dsyrk(
             if (gr < N && gc < N && gc >= gr) C[gr * N + gc] = acc[i][j];
         }
 }
+
+typedef decltype(dd_dsyrk_t<false>) dd_dsyrk_fn;
+template [[host_name("dd_dsyrk")]] kernel dd_dsyrk_fn dd_dsyrk_t<false>;
+template [[host_name("dd_dsyrk_pf")]] kernel dd_dsyrk_fn dd_dsyrk_t<true>;
 
 // =============================================================================
 // Element-wise Kernels
@@ -1387,6 +1543,11 @@ kernel void ab_epi_z(device const uint2* Pr [[buffer(0)]], device const uint2* P
 // Metal Context (Singleton)
 // =============================================================================
 
+// AB_PREFETCH at initialization: "0" the plain kernels only, "1" the
+// register-prefetch kernels on every grid, unset or anything else
+// use_prefetch's rule. The results are the same in all three.
+typedef enum { AB_PREFETCH_RULE, AB_PREFETCH_OFF, AB_PREFETCH_ALL } ABPrefetchMode;
+
 @interface ABContextImpl : NSObject
 @property (nonatomic, strong) id<MTLDevice> device;
 @property (nonatomic, strong) id<MTLCommandQueue> commandQueue;
@@ -1396,6 +1557,14 @@ kernel void ab_epi_z(device const uint2* Pr [[buffer(0)]], device const uint2* P
 @property (nonatomic, strong) id<MTLComputePipelineState> dgemmNarrowPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> dgemmABNarrowPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> dsyrkPipeline;
+// The same kernels' register-prefetch instances (*_pf; routing: use_prefetch)
+@property (nonatomic, strong) id<MTLComputePipelineState> dgemmPFPipeline;
+@property (nonatomic, strong) id<MTLComputePipelineState> dgemmABPFPipeline;
+@property (nonatomic, strong) id<MTLComputePipelineState> dgemmABTSPFPipeline;
+@property (nonatomic, strong) id<MTLComputePipelineState> dgemmNarrowPFPipeline;
+@property (nonatomic, strong) id<MTLComputePipelineState> dgemmABNarrowPFPipeline;
+@property (nonatomic, strong) id<MTLComputePipelineState> dsyrkPFPipeline;
+@property (nonatomic) ABPrefetchMode prefetchMode;
 @property (nonatomic, strong) id<MTLComputePipelineState> zeroPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> addPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> subPipeline;
@@ -1496,6 +1665,29 @@ static void ab_atfork_child(void) { g_forked_child = true; }
 
         _dsyrkPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_dsyrk"] error:&error];
         if (!_dsyrkPipeline) { NSLog(@"Pipeline creation failed (dd_dsyrk): %@", error); return nil; }
+
+        _dgemmPFPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_dgemm_pf"] error:&error];
+        if (!_dgemmPFPipeline) { NSLog(@"Pipeline creation failed (dd_dgemm_pf): %@", error); return nil; }
+
+        _dgemmABPFPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_dgemm_ab_pf"] error:&error];
+        if (!_dgemmABPFPipeline) { NSLog(@"Pipeline creation failed (dd_dgemm_ab_pf): %@", error); return nil; }
+
+        _dgemmABTSPFPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_dgemm_ab_ts_pf"] error:&error];
+        if (!_dgemmABTSPFPipeline) { NSLog(@"Pipeline creation failed (dd_dgemm_ab_ts_pf): %@", error); return nil; }
+
+        _dgemmNarrowPFPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_dgemm_narrow_pf"] error:&error];
+        if (!_dgemmNarrowPFPipeline) { NSLog(@"Pipeline creation failed (dd_dgemm_narrow_pf): %@", error); return nil; }
+
+        _dgemmABNarrowPFPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_dgemm_ab_narrow_pf"] error:&error];
+        if (!_dgemmABNarrowPFPipeline) { NSLog(@"Pipeline creation failed (dd_dgemm_ab_narrow_pf): %@", error); return nil; }
+
+        _dsyrkPFPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_dsyrk_pf"] error:&error];
+        if (!_dsyrkPFPipeline) { NSLog(@"Pipeline creation failed (dd_dsyrk_pf): %@", error); return nil; }
+
+        const char* prefetch = getenv("AB_PREFETCH");
+        _prefetchMode = !prefetch ? AB_PREFETCH_RULE
+                      : !strcmp(prefetch, "0") ? AB_PREFETCH_OFF
+                      : !strcmp(prefetch, "1") ? AB_PREFETCH_ALL : AB_PREFETCH_RULE;
 
         _zeroPipeline = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:@"dd_matrix_zero"] error:&error];
         if (!_zeroPipeline) { NSLog(@"Pipeline creation failed (dd_matrix_zero): %@", error); return nil; }
@@ -2142,31 +2334,79 @@ static bool use_narrow_tiles(uint32_t M, uint32_t N, bool tall_skinny) {
     return (N + 31) / 32 * 32 == (N + 15) / 16 * 16 || ts_groups <= AB_NARROW_MAX_TS_GROUPS;
 }
 
+// Register prefetch: the *_pf instance of a kernel (Register Prefetch in the
+// MSL; same bits) instead of the plain one, while the GPU holds few enough
+// threadgroups that the tile loads' latency shows. Measured on M2 Max (38-core
+// GPU), kernel GPU time against the plain instance:
+//   - 64×64 (dd_dgemm, dd_dgemm_ab, dd_dsyrk): 1.05-1.26x up to 64
+//     threadgroups (1.09x at 512×512×18432; DSYRK 1.03-1.18x up to N = 512)
+//     and within ±2% from 70 on, alone on the GPU, but 0.86-0.91x for three
+//     concurrent products of 64: so only in a serial encoder.
+//   - Tall-skinny: 1.01-1.47x up to ~700 threadgroups (1.16x at
+//     4096×64×4608) and within ±1.5% from 720 on (QE's 18277×150×150
+//     rotation: 0.99-1.00x), alone or as Gauss-3M's three concurrent products.
+//   - Narrow: 1.00-1.43x on every grid measured, up to 1156 threadgroups,
+//     alone or concurrent (1.43x at 160×160×18432): every grid.
+#define AB_PREFETCH_MAX_GROUPS 64u
+#define AB_PREFETCH_MAX_TS_GROUPS 512u
+#define AB_PREFETCH_MAX_NARROW_GROUPS UINT32_MAX
+
+static uint64_t g_prefetch_dispatches = 0;
+
+// The *_pf kernel for a grid of `groups` threadgroups while at most
+// max_groups (AB_PREFETCH=1: always, =0: never). Each true counts one dispatch.
+static bool use_prefetch(ABContextImpl* ctx, uint32_t groups, uint32_t max_groups) {
+    ABPrefetchMode mode = ctx.prefetchMode;
+    if (mode == AB_PREFETCH_OFF || (mode == AB_PREFETCH_RULE && groups > max_groups)) return false;
+    __atomic_fetch_add(&g_prefetch_dispatches, 1, __ATOMIC_RELAXED);
+    return true;
+}
+
+// Dispatches of a *_pf kernel since the process started, for the tests.
+extern "C" uint64_t ab_internal_prefetch_dispatches(void) {
+    return __atomic_load_n(&g_prefetch_dispatches, __ATOMIC_RELAXED);
+}
+
+// The 64×64 kernels' prefetch limit: none in a concurrent encoder, whose
+// products share the GPU (see above)
+static uint32_t square_prefetch_max(id<MTLComputeCommandEncoder> encoder) {
+    return encoder.dispatchType == MTLDispatchTypeConcurrent ? 0 : AB_PREFETCH_MAX_GROUPS;
+}
+
 // dd_dgemm (C = A*B) with all of its buffers bound, including the Morton grid
-// dims at 6/7, or dd_dgemm_narrow (same buffers) for a small C. ab_dgemm and
-// ab_dgemm_async always come here, so their results are bitwise identical.
+// dims at 6/7, or dd_dgemm_narrow (same buffers) for a small C, or their
+// prefetch instances. ab_dgemm and ab_dgemm_async always come here, so their
+// results are bitwise identical.
 static void encode_dgemm_square_dispatch(id<MTLComputeCommandEncoder> encoder,
                                           ABContextImpl* ctx,
                                           ABMatrix A, ABMatrix B, ABMatrix C) {
     uint32_t M = A->rows, N = B->cols, K = A->cols;
     bool narrow = use_narrow_tiles(M, N, false);
     uint32_t tile = narrow ? 32 : 64;
-    [encoder setComputePipelineState:narrow ? ctx.dgemmNarrowPipeline : ctx.dgemmPipeline];
+    uint32_t gridW = (N + tile - 1) / tile, gridH = (M + tile - 1) / tile;
+    id<MTLComputePipelineState> plain = ctx.dgemmPipeline, pf = ctx.dgemmPFPipeline;
+    uint32_t max_groups = square_prefetch_max(encoder);
+    if (narrow) {
+        plain = ctx.dgemmNarrowPipeline;
+        pf = ctx.dgemmNarrowPFPipeline;
+        max_groups = AB_PREFETCH_MAX_NARROW_GROUPS;
+    }
+    [encoder setComputePipelineState:use_prefetch(ctx, gridW * gridH, max_groups) ? pf : plain];
     [encoder setBuffer:A->buffer offset:0 atIndex:0];
     [encoder setBuffer:B->buffer offset:0 atIndex:1];
     [encoder setBuffer:C->buffer offset:0 atIndex:2];
     [encoder setBytes:&M length:sizeof(M) atIndex:3];
     [encoder setBytes:&N length:sizeof(N) atIndex:4];
     [encoder setBytes:&K length:sizeof(K) atIndex:5];
-    uint32_t gridW = (N + tile - 1) / tile, gridH = (M + tile - 1) / tile;
     [encoder setBytes:&gridW length:sizeof(gridW) atIndex:6];
     [encoder setBytes:&gridH length:sizeof(gridH) atIndex:7];
     [encoder dispatchThreadgroups:MTLSizeMake(gridW, gridH, 1)
              threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
 }
 
-// C = alpha*A*B + beta*C: dd_dgemm_ab, dd_dgemm_ab_ts or dd_dgemm_ab_narrow
-// (buffer layout A,B,C,M,N,K,alpha,beta,gridW,gridH).
+// C = alpha*A*B + beta*C: dd_dgemm_ab, dd_dgemm_ab_ts or dd_dgemm_ab_narrow,
+// or their prefetch instances (buffer layout A,B,C,M,N,K,alpha,beta,gridW,
+// gridH).
 static void encode_dgemm_scaled_dispatch(id<MTLComputeCommandEncoder> encoder,
                                           ABContextImpl* ctx,
                                           double alpha, ABMatrix A, ABMatrix B,
@@ -2180,17 +2420,23 @@ static void encode_dgemm_scaled_dispatch(id<MTLComputeCommandEncoder> encoder,
     // tall-skinny (TM=4, TN=2) 8×32
     uint32_t bm = 64, bn = 64;
     MTLSize threads = MTLSizeMake(16, 16, 1);
+    id<MTLComputePipelineState> plain = ctx.dgemmABPipeline, pf = ctx.dgemmABPFPipeline;
+    uint32_t max_groups = square_prefetch_max(encoder);
     if (narrow) {
-        [encoder setComputePipelineState:ctx.dgemmABNarrowPipeline];
         bm = bn = 32;
+        plain = ctx.dgemmABNarrowPipeline;
+        pf = ctx.dgemmABNarrowPFPipeline;
+        max_groups = AB_PREFETCH_MAX_NARROW_GROUPS;
     } else if (use_ts) {
-        [encoder setComputePipelineState:ctx.dgemmABTSPipeline];
         bm = 128;
         bn = 16;
         threads = MTLSizeMake(8, 32, 1);
-    } else {
-        [encoder setComputePipelineState:ctx.dgemmABPipeline];
+        plain = ctx.dgemmABTSPipeline;
+        pf = ctx.dgemmABTSPFPipeline;
+        max_groups = AB_PREFETCH_MAX_TS_GROUPS;
     }
+    uint32_t gridW = (N + bn - 1) / bn, gridH = (M + bm - 1) / bm;
+    [encoder setComputePipelineState:use_prefetch(ctx, gridW * gridH, max_groups) ? pf : plain];
     [encoder setBuffer:A->buffer offset:0 atIndex:0];
     [encoder setBuffer:B->buffer offset:0 atIndex:1];
     [encoder setBuffer:C->buffer offset:0 atIndex:2];
@@ -2199,7 +2445,6 @@ static void encode_dgemm_scaled_dispatch(id<MTLComputeCommandEncoder> encoder,
     [encoder setBytes:&K length:sizeof(K) atIndex:5];
     [encoder setBytes:&alpha_dd length:sizeof(alpha_dd) atIndex:6];
     [encoder setBytes:&beta_dd length:sizeof(beta_dd) atIndex:7];
-    uint32_t gridW = (N + bn - 1) / bn, gridH = (M + bm - 1) / bm;
     [encoder setBytes:&gridW length:sizeof(gridW) atIndex:8];
     [encoder setBytes:&gridH length:sizeof(gridH) atIndex:9];
     [encoder dispatchThreadgroups:MTLSizeMake(gridW, gridH, 1) threadsPerThreadgroup:threads];
@@ -2758,12 +3003,13 @@ ABStatus ab_dsyrk(ABMatrix A, ABMatrix C) {
     // result's scale first, so that it keeps its values.
     encode_rescale(cmdBuf, ctx, C, C->exp2 - 2 * A->exp2);
     id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
-    [encoder setComputePipelineState:ctx.dsyrkPipeline];
+    uint32_t gridW = (N + 63) / 64, gridH = (N + 63) / 64;
+    bool pf = use_prefetch(ctx, gridW * gridH, square_prefetch_max(encoder));
+    [encoder setComputePipelineState:pf ? ctx.dsyrkPFPipeline : ctx.dsyrkPipeline];
     [encoder setBuffer:A->buffer offset:0 atIndex:0];
     [encoder setBuffer:C->buffer offset:0 atIndex:1];
     [encoder setBytes:&N length:sizeof(N) atIndex:2];
     [encoder setBytes:&K length:sizeof(K) atIndex:3];
-    uint32_t gridW = (N + 63) / 64, gridH = (N + 63) / 64;
     [encoder setBytes:&gridW length:sizeof(gridW) atIndex:4];
     [encoder setBytes:&gridH length:sizeof(gridH) atIndex:5];
     [encoder dispatchThreadgroups:MTLSizeMake(gridW, gridH, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
