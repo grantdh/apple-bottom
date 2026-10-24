@@ -90,7 +90,7 @@ void ab_prof_dump(FILE *out);
 #define MEM_WARMUP_CALLS 200
 #define MEM_CALLS       2000
 #define MEM_FOOTPRINT_LIMIT_KB 32768 // growth over MEM_CALLS (see gen_memory)
-#define MEM_MALLOC_LIMIT_KB    128
+#define MEM_MALLOC_LIMIT_KB    64    // growth over MEM_CALLS / 2, in at least one half
 
 // =============================================================================
 // Case model
@@ -218,6 +218,7 @@ struct Suite {
     bool init;                  // call ab_init() before the first case
     bool debug_layer;           // MTL_DEBUG_LAYER=1 (Metal API validation)
     bool profile;               // AB_PROFILE=1
+    bool exact_malloc;          // MallocNanoZone=0 (see gen_memory)
     bool show;                  // print every case's detail (measured values), not only failures
     Op op;                      // entry point (gen_blas suites only)
     void (*gen)(const Suite *s);
@@ -455,17 +456,31 @@ static void gen_threads(const Suite *s) {
 
 // Memory: MEM_CALLS GPU calls (MEM_SHAPES in turn) after MEM_WARMUP_CALLS
 // must grow the process's phys_footprint (task_info TASK_VM_INFO; it counts
-// the Metal buffers the calls write) by less than MEM_FOOTPRINT_LIMIT_KB and
+// the Metal buffers the calls write) by less than MEM_FOOTPRINT_LIMIT_KB, and
 // the bytes malloc has handed out (malloc_zone_statistics, all zones) by less
-// than MEM_MALLOC_LIMIT_KB. Measured on 1.4.0 (M2 Max), ~90 runs: footprint
-// -912 to +608 KB, and once +11.1 MB (a region Metal maps at some point);
-// malloc -1.5 to +11.5 KB. Leaks planted in a probe making the same kind of
-// calls: 170 B per call (what the autoreleased command buffers and encoders
-// cost before ABAutoreleaseScope, apple_bottom.m) +375 KB malloc, which the
-// footprint (+400-656 KB) cannot tell from noise; an unwritten 64x64 ABMatrix
-// per call +1.4 MB malloc, +1.9-2.2 MB footprint. So malloc catches small
-// leaks, and the footprint limit (~3x the outlier) the large ones: a leaked
-// packed operand or written GPU buffer costs >= 30 KB per call, >= 60 MB.
+// than MEM_MALLOC_LIMIT_KB over the first or the second half of the calls.
+// Measured on 1.4.0 (M2 Max), ~90 runs: footprint -912 to +608 KB, and once
+// +11.1 MB (a region Metal maps at some point); malloc -1.5 to +11.5 KB over
+// all the calls. Leaks planted in a probe making the same kind of calls: 170 B
+// per call (what the autoreleased command buffers and encoders cost before
+// ABAutoreleaseScope, apple_bottom.m) +375 KB malloc, which the footprint
+// (+400-656 KB) cannot tell from noise; an unwritten 64x64 ABMatrix per call
+// +1.4 MB malloc, +1.9-2.2 MB footprint. So malloc catches small leaks, and
+// the footprint limit (~3x the outlier) the large ones: a leaked packed
+// operand or written GPU buffer costs >= 30 KB per call, >= 60 MB.
+//
+// Halves: a leak grows both alike (MEM_MALLOC_LIMIT_KB per half is 64 B per
+// call), memory allocated once only one. Malloc growth of 3943a96 (M2 Max):
+// 0-4 KB in 19 runs, idle or beside CPU, GPU and memory-bandwidth load;
+// beside other jobs at load1 23-33, 141-169 KB in 6 of 9 runs and 8-13 KB in
+// 3. No call leaves memory to be freed after it returns.
+//
+// The child runs with MallocNanoZone=0 (Suite.exact_malloc). The default nano
+// allocator counts small blocks another thread freed as still in use, in 16 KB
+// steps (341 blocks of 48 B), and Metal frees some objects on its own threads:
+// 0-32 KB over 2000 calls, no more over 8000. Without Metal, one thread
+// allocating 16 blocks of 48 B and another freeing them gains 8.5 KB in 2000
+// rounds and 14.5 KB in 32000, and nothing with MallocNanoZone=0.
 static void gen_memory(const Suite *s) {
     AbiCase *c = new_case();
     snprintf(c->name, sizeof c->name, "dgemm_+zgemm_/%s/%d-calls/footprint", s->label, MEM_CALLS);
@@ -568,7 +583,8 @@ static Suite SUITES[SU_COUNT] = {
     [SU_LONG_K]  = {.label = "gpu-noinit", .ab_mode = "gpu", .show = true, .gen = gen_long_k},
     [SU_REPEAT]  = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_repeat},
     [SU_THREADS] = {.label = "gpu-noinit", .ab_mode = "gpu", .show = true, .gen = gen_threads},
-    [SU_MEMORY]  = {.label = "gpu-noinit", .ab_mode = "gpu", .show = true, .gen = gen_memory},
+    [SU_MEMORY]  = {.label = "gpu-noinit", .ab_mode = "gpu", .exact_malloc = true, .show = true,
+                    .gen = gen_memory},
     [SU_PROFILE] = {.label = "auto-table-profile", .ab_mode = "auto", .test_table = true,
                     .profile = true, .gen = gen_profile},
     [SU_REPORT]  = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_report},
@@ -1282,20 +1298,26 @@ static bool run_memory(const AbiCase *c, char *detail, size_t n) {
     int not_gpu = 0;
     for (int i = 0; i < MEM_WARMUP_CALLS; i++)
         not_gpu += !call_run(&calls[i % N_MEM_SHAPES], out[i % N_MEM_SHAPES]);
-    MemUse m0 = {0}, m1 = {0};
+    MemUse m0 = {0}, mh = {0}, m1 = {0};    // before, halfway, after
     bool measured = mem_use(&m0);
     uint64_t g0 = gpu_gemm_count();
-    for (int i = 0; i < MEM_CALLS; i++)
+    for (int i = 0; i < MEM_CALLS; i++) {
+        if (i == MEM_CALLS / 2) measured = mem_use(&mh) && measured;
         not_gpu += !call_run(&calls[i % N_MEM_SHAPES], out[i % N_MEM_SHAPES]);
+    }
     uint64_t gpu_calls = gpu_gemm_count() - g0;
     measured = mem_use(&m1) && measured;
 
-    const double phys = kb_change(m0.phys, m1.phys), mall = kb_change(m0.malloced, m1.malloced);
+    const double phys = kb_change(m0.phys, m1.phys);
+    const double mall[2] = {kb_change(m0.malloced, mh.malloced), kb_change(mh.malloced, m1.malloced)};
+    const char *nano = getenv("MallocNanoZone");
     snprintf(detail, n, "%llu GPU calls after %d warm-up calls: phys_footprint %+.0f KB "
-             "(limit %d KB; %.1f MB in all), malloc in use %+.1f KB (limit %d KB), "
-             "resident %+.0f KB%s%s",
+             "(limit %d KB; %.1f MB in all), malloc in use %+.1f then %+.1f KB per half "
+             "(limit %d KB in at least one), resident %+.0f KB%s%s%s",
              (unsigned long long)gpu_calls, MEM_WARMUP_CALLS, phys, MEM_FOOTPRINT_LIMIT_KB,
-             m1.phys / 1048576.0, mall, MEM_MALLOC_LIMIT_KB, kb_change(m0.resident, m1.resident),
+             m1.phys / 1048576.0, mall[0], mall[1], MEM_MALLOC_LIMIT_KB,
+             kb_change(m0.resident, m1.resident),
+             nano && !strcmp(nano, "0") ? "" : " [not MallocNanoZone=0: inexact malloc counts]",
              measured ? "" : " [task_info failed]",
              not_gpu ? " [a call did not run on the GPU]" : "");
     for (int i = 0; i < N_MEM_SHAPES; i++) {
@@ -1303,7 +1325,7 @@ static bool run_memory(const AbiCase *c, char *detail, size_t n) {
         call_free(&calls[i]);
     }
     return measured && !not_gpu && gpu_calls == MEM_CALLS && phys < MEM_FOOTPRINT_LIMIT_KB &&
-           mall < MEM_MALLOC_LIMIT_KB;
+           fmin(mall[0], mall[1]) < MEM_MALLOC_LIMIT_KB;
 }
 
 // =============================================================================
@@ -1659,13 +1681,16 @@ static void record(const AbiCase *c, bool ok, const char *detail) {
     }
 }
 
-// Child environment: the caller's, minus AB_* and MTL_DEBUG_LAYER, plus the suite's.
+// Child environment: the caller's, minus AB_*, MTL_DEBUG_LAYER and
+// MallocNanoZone, plus the suite's.
 static char **child_env(const Suite *s, char *mode_buf, size_t mode_len,
                         char *table_buf, size_t table_len) {
     static char debug_layer[] = "MTL_DEBUG_LAYER=1";
     static char profile[] = "AB_PROFILE=1";
+    static char nano_off[] = "MallocNanoZone=0";
     size_t k;
-    char **env = child_environ(4, &k);
+    char **env = child_environ(5, &k);
+    if (s->exact_malloc) env[k++] = nano_off;
     if (s->ab_mode) {
         snprintf(mode_buf, mode_len, "AB_MODE=%s", s->ab_mode);
         env[k++] = mode_buf;

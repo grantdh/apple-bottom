@@ -138,11 +138,13 @@ memory suites print their measured values on every run:
   the same call made single-threaded afterwards, and that within 1e-11 of
   cblas.
 - `test_memory_growth`: GPU calls after a warm-up may grow the bytes
-  malloc has handed out by less than `MEM_MALLOC_LIMIT_KB`, which catches
-  small leaks, and `phys_footprint` (`task_info`) by less than
+  malloc has handed out by less than `MEM_MALLOC_LIMIT_KB` over the first
+  or the second half of the calls (a leak grows both), which catches small
+  leaks, and `phys_footprint` (`task_info`) by less than
   `MEM_FOOTPRINT_LIMIT_KB`, which catches a leaked operand or GPU buffer.
-  `gen_memory` records what 1.4.0 measures, what planted leaks cost, and
-  how the limits follow.
+  The child runs with `MallocNanoZone=0`, so that malloc's statistics count
+  only live blocks. `gen_memory` records what 1.4.0 measures, what planted
+  leaks cost, and how the limits follow.
 - `test_fork_exit`: as `test_fork_after_gpu` without `AB_PROFILE`, but the
   forked child ends with `exit()` (atexit handlers and static destructors
   run, as at a Fortran `STOP`), not `_exit()`; it must exit with status 0
@@ -200,8 +202,8 @@ this tree's 1.4.0 library gives the same bits.
 `tests/test_trace.c` re-executes itself (`--child <scenario> <dir>`, via
 `posix_spawn` so the child can use Metal; the helpers are shared with
 `test_blas_abi.c` in `tests/test_spawn.h`) with the variables under test,
-after dropping every `AB_*` variable and `MTL_DEBUG_LAYER` of the caller's
-environment, and checks the child's output and the files it leaves in a
+after dropping every `AB_*` variable, `MTL_DEBUG_LAYER` and `MallocNanoZone`
+of the caller's environment, and checks the child's output and the files it leaves in a
 scratch directory under `$TMPDIR` (kept, and named in the failure, when a
 test fails). A child still running after 120 s, or its `fork()`ed child
 after 30 s, is ended by an alarm, and the test fails. `test_trace_lines`
