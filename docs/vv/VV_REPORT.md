@@ -144,7 +144,7 @@ In practice, random matrices exhibit `~√N` scaling due to statistical cancella
 |-----------|-----------|----------------------|-------|
 | `ab_dgemm(A, B, C)` | ~N·10⁻¹⁵ | 1.10× | C = A × B |
 | `ab_dgemm_scaled(α, A, B, β, C)` | ~N·10⁻¹⁵ | 1.10× | C = αAB + βC |
-| `ab_zgemm(Ar, Ai, Br, Bi, Cr, Ci)` | ~3N·10⁻¹⁵ | 1.18-1.29× | Complex GEMM (Gauss 3-multiply) |
+| `ab_zgemm(Ar, Ai, Br, Bi, Cr, Ci)` | ~3N·10⁻¹⁵ | 1.18-1.29× | Complex GEMM (Gauss 3-multiply; 4 products for imbalanced parts) |
 | `ab_dsyrk(A, C)` | ~N·10⁻¹⁵ | 0.9-1.1× | C = A × Aᵀ (symmetric) |
 | `ab_matrix_scale(α, A)` | ~10⁻¹⁵ | — | Element-wise scaling |
 

@@ -47,12 +47,14 @@ const char* ab_get_last_dispatch_path(void) { return _ab_last_path; }
 // lines all lie inside the window runs exactly as before.
 #define AB_RANGE_WHY "values beyond double-float's exponent range, or NaN/Inf"
 
-bool ab_line_stats_init(ab_line_stats_t* s, int n) {
+bool ab_line_stats_init(ab_line_stats_t* s, int n, bool complex_parts) {
     s->n = n;
     s->max = malloc((size_t)n * sizeof *s->max);
     s->min = malloc((size_t)n * sizeof *s->min);
     s->e = malloc((size_t)n * sizeof *s->e);
-    if (!s->max || !s->min || !s->e) return false;
+    s->rmax = complex_parts ? calloc((size_t)n, sizeof *s->rmax) : NULL;
+    s->imax = complex_parts ? calloc((size_t)n, sizeof *s->imax) : NULL;
+    if (!s->max || !s->min || !s->e || (complex_parts && (!s->rmax || !s->imax))) return false;
     for (int i = 0; i < n; i++) { s->max[i] = 0; s->min[i] = UINT32_MAX; }
     return true;
 }
@@ -61,7 +63,9 @@ void ab_line_stats_free(ab_line_stats_t* s) {
     free(s->max);
     free(s->min);
     free(s->e);
-    s->max = s->min = NULL;
+    free(s->rmax);
+    free(s->imax);
+    s->max = s->min = s->rmax = s->imax = NULL;
     s->e = NULL;
 }
 
@@ -81,12 +85,42 @@ static inline int line_min_exp(const ab_line_stats_t* s, int i) {
     return ab_hiword_ilogb(s->min[i]) - s->e[i];
 }
 
-// Adds a complex element to a line's (mx, mn) as AB_RANGE_ADD adds a real
-// one: by the larger of its parts' high words.
-#define LINE_ADD_COMPLEX(re, im, mx, mn) do {                      \
+// Adds a complex element to a line's statistics: its parts' high words to
+// their maxima (rmx, imx), and the larger of them to the smallest (mn), as
+// AB_RANGE_ADD adds a real element's. The line's max follows from rmx and imx
+// (pack_op_complex_stats).
+#define LINE_ADD_COMPLEX(re, im, rmx, imx, mn) do {                \
         uint32_t hr_ = ab_abs_hiword(re), hi_ = ab_abs_hiword(im); \
-        AB_HIWORD_ADD(hr_ > hi_ ? hr_ : hi_, mx, mn);              \
+        AB_HIWORD_MAX(hr_, rmx);                                   \
+        AB_HIWORD_MAX(hi_, imx);                                   \
+        AB_HIWORD_MIN(hr_ > hi_ ? hr_ : hi_, mn);                  \
     } while (0)
+
+// The range [*lo, *hi] of |Im x|/|Re x| over s's nonzero lines, each line's
+// from its parts' largest magnitudes (Inf for a line whose real parts are all
+// zero); false if every line is zero.
+static bool line_ratios(const ab_line_stats_t* s, double* lo, double* hi) {
+    *lo = INFINITY;
+    *hi = 0.0;
+    for (int i = 0; i < s->n; i++) {
+        uint32_t r = s->rmax[i], m = s->imax[i];
+        if (r == 0 && m == 0) continue;
+        double p = ab_hiword_value(m) / ab_hiword_value(r);
+        *lo = fmin(*lo, p);
+        *hi = fmax(*hi, p);
+    }
+    return *lo <= *hi;
+}
+
+// In p, rho grows where q > 1 and falls where q < 1 (and in q likewise), so
+// over [plo, phi] x [qlo, qhi] it is largest at a corner, and each corner is
+// a row of op(A) and a column of op(B).
+double ab_lines_rho(const ab_line_stats_t* sa, const ab_line_stats_t* sb) {
+    double plo, phi, qlo, qhi;
+    if (!line_ratios(sa, &plo, &phi) || !line_ratios(sb, &qlo, &qhi)) return 0.0;
+    return fmax(fmax(ab_gauss3m_rho(plo, qlo), ab_gauss3m_rho(plo, qhi)),
+                fmax(ab_gauss3m_rho(phi, qlo), ab_gauss3m_rho(phi, qhi)));
+}
 
 // Pack op(X), rows x cols, into row-major dst (statistics only if dst is
 // NULL), gathering the magnitudes of op(X)'s rows (by_row) or columns into
@@ -175,38 +209,36 @@ static void pack_c(const double* X, int ld, int rows, int cols, double* restrict
 
 // Complex variant: split op(X) into row-major real and imaginary parts
 // (statistics only if re and im are NULL), conjugating for CblasConjTrans,
-// and gather the lines' magnitudes into st.
+// and gather the lines' magnitudes into st (complex statistics).
 static void pack_op_complex_stats(enum CBLAS_TRANSPOSE t, const double complex* X, int ld,
                                   int rows, int cols, double* restrict re, double* restrict im,
                                   bool by_row, ab_line_stats_t* st) {
     size_t r = (size_t)rows, c = (size_t)cols, l = (size_t)ld;
-    uint32_t* restrict mx = st->max;
+    uint32_t* restrict rx = st->rmax;
+    uint32_t* restrict ix = st->imax;
     uint32_t* restrict mn = st->min;
     if (t == CblasNoTrans) {
         for (size_t i0 = 0; i0 < r; i0 += AB_PACK_ROWS) {
             const size_t i1 = r - i0 > AB_PACK_ROWS ? i0 + AB_PACK_ROWS : r;
             for (size_t j = 0; j < c; j++) {
                 const double* restrict x = (const double*)(X + j * l);
-                if (by_row && re) {
+                // The strided copy, then the statistics over the same
+                // segment (still in L1), which vectorize on their own.
+                if (re) {
                     for (size_t i = i0; i < i1; i++) {
-                        double vr = x[2 * i], vi = x[2 * i + 1];
-                        re[i * c + j] = vr;
-                        im[i * c + j] = vi;
-                        LINE_ADD_COMPLEX(vr, vi, mx[i], mn[i]);
+                        re[i * c + j] = x[2 * i];
+                        im[i * c + j] = x[2 * i + 1];
                     }
-                } else if (by_row) {
+                }
+                if (by_row) {
                     for (size_t i = i0; i < i1; i++)
-                        LINE_ADD_COMPLEX(x[2 * i], x[2 * i + 1], mx[i], mn[i]);
+                        LINE_ADD_COMPLEX(x[2 * i], x[2 * i + 1], rx[i], ix[i], mn[i]);
                 } else {
-                    if (re) {
-                        for (size_t i = i0; i < i1; i++) {
-                            re[i * c + j] = x[2 * i];
-                            im[i * c + j] = x[2 * i + 1];
-                        }
-                    }
-                    uint32_t lmx = mx[j], lmn = mn[j];
-                    for (size_t i = i0; i < i1; i++) LINE_ADD_COMPLEX(x[2 * i], x[2 * i + 1], lmx, lmn);
-                    mx[j] = lmx;
+                    uint32_t lrx = rx[j], lix = ix[j], lmn = mn[j];
+                    for (size_t i = i0; i < i1; i++)
+                        LINE_ADD_COMPLEX(x[2 * i], x[2 * i + 1], lrx, lix, lmn);
+                    rx[j] = lrx;
+                    ix[j] = lix;
                     mn[j] = lmn;
                 }
             }
@@ -217,38 +249,42 @@ static void pack_op_complex_stats(enum CBLAS_TRANSPOSE t, const double complex* 
             const double* restrict x = (const double*)(X + i * l);
             if (!re) {                  // statistics only: the sign does not matter
                 if (by_row) {
-                    uint32_t lmx = mx[i], lmn = mn[i];
-                    for (size_t j = 0; j < c; j++) LINE_ADD_COMPLEX(x[2 * j], x[2 * j + 1], lmx, lmn);
-                    mx[i] = lmx;
+                    uint32_t lrx = rx[i], lix = ix[i], lmn = mn[i];
+                    for (size_t j = 0; j < c; j++)
+                        LINE_ADD_COMPLEX(x[2 * j], x[2 * j + 1], lrx, lix, lmn);
+                    rx[i] = lrx;
+                    ix[i] = lix;
                     mn[i] = lmn;
                 } else {
                     for (size_t j = 0; j < c; j++)
-                        LINE_ADD_COMPLEX(x[2 * j], x[2 * j + 1], mx[j], mn[j]);
+                        LINE_ADD_COMPLEX(x[2 * j], x[2 * j + 1], rx[j], ix[j], mn[j]);
                 }
                 continue;
             }
             double* restrict dr = re + i * c;
             double* restrict di = im + i * c;
             if (by_row) {
-                uint32_t lmx = mx[i], lmn = mn[i];
+                uint32_t lrx = rx[i], lix = ix[i], lmn = mn[i];
                 for (size_t j = 0; j < c; j++) {
                     double vr = x[2 * j], vi = sign * x[2 * j + 1];
                     dr[j] = vr;
                     di[j] = vi;
-                    LINE_ADD_COMPLEX(vr, vi, lmx, lmn);
+                    LINE_ADD_COMPLEX(vr, vi, lrx, lix, lmn);
                 }
-                mx[i] = lmx;
+                rx[i] = lrx;
+                ix[i] = lix;
                 mn[i] = lmn;
             } else {
                 for (size_t j = 0; j < c; j++) {
                     double vr = x[2 * j], vi = sign * x[2 * j + 1];
                     dr[j] = vr;
                     di[j] = vi;
-                    LINE_ADD_COMPLEX(vr, vi, mx[j], mn[j]);
+                    LINE_ADD_COMPLEX(vr, vi, rx[j], ix[j], mn[j]);
                 }
             }
         }
     }
+    for (int i = 0; i < st->n; i++) AB_HIWORD_MAX(rx[i] > ix[i] ? rx[i] : ix[i], st->max[i]);
 }
 
 void ab_line_stats_scan(const ab_op_view_t* v, bool by_row, ab_line_stats_t* s) {
@@ -645,7 +681,7 @@ static void zgemm_blas(
     ABMatrix mCr = ab_matrix_create(M, N);
     ABMatrix mCi = ab_matrix_create(M, N);
     if (!mAr || !mAi || !mBr || !mBi || !mCr || !mCi) goto cleanup;
-    if (!ab_line_stats_init(&sa, M) || !ab_line_stats_init(&sb, N)) goto cleanup;
+    if (!ab_line_stats_init(&sa, M, true) || !ab_line_stats_init(&sb, N, true)) goto cleanup;
 
     // Upload op(A) (column-major to row-major, transposed/conjugated as asked)
     Ar_data = malloc((size_t)M * K * sizeof(double));
@@ -687,8 +723,12 @@ static void zgemm_blas(
     }
     prof_stage(p, AB_PROF_STAGE_PACK);
 
-    // Compute C = op(A) * op(B)
-    if (ab_zgemm(mAr, mAi, mBr, mBi, mCr, mCi) != AB_OK) goto cleanup;
+    // Compute C = op(A) * op(B), by 4M where some row of op(A) and column of
+    // op(B) are imbalanced enough to cost Gauss-3M's imaginary part its
+    // accuracy (ab_internal.h).
+    ab_zgemm_method_t method =
+        ab_lines_rho(&sa, &sb) > AB_GAUSS3M_MAX_RHO ? AB_ZGEMM_4M : AB_ZGEMM_3M;
+    if (ab_internal_zgemm(mAr, mAi, mBr, mBi, mCr, mCi, method) != AB_OK) goto cleanup;
     prof_kernel(p);
 
     // Download result and apply alpha/beta epilogue
@@ -806,7 +846,7 @@ static void dgemm_blas(
     ABMatrix mB = ab_matrix_create(K, N);
     ABMatrix mC = ab_matrix_create(M, N);
     if (!mA || !mB || !mC) goto cleanup;
-    if (!ab_line_stats_init(&sa, M) || !ab_line_stats_init(&sb, N)) goto cleanup;
+    if (!ab_line_stats_init(&sa, M, false) || !ab_line_stats_init(&sb, N, false)) goto cleanup;
 
     // Upload op(A) as M×K and op(B) as K×N, row-major
     A_row = malloc((size_t)M * K * sizeof(double));

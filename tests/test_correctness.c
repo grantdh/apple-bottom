@@ -2331,17 +2331,20 @@ static void xr_verdict(const char* const* names, const double* err, int n) {
     FAIL(buf);
 }
 
-static void test_xr_zgemm_paths(void) {
-    TEST("Exponent range: ZGEMM entry points");
+// Every native ZGEMM path on data whose parts have magnitudes [0.5, 1) times
+// scale[0..3] (Ar, Ai, Br, Bi), each result's error measured by error(): the
+// sync, async and ABBatch calls; ab_zgemm_batched with an in-window ZGEMM of
+// another shape between two such ones; and ab_zgemm_ex with op(A) = A^H and
+// op(B) = B^T.
+static void zgemm_paths(const char* title, const double scale[4],
+                        double (*error)(const XrZgemm*)) {
+    TEST(title);
     ab_init();
-    // Parts on different scales (2^80 and 2^64), and an in-window ZGEMM of
-    // another shape between two such ones in the batched call; z[6] is
-    // op(A) = A^H, op(B) = B^T, for ab_zgemm_ex.
     const enum CBLAS_TRANSPOSE NT = CblasNoTrans;
+    const double s0 = scale[0], s1 = scale[1], s2 = scale[2], s3 = scale[3];
     XrZgemm z[7], w;
-    for (int i = 0; i < 6; i++)
-        xr_zgemm_init(&z[i], NT, NT, 96, 80, 72, XR_HI, XR_LO, XR_LO, XR_HI);
-    xr_zgemm_init(&z[6], CblasConjTrans, CblasTrans, 96, 80, 72, XR_HI, XR_LO, XR_LO, XR_HI);
+    for (int i = 0; i < 6; i++) xr_zgemm_init(&z[i], NT, NT, 96, 80, 72, s0, s1, s2, s3);
+    xr_zgemm_init(&z[6], CblasConjTrans, CblasTrans, 96, 80, 72, s0, s1, s2, s3);
     xr_zgemm_init(&w, NT, NT, 64, 48, 32, 1.0, 1.0, 1.0, 1.0);
 
     ab_zgemm(z[0].Ar, z[0].Ai, z[0].Br, z[0].Bi, z[0].Cr, z[0].Ci);
@@ -2365,13 +2368,32 @@ static void test_xr_zgemm_paths(void) {
         "ab_batch_zgemm[0]", "ab_batch_zgemm[1]", "ab_zgemm_ex(C,T)", "ab_zgemm_batched[1]",
     };
     double err[8];
-    for (int i = 0; i < 7; i++) err[i] = xr_zgemm_error(&z[i]);
-    err[7] = sb == AB_OK ? xr_zgemm_error(&w) : INFINITY;
+    for (int i = 0; i < 7; i++) err[i] = error(&z[i]);
+    err[7] = sb == AB_OK ? error(&w) : INFINITY;
     xr_verdict(names, err, 8);
 
     for (int i = 0; i < 7; i++) xr_zgemm_free(&z[i]);
     xr_zgemm_free(&w);
     ab_shutdown();
+}
+
+// Parts on different scales (2^80 and 2^64).
+static void test_xr_zgemm_paths(void) {
+    static const double scale[4] = {XR_HI, XR_LO, XR_LO, XR_HI};
+    zgemm_paths("Exponent range: ZGEMM entry points", scale, xr_zgemm_error);
+}
+
+// Re(C) and Im(C) each against its own reference part.
+static double xr_parts_error(const XrZgemm* z) {
+    const size_t n = (size_t)z->M * z->N;
+    return fmax(xr_error(z->Cr, NULL, z->cr, NULL, n), xr_error(z->Ci, NULL, z->ci, NULL, n));
+}
+
+// Gauss-3M's imaginary part under Re/Im imbalance (audit K-P1-2): imaginary
+// parts 1e-6 times the real ones, where 3M misses Im(C) by about 1e-9 of it.
+static void test_imbalance_zgemm_paths(void) {
+    static const double scale[4] = {1.0, 1e-6, 1.0, 1e-6};
+    zgemm_paths("Re/Im imbalance: ZGEMM entry points", scale, xr_parts_error);
 }
 
 // Row-major c = alpha a b + beta c (a M x K, b K x N).
@@ -2656,6 +2678,7 @@ static const TestCase TESTS[] = {
     {"test_xr_dgemm_paths",                   test_xr_dgemm_paths},
     {"test_xr_syrk_herk",                     test_xr_syrk_herk},
     {"test_xr_elementwise",                   test_xr_elementwise},
+    {"test_imbalance_zgemm_paths",            test_imbalance_zgemm_paths},
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
 

@@ -119,6 +119,22 @@ All notable changes to this project will be documented in this file.
     `ab_dsyrk`, `ab_zherk`, add, sub, scale, copy) on data near 2^±73
     whose real and imaginary parts get different scales. Limits:
     `docs/vv/LIMITATIONS.md`, "Exponent range".
+- **ZGEMM's imaginary part keeps DD accuracy when real and imaginary parts
+  are imbalanced** (audit K-P1-2). Gauss's three-multiplication form
+  computes Im(C) as (Ar+Ai)(Br+Bi) − ArBr − AiBi, whose rounding errors
+  follow the larger real products. With imaginary parts 10⁻⁶ of the real
+  ones, Im(C) missed its componentwise scale by about 10⁶ u², against about
+  1 u² with four products.
+  - A ZGEMM whose parts give ρ = (1+p)(1+q)/(p+q) above 4, where p and q are
+    the parts' magnitude ratios, now runs as four real products (4M). The
+    BLAS ABI takes p and q per row of op(A) and column of op(B); the native
+    API per uploaded matrix.
+  - 4M costs 1.07–1.34× the native call time and 1.00–1.10× end to end
+    through `zgemm_` (M2 Max). Balanced data keeps the three-product form
+    and its bits.
+  - New tests: `test_blas_abi test_zgemm_imbalance` (6 cases) and
+    `test_correctness test_imbalance_zgemm_paths`. Limits:
+    `docs/vv/LIMITATIONS.md`, "Complex products".
 
 ## [1.4.0] - Unreleased
 

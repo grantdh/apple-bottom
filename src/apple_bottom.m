@@ -1217,6 +1217,11 @@ static void convert_dd_to_fp64_parallel(const DDFloat* src, double* dst, size_t 
 // carry to their results, so that data far outside FP32's exponent range
 // keeps DD precision. It is 0 for data inside AB_NATIVE_WINDOW, so such
 // data is stored and computed exactly as before the scale existed.
+// ab_matrix_upload also keeps the largest magnitude, from which a ZGEMM
+// chooses between Gauss-3M and 4M (zgemm_uses_4m). Only an upload, a copy
+// and a zero know it; every other write of a matrix's data sets its scale
+// through set_scale_unmeasured, never exp2 alone, so that a stale magnitude
+// cannot steer that choice.
 struct ABMatrix_s {
     id<MTLBuffer> buffer;
     int rows, cols;
@@ -1224,7 +1229,16 @@ struct ABMatrix_s {
     size_t capacity;  // elements the buffer holds (>= count after pool reuse)
     bool uploaded;
     int exp2;         // power-of-two scale: element = DD * 2^exp2
+    uint32_t maxhw;   // high word of the largest |element| (ab_internal.h), or AB_MAXHW_UNKNOWN
 };
+
+#define AB_MAXHW_UNKNOWN UINT32_MAX     // above the high word of any |x|, NaN included
+
+// Gives m scale e, its magnitudes not measured.
+static inline void set_scale_unmeasured(ABMatrix m, int e) {
+    m->exp2 = e;
+    m->maxhw = AB_MAXHW_UNKNOWN;
+}
 
 // floor(s / q) * q for any int s and q > 0.
 static inline int floor_to(int s, int q) { return s >= 0 ? s / q * q : -((q - 1 - s) / q) * q; }
@@ -1386,7 +1400,7 @@ ABMatrix ab_matrix_create(int rows, int cols) {
     m->count = (size_t)rows * cols;
     m->capacity = m->count;
     m->uploaded = false;
-    m->exp2 = 0;
+    set_scale_unmeasured(m, 0);
 
     size_t alloc_size = m->count * sizeof(DDFloat);
     // AB_TEST_FAIL_STAGE=alloc (test-only): no buffer, as when Metal refuses one.
@@ -1426,6 +1440,7 @@ ABStatus ab_matrix_upload(ABMatrix m, const double* data, bool parallel) {
     ab_range_t range = parallel ? convert_fp64_to_dd_parallel(data, dst, m->count, 0, true)
                                 : convert_fp64_to_dd(data, dst, m->count, 0, true);
     m->exp2 = native_scale_exp(range);
+    m->maxhw = range.max;
     if (m->exp2 != 0) {
         if (parallel)
             convert_fp64_to_dd_parallel(data, dst, m->count, m->exp2, false);
@@ -1505,7 +1520,7 @@ extern "C" ABStatus ab_internal_upload_scaled(ABMatrix m, const double* data, co
     }
     free(colf);
     if (range) *range = r;
-    m->exp2 = 0;
+    set_scale_unmeasured(m, 0);
     m->uploaded = true;
     stats_add_upload(get_time_ms() - t0, m->count);
     return AB_OK;
@@ -1563,6 +1578,7 @@ ABStatus ab_matrix_zero(ABMatrix m) {
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
     m->exp2 = 0;
+    m->maxhw = 0;
     return AB_OK;
 }
 
@@ -1577,6 +1593,7 @@ ABStatus ab_matrix_copy(ABMatrix src, ABMatrix dst) {
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
     dst->exp2 = src->exp2;
+    dst->maxhw = src->maxhw;
     return AB_OK;
 }
 
@@ -1630,15 +1647,15 @@ static int encode_align_pair(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
 }
 
 // The real and imaginary parts of A, and of B, on one scale each for
-// Gauss-3M's sums (encode_align_pair); returns the scale of the products, or
-// INT_MIN if a copy could not be allocated. The caller destroys temps[0] and
-// temps[1] (NULL if unused) once cmdBuf has completed.
-static int encode_align_zgemm(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
-                              ABMatrix* Ar, ABMatrix* Ai, ABMatrix* Br, ABMatrix* Bi,
-                              ABMatrix temps[2]) {
+// Gauss-3M's sums (encode_align_pair); false if a copy could not be
+// allocated. The caller destroys temps[0] and temps[1] (NULL if unused) once
+// cmdBuf has completed.
+static bool encode_align_zgemm(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
+                               ABMatrix* Ar, ABMatrix* Ai, ABMatrix* Br, ABMatrix* Bi,
+                               ABMatrix temps[2]) {
     int ea = encode_align_pair(cmdBuf, ctx, Ar, Ai, &temps[0]);
     int eb = encode_align_pair(cmdBuf, ctx, Br, Bi, &temps[1]);
-    return ea == INT_MIN || eb == INT_MIN ? INT_MIN : ea + eb;
+    return ea != INT_MIN && eb != INT_MIN;
 }
 
 // =============================================================================
@@ -1762,22 +1779,128 @@ static void encode_elemwise_dispatch(id<MTLComputeCommandEncoder> encoder,
              threadsPerThreadgroup:MTLSizeMake(MIN((size_t)256, threads), 1, 1)];
 }
 
-// Gauss-3M's products T1 = Ar*Br, T2 = Ai*Bi and Ci = T3*T4 in an encoder of
-// their own. They write distinct buffers, so the encoder is concurrent and the
-// products of a small C share the GPU. If Ci shares a buffer with Ar, Ai, Br
-// or Bi, writing it could race T1's or T2's reads: keep those serial.
-static void encode_gauss3m_products(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
-                                    ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
-                                    ABMatrix T1, ABMatrix T2, ABMatrix T3, ABMatrix T4,
-                                    ABMatrix Ci) {
+// C = A B by Gauss-3M, encoder boundaries ordering the steps:
+//   1: T3 = Ar + Ai, T4 = Br + Bi
+//   2: T1 = Ar*Br, T2 = Ai*Bi, Ci = T3*T4
+//   3: Ci = Ci - T1, Cr = T1 - T2 (distinct outputs)
+//   4: Ci = Ci - T2
+// T1, T2 are M x N, T3 M x K, T4 K x N (zgemm_temps). A's parts must share a
+// scale, and B's (encode_align_zgemm). Step 2's products write distinct
+// buffers, so its encoder is concurrent and the products of a small C share
+// the GPU; if Ci shares a buffer with Ar, Ai, Br or Bi, writing it could race
+// T1's or T2's reads, so those stay serial.
+static void encode_zgemm_3m(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
+                            ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
+                            const ABMatrix T[4], ABMatrix Cr, ABMatrix Ci) {
+    ABMatrix T1 = T[0], T2 = T[1], T3 = T[2], T4 = T[3];
+    int e = Ar->exp2 + Br->exp2;
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+    encode_elemwise_dispatch(enc, ctx.addPipeline, Ar, Ai, T3);
+    encode_elemwise_dispatch(enc, ctx.addPipeline, Br, Bi, T4);
+    [enc endEncoding];
     bool ci_is_input = Ci->buffer == Ar->buffer || Ci->buffer == Ai->buffer ||
                        Ci->buffer == Br->buffer || Ci->buffer == Bi->buffer;
-    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoderWithDispatchType:
+    enc = [cmdBuf computeCommandEncoderWithDispatchType:
         ci_is_input ? MTLDispatchTypeSerial : MTLDispatchTypeConcurrent];
     encode_dgemm_dispatch(enc, ctx, Ar, Br, T1);
     encode_dgemm_dispatch(enc, ctx, Ai, Bi, T2);
     encode_dgemm_dispatch(enc, ctx, T3, T4, Ci);
     [enc endEncoding];
+    enc = [cmdBuf computeCommandEncoder];
+    encode_elemwise_dispatch(enc, ctx.subPipeline, Ci, T1, Ci);
+    encode_elemwise_dispatch(enc, ctx.subPipeline, T1, T2, Cr);
+    [enc endEncoding];
+    enc = [cmdBuf computeCommandEncoder];
+    encode_elemwise_dispatch(enc, ctx.subPipeline, Ci, T2, Ci);
+    [enc endEncoding];
+    set_scale_unmeasured(Cr, e);
+    set_scale_unmeasured(Ci, e);
+}
+
+// C = A B by 4M: T1..T4 = Ar*Br, Ai*Bi, Ai*Br, Ar*Bi (M x N each,
+// zgemm_temps) in one concurrent encoder, each on its own scale; then
+// Cr = T1 - T2 and Ci = T3 + T4, each pair brought to the larger of its
+// scales first. Only the temporaries are written before the last step, so C
+// may share buffers with A or B.
+static void encode_zgemm_4m(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
+                            ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
+                            const ABMatrix T[4], ABMatrix Cr, ABMatrix Ci) {
+    const ABMatrix X[4] = {Ar, Ai, Ai, Ar}, Y[4] = {Br, Bi, Br, Bi};
+    id<MTLComputeCommandEncoder> enc =
+        [cmdBuf computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
+    for (int t = 0; t < 4; t++) encode_dgemm_dispatch(enc, ctx, X[t], Y[t], T[t]);
+    [enc endEncoding];
+    for (int t = 0; t < 4; t += 2) {
+        int e = MAX(X[t]->exp2 + Y[t]->exp2, X[t + 1]->exp2 + Y[t + 1]->exp2);
+        for (int u = t; u < t + 2; u++) {
+            encode_rescale(cmdBuf, ctx, T[u], X[u]->exp2 + Y[u]->exp2 - e);
+            set_scale_unmeasured(T[u], e);
+        }
+    }
+    enc = [cmdBuf computeCommandEncoder];
+    encode_elemwise_dispatch(enc, ctx.subPipeline, T[0], T[1], Cr);
+    encode_elemwise_dispatch(enc, ctx.addPipeline, T[2], T[3], Ci);
+    [enc endEncoding];
+    set_scale_unmeasured(Cr, T[0]->exp2);
+    set_scale_unmeasured(Ci, T[2]->exp2);
+}
+
+// Whether a ZGEMM runs as 4M: as asked, or for AB_ZGEMM_AUTO when the parts'
+// largest magnitudes (known for uploaded and copied matrices; a GPU result's
+// is not measured, and counts as balanced) give Gauss-3M a rho above
+// AB_GAUSS3M_MAX_RHO. A zero A or B gives NaN, and 3M: there are no products.
+static bool zgemm_uses_4m(ab_zgemm_method_t method, ABMatrix Ar, ABMatrix Ai, ABMatrix Br,
+                          ABMatrix Bi) {
+    if (method != AB_ZGEMM_AUTO) return method == AB_ZGEMM_4M;
+    if (Ar->maxhw == AB_MAXHW_UNKNOWN || Ai->maxhw == AB_MAXHW_UNKNOWN ||
+        Br->maxhw == AB_MAXHW_UNKNOWN || Bi->maxhw == AB_MAXHW_UNKNOWN)
+        return false;
+    double p = ab_hiword_value(Ai->maxhw) / ab_hiword_value(Ar->maxhw);
+    double q = ab_hiword_value(Bi->maxhw) / ab_hiword_value(Br->maxhw);
+    return ab_gauss3m_rho(p, q) > AB_GAUSS3M_MAX_RHO;
+}
+
+// One ZGEMM's temporaries, NULL where unused: T1..T4 for encode_zgemm_3m or
+// encode_zgemm_4m, and the copies encode_align_zgemm makes for 3M. Blocks
+// capture it by value.
+typedef struct {
+    ABMatrix T[4];
+    ABMatrix aligned[2];
+} ZgemmTemps;
+
+static void zgemm_temps_free(ZgemmTemps t) {
+    for (int i = 0; i < 4; i++) ab_matrix_destroy(t.T[i]);
+    for (int i = 0; i < 2; i++) ab_matrix_destroy(t.aligned[i]);
+}
+
+// T1..T4 for 4M or 3M into t; false, with t all NULL, if one cannot be
+// allocated.
+static bool zgemm_temps(bool four_m, int M, int N, int K, ZgemmTemps* t) {
+    *t = ZgemmTemps();
+    t->T[0] = ab_matrix_create(M, N);
+    t->T[1] = ab_matrix_create(M, N);
+    t->T[2] = four_m ? ab_matrix_create(M, N) : ab_matrix_create(M, K);
+    t->T[3] = four_m ? ab_matrix_create(M, N) : ab_matrix_create(K, N);
+    if (t->T[0] && t->T[1] && t->T[2] && t->T[3]) return true;
+    zgemm_temps_free(*t);
+    *t = ZgemmTemps();
+    return false;
+}
+
+// C = A B by 4M (four_m) or by Gauss-3M, which first brings A's parts, and
+// B's, to one scale into aligned (encode_align_zgemm), with T1..T4 from
+// zgemm_temps. False if such a copy could not be allocated. The caller
+// destroys T and aligned once cmdBuf has completed.
+static bool encode_zgemm(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx, bool four_m,
+                         ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
+                         const ABMatrix T[4], ABMatrix aligned[2], ABMatrix Cr, ABMatrix Ci) {
+    if (four_m) {
+        encode_zgemm_4m(cmdBuf, ctx, Ar, Ai, Br, Bi, T, Cr, Ci);
+        return true;
+    }
+    if (!encode_align_zgemm(cmdBuf, ctx, &Ar, &Ai, &Br, &Bi, aligned)) return false;
+    encode_zgemm_3m(cmdBuf, ctx, Ar, Ai, Br, Bi, T, Cr, Ci);
+    return true;
 }
 
 // =============================================================================
@@ -1799,7 +1922,7 @@ ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C) {
     [encoder endEncoding];
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
-    C->exp2 = A->exp2 + B->exp2;
+    set_scale_unmeasured(C, A->exp2 + B->exp2);
     if (cmdBuf.status == MTLCommandBufferStatusError) return AB_ERROR_KERNEL_FAILED;
 
     stats_add_kernel(get_time_ms() - t0);
@@ -1823,7 +1946,7 @@ ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMa
     encode_dgemm_scaled_dispatch(encoder, ctx, alpha, A, B, beta, C);
     [encoder endEncoding];
     bool completed = commit_and_wait(cmdBuf, encode_ns);
-    C->exp2 = exp2;
+    set_scale_unmeasured(C, exp2);
     if (!completed) return AB_ERROR_KERNEL_FAILED;
 
     stats_add_kernel(get_time_ms() - t0);
@@ -1844,7 +1967,7 @@ static ABStatus elementwise_aligned(id<MTLComputePipelineState> pipeline, ABCont
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
     ab_matrix_destroy(temp);
-    C->exp2 = e;
+    set_scale_unmeasured(C, e);
     return AB_OK;
 }
 
@@ -1875,7 +1998,7 @@ ABStatus ab_matrix_scale(double alpha, ABMatrix A) {
     if (!ctx) return AB_ERROR_NO_DEVICE;
 
     int e = ab_scalar_exp(alpha, AB_NATIVE_WINDOW);
-    A->exp2 += e;
+    set_scale_unmeasured(A, A->exp2 + e);
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
     encode_scale(cmdBuf, ctx, A, fp64_to_dd(ab_scale2(alpha, -e)));
     [cmdBuf commit];
@@ -1888,14 +2011,17 @@ ABStatus ab_matrix_scale(double alpha, ABMatrix A) {
 // =============================================================================
 
 // Forward declaration of internal ZGEMM
-static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci);
+static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
+                                  ABMatrix Cr, ABMatrix Ci, bool four_m);
 
-// Extended ZGEMM with transpose support (for QE compatibility)
-ABStatus ab_zgemm_ex(
+// Extended ZGEMM with transpose support (for QE compatibility), by the given
+// method (ab_internal.h).
+static ABStatus zgemm_ex(
     ABTranspose transA, ABTranspose transB,
     ABMatrix Ar, ABMatrix Ai,
     ABMatrix Br, ABMatrix Bi,
-    ABMatrix Cr, ABMatrix Ci
+    ABMatrix Cr, ABMatrix Ci,
+    ab_zgemm_method_t method
 ) {
     ABAutoreleaseScope pool;
     if (!Ar || !Ai || !Br || !Bi || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
@@ -1912,6 +2038,9 @@ ABStatus ab_zgemm_ex(
     // Validate dimensions
     if (K_A != K_B) return AB_ERROR_DIMENSION_MISMATCH;
     if (M != Cr->rows || N != Cr->cols) return AB_ERROR_DIMENSION_MISMATCH;
+
+    // 3M or 4M, from the operands as given: a transpose keeps their magnitudes
+    const bool four_m = zgemm_uses_4m(method, Ar, Ai, Br, Bi);
 
     // Working matrices (either original or transposed)
     ABMatrix A_work_r = Ar, A_work_i = Ai;
@@ -2045,7 +2174,7 @@ ABStatus ab_zgemm_ex(
     }
 
     // Call internal ZGEMM with (possibly transposed) matrices
-    status = ab_zgemm_internal(A_work_r, A_work_i, B_work_r, B_work_i, Cr, Ci);
+    status = ab_zgemm_internal(A_work_r, A_work_i, B_work_r, B_work_i, Cr, Ci, four_m);
 
 cleanup:
     // Cleanup temporary transpose buffers
@@ -2061,22 +2190,27 @@ cleanup:
     return status;
 }
 
+ABStatus ab_zgemm_ex(ABTranspose transA, ABTranspose transB, ABMatrix Ar, ABMatrix Ai,
+                     ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci) {
+    return zgemm_ex(transA, transB, Ar, Ai, Br, Bi, Cr, Ci, AB_ZGEMM_AUTO);
+}
+
+extern "C" ABStatus ab_internal_zgemm(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
+                                      ABMatrix Cr, ABMatrix Ci, ab_zgemm_method_t method) {
+    return zgemm_ex(AB_NO_TRANS, AB_NO_TRANS, Ar, Ai, Br, Bi, Cr, Ci, method);
+}
+
 // ZGEMM using Gauss's trick: 3 real multiplications instead of 4
 // (A_r + iA_i)(B_r + iB_i) = (A_r*B_r - A_i*B_i) + i((A_r+A_i)(B_r+B_i) - A_r*B_r - A_i*B_i)
+// or, for parts whose imbalance would cost 3M's imaginary part its accuracy,
+// by 4M (four_m: zgemm_uses_4m); encode_zgemm.
 //
-// Fused implementation: 1 command buffer, 4 encoders (was 8 separate round-trips).
-// Encoder boundaries act as GPU barriers, enforcing the dependency DAG:
-//   Enc 1: T3=Ar+Ai, T4=Br+Bi                      (parallel, no deps)
-//   Enc 2: T1=Ar*Br, T2=Ai*Bi, Ci=T3*T4             (barrier ensures T3,T4 ready)
-//   Enc 3: Ci=Ci-T1, Cr=T1-T2                        (barrier ensures T1,T2,Ci ready)
-//   Enc 4: Ci=Ci-T2                                   (barrier ensures Ci from enc3)
-// This eliminates ~350μs of command buffer commit+wait overhead per ZGEMM call.
-// Real and imaginary parts with different power-of-two scales (upload scales
-// each on its own) are first brought to one (encode_align_pair); C's two
-// parts take the sum of A's and B's.
+// Fused implementation: 1 command buffer (was 8 separate round-trips); this
+// eliminates ~350μs of command buffer commit+wait overhead per ZGEMM call.
 //
 // NOTE: This is the internal implementation - ab_zgemm is now a wrapper
-static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci) {
+static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
+                                  ABMatrix Cr, ABMatrix Ci, bool four_m) {
     if (!Ar || !Ai || !Br || !Bi || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
 
     int M = Ar->rows, N = Br->cols, K = Ar->cols;
@@ -2085,74 +2219,26 @@ static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatri
 
     // Allocate all temporaries upfront
     uint64_t temps_ns = host_ns();
-    ABMatrix T1 = ab_matrix_create(M, N);  // Ar * Br
-    ABMatrix T2 = ab_matrix_create(M, N);  // Ai * Bi
-    ABMatrix T3 = ab_matrix_create(M, K);  // Ar + Ai
-    ABMatrix T4 = ab_matrix_create(K, N);  // Br + Bi
+    ZgemmTemps tmp;
+    bool allocated = zgemm_temps(four_m, M, N, K, &tmp);
     t_kernel_split.temps_ns += host_ns() - temps_ns;
-
-    if (!T1 || !T2 || !T3 || !T4) {
-        ab_matrix_destroy(T1); ab_matrix_destroy(T2);
-        ab_matrix_destroy(T3); ab_matrix_destroy(T4);
-        return AB_ERROR_ALLOC_FAILED;
-    }
+    if (!allocated) return AB_ERROR_ALLOC_FAILED;
 
     double t0 = get_time_ms();
 
     uint64_t encode_ns = host_ns();
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
-
-    ABMatrix aligned[2];
-    int e = encode_align_zgemm(cmdBuf, ctx, &Ar, &Ai, &Br, &Bi, aligned);
-    if (e == INT_MIN) {
-        ab_matrix_destroy(aligned[0]); ab_matrix_destroy(aligned[1]);
-        ab_matrix_destroy(T1); ab_matrix_destroy(T2);
-        ab_matrix_destroy(T3); ab_matrix_destroy(T4);
+    if (!encode_zgemm(cmdBuf, ctx, four_m, Ar, Ai, Br, Bi, tmp.T, tmp.aligned, Cr, Ci)) {
+        zgemm_temps_free(tmp);
         return AB_ERROR_ALLOC_FAILED;
     }
-
-    // --- Encoder 1: element-wise additions (T3 = Ar + Ai, T4 = Br + Bi) ---
-    {
-        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-        encode_elemwise_dispatch(enc, ctx.addPipeline, Ar, Ai, T3);
-        encode_elemwise_dispatch(enc, ctx.addPipeline, Br, Bi, T4);
-        [enc endEncoding];
-    }
-
-    // --- Encoder 2: three DGEMMs (T1=Ar*Br, T2=Ai*Bi, Ci=T3*T4) ---
-    // Encoder boundary guarantees T3 and T4 are written before reads begin
-    encode_gauss3m_products(cmdBuf, ctx, Ar, Ai, Br, Bi, T1, T2, T3, T4, Ci);
-
-    // --- Encoder 3: Ci = Ci - T1, Cr = T1 - T2 ---
-    // Different output buffers (Ci vs Cr) so these are parallel-safe
-    {
-        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-        encode_elemwise_dispatch(enc, ctx.subPipeline, Ci, T1, Ci);
-        encode_elemwise_dispatch(enc, ctx.subPipeline, T1, T2, Cr);
-        [enc endEncoding];
-    }
-
-    // --- Encoder 4: Ci = Ci - T2 ---
-    // Needs the updated Ci from encoder 3
-    {
-        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-        encode_elemwise_dispatch(enc, ctx.subPipeline, Ci, T2, Ci);
-        [enc endEncoding];
-    }
-
     bool completed = commit_and_wait(cmdBuf, encode_ns);
-    Cr->exp2 = Ci->exp2 = e;
 
     stats_add_kernel(get_time_ms() - t0);
     stats_add_zgemm();
 
     temps_ns = host_ns();
-    ab_matrix_destroy(T1);
-    ab_matrix_destroy(T2);
-    ab_matrix_destroy(T3);
-    ab_matrix_destroy(T4);
-    ab_matrix_destroy(aligned[0]);
-    ab_matrix_destroy(aligned[1]);
+    zgemm_temps_free(tmp);
     t_kernel_split.temps_ns += host_ns() - temps_ns;
 
     if (!completed) {
@@ -2172,58 +2258,19 @@ static ABStatus ab_zgemm_internal_async(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, A
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return AB_ERROR_NO_DEVICE;
 
-    ABMatrix T1 = ab_matrix_create(M, N);
-    ABMatrix T2 = ab_matrix_create(M, N);
-    ABMatrix T3 = ab_matrix_create(M, K);
-    ABMatrix T4 = ab_matrix_create(K, N);
-
-    if (!T1 || !T2 || !T3 || !T4) {
-        ab_matrix_destroy(T1); ab_matrix_destroy(T2);
-        ab_matrix_destroy(T3); ab_matrix_destroy(T4);
-        return AB_ERROR_ALLOC_FAILED;
-    }
+    const bool four_m = zgemm_uses_4m(AB_ZGEMM_AUTO, Ar, Ai, Br, Bi);
+    ZgemmTemps tmp;
+    if (!zgemm_temps(four_m, M, N, K, &tmp)) return AB_ERROR_ALLOC_FAILED;
 
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
-
-    ABMatrix aligned[2];
-    int e = encode_align_zgemm(cmdBuf, ctx, &Ar, &Ai, &Br, &Bi, aligned);
-    if (e == INT_MIN) {
-        ab_matrix_destroy(aligned[0]); ab_matrix_destroy(aligned[1]);
-        ab_matrix_destroy(T1); ab_matrix_destroy(T2);
-        ab_matrix_destroy(T3); ab_matrix_destroy(T4);
+    if (!encode_zgemm(cmdBuf, ctx, four_m, Ar, Ai, Br, Bi, tmp.T, tmp.aligned, Cr, Ci)) {
+        zgemm_temps_free(tmp);
         return AB_ERROR_ALLOC_FAILED;
-    }
-    ABMatrix alignA = aligned[0], alignB = aligned[1];   // blocks capture no arrays
-    Cr->exp2 = Ci->exp2 = e;
-
-    // Same 4-encoder structure as sync version
-    {
-        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-        encode_elemwise_dispatch(enc, ctx.addPipeline, Ar, Ai, T3);
-        encode_elemwise_dispatch(enc, ctx.addPipeline, Br, Bi, T4);
-        [enc endEncoding];
-    }
-    encode_gauss3m_products(cmdBuf, ctx, Ar, Ai, Br, Bi, T1, T2, T3, T4, Ci);
-    {
-        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-        encode_elemwise_dispatch(enc, ctx.subPipeline, Ci, T1, Ci);
-        encode_elemwise_dispatch(enc, ctx.subPipeline, T1, T2, Cr);
-        [enc endEncoding];
-    }
-    {
-        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-        encode_elemwise_dispatch(enc, ctx.subPipeline, Ci, T2, Ci);
-        [enc endEncoding];
     }
 
     // Completion handler cleans up temporaries when GPU finishes
     [cmdBuf addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull __unused buf) {
-        ab_matrix_destroy(T1);
-        ab_matrix_destroy(T2);
-        ab_matrix_destroy(T3);
-        ab_matrix_destroy(T4);
-        ab_matrix_destroy(alignA);
-        ab_matrix_destroy(alignB);
+        zgemm_temps_free(tmp);
     }];
 
     [cmdBuf commit];
@@ -2265,7 +2312,7 @@ ABStatus ab_dsyrk(ABMatrix A, ABMatrix C) {
     [encoder endEncoding];
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
-    C->exp2 = 2 * A->exp2;
+    set_scale_unmeasured(C, 2 * A->exp2);
 
     stats_add_kernel(get_time_ms() - t0);
     return AB_OK;
@@ -2807,7 +2854,7 @@ ABStatus ab_dgemm_batched(
         id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
         encode_dgemm_dispatch(encoder, ctx, As[i], Bs[i], Cs[i]);
         [encoder endEncoding];
-        Cs[i]->exp2 = As[i]->exp2 + Bs[i]->exp2;
+        set_scale_unmeasured(Cs[i], As[i]->exp2 + Bs[i]->exp2);
     }
 
     [cmdBuf commit];
@@ -2843,29 +2890,20 @@ ABStatus ab_zgemm_batched(
     if (!ctx) return AB_ERROR_NO_DEVICE;
 
     // Optimized batch path: single command buffer, shared temporaries.
-    // Gauss's 3-multiply trick needs 4 temps per ZGEMM, but since each ZGEMM
-    // fully consumes its temps before the next one starts (encoder boundaries
-    // guarantee this), we allocate once and reuse across the batch.
+    // Each ZGEMM fully consumes its temporaries before the next one starts
+    // (encoder boundaries guarantee this), so one set per method (3M's or
+    // 4M's, zgemm_uses_4m) serves the batch, allocated when first needed.
     //
     // For mixed-dimension batches, we track the current temp size and reallocate
     // only when dimensions change — QE's uniform workloads never trigger this.
 
     int cur_M = Ars[0]->rows, cur_N = Brs[0]->cols, cur_K = Ars[0]->cols;
-    ABMatrix T1 = ab_matrix_create(cur_M, cur_N);  // Ar * Br
-    ABMatrix T2 = ab_matrix_create(cur_M, cur_N);  // Ai * Bi
-    ABMatrix T3 = ab_matrix_create(cur_M, cur_K);  // Ar + Ai
-    ABMatrix T4 = ab_matrix_create(cur_K, cur_N);  // Br + Bi
-
-    if (!T1 || !T2 || !T3 || !T4) {
-        ab_matrix_destroy(T1); ab_matrix_destroy(T2);
-        ab_matrix_destroy(T3); ab_matrix_destroy(T4);
-        return AB_ERROR_ALLOC_FAILED;
-    }
+    ZgemmTemps shared[2] = {};          // [four_m]; their aligned slots stay NULL
 
     double t0 = get_time_ms();
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
-    // Copies that bring real and imaginary parts to one scale, destroyed at
-    // the end. After an error, the work encoded so far still completes first.
+    // Each 3M ZGEMM's alignment copies, destroyed at the end. After an error,
+    // the work encoded so far still completes first.
     ABMatrix* aligned = (ABMatrix*)calloc(2 * (size_t)batch_count, sizeof *aligned);
     ABStatus status = aligned ? AB_OK : AB_ERROR_ALLOC_FAILED;
     int encoded = 0;
@@ -2882,54 +2920,21 @@ ABStatus ab_zgemm_batched(
             [cmdBuf waitUntilCompleted];
             cmdBuf = [ctx.commandQueue commandBuffer];
 
-            ab_matrix_destroy(T1); ab_matrix_destroy(T2);
-            ab_matrix_destroy(T3); ab_matrix_destroy(T4);
-            T1 = ab_matrix_create(M, N);
-            T2 = ab_matrix_create(M, N);
-            T3 = ab_matrix_create(M, K);
-            T4 = ab_matrix_create(K, N);
-            if (!T1 || !T2 || !T3 || !T4) {
-                status = AB_ERROR_ALLOC_FAILED;
-                break;
+            for (int m = 0; m < 2; m++) {
+                zgemm_temps_free(shared[m]);
+                shared[m] = ZgemmTemps();
             }
             cur_M = M; cur_N = N; cur_K = K;
         }
 
-        ABMatrix Ar = Ars[i], Ai = Ais[i], Br = Brs[i], Bi = Bis[i];
-        int e = encode_align_zgemm(cmdBuf, ctx, &Ar, &Ai, &Br, &Bi, &aligned[2 * i]);
-        if (e == INT_MIN) {
+        const bool four_m = zgemm_uses_4m(AB_ZGEMM_AUTO, Ars[i], Ais[i], Brs[i], Bis[i]);
+        ZgemmTemps* t = &shared[four_m];
+        if ((!t->T[0] && !zgemm_temps(four_m, M, N, K, t)) ||
+            !encode_zgemm(cmdBuf, ctx, four_m, Ars[i], Ais[i], Brs[i], Bis[i], t->T,
+                          &aligned[2 * i], Crs[i], Cis[i])) {
             status = AB_ERROR_ALLOC_FAILED;
             break;
         }
-        Crs[i]->exp2 = Cis[i]->exp2 = e;
-
-        // Encoder 1: element-wise additions (T3 = Ar + Ai, T4 = Br + Bi)
-        {
-            id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-            encode_elemwise_dispatch(enc, ctx.addPipeline, Ar, Ai, T3);
-            encode_elemwise_dispatch(enc, ctx.addPipeline, Br, Bi, T4);
-            [enc endEncoding];
-        }
-
-        // Encoder 2: three DGEMMs (T1=Ar*Br, T2=Ai*Bi, Ci=T3*T4)
-        encode_gauss3m_products(cmdBuf, ctx, Ar, Ai, Br, Bi, T1, T2, T3, T4, Cis[i]);
-
-        // Encoder 3: Ci = Ci - T1, Cr = T1 - T2 (different outputs → parallel-safe)
-        {
-            id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-            encode_elemwise_dispatch(enc, ctx.subPipeline, Cis[i], T1, Cis[i]);
-            encode_elemwise_dispatch(enc, ctx.subPipeline, T1, T2, Crs[i]);
-            [enc endEncoding];
-        }
-
-        // Encoder 4: Ci = Ci - T2 (depends on updated Ci from encoder 3)
-        {
-            id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-            encode_elemwise_dispatch(enc, ctx.subPipeline, Cis[i], T2, Cis[i]);
-            [enc endEncoding];
-        }
-        // Encoder boundary here guarantees T1-T4 are fully consumed before
-        // the next iteration's Encoder 1 overwrites T3/T4.
         encoded++;
     }
 
@@ -2939,8 +2944,7 @@ ABStatus ab_zgemm_batched(
     stats_add_kernel(get_time_ms() - t0);
     for (int i = 0; i < encoded; i++) stats_add_zgemm();
 
-    ab_matrix_destroy(T1); ab_matrix_destroy(T2);
-    ab_matrix_destroy(T3); ab_matrix_destroy(T4);
+    for (int m = 0; m < 2; m++) zgemm_temps_free(shared[m]);
     for (int i = 0; aligned && i < 2 * batch_count; i++) ab_matrix_destroy(aligned[i]);
     free(aligned);
 
@@ -2994,12 +2998,12 @@ ABMatrix ab_pool_get_matrix(ABMemoryPool pool, int rows, int cols) {
             if (m->rows == rows && m->cols == cols) {
                 pool->entries[i].in_use = true;
                 m->uploaded = false;
-                m->exp2 = 0;
+                set_scale_unmeasured(m, 0);
                 return m;
             }
         }
     }
-    
+
     // Look for available matrix with sufficient capacity
     for (int i = 0; i < pool->count; i++) {
         if (!pool->entries[i].in_use && pool->entries[i].matrix) {
@@ -3010,7 +3014,7 @@ ABMatrix ab_pool_get_matrix(ABMemoryPool pool, int rows, int cols) {
                 m->cols = cols;
                 m->count = needed;  // upload/download/elementwise ops use count
                 m->uploaded = false;
-                m->exp2 = 0;
+                set_scale_unmeasured(m, 0);
                 return m;
             }
         }
@@ -3076,7 +3080,7 @@ ABFuture ab_dgemm_async(ABMatrix A, ABMatrix B, ABMatrix C) {
 
     [cmdBuf commit];
     C->uploaded = true;
-    C->exp2 = A->exp2 + B->exp2;
+    set_scale_unmeasured(C, A->exp2 + B->exp2);
 
     ABFuture f = create_future_with_buffer(cmdBuf);
     return f;
@@ -3196,7 +3200,7 @@ ABStatus ab_batch_dgemm(ABBatch batch, ABMatrix A, ABMatrix B, ABMatrix C) {
         return AB_ERROR_DIMENSION_MISMATCH;
 
     encode_dgemm_dispatch(batch->currentEncoder, batch->ctx, A, B, C);
-    C->exp2 = A->exp2 + B->exp2;
+    set_scale_unmeasured(C, A->exp2 + B->exp2);
     batch->op_count++;
     stats_add_dgemm();
     return AB_OK;
@@ -3210,7 +3214,7 @@ ABStatus ab_batch_dgemm_scaled(ABBatch batch, double alpha, ABMatrix A, ABMatrix
 
     int exp2 = scaled_gemm_scalars(A, B, C, &alpha, &beta);
     encode_dgemm_scaled_dispatch(batch->currentEncoder, batch->ctx, alpha, A, B, beta, C);
-    C->exp2 = exp2;
+    set_scale_unmeasured(C, exp2);
     batch->op_count++;
     stats_add_dgemm();
     return AB_OK;
@@ -3225,62 +3229,23 @@ ABStatus ab_batch_zgemm(ABBatch batch, ABMatrix Ar, ABMatrix Ai, ABMatrix Br, AB
     int M = Ar->rows, N = Br->cols, K = Ar->cols;
     ABContextImpl* ctx = batch->ctx;
 
-    // Allocate temporaries for Gauss trick
-    ABMatrix T1 = ab_matrix_create(M, N);
-    ABMatrix T2 = ab_matrix_create(M, N);
-    ABMatrix T3 = ab_matrix_create(M, K);
-    ABMatrix T4 = ab_matrix_create(K, N);
-    if (!T1 || !T2 || !T3 || !T4) {
-        ab_matrix_destroy(T1); ab_matrix_destroy(T2);
-        ab_matrix_destroy(T3); ab_matrix_destroy(T4);
+    // Temporaries for Gauss's trick or 4M (zgemm_uses_4m), released by a
+    // completion handler; the ZGEMM's encoders go between the batch's.
+    const bool four_m = zgemm_uses_4m(AB_ZGEMM_AUTO, Ar, Ai, Br, Bi);
+    ZgemmTemps tmp;
+    if (!zgemm_temps(four_m, M, N, K, &tmp)) return AB_ERROR_ALLOC_FAILED;
+    [batch->currentEncoder endEncoding];
+    bool encoded = encode_zgemm(batch->cmdBuffer, ctx, four_m, Ar, Ai, Br, Bi, tmp.T,
+                                tmp.aligned, Cr, Ci);
+    batch->currentEncoder = [batch->cmdBuffer computeCommandEncoder];
+    if (!encoded) {
+        zgemm_temps_free(tmp);
         return AB_ERROR_ALLOC_FAILED;
     }
 
-    // Real and imaginary parts on different power-of-two scales are brought
-    // to one first, in encoders of their own (encode_align_zgemm).
-    ABMatrix aligned[2] = {NULL, NULL};
-    int e = Ar->exp2 + Br->exp2;
-    if (Ar->exp2 != Ai->exp2 || Br->exp2 != Bi->exp2) {
-        [batch->currentEncoder endEncoding];
-        e = encode_align_zgemm(batch->cmdBuffer, ctx, &Ar, &Ai, &Br, &Bi, aligned);
-        batch->currentEncoder = [batch->cmdBuffer computeCommandEncoder];
-        if (e == INT_MIN) {
-            ab_matrix_destroy(aligned[0]); ab_matrix_destroy(aligned[1]);
-            ab_matrix_destroy(T1); ab_matrix_destroy(T2);
-            ab_matrix_destroy(T3); ab_matrix_destroy(T4);
-            return AB_ERROR_ALLOC_FAILED;
-        }
-    }
-    ABMatrix alignA = aligned[0], alignB = aligned[1];   // blocks capture no arrays
-    Cr->exp2 = Ci->exp2 = e;
-
-    // Enc 1: T3 = Ar + Ai, T4 = Br + Bi
-    encode_elemwise_dispatch(batch->currentEncoder, ctx.addPipeline, Ar, Ai, T3);
-    encode_elemwise_dispatch(batch->currentEncoder, ctx.addPipeline, Br, Bi, T4);
-    [batch->currentEncoder endEncoding];
-
-    // Enc 2: T1 = Ar*Br, T2 = Ai*Bi, Ci = T3*T4
-    encode_gauss3m_products(batch->cmdBuffer, ctx, Ar, Ai, Br, Bi, T1, T2, T3, T4, Ci);
-
-    // Enc 3: Ci = Ci - T1, Cr = T1 - T2
-    batch->currentEncoder = [batch->cmdBuffer computeCommandEncoder];
-    encode_elemwise_dispatch(batch->currentEncoder, ctx.subPipeline, Ci, T1, Ci);
-    encode_elemwise_dispatch(batch->currentEncoder, ctx.subPipeline, T1, T2, Cr);
-    [batch->currentEncoder endEncoding];
-
-    // Enc 4: Ci = Ci - T2
-    batch->currentEncoder = [batch->cmdBuffer computeCommandEncoder];
-    encode_elemwise_dispatch(batch->currentEncoder, ctx.subPipeline, Ci, T2, Ci);
-    // Don't end — leave encoder open for further batched ops
-
     // Cleanup temporaries via completion handler
     [batch->cmdBuffer addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull __unused buf) {
-        ab_matrix_destroy(T1);
-        ab_matrix_destroy(T2);
-        ab_matrix_destroy(T3);
-        ab_matrix_destroy(T4);
-        ab_matrix_destroy(alignA);
-        ab_matrix_destroy(alignB);
+        zgemm_temps_free(tmp);
     }];
 
     batch->op_count++;

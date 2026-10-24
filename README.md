@@ -189,8 +189,10 @@ fused multiply-add of the GEMM inner loop has a conservative 8u² envelope
   thread) for outputs of at most 480 × 480 elements; every variant computes
   each output the same way. Long dot products are renormalized every 128
   terms.
-- ZGEMM uses Gauss's three-multiplication form: three real DD GEMMs
-  instead of four.
+- ZGEMM uses Gauss's three-multiplication form, three real DD GEMMs
+  instead of four, unless its real and imaginary parts are imbalanced
+  enough to cost the imaginary part its accuracy; then it takes four
+  ([details](docs/vv/LIMITATIONS.md#complex-products)).
 
 ## Accuracy and testing
 

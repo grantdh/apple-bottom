@@ -87,6 +87,8 @@ void ab_prof_dump(FILE *out);
 
 #define U2              0x1p-48 // u² = 2⁻⁴⁸, DD unit roundoff (u = 2⁻²⁴, FP32)
 #define LONG_K_BOUND    8.0     // long-K error bound, units of u² (see gen_long_k)
+#define IMAG_BOUND      8.0     // Re/Im error bound under imbalance, units of u² (gen_imbalance)
+#define IMAG_RATIO      1e-6    // the smaller part's magnitude, relative (ImagData)
 #define N_THREADS       8
 #define THREAD_REPS     3       // calls per routine and thread
 #define MEM_WARMUP_CALLS 200
@@ -128,11 +130,13 @@ typedef enum {
     KIND_THREADS,       // N_THREADS threads at once, each bitwise its single-threaded result
     KIND_MEMORY,        // footprint growth over MEM_CALLS GPU calls
     KIND_RANGE,         // one call on data outside FP32's exponent range (RangeData)
+    KIND_IMAG,          // one ZGEMM on imbalanced parts, Re and Im each against Dot2 (ImagData)
 } Kind;
 
 static const char *const KIND_TAG[] = {
     [KIND_CALL] = "call", [KIND_LONG_K] = "long-k", [KIND_REPEAT] = "repeat",
     [KIND_THREADS] = "threads", [KIND_MEMORY] = "memory", [KIND_RANGE] = "range",
+    [KIND_IMAG] = "imag",
 };
 
 // KIND_RANGE data. Every entry first becomes a magnitude in [0.5, 1) with a
@@ -166,6 +170,20 @@ typedef enum {
                         // away beside the products (the GPU must certify it)
     RANGE_C_HUGE,       // C0 x 2^135, beta = 2^-20: beta C0 fits FP32, C0 does not (Accelerate)
 } RangeData;
+
+// KIND_IMAG data: entries of magnitude [0.5, 1) with random signs, as for
+// KIND_RANGE, then one part of each row of op(A) and each column of op(B)
+// multiplied by IMAG_RATIO, which Gauss-3M's imaginary part cannot take.
+typedef enum {
+    IMAG_SMALL,         // Im x IMAG_RATIO: nearly real A and B
+    IMAG_LARGE,         // Re x IMAG_RATIO: nearly imaginary
+    IMAG_LINES,         // even rows of op(A) and columns of op(B) nearly real, odd ones nearly
+                        // imaginary: every row and column imbalanced, A and B as a whole not
+} ImagData;
+
+static const char *const IMAG_TAG[] = {
+    [IMAG_SMALL] = "small-im", [IMAG_LARGE] = "small-re", [IMAG_LINES] = "lines",
+};
 
 static const char *const RANGE_TAG[] = {
     [RANGE_TINY] = "tiny", [RANGE_HUGE] = "huge", [RANGE_ROWCOL] = "rowcol",
@@ -220,6 +238,7 @@ typedef struct {
     bool same_shape;                    // KIND_THREADS: every thread makes thread 0's calls
     Kind kind;
     RangeData data;                     // KIND_RANGE only
+    ImagData imag;                      // KIND_IMAG only
     const void *sym;                    // OP_SYMBOL only
 } AbiCase;
 
@@ -592,6 +611,26 @@ static void gen_range(const Suite *s) {
         add_range(s, R[i].op, R[i].ta, R[i].tb, R[i].data, R[i].route);
 }
 
+// Gauss-3M's imaginary part under Re/Im imbalance (audit K-P1-2): zgemm_
+// with alpha = 1, beta = 0 on ImagData, every TRANS kind of op(). Re(C) and
+// Im(C) must each be within IMAG_BOUND u² of a Dot2 reference, relative to
+// their own componentwise scales |Ar||Br| + |Ai||Bi| and |Ar||Bi| + |Ai||Br|;
+// 3M misses Im by about 1/(2 IMAG_RATIO) of them. IMAG_LINES needs the
+// row- and column-wise check: A's and B's largest parts are balanced.
+static void gen_imbalance(const Suite *s) {
+    static const struct { char ta, tb; ImagData d; } IMB[] = {
+        {'N', 'N', IMAG_SMALL}, {'C', 'N', IMAG_SMALL}, {'N', 'T', IMAG_LARGE},
+        {'T', 'C', IMAG_LARGE}, {'N', 'N', IMAG_LINES}, {'C', 'T', IMAG_LINES},
+    };
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(IMB); i++) {
+        AbiCase *c = add_kind(s, KIND_IMAG, OP_ZGEMM_SYM, IMB[i].ta, IMB[i].tb, 96, 80, 72, 3,
+                              SC_A1B0);
+        c->imag = IMB[i].d;
+        snprintf(c->name, sizeof c->name, "zgemm_/%s/%c%c/96x80x72/imag-%s", s->label,
+                 IMB[i].ta, IMB[i].tb, IMAG_TAG[IMB[i].d]);
+    }
+}
+
 static void add_native(Op op, int M, int N, int K) {
     AbiCase *c = new_case();
     snprintf(c->name, sizeof c->name, "%s/%dx%dx%d", OP_NAME[op], M, N, K);
@@ -648,7 +687,7 @@ enum {
     SU_AUTO,
     SU_DGEMM_BLAS_NOINIT, SU_ZGEMM_BLAS_NOINIT, SU_DGEMM_F_NOINIT, SU_ZGEMM_F_NOINIT,
     SU_DGEMM_SYM_NOINIT, SU_ZGEMM_SYM_NOINIT, SU_ILLEGAL, SU_FORK, SU_FORK_EXIT, SU_QE,
-    SU_LONG_K, SU_REPEAT, SU_THREADS, SU_MEMORY, SU_RANGE,
+    SU_LONG_K, SU_REPEAT, SU_THREADS, SU_MEMORY, SU_RANGE, SU_IMBALANCE,
     SU_PROFILE, SU_REPORT, SU_NATIVE, SU_SYMBOLS, SU_COUNT
 };
 
@@ -690,6 +729,7 @@ static Suite SUITES[SU_COUNT] = {
     [SU_THREADS] = {.label = "gpu-noinit", .ab_mode = "gpu", .show = true, .gen = gen_threads},
     [SU_MEMORY]  = {.label = "gpu-noinit", .ab_mode = "gpu", .show = true, .gen = gen_memory},
     [SU_RANGE]   = {.label = "gpu-noinit", .ab_mode = "gpu", .show = true, .gen = gen_range},
+    [SU_IMBALANCE] = {.label = "gpu-noinit", .ab_mode = "gpu", .show = true, .gen = gen_imbalance},
     [SU_PROFILE] = {.label = "auto-table-profile", .ab_mode = "auto", .test_table = true,
                     .profile = true, .gen = gen_profile},
     [SU_REPORT]  = {.label = "gpu-noinit", .ab_mode = "gpu", .gen = gen_report},
@@ -1203,12 +1243,10 @@ static bool run_long_k(const AbiCase *c, char *detail, size_t n) {
     double *E[2] = {calloc(nr, sizeof(double)), calloc(nr, sizeof(double))};
     pack_rows(k.A, k.la, c->ta, k.cplx, M, K, Ar, Ai);
     pack_rows(k.B, k.lb, c->tb, k.cplx, K, N, Br, Bi);
-    dot2_gemm_acc(M, N, K, 1.0, Ar, Br, S[0], E[0]);
-    if (k.cplx) {
-        dot2_gemm_acc(M, N, K, -1.0, Ai, Bi, S[0], E[0]);
-        dot2_gemm_acc(M, N, K, 1.0, Ar, Bi, S[1], E[1]);
-        dot2_gemm_acc(M, N, K, 1.0, Ai, Br, S[1], E[1]);
-    }
+    if (k.cplx)
+        dot2_zgemm_acc(M, N, K, Ar, Ai, Br, Bi, S, E);
+    else
+        dot2_gemm_acc(M, N, K, 1.0, Ar, Br, S[0], E[0]);
     free(Ar); free(Ai); free(Br); free(Bi);
 
     // R = S + E in C's layout (re, im pairs for complex), and the error
@@ -1725,6 +1763,76 @@ static bool run_range(const AbiCase *c, char *detail, size_t n) {
                ? run_range_native(c, detail, n) : run_range_blas(c, detail, n);
 }
 
+// --- Re/Im imbalance ------------------------------------------------------------
+
+// Whether line l of op(A) (rows) or op(B) (columns) gets its real part (else
+// its imaginary part) multiplied by IMAG_RATIO.
+static bool imag_small_re(ImagData d, int l) {
+    return d == IMAG_LARGE || (d == IMAG_LINES && l % 2);
+}
+
+static void imag_apply(Call *k, ImagData d) {
+    const AbiCase *c = &k->c;
+    double *A = k->A, *B = k->B;
+    for (int i = 0; i < c->M; i++)
+        for (int kk = 0; kk < c->K; kk++)
+            A[op_index(c->ta, k->la, i, kk) * 2 + !imag_small_re(d, i)] *= IMAG_RATIO;
+    for (int kk = 0; kk < c->K; kk++)
+        for (int j = 0; j < c->N; j++)
+            B[op_index(c->tb, k->lb, kk, j) * 2 + !imag_small_re(d, j)] *= IMAG_RATIO;
+}
+
+static bool run_imag(const AbiCase *c, char *detail, size_t n) {
+    const int M = c->M, N = c->N, K = c->K;
+    Call k;
+    call_init_case(&k, c);
+    range_apply(&k, c->data, true);                 // magnitudes [0.5, 1)
+    imag_apply(&k, c->imag);
+    void *C = malloc(k.nc * k.es);
+    uint64_t g0 = gpu_gemm_count();
+    bool gpu = call_run(&k, C) && gpu_gemm_count() > g0;
+
+    // R = op(A) op(B) in Dot2, and each part's componentwise scale D:
+    // |Ar||Br| + |Ai||Bi| for Re, |Ar||Bi| + |Ai||Br| for Im.
+    const size_t na = (size_t)M * K, nb = (size_t)K * N, nr = (size_t)M * N;
+    double *Ar = malloc(na * sizeof *Ar), *Ai = malloc(na * sizeof *Ai);
+    double *Br = malloc(nb * sizeof *Br), *Bi = malloc(nb * sizeof *Bi);
+    double *S[2], *E[2], *D[2];
+    for (int p = 0; p < 2; p++) {
+        S[p] = calloc(nr, sizeof(double)); E[p] = calloc(nr, sizeof(double));
+        D[p] = calloc(nr, sizeof(double));
+    }
+    pack_rows(k.A, k.la, c->ta, true, M, K, Ar, Ai);
+    pack_rows(k.B, k.lb, c->tb, true, K, N, Br, Bi);
+    dot2_zgemm_acc(M, N, K, Ar, Ai, Br, Bi, S, E);
+    abs_gemm_acc(M, N, K, Ar, NULL, Br, NULL, D[0]);
+    abs_gemm_acc(M, N, K, Ai, NULL, Bi, NULL, D[0]);
+    abs_gemm_acc(M, N, K, Ar, NULL, Bi, NULL, D[1]);
+    abs_gemm_acc(M, N, K, Ai, NULL, Br, NULL, D[1]);
+    free(Ar); free(Ai); free(Br); free(Bi);
+
+    double err[2] = {0.0, 0.0};
+    for (int j = 0; j < N; j++)
+        for (int i = 0; i < M; i++) {
+            const double complex v = ((const double complex *)C)[(size_t)j * k.lc.ld + i];
+            const double got[2] = {creal(v), cimag(v)};
+            for (int p = 0; p < 2; p++) {
+                size_t y = (size_t)i * N + j;
+                double e = fabs(got[p] - (S[p][y] + E[p][y])) / (D[p][y] + DBL_MIN);
+                if (isnan(e) || e > err[p]) err[p] = e;
+            }
+        }
+    bool outside_ok = outside_block_unchanged(C, k.C0, k.nc, k.lc, k.es);
+    snprintf(detail, n, "Re err=%.2f u² Im err=%.2f u² (bound %.0f u²) path=%s%s%s", err[0] / U2,
+             err[1] / U2, IMAG_BOUND, ab_get_last_dispatch_path(),
+             gpu ? "" : " [GPU path not taken]", outside_ok ? "" : " [C outside MxN modified]");
+
+    for (int p = 0; p < 2; p++) { free(S[p]); free(E[p]); free(D[p]); }
+    free(C);
+    call_free(&k);
+    return gpu && outside_ok && err[0] <= IMAG_BOUND * U2 && err[1] <= IMAG_BOUND * U2;
+}
+
 // =============================================================================
 // Exit reports (AB_REPORT, AB_PROFILE)
 // =============================================================================
@@ -2000,6 +2108,7 @@ static bool run_case(int idx, char *detail, size_t n) {
     case KIND_THREADS: return run_threads(c, detail, n);
     case KIND_MEMORY:  return run_memory(c, detail, n);
     case KIND_RANGE:   return run_range(c, detail, n);
+    case KIND_IMAG:    return run_imag(c, detail, n);
     case KIND_CALL:    break;
     }
     if (c->fork) return run_fork(c, detail, n);
@@ -2226,6 +2335,7 @@ static void test_determinism(void)      { run_suite(SU_REPEAT); }
 static void test_concurrency(void)      { run_suite(SU_THREADS); }
 static void test_memory_growth(void)    { run_suite(SU_MEMORY); }
 static void test_exponent_range(void)   { run_suite(SU_RANGE); }
+static void test_zgemm_imbalance(void)  { run_suite(SU_IMBALANCE); }
 static void test_profile_path(void)     { run_suite(SU_PROFILE); }
 static void test_exit_reports(void)     { run_suite(SU_REPORT); }
 static void test_native_morton(void)    { run_suite(SU_NATIVE); }
@@ -2260,6 +2370,7 @@ static const TestCase TESTS[] = {
     {"test_concurrency",      test_concurrency},
     {"test_memory_growth",    test_memory_growth},
     {"test_exponent_range",   test_exponent_range},
+    {"test_zgemm_imbalance",  test_zgemm_imbalance},
     {"test_profile_path",     test_profile_path},
     {"test_exit_reports",     test_exit_reports},
     {"test_native_morton",    test_native_morton},

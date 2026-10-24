@@ -224,7 +224,7 @@ Frobenius-class error is appropriate.
 |-----------|---------------------|----------------------|-----------|-------|
 | `ab_dgemm(A, B, C)` | `~N·10⁻¹⁵` | `~N²·⁵·10⁻²¹` | ✓ V-2 | C = A × B |
 | `ab_dgemm_scaled(α, A, B, β, C)` | `~N·10⁻¹⁵` | `~N²·⁵·10⁻²¹` | ✓ BUG-3 fix | C = αAB + βC, α,β in DD |
-| `ab_zgemm(Ar, Ai, Br, Bi, Cr, Ci)` | `~3N·10⁻¹⁵` | `~3N²·⁵·10⁻²¹` | ✓ QE validation | Complex: 3 real DGEMMs |
+| `ab_zgemm(Ar, Ai, Br, Bi, Cr, Ci)` | `~3N·10⁻¹⁵` | `~3N²·⁵·10⁻²¹` | ✓ QE validation | Complex: 3 real DGEMMs, 4 for imbalanced parts (`LIMITATIONS.md#complex-products`) |
 | `ab_matrix_scale(α, A)` | `~10⁻¹⁵` | `~10⁻¹⁵` | ✓ BUG-4 fix | Element-wise A ← αA |
 | `ab_dsyrk(A, C)` | `~N·10⁻¹⁵` | `~N²·⁵·10⁻²¹` | ✓ Tested | C = A × Aᵀ (symmetric) |
 

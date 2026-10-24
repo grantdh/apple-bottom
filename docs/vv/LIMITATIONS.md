@@ -16,6 +16,8 @@ Specific instances of this stance, linked to the sections where each is develope
 
 - **Exponent range: scaled where a power of two can keep it, refused where it cannot.** The thresholds below come from M2 Max measurements and are conservative; a call the guard cannot certify runs on Accelerate rather than returning a degraded GPU result. See [Exponent range](#exponent-range).
 
+- **Complex products: three where they hold their accuracy, four where they do not.** Gauss's three-product ZGEMM loses accuracy in the imaginary part when real and imaginary parts are imbalanced; such calls run as four real products, at a measured threshold. See [Complex products](#complex-products).
+
 ## Exponent range
 
 A DD value is a pair of FP32 numbers, so it has FP32's exponent range. On the M2 Max GPU (measured, `MTLMathModeSafe`):
@@ -37,10 +39,32 @@ The library keeps data out of those limits with exact powers of two. A power of 
 - **Native `ABMatrix` API.** A matrix holds one power-of-two scale, chosen by `ab_matrix_upload`.
   - It is 0 when every nonzero magnitude lies in [2⁻³⁹, 2³⁹]; the products of two such matrices then stay in [2⁻⁷⁸, 2⁷⁸].
   - A matrix outside that window whose nonzero entries span at most 2⁷⁸ is centred on 1.
-  - The GPU operations carry the scales to their results; real and imaginary parts of different scales are aligned before Gauss's 3M sums, and operands of `ab_matrix_add` and `ab_matrix_sub` before the sum. `ab_dsyrk` writes C's upper triangle only, and brings the rest to the new scale so that it keeps its values. `tests/test_correctness.c` runs each of these operations on data near 2^±73 (`test_xr_*`).
+  - The GPU operations carry the scales to their results; real and imaginary parts of different scales are aligned before Gauss's 3M sums (4M takes each product on its own scale), and operands of `ab_matrix_add` and `ab_matrix_sub` before the sum. `ab_dsyrk` writes C's upper triangle only, and brings the rest to the new scale so that it keeps its values. `tests/test_correctness.c` runs each of these operations on data near 2^±73 (`test_xr_*`).
   - A single matrix whose entries span more than 2⁷⁸, or results of the GPU whose span grows past it, keep FP32's range relative to their scale. There, products of entries far apart can still lose their low part without a warning. The native API has no Accelerate fallback; use the BLAS ABI, or split such data.
 - **Device-buffer API** (`ab_dev_dgemm`, `ab_dev_zgemm`). It converts through `ABMatrix` handles, so it behaves as the native API: one scale per matrix, no fallback.
 - **Not covered**: NaN and Inf through the native API propagate as before, and DD's Inf − Inf gives NaN where IEEE arithmetic gives Inf.
+
+## Complex products
+
+ZGEMM uses Gauss's three-multiplication form (3M): Re(C) = Ar·Br − Ai·Bi and Im(C) = (Ar + Ai)(Br + Bi) − Ar·Br − Ai·Bi. Its imaginary part therefore carries the rounding errors of products that can be much larger than Im(C). Relative to Im(C)'s own componentwise scale |Ar||Bi| + |Ai||Br|, the error exceeds that of the four-product form (4M, Im(C) = Ar·Bi + Ai·Br) by about ρ(p, q) = (1 + p)(1 + q)/(p + q), with p = |Ai|/|Ar| and q = |Bi|/|Br|. ρ is 2 for balanced parts and grows like 1/(2p) when both operands are nearly real (p = q ≪ 1) or nearly imaginary. Both forms compute Re(C) the same way.
+
+Measured on M2 Max (M = N = 96, p = q, componentwise against a compensated Dot2 reference, in u² = 2⁻⁴⁸):
+
+| ρ | 3M Im, K = 72 | 3M Im, K = 2048 | 4M Im |
+|---|---:|---:|---:|
+| 2 (balanced) | 1.8 | 1.6 | 0.9–1.1 |
+| 4 | 7.9 | 6.9 | 1.0–1.1 |
+| 5.1 | 9.8 | 11.8 | 0.9 |
+| 8 | 14.6 | 19.3 | 1.0–1.1 |
+| 129 | 321 | 304 | 1.0 |
+| 5 × 10⁵ (parts 10⁻⁶ apart) | 1.2 × 10⁶ | 1.1 × 10⁶ | 1.2–1.4 |
+
+A ZGEMM runs as 4M when ρ exceeds 4 (`AB_GAUSS3M_MAX_RHO`), so 3M's imaginary part stays within 8 u², the bound the tests hold both parts to.
+
+- **BLAS ABI** (`zgemm_`, `ab_zgemm_blas`): p and q come from the largest real and imaginary parts of each row of op(A) and each column of op(B), and the call takes the largest ρ of any row and column (at a corner of the ranges of p and q). Rows or columns imbalanced in opposite directions are caught even where A and B as a whole look balanced.
+- **Native API** (`ab_zgemm`, `ab_zgemm_ex`, `ab_zgemm_async`, `ab_zgemm_batched`, `ab_batch_zgemm`; the device API's `ab_dev_zgemm`): p and q come from each part's largest magnitude over the whole matrix, which `ab_matrix_upload` measures. Two cases therefore stay 3M: rows or columns imbalanced in opposite directions in a matrix whose parts balance as a whole, and a matrix computed on the GPU, which has no such measurement. Use the BLAS ABI where either is possible.
+- **Cost of 4M** on M2 Max: per native call, 1.07× on 160×160×9140 and 150×150×18277, 1.24× on 9140×160×160 and 1.27–1.34× from 512³ to 2048³; end to end through `zgemm_`, 1.00–1.06× on those QE shapes and 1.10× at 1024³.
+- Balanced data keeps 3M and its bits (`tests/test_qe_golden.c`). `test_zgemm_imbalance` in `tests/test_blas_abi.c` and `test_imbalance_zgemm_paths` in `tests/test_correctness.c` hold Re(C) and Im(C) of nearly real, nearly imaginary and line-wise mixed data (parts 10⁻⁶ apart) each to its own reference; under 3M they missed Im(C) by about 10⁶ u².
 
 ## What this posture rules in and out
 

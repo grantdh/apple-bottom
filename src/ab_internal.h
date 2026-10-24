@@ -76,6 +76,14 @@ static inline int ab_hiword_ilogb(uint32_t h) {
     return h ? (31 - __builtin_clz(h)) - 1042 : -1075;
 }
 
+// |x| truncated to its high word, as a double (within 2^-20 of |x|).
+static inline double ab_hiword_value(uint32_t h) {
+    uint64_t b = (uint64_t)h << 32;
+    double d;
+    memcpy(&d, &b, sizeof d);
+    return d;
+}
+
 // The magnitudes of some FP64 values, as high words: of the largest |x| (0 if
 // all are zero; AB_HIWORD_NONFINITE or more if any is NaN or Inf) and of the
 // smallest |x| with a nonzero high word (UINT32_MAX if none).
@@ -87,12 +95,21 @@ typedef struct {
 
 static inline bool ab_range_nonfinite(ab_range_t r) { return r.max >= AB_HIWORD_NONFINITE; }
 
-// Adds high word h to (mx, mn), as in ab_range_t, in selects that vectorize.
-#define AB_HIWORD_ADD(h, mx, mn) do {                      \
+// Adds high word h to a maximum mx, or to a minimum mn as in ab_range_t
+// (ignoring 0), or to both, in selects that vectorize.
+#define AB_HIWORD_MAX(h, mx) do {                          \
         uint32_t h_ = (h);                                 \
         (mx) = h_ > (mx) ? h_ : (mx);                      \
-        uint32_t z_ = h_ ? h_ : UINT32_MAX;                \
+    } while (0)
+#define AB_HIWORD_MIN(h, mn) do {                          \
+        uint32_t z_ = (h);                                 \
+        z_ = z_ ? z_ : UINT32_MAX;                         \
         (mn) = z_ < (mn) ? z_ : (mn);                      \
+    } while (0)
+#define AB_HIWORD_ADD(h, mx, mn) do {                      \
+        uint32_t hw_ = (h);                                \
+        AB_HIWORD_MAX(hw_, mx);                            \
+        AB_HIWORD_MIN(hw_, mn);                            \
     } while (0)
 #define AB_RANGE_ADD(x, mx, mn) AB_HIWORD_ADD(ab_abs_hiword(x), mx, mn)
 
@@ -143,15 +160,22 @@ typedef struct {
 // line, the high words of its largest |x| (0 for a zero line;
 // AB_HIWORD_NONFINITE or more if it has NaN or Inf) and of its smallest
 // nonzero |x| (UINT32_MAX for a zero line), with |x| = max(|Re x|, |Im x|)
-// for complex; and the exponent of its scale (ab_line_scales).
+// for complex; and the exponent of its scale (ab_line_scales). Complex
+// statistics also hold the high words of each line's largest |Re x| and
+// largest |Im x| (rmax, imax), from which ab_lines_rho chooses between
+// Gauss-3M and 4M. The arrays are plain pointers a caller may set (a GPU
+// pass, say, gathering the same per line), and the functions below read
+// nothing else.
 typedef struct {
     int n;
     uint32_t *max, *min;
     int* e;
+    uint32_t *rmax, *imax;  // complex only, else NULL
 } ab_line_stats_t;
 
-// n lines, all zero so far; false if out of memory (free it anyway).
-bool ab_line_stats_init(ab_line_stats_t* s, int n);
+// n lines (of a complex operand, if complex_parts), all zero so far; false
+// if out of memory (free it anyway).
+bool ab_line_stats_init(ab_line_stats_t* s, int n, bool complex_parts);
 void ab_line_stats_free(ab_line_stats_t* s);
 
 // Adds the statistics of op(X)'s rows (by_row) or columns to s, as the BLAS
@@ -191,8 +215,45 @@ bool ab_range_guard_c(const ab_line_stats_t* sa, const ab_line_stats_t* sb, ab_r
                       int beta_exp, const double* C, int ldC, int shift);
 
 // =============================================================================
+// Complex products: Gauss-3M or 4M
+// =============================================================================
+// Gauss-3M forms Im(C) = (Ar + Ai)(Br + Bi) - Ar Br - Ai Bi, three real
+// products instead of 4M's Ar Bi + Ai Br. Its error follows the largest of
+// those products, so relative to Im(C)'s own scale |Ar||Bi| + |Ai||Br| it is
+// larger than 4M's by about
+//     rho(p, q) = (1 + p)(1 + q) / (p + q),  p = |Ai|/|Ar|, q = |Bi|/|Br|:
+// 2 for balanced parts, about 1/(2p) when p = q << 1 (or p = q >> 1). A ZGEMM
+// whose parts give rho above AB_GAUSS3M_MAX_RHO runs as 4M (docs/vv/
+// LIMITATIONS.md, "Complex products"): measured on M2 Max, 3M's imaginary
+// part stays within 8 u^2 of its componentwise scale up to rho = 4 (6.9 u^2
+// at K = 2048) and grows as about 2.3 rho u^2 above; 4M's stays near 1 u^2.
+#define AB_GAUSS3M_MAX_RHO 4.0
+
+static inline double ab_gauss3m_rho(double p, double q) {
+    if (isinf(p)) return isinf(q) ? INFINITY : 1.0 + q;
+    if (isinf(q)) return 1.0 + p;
+    return (1.0 + p) * (1.0 + q) / (p + q);     // Inf for p = q = 0
+}
+
+// The largest rho of a row of op(A) and a column of op(B), from their
+// complex statistics (rmax, imax); 0 if op(A) or op(B) is zero. A BLAS-ABI
+// ZGEMM runs as 4M above AB_GAUSS3M_MAX_RHO.
+double ab_lines_rho(const ab_line_stats_t* sa, const ab_line_stats_t* sb);
+
+typedef enum {
+    AB_ZGEMM_AUTO,      // as ab_zgemm chooses, from the parts' largest magnitudes
+    AB_ZGEMM_3M,
+    AB_ZGEMM_4M,
+} ab_zgemm_method_t;
+
+// =============================================================================
 // Entry points of apple_bottom.m
 // =============================================================================
+
+// C = A B for split-complex A (Ar, Ai) and B (Br, Bi), as ab_zgemm computes
+// it, by the given method.
+ABStatus ab_internal_zgemm(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr,
+                           ABMatrix Ci, ab_zgemm_method_t method);
 
 // Uploads row-major rows x cols data (the matrix's own shape) as
 // x * 2^-(row_exp[i] + col_exp[j] + shift) into m, whose power-of-two scale

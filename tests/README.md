@@ -44,15 +44,15 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 155, every test but
-the chaos ones, and `make ci-local` all 173 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 157, every test but
+the chaos ones, and `make ci-local` all 175 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
 (its `TEST_QE_GOLDEN` line says `PASS`, or `SKIP` on another device).
 
 - **Registry-based (ghost-guarded):**
-  - `tests/test_correctness.c` — 77 tests
+  - `tests/test_correctness.c` — 78 tests
   - `tests/test_chaos.c` — 18 tests
   - `tests/test_device_api.c` — 16 tests (152 `CHECK`s); the GEMM
     tests compare `ab_dev_dgemm` / `ab_dev_zgemm` with column-major
@@ -61,7 +61,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     the device path is bitwise the host API on the transposed operands
   - `tests/test_dispatch.c` — 9 tests of the BLAS-ABI routing, no GPU,
     see below
-  - `tests/test_blas_abi.c` — 32 suites (1063 cases), see below
+  - `tests/test_blas_abi.c` — 33 suites (1069 cases), see below
   - `tests/test_trace.c` — 5 tests of `AB_TRACE` and
     `AB_TEST_FAIL_STAGE`, see below
 
@@ -173,6 +173,14 @@ with random signs, so the pattern alone sets the span.
 - **Native `ab_dgemm`, `ab_dgemm_scaled` and `ab_zgemm`**: the same 1e±25
   data, rows spread over 2⁻¹⁰⁰…2⁻⁶⁰, columns over 2⁶⁰…2¹⁰⁰, and an
   exactness case (A and B × 2⁹⁰).
+
+`test_zgemm_imbalance` gives `zgemm_` (`AB_MODE=gpu`, alpha = 1, beta = 0,
+every TRANS kind) data whose real and imaginary parts are 10⁻⁶ apart:
+nearly real A and B, nearly imaginary ones, and rows of op(A) and columns
+of op(B) that alternate between the two. Re(C) and Im(C) must each be
+within 8 u² of a Dot2 reference, relative to their own componentwise
+scales. Gauss's three-product form misses Im(C) by about 10⁶ u² there, so
+the call must run as four products.
 
 Known failures live in the file's `XFAIL` table, each with a short tag
 naming the defect. An XFAIL that now passes (XPASS), or an entry that matches
