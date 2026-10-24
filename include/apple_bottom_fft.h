@@ -11,8 +11,8 @@
 //   - the input is rounded to double-float, the transform runs in
 //     double-float, and each output is the double-float result rounded to
 //     FP64. The error is normwise, as an FFT's always is: a relative L2 error
-//     of 3e-15 to 7e-15 on random data (N = 2 to 4M points), more than ten
-//     times FFTW's FP64 error, and no FP64-identical results. Additions use
+//     of 3e-15 to 8e-15 on random data (N = 2 to 4M points), 20 to 24 times
+//     FFTW's FP64 error, and no FP64-identical results. Additions use
 //     the faster double-float sum whose error bound is absolute, so a
 //     component much smaller than the data's norm can have a large relative
 //     error (it has with FFTW too, at FP64's level);

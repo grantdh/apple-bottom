@@ -1,0 +1,134 @@
+bench_fft: apple-bottom 1.4.0 (c13854306d56); FFTW fftw-3.3.10-neon (fftw-neon, PATIENT plans), 8 threads, reps 3, warm-up 3.0 s
+speed (forward, complex FP64 in and out):
+  [rank 3 48x48x48 howmany 1 sign -1 norm 0 groups of 1, staged chunks of 1: [N=48 8x3x2 T=6 L=8 f64->dd] [N=48 8x3x2 T=6 L=8 dd(p)->dd(p)] [N=48 8x3x2 T=6 L=8 dd(p)->f64(p)]]
+    48^3 x1    gpu-staged         0.3104 ms/transform     29.8 GF/s  vs FFTW 6.2e-15  gpu 0.067 copy-in 0.049 copy-out 0.058 ms per call
+    48^3 x1    gpu-zc             0.2233 ms/transform     41.5 GF/s  vs FFTW 6.2e-15  gpu 0.072 ms per call
+    48^3 x1    gpu-reg            0.2233 ms/transform     41.5 GF/s  vs FFTW 6.2e-15  gpu 0.068 ms per call
+    48^3 x1    fftw-neon-1        1.0571 ms/transform      8.8 GF/s  vs FFTW 0.0e+00  
+    48^3 x1    fftw-neon-8      144.6210 ms/transform      0.1 GF/s  vs FFTW 0.0e+00  
+    48^3 x1    vdsp-1             0.7208 ms/transform     12.9 GF/s  vs FFTW 7.6e-16  
+    48^3 x1    vdsp-8             0.2146 ms/transform     43.2 GF/s  vs FFTW 7.6e-16  
+  [rank 3 48x48x48 howmany 128 sign -1 norm 0 groups of 128, staged chunks of 16: [N=48 8x3x2 T=6 L=8 f64->dd] [N=48 8x3x2 T=6 L=8 dd(p)->dd(p)] [N=48 8x3x2 T=6 L=8 dd(p)->f64(p)]]
+    48^3 x128  gpu-staged         0.0605 ms/transform    153.1 GF/s  vs FFTW 6.2e-15  gpu 6.356 copy-in 2.916 copy-out 3.269 ms per call
+    48^3 x128  gpu-zc             0.0435 ms/transform    212.9 GF/s  vs FFTW 6.2e-15  gpu 5.584 ms per call
+    48^3 x128  gpu-reg            0.0434 ms/transform    213.4 GF/s  vs FFTW 6.2e-15  gpu 5.328 ms per call
+    48^3 x128  fftw-neon-1        1.1923 ms/transform      7.8 GF/s  vs FFTW 0.0e+00  
+    48^3 x128  fftw-neon-8x1      0.1936 ms/transform     47.9 GF/s  vs FFTW 0.0e+00  
+    48^3 x128  fftw-neon-8      146.9158 ms/transform      0.1 GF/s  vs FFTW 0.0e+00  
+    48^3 x128  vdsp-1             0.8349 ms/transform     11.1 GF/s  vs FFTW 7.6e-16  
+    48^3 x128  vdsp-8             0.1468 ms/transform     63.1 GF/s  vs FFTW 7.6e-16  
+  [rank 3 64x64x64 howmany 1 sign -1 norm 0 groups of 1, staged chunks of 1: [N=64 8x8 T=8 L=8 f64->dd] [N=64 8x8 T=8 L=8 dd(p)->dd(p)] [N=64 8x8 T=8 L=8 dd(p)->f64(p)]]
+    64^3 x1    gpu-staged         0.4836 ms/transform     48.8 GF/s  vs FFTW 5.8e-15  gpu 0.112 copy-in 0.111 copy-out 0.118 ms per call
+    64^3 x1    gpu-zc             0.2694 ms/transform     87.6 GF/s  vs FFTW 5.8e-15  gpu 0.107 ms per call
+    64^3 x1    gpu-reg            0.2936 ms/transform     80.4 GF/s  vs FFTW 5.8e-15  gpu 0.115 ms per call
+    64^3 x1    fftw-neon-1        2.0809 ms/transform     11.3 GF/s  vs FFTW 0.0e+00  
+    64^3 x1    fftw-neon-8        2.1145 ms/transform     11.2 GF/s  vs FFTW 0.0e+00  
+    64^3 x1    vdsp-1             2.7693 ms/transform      8.5 GF/s  vs FFTW 4.0e-16  
+    64^3 x1    vdsp-8             0.7571 ms/transform     31.2 GF/s  vs FFTW 4.0e-16  
+  [rank 3 64x64x64 howmany 128 sign -1 norm 0 groups of 64, staged chunks of 8: [N=64 8x8 T=8 L=8 f64->dd] [N=64 8x8 T=8 L=8 dd(p)->dd(p)] [N=64 8x8 T=8 L=8 dd(p)->f64(p)]]
+    64^3 x128  gpu-staged         0.1381 ms/transform    170.9 GF/s  vs FFTW 5.9e-15  gpu 13.625 copy-in 7.237 copy-out 8.612 ms per call
+    64^3 x128  gpu-zc             0.0864 ms/transform    273.1 GF/s  vs FFTW 5.9e-15  gpu 10.602 ms per call
+    64^3 x128  gpu-reg            0.0860 ms/transform    274.2 GF/s  vs FFTW 5.9e-15  gpu 10.836 ms per call
+    64^3 x128  fftw-neon-1        2.0393 ms/transform     11.6 GF/s  vs FFTW 0.0e+00  
+    64^3 x128  fftw-neon-8x1      0.4138 ms/transform     57.0 GF/s  vs FFTW 0.0e+00  
+    64^3 x128  fftw-neon-8        2.1682 ms/transform     10.9 GF/s  vs FFTW 0.0e+00  
+    64^3 x128  vdsp-1             2.8193 ms/transform      8.4 GF/s  vs FFTW 4.0e-16  
+    64^3 x128  vdsp-8             0.4614 ms/transform     51.1 GF/s  vs FFTW 4.0e-16  
+  [rank 3 72x72x72 howmany 1 sign -1 norm 0 groups of 1, staged chunks of 1: [N=72 8x3x3 T=9 L=6 f64->dd] [N=72 8x3x3 T=9 L=6 dd(p)->dd(p)] [N=72 8x3x3 T=9 L=6 dd(p)->f64(p)]]
+    72^3 x1    gpu-staged         0.6678 ms/transform     51.7 GF/s  vs FFTW 6.9e-15  gpu 0.226 copy-in 0.134 copy-out 0.125 ms per call
+    72^3 x1    gpu-zc             0.3866 ms/transform     89.3 GF/s  vs FFTW 6.9e-15  gpu 0.222 ms per call
+    72^3 x1    gpu-reg            0.4025 ms/transform     85.8 GF/s  vs FFTW 6.9e-15  gpu 0.222 ms per call
+    72^3 x1    fftw-neon-1        2.2991 ms/transform     15.0 GF/s  vs FFTW 4.2e-16  
+    72^3 x1    fftw-neon-8        9.2265 ms/transform      3.7 GF/s  vs FFTW 4.2e-16  
+    72^3 x1    vdsp-1             2.2149 ms/transform     15.6 GF/s  vs FFTW 9.3e-16  
+    72^3 x1    vdsp-8             0.5677 ms/transform     60.8 GF/s  vs FFTW 9.3e-16  
+  [rank 3 72x72x72 howmany 128 sign -1 norm 0 groups of 44, staged chunks of 5: [N=72 8x3x3 T=9 L=6 f64->dd] [N=72 8x3x3 T=9 L=6 dd(p)->dd(p)] [N=72 8x3x3 T=9 L=6 dd(p)->f64(p)]]
+    72^3 x128  gpu-staged         0.2074 ms/transform    166.6 GF/s  vs FFTW 7.0e-15  gpu 25.073 copy-in 10.124 copy-out 11.005 ms per call
+    72^3 x128  gpu-zc             0.1734 ms/transform    199.3 GF/s  vs FFTW 7.0e-15  gpu 21.916 ms per call
+    72^3 x128  gpu-reg            0.1733 ms/transform    199.4 GF/s  vs FFTW 7.0e-15  gpu 22.123 ms per call
+    72^3 x128  fftw-neon-1        2.6544 ms/transform     13.0 GF/s  vs FFTW 0.0e+00  
+    72^3 x128  fftw-neon-8x1      0.6894 ms/transform     50.1 GF/s  vs FFTW 0.0e+00  
+    72^3 x128  fftw-neon-8        9.3061 ms/transform      3.7 GF/s  vs FFTW 0.0e+00  
+    72^3 x128  vdsp-1             2.3124 ms/transform     14.9 GF/s  vs FFTW 9.9e-16  
+    72^3 x128  vdsp-8             0.4090 ms/transform     84.5 GF/s  vs FFTW 9.9e-16  
+  [rank 3 96x96x96 howmany 1 sign -1 norm 0 groups of 1, staged chunks of 1: [N=96 8x4x3 T=12 L=4 f64->dd] [N=96 8x4x3 T=12 L=4 dd(p)->dd(p)] [N=96 8x4x3 T=12 L=4 dd(p)->f64(p)]]
+    96^3 x1    gpu-staged         0.9585 ms/transform     91.2 GF/s  vs FFTW 6.6e-15  gpu 0.382 copy-in 0.179 copy-out 0.198 ms per call
+    96^3 x1    gpu-zc             0.5508 ms/transform    158.7 GF/s  vs FFTW 6.6e-15  gpu 0.395 ms per call
+    96^3 x1    gpu-reg            0.5593 ms/transform    156.2 GF/s  vs FFTW 6.6e-15  gpu 0.387 ms per call
+    96^3 x1    fftw-neon-1       22.3530 ms/transform      3.9 GF/s  vs FFTW 3.6e-16  
+    96^3 x1    fftw-neon-8      926.0732 ms/transform      0.1 GF/s  vs FFTW 3.6e-16  
+    96^3 x1    vdsp-1            10.8514 ms/transform      8.1 GF/s  vs FFTW 9.2e-16  
+    96^3 x1    vdsp-8             1.6206 ms/transform     53.9 GF/s  vs FFTW 9.2e-16  
+  [rank 3 96x96x96 howmany 128 sign -1 norm 0 groups of 18, staged chunks of 2: [N=96 8x4x3 T=12 L=4 f64->dd] [N=96 8x4x3 T=12 L=4 dd(p)->dd(p)] [N=96 8x4x3 T=12 L=4 dd(p)->f64(p)]]
+    96^3 x128  gpu-staged         0.4819 ms/transform    181.3 GF/s  vs FFTW 6.6e-15  gpu 55.703 copy-in 23.887 copy-out 26.798 ms per call
+    96^3 x128  gpu-zc             0.3697 ms/transform    236.4 GF/s  vs FFTW 6.6e-15  gpu 47.176 ms per call
+    96^3 x128  gpu-reg            0.3709 ms/transform    235.6 GF/s  vs FFTW 6.6e-15  gpu 47.476 ms per call
+    96^3 x128  fftw-neon-1       23.6600 ms/transform      3.7 GF/s  vs FFTW 0.0e+00  
+    96^3 x128  fftw-neon-8x1      4.1812 ms/transform     20.9 GF/s  vs FFTW 0.0e+00  
+    96^3 x128  fftw-neon-8      904.8488 ms/transform      0.1 GF/s  vs FFTW 0.0e+00  
+    96^3 x128  vdsp-1             9.7951 ms/transform      8.9 GF/s  vs FFTW 9.3e-16  
+    96^3 x128  vdsp-8             1.5949 ms/transform     54.8 GF/s  vs FFTW 9.3e-16  
+  [rank 3 100x100x100 howmany 1 sign -1 norm 0 groups of 1, staged chunks of 1: [N=100 5x5x4 T=20 L=4 f64->dd] [N=100 5x5x4 T=20 L=4 dd(p)->dd(p)] [N=100 5x5x4 T=20 L=4 dd(p)->f64(p)]]
+   100^3 x1    gpu-staged         1.0177 ms/transform     97.9 GF/s  vs FFTW 7.0e-15  gpu 0.396 copy-in 0.190 copy-out 0.227 ms per call
+   100^3 x1    gpu-zc             0.5774 ms/transform    172.6 GF/s  vs FFTW 7.0e-15  gpu 0.406 ms per call
+   100^3 x1    gpu-reg            0.5817 ms/transform    171.3 GF/s  vs FFTW 7.0e-15  gpu 0.392 ms per call
+   100^3 x1    fftw-neon-1        6.7717 ms/transform     14.7 GF/s  vs FFTW 4.3e-16  
+   100^3 x1    fftw-neon-8      990.4046 ms/transform      0.1 GF/s  vs FFTW 4.3e-16  
+   100^3 x1    vdsp           (length 100 not supported by vDSP_DFT_Interleaved)
+  [rank 3 100x100x100 howmany 128 sign -1 norm 0 groups of 16, staged chunks of 2: [N=100 5x5x4 T=20 L=4 f64->dd] [N=100 5x5x4 T=20 L=4 dd(p)->dd(p)] [N=100 5x5x4 T=20 L=4 dd(p)->f64(p)]]
+   100^3 x128  gpu-staged         0.4904 ms/transform    203.2 GF/s  vs FFTW 7.0e-15  gpu 54.164 copy-in 26.044 copy-out 29.814 ms per call
+   100^3 x128  gpu-zc             0.3722 ms/transform    267.8 GF/s  vs FFTW 7.0e-15  gpu 47.322 ms per call
+   100^3 x128  gpu-reg            0.3721 ms/transform    267.8 GF/s  vs FFTW 7.0e-15  gpu 47.320 ms per call
+   100^3 x128  fftw-neon-1        7.5007 ms/transform     13.3 GF/s  vs FFTW 0.0e+00  
+   100^3 x128  fftw-neon-8x1      2.1879 ms/transform     45.6 GF/s  vs FFTW 0.0e+00  
+   100^3 x128  fftw-neon-8      989.1316 ms/transform      0.1 GF/s  vs FFTW 0.0e+00  
+   100^3 x128  vdsp           (length 100 not supported by vDSP_DFT_Interleaved)
+  [rank 3 108x108x108 howmany 1 sign -1 norm 0 groups of 1, staged chunks of 1: [N=108 4x3x3x3 T=27 L=3 f64->dd] [N=108 4x3x3x3 T=27 L=3 dd(p)->dd(p)] [N=108 4x3x3x3 T=27 L=3 dd(p)->f64(p)]]
+   108^3 x1    gpu-staged         1.2441 ms/transform    102.6 GF/s  vs FFTW 7.5e-15  gpu 0.551 copy-in 0.241 copy-out 0.262 ms per call
+   108^3 x1    gpu-zc             0.7421 ms/transform    172.0 GF/s  vs FFTW 7.5e-15  gpu 0.551 ms per call
+   108^3 x1    gpu-reg            0.7137 ms/transform    178.8 GF/s  vs FFTW 7.5e-15  gpu 0.546 ms per call
+   108^3 x1    fftw-neon-1       13.3868 ms/transform      9.5 GF/s  vs FFTW 3.8e-16  
+   108^3 x1    fftw-neon-8       26.2059 ms/transform      4.9 GF/s  vs FFTW 3.8e-16  
+   108^3 x1    vdsp           (length 108 not supported by vDSP_DFT_Interleaved)
+  [rank 3 108x108x108 howmany 128 sign -1 norm 0 groups of 13, staged chunks of 1: [N=108 4x3x3x3 T=27 L=3 f64->dd] [N=108 4x3x3x3 T=27 L=3 dd(p)->dd(p)] [N=108 4x3x3x3 T=27 L=3 dd(p)->f64(p)]]
+   108^3 x128  gpu-staged         0.6256 ms/transform    204.0 GF/s  vs FFTW 7.5e-15  gpu 71.961 copy-in 30.015 copy-out 32.424 ms per call
+   108^3 x128  gpu-zc             0.5101 ms/transform    250.2 GF/s  vs FFTW 7.5e-15  gpu 64.998 ms per call
+   108^3 x128  gpu-reg            0.5101 ms/transform    250.2 GF/s  vs FFTW 7.5e-15  gpu 64.985 ms per call
+   108^3 x128  fftw-neon-1       14.2636 ms/transform      8.9 GF/s  vs FFTW 0.0e+00  
+   108^3 x128  fftw-neon-8x1      3.9101 ms/transform     32.6 GF/s  vs FFTW 0.0e+00  
+   108^3 x128  fftw-neon-8       26.3686 ms/transform      4.8 GF/s  vs FFTW 0.0e+00  
+   108^3 x128  vdsp           (length 108 not supported by vDSP_DFT_Interleaved)
+  [rank 3 120x120x120 howmany 1 sign -1 norm 0 groups of 1, staged chunks of 1: [N=120 8x5x3 T=15 L=4 f64->dd] [N=120 8x5x3 T=15 L=4 dd(p)->dd(p)] [N=120 8x5x3 T=15 L=4 dd(p)->f64(p)]]
+   120^3 x1    gpu-staged         1.6367 ms/transform    109.4 GF/s  vs FFTW 7.2e-15  gpu 0.833 copy-in 0.273 copy-out 0.305 ms per call
+   120^3 x1    gpu-zc             1.0237 ms/transform    174.9 GF/s  vs FFTW 7.2e-15  gpu 0.823 ms per call
+   120^3 x1    gpu-reg            1.0216 ms/transform    175.2 GF/s  vs FFTW 7.2e-15  gpu 0.820 ms per call
+   120^3 x1    fftw-neon-1       12.6224 ms/transform     14.2 GF/s  vs FFTW 4.3e-16  
+   120^3 x1    fftw-neon-8       22.7056 ms/transform      7.9 GF/s  vs FFTW 4.3e-16  
+   120^3 x1    vdsp-1            11.8654 ms/transform     15.1 GF/s  vs FFTW 1.1e-15  
+   120^3 x1    vdsp-8             1.8336 ms/transform     97.6 GF/s  vs FFTW 1.1e-15  
+  [rank 3 120x120x120 howmany 128 sign -1 norm 0 groups of 9, staged chunks of 1: [N=120 8x5x3 T=15 L=4 f64->dd] [N=120 8x5x3 T=15 L=4 dd(p)->dd(p)] [N=120 8x5x3 T=15 L=4 dd(p)->f64(p)]]
+   120^3 x128  gpu-staged         0.9324 ms/transform    192.0 GF/s  vs FFTW 7.2e-15  gpu 117.255 copy-in 43.720 copy-out 46.022 ms per call
+   120^3 x128  gpu-zc             0.8101 ms/transform    221.0 GF/s  vs FFTW 7.2e-15  gpu 103.341 ms per call
+   120^3 x128  gpu-reg            0.8100 ms/transform    221.0 GF/s  vs FFTW 7.2e-15  gpu 103.387 ms per call
+   120^3 x128  fftw-neon-1       13.8242 ms/transform     13.0 GF/s  vs FFTW 0.0e+00  
+   120^3 x128  fftw-neon-8x1      3.9512 ms/transform     45.3 GF/s  vs FFTW 0.0e+00  
+   120^3 x128  fftw-neon-8       22.7172 ms/transform      7.9 GF/s  vs FFTW 0.0e+00  
+   120^3 x128  vdsp-1            12.5564 ms/transform     14.3 GF/s  vs FFTW 1.1e-15  
+   120^3 x128  vdsp-8             1.9146 ms/transform     93.5 GF/s  vs FFTW 1.1e-15  
+  [rank 3 128x128x128 howmany 1 sign -1 norm 0 groups of 1, staged chunks of 1: [N=128 8x8x2 T=16 L=4 f64->dd] [N=128 8x8x2 T=16 L=4 dd(p)->dd(p)] [N=128 8x8x2 T=16 L=4 dd(p)->f64(p)]]
+   128^3 x1    gpu-staged         2.2317 ms/transform     98.7 GF/s  vs FFTW 6.5e-15  gpu 0.787 copy-in 0.336 copy-out 0.374 ms per call
+   128^3 x1    gpu-zc             0.9749 ms/transform    225.9 GF/s  vs FFTW 6.5e-15  gpu 0.766 ms per call
+   128^3 x1    gpu-reg            0.9779 ms/transform    225.2 GF/s  vs FFTW 6.5e-15  gpu 0.776 ms per call
+   128^3 x1    fftw-neon-1       32.0959 ms/transform      6.9 GF/s  vs FFTW 0.0e+00  
+   128^3 x1    fftw-neon-8        9.4910 ms/transform     23.2 GF/s  vs FFTW 0.0e+00  
+   128^3 x1    vdsp-1            34.2242 ms/transform      6.4 GF/s  vs FFTW 5.4e-16  
+   128^3 x1    vdsp-8             6.4565 ms/transform     34.1 GF/s  vs FFTW 5.4e-16  
+  [rank 3 128x128x128 howmany 128 sign -1 norm 0 groups of 8, staged chunks of 1: [N=128 8x8x2 T=16 L=4 f64->dd] [N=128 8x8x2 T=16 L=4 dd(p)->dd(p)] [N=128 8x8x2 T=16 L=4 dd(p)->f64(p)]]
+   128^3 x128  gpu-staged         1.0501 ms/transform    209.7 GF/s  vs FFTW 6.5e-15  gpu 114.714 copy-in 55.695 copy-out 63.918 ms per call
+   128^3 x128  gpu-zc             0.7581 ms/transform    290.5 GF/s  vs FFTW 6.5e-15  gpu 96.709 ms per call
+   128^3 x128  gpu-reg            0.7584 ms/transform    290.4 GF/s  vs FFTW 6.5e-15  gpu 96.723 ms per call
+   128^3 x128  fftw-neon-1       35.2836 ms/transform      6.2 GF/s  vs FFTW 0.0e+00  
+   128^3 x128  fftw-neon-8x1      7.6319 ms/transform     28.9 GF/s  vs FFTW 0.0e+00  
+   128^3 x128  fftw-neon-8       11.6598 ms/transform     18.9 GF/s  vs FFTW 0.0e+00  
+   128^3 x128  vdsp-1            36.8350 ms/transform      6.0 GF/s  vs FFTW 5.4e-16  
+   128^3 x128  vdsp-8             8.2385 ms/transform     26.7 GF/s  vs FFTW 5.4e-16  
