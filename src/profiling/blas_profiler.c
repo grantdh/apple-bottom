@@ -63,7 +63,7 @@ const char* const ab_prof_stage_names[AB_PROF_STAGE_COUNT] = {
 };
 
 static const char* const fallback_names[AB_PROF_FB_COUNT] = {
-    "no_device", "too_large", "gpu_failed", "other"
+    "no_device", "too_large", "gpu_failed", "other", "range"
 };
 
 // =============================================================================

@@ -806,7 +806,7 @@ static void test_fail_stage(int stage_index) {
                 break;
             snprintf(prefix, sizeof prefix, "AB_REPORT[%d] %s fallbacks ", (int)r.pid, routine);
             snprintf(want, sizeof want, "AB_REPORT[%d] %s fallbacks no_device=0 too_large=0 "
-                     "gpu_failed=1 other=0", (int)r.pid, routine);
+                     "gpu_failed=1 other=0 range=0", (int)r.pid, routine);
             expect(find_line(r.out, prefix, line, sizeof line) && !strcmp(line, want),
                    "%s: AB_REPORT does not give the fallback as gpu_failed: %s", routine, r.out);
         }

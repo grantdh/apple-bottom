@@ -22,7 +22,10 @@
 
 For matrix multiplication `C = A × B` where:
 - Matrix dimensions: `64 ≤ N ≤ 4096` (square matrices, validated range)
-- Matrix entries: `|A[i,j]|, |B[i,j]| ∈ [10⁻³⁰, 10³⁰]` (FP32 exponent range)
+- Matrix entries: finite FP64 values. The BLAS ABI scales rows and columns
+  far from 1 by powers of two, and runs on Accelerate what that cannot keep
+  in DD's range. A native `ABMatrix` keeps its nonzero entries within a span
+  of 2⁷⁸ under one power-of-two scale; `LIMITATIONS.md#exponent-range`.
 - Condition number: `κ(A), κ(B) < 10¹²`
 
 apple-bottom guarantees:
@@ -208,12 +211,12 @@ Frobenius-class error is appropriate.
 
 | Condition | Validated Range | Behavior Outside Range |
 |-----------|----------------|------------------------|
-| Exponent range | `[10⁻³⁰, 10³⁰]` | FP32 limits; denormals flushed to zero |
-| Magnitude ratios | `max/min < 10³⁰` | Mixed-magnitude OK within FP32 range |
+| Exponent range, BLAS ABI | Any finite FP64 | Rows of op(A) and columns of op(B) outside `[2⁻²⁰, 2²⁰)` are scaled by powers of two; calls a guard cannot certify run on Accelerate |
+| Exponent range, native API | Nonzero entries of a matrix spanning at most `2⁷⁸` | One power-of-two scale per matrix; a wider span keeps FP32's range relative to it |
 | Condition number | `κ < 10¹²` | Higher κ: error grows as `κ · N · ε` |
-| NaN/Inf | Documented | Propagates through computation |
+| NaN/Inf | Documented | BLAS ABI: the call runs on Accelerate; native API: propagates (DD's `∞ − ∞` gives NaN) |
 
-**Denormal handling**: Values `< 10⁻³⁸` (FP32 denormal threshold) are flushed to zero in DD representation.
+**Subnormal handling**: the GPU flushes FP32 subnormals (below 2⁻¹²⁶) to zero, as inputs and as results, and a DD product keeps its full precision only above about 2⁻⁸⁰. The power-of-two scaling keeps data out of that region; see `LIMITATIONS.md#exponent-range` for the measurements and the guard's thresholds.
 
 ### 3.3 Precision Scaling by Operation
 
@@ -221,7 +224,7 @@ Frobenius-class error is appropriate.
 |-----------|---------------------|----------------------|-----------|-------|
 | `ab_dgemm(A, B, C)` | `~N·10⁻¹⁵` | `~N²·⁵·10⁻²¹` | ✓ V-2 | C = A × B |
 | `ab_dgemm_scaled(α, A, B, β, C)` | `~N·10⁻¹⁵` | `~N²·⁵·10⁻²¹` | ✓ BUG-3 fix | C = αAB + βC, α,β in DD |
-| `ab_zgemm(Ar, Ai, Br, Bi, Cr, Ci)` | `~3N·10⁻¹⁵` | `~3N²·⁵·10⁻²¹` | ✓ QE validation | Complex: 3 real DGEMMs |
+| `ab_zgemm(Ar, Ai, Br, Bi, Cr, Ci)` | `~3N·10⁻¹⁵` | `~3N²·⁵·10⁻²¹` | ✓ QE validation | Complex: 3 real DGEMMs, 4 for imbalanced parts (`LIMITATIONS.md#complex-products`) |
 | `ab_matrix_scale(α, A)` | `~10⁻¹⁵` | `~10⁻¹⁵` | ✓ BUG-4 fix | Element-wise A ← αA |
 | `ab_dsyrk(A, C)` | `~N·10⁻¹⁵` | `~N²·⁵·10⁻²¹` | ✓ Tested | C = A × Aᵀ (symmetric) |
 
@@ -241,8 +244,11 @@ The following conditions are **outside the validated envelope**. Results are und
 
 ### 4.2 Numerical Extremes
 
-- **Exponents outside FP32 range**: `|x| > 10³⁸` or `|x| < 10⁻⁴⁵`
-  - DD uses FP32 components; extreme exponents overflow/underflow
+- **Exponent spans a power-of-two scale cannot bridge**: a native `ABMatrix`
+  whose nonzero entries span more than 2⁷⁸, or BLAS-ABI data whose products
+  the guard cannot certify (those calls run on Accelerate)
+  - DD uses FP32 components; products far below the result lose their low
+    parts, and values beyond FP32's range overflow or flush
 - **Condition numbers `κ > 10¹²`**: Error bound becomes `κ · N · 2⁻⁴⁸ > 10⁻³`
   - **Workaround**: Use IEEE FP64 (`cblas_dgemm`) for ill-conditioned problems
 
@@ -250,9 +256,9 @@ The following conditions are **outside the validated envelope**. Results are und
 
 | Input | Behavior | Tested |
 |-------|----------|--------|
-| Denormals (`< 10⁻³⁸`) | Flushed to zero | ⚠ V-4 (planned) |
-| `±Infinity` | Propagates (NaN if `∞ - ∞`) | ⚠ V-4 (planned) |
-| `NaN` | Propagates | ⚠ V-4 (planned) |
+| FP32 subnormals (`< 2⁻¹²⁶` after scaling) | Flushed to zero by the GPU | ✓ exponent-range suite (`test_blas_abi`) |
+| `±Infinity` | BLAS ABI: Accelerate (IEEE result); native: propagates (NaN if `∞ - ∞`) | ✓ BLAS ABI (`range-inf` cases); native ⚠ V-4 (planned) |
+| `NaN` | BLAS ABI: Accelerate; native: propagates | ⚠ V-4 (planned) |
 
 ### 4.4 Concurrency
 

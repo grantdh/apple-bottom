@@ -67,25 +67,6 @@ static double* random_matrix(size_t n) {
     return x;
 }
 
-// |X1| + |X2| elementwise (X2 may be NULL).
-static double* abs_sum(const double* X1, const double* X2, size_t n) {
-    double* X = malloc(n * sizeof(double));
-    for (size_t i = 0; i < n; i++)
-        X[i] = fabs(X1[i]) + (X2 ? fabs(X2[i]) : 0.0);
-    return X;
-}
-
-// L += (|X1| + |X2|)(|Y1| + |Y2|) in FP64 (X2, Y2 may be NULL). All terms are
-// non-negative, so the relative error is at most γ_K: harmless in a bound.
-static void abs_gemm_acc(int M, int N, int K, const double* X1, const double* X2,
-                         const double* Y1, const double* Y2, double* L) {
-    double* X = abs_sum(X1, X2, (size_t)M * K);
-    double* Y = abs_sum(Y1, Y2, (size_t)K * N);
-    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, M, N, K,
-                1.0, X, K, Y, N, 1.0, L, N);
-    free(X); free(Y);
-}
-
 // Reference R and componentwise bound L (both zero on entry).
 static void reference_gemm(const PrecisionCase* pc, double* const A[2], double* const B[2],
                            const double* C0, double* R[2], double* L[2]) {
@@ -96,10 +77,7 @@ static void reference_gemm(const PrecisionCase* pc, double* const A[2], double* 
 
     if (pc->op == OP_ZGEMM) {
         // Cr = Ar·Br − Ai·Bi,  Ci = Ar·Bi + Ai·Br
-        dot2_gemm_acc(M, N, K,  1.0, A[0], B[0], R[0], E[0]);
-        dot2_gemm_acc(M, N, K, -1.0, A[1], B[1], R[0], E[0]);
-        dot2_gemm_acc(M, N, K,  1.0, A[0], B[1], R[1], E[1]);
-        dot2_gemm_acc(M, N, K,  1.0, A[1], B[0], R[1], E[1]);
+        dot2_zgemm_acc(M, N, K, A[0], A[1], B[0], B[1], R, E);
         abs_gemm_acc(M, N, K, A[0], NULL, B[0], NULL, L[0]);
         abs_gemm_acc(M, N, K, A[1], NULL, B[1], NULL, L[0]);
         memcpy(L[1], L[0], nC * sizeof(double));

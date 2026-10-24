@@ -49,6 +49,13 @@
 //     prints why).
 //   - Memory pool capacity: 128 entries (ab_pool_get_matrix returns NULL when full)
 //   - Session capacity: 64 matrices per session
+//   - Exponent range: DD has FP32's. ab_matrix_upload gives each matrix one
+//     power-of-two scale (0 for nonzero entries within 2^±39; otherwise
+//     entries spanning at most 2^78 are centred on 1), which the GPU
+//     operations carry and ab_matrix_download removes; a matrix spanning
+//     more keeps FP32's range relative to its scale. The BLAS ABI scales
+//     rows of op(A) and columns of op(B) instead, and runs on Accelerate
+//     what that cannot keep in range (docs/vv/LIMITATIONS.md, Exponent range).
 // =============================================================================
 #ifndef APPLE_BOTTOM_H
 #define APPLE_BOTTOM_H
@@ -299,7 +306,7 @@ const char* ab_build_info(void);
 //                 of time), the GPU calls' stage costs (init, alloc, pack,
 //                 upload, kernel = command-buffer GPU time, download,
 //                 epilogue, other) and fallbacks to cblas by reason
-//                 (no_device, too_large, gpu_failed, other).
+//                 (no_device, too_large, gpu_failed, other, range).
 //   AB_PROFILE=1  the same counts as a detailed table with dimension
 //                 histograms at exit, plus a stderr line per GPU call and per
 //                 fallback. AB_PROFILE_JSON=path also writes JSON at exit.

@@ -5,12 +5,15 @@
 
 #include "apple_bottom.h"
 #include <complex.h>
+#include <limits.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
 #include <Accelerate/Accelerate.h>
 #include <stdio.h>
 
+#include "ab_internal.h"
 #include "blas_trans.h"
 #include "dispatch.h"
 #include "profiling/blas_profiler.h"
@@ -30,44 +33,417 @@ const char* ab_get_last_dispatch_path(void) { return _ab_last_path; }
 // All index arithmetic is size_t: ld*cols can exceed 2^31 even when every
 // operand is within the ABMatrix size limits.
 
-// Pack op(X), rows x cols, into row-major dst. op(X)[i][j] is X[j*ld+i] for
-// CblasNoTrans and X[i*ld+j] otherwise; each loop order walks X contiguously.
-static void pack_op_real(enum CBLAS_TRANSPOSE t, const double* X, int ld,
-                         int rows, int cols, double* dst) {
+// =============================================================================
+// Exponent range: power-of-two scaling of the operands, and its guard
+// =============================================================================
+// DD has FP32's exponent range. Rows of op(A) and columns of op(B) whose
+// largest |x| lies outside 2^±AB_SCALE_WINDOW are scaled by exact powers of
+// two on their way to DD and C is scaled back; calls that no such scaling
+// keeps in range, or with NaN or Inf, run on Accelerate. The rule, and the
+// exact order of the unscale, are in ab_internal.h ("The BLAS ABI's
+// exponent-range guard"). A power of two scales every product and partial
+// sum of C_ij alike, so wherever no intermediate leaves FP32's normal range
+// either way, the bits are those of the unscaled computation; data whose
+// lines all lie inside the window runs exactly as before.
+#define AB_RANGE_WHY "values beyond double-float's exponent range, or NaN/Inf"
+
+bool ab_line_stats_init(ab_line_stats_t* s, int n, bool complex_parts) {
+    s->n = n;
+    s->max = malloc((size_t)n * sizeof *s->max);
+    s->min = malloc((size_t)n * sizeof *s->min);
+    s->e = malloc((size_t)n * sizeof *s->e);
+    s->rmax = complex_parts ? calloc((size_t)n, sizeof *s->rmax) : NULL;
+    s->imax = complex_parts ? calloc((size_t)n, sizeof *s->imax) : NULL;
+    if (!s->max || !s->min || !s->e || (complex_parts && (!s->rmax || !s->imax))) return false;
+    for (int i = 0; i < n; i++) { s->max[i] = 0; s->min[i] = UINT32_MAX; }
+    return true;
+}
+
+void ab_line_stats_free(ab_line_stats_t* s) {
+    free(s->max);
+    free(s->min);
+    free(s->e);
+    free(s->rmax);
+    free(s->imax);
+    s->max = s->min = s->rmax = s->imax = NULL;
+    s->e = NULL;
+}
+
+const int* ab_line_scales(ab_line_stats_t* s) {
+    bool any = false;
+    for (int i = 0; i < s->n; i++) {
+        uint32_t h = s->max[i];
+        int e = h == 0 || h >= AB_HIWORD_NONFINITE ? 0 : ab_hiword_ilogb(h);
+        s->e[i] = e >= -AB_SCALE_WINDOW && e < AB_SCALE_WINDOW ? 0 : e - AB_SCALE_TARGET;
+        any = any || s->e[i] != 0;
+    }
+    return any ? s->e : NULL;
+}
+
+// The exponent of nonzero line i's smallest scaled |x|.
+static inline int line_min_exp(const ab_line_stats_t* s, int i) {
+    return ab_hiword_ilogb(s->min[i]) - s->e[i];
+}
+
+// Adds a complex element to a line's statistics: its parts' high words to
+// their maxima (rmx, imx), and the larger of them to the smallest (mn), as
+// AB_RANGE_ADD adds a real element's. The line's max follows from rmx and imx
+// (pack_op_complex_stats).
+#define LINE_ADD_COMPLEX(re, im, rmx, imx, mn) do {                \
+        uint32_t hr_ = ab_abs_hiword(re), hi_ = ab_abs_hiword(im); \
+        AB_HIWORD_MAX(hr_, rmx);                                   \
+        AB_HIWORD_MAX(hi_, imx);                                   \
+        AB_HIWORD_MIN(hr_ > hi_ ? hr_ : hi_, mn);                  \
+    } while (0)
+
+// The range [*lo, *hi] of |Im x|/|Re x| over s's nonzero lines, each line's
+// from its parts' largest magnitudes (Inf for a line whose real parts are all
+// zero); false if every line is zero.
+static bool line_ratios(const ab_line_stats_t* s, double* lo, double* hi) {
+    *lo = INFINITY;
+    *hi = 0.0;
+    for (int i = 0; i < s->n; i++) {
+        uint32_t r = s->rmax[i], m = s->imax[i];
+        if (r == 0 && m == 0) continue;
+        double p = ab_hiword_value(m) / ab_hiword_value(r);
+        *lo = fmin(*lo, p);
+        *hi = fmax(*hi, p);
+    }
+    return *lo <= *hi;
+}
+
+// In p, rho grows where q > 1 and falls where q < 1 (and in q likewise), so
+// over [plo, phi] x [qlo, qhi] it is largest at a corner, and each corner is
+// a row of op(A) and a column of op(B).
+double ab_lines_rho(const ab_line_stats_t* sa, const ab_line_stats_t* sb) {
+    double plo, phi, qlo, qhi;
+    if (!line_ratios(sa, &plo, &phi) || !line_ratios(sb, &qlo, &qhi)) return 0.0;
+    return fmax(fmax(ab_gauss3m_rho(plo, qlo), ab_gauss3m_rho(plo, qhi)),
+                fmax(ab_gauss3m_rho(phi, qlo), ab_gauss3m_rho(phi, qhi)));
+}
+
+// Pack op(X), rows x cols, into row-major dst (statistics only if dst is
+// NULL), gathering the magnitudes of op(X)'s rows (by_row) or columns into
+// st. op(X)[i][j] is X[j*ld+i] for CblasNoTrans and X[i*ld+j] otherwise; each
+// loop order walks X contiguously, keeping its line's statistics in registers
+// or a contiguous array. For CblasNoTrans the rows go in blocks of
+// AB_PACK_ROWS, so that the block's strided stores into dst stay in cache
+// from one column to the next.
+#define AB_PACK_ROWS 256
+static void pack_op_real_stats(enum CBLAS_TRANSPOSE t, const double* X, int ld,
+                               int rows, int cols, double* restrict dst, bool by_row,
+                               ab_line_stats_t* st) {
     size_t r = (size_t)rows, c = (size_t)cols, l = (size_t)ld;
+    uint32_t* restrict mx = st->max;
+    uint32_t* restrict mn = st->min;
     if (t == CblasNoTrans) {
-        for (size_t j = 0; j < c; j++)
-            for (size_t i = 0; i < r; i++)
-                dst[i * c + j] = X[j * l + i];
+        for (size_t i0 = 0; i0 < r; i0 += AB_PACK_ROWS) {
+            const size_t i1 = r - i0 > AB_PACK_ROWS ? i0 + AB_PACK_ROWS : r;
+            for (size_t j = 0; j < c; j++) {
+                const double* restrict x = X + j * l;
+                if (by_row && dst) {
+                    for (size_t i = i0; i < i1; i++) {
+                        double v = x[i];
+                        dst[i * c + j] = v;
+                        AB_RANGE_ADD(v, mx[i], mn[i]);
+                    }
+                } else if (by_row) {
+                    for (size_t i = i0; i < i1; i++) AB_RANGE_ADD(x[i], mx[i], mn[i]);
+                } else {
+                    // The strided stores keep the copy scalar, so the
+                    // column's reduction is a pass of its own, which vectorizes.
+                    if (dst) for (size_t i = i0; i < i1; i++) dst[i * c + j] = x[i];
+                    uint32_t lmx = mx[j], lmn = mn[j];
+                    for (size_t i = i0; i < i1; i++) AB_RANGE_ADD(x[i], lmx, lmn);
+                    mx[j] = lmx;
+                    mn[j] = lmn;
+                }
+            }
+        }
     } else {
-        for (size_t i = 0; i < r; i++)
-            for (size_t j = 0; j < c; j++)
-                dst[i * c + j] = X[i * l + j];
+        for (size_t i = 0; i < r; i++) {
+            const double* restrict x = X + i * l;
+            double* restrict d = dst ? dst + i * c : NULL;
+            if (by_row) {
+                uint32_t lmx = mx[i], lmn = mn[i];
+                if (d) {
+                    for (size_t j = 0; j < c; j++) {
+                        double v = x[j];
+                        d[j] = v;
+                        AB_RANGE_ADD(v, lmx, lmn);
+                    }
+                } else {
+                    for (size_t j = 0; j < c; j++) AB_RANGE_ADD(x[j], lmx, lmn);
+                }
+                mx[i] = lmx;
+                mn[i] = lmn;
+            } else if (d) {
+                for (size_t j = 0; j < c; j++) {
+                    double v = x[j];
+                    d[j] = v;
+                    AB_RANGE_ADD(v, mx[j], mn[j]);
+                }
+            } else {
+                for (size_t j = 0; j < c; j++) AB_RANGE_ADD(x[j], mx[j], mn[j]);
+            }
+        }
     }
 }
 
-// Complex variant: split op(X) into row-major real and imaginary parts,
-// conjugating for CblasConjTrans.
-static void pack_op_complex(enum CBLAS_TRANSPOSE t, const double complex* X, int ld,
-                            int rows, int cols, double* re, double* im) {
+// Pack C (rows x cols, CblasNoTrans) as pack_op_real_stats does, gathering
+// the range of its values.
+static void pack_c(const double* X, int ld, int rows, int cols, double* restrict dst,
+                   ab_range_t* range) {
     size_t r = (size_t)rows, c = (size_t)cols, l = (size_t)ld;
-    if (t == CblasNoTrans) {
-        for (size_t j = 0; j < c; j++)
-            for (size_t i = 0; i < r; i++) {
-                double complex val = X[j * l + i];
-                re[i * c + j] = creal(val);
-                im[i * c + j] = cimag(val);
-            }
-    } else {
-        bool conjugate = (t == CblasConjTrans);
-        for (size_t i = 0; i < r; i++)
-            for (size_t j = 0; j < c; j++) {
-                double complex val = X[i * l + j];
-                if (conjugate) val = conj(val);
-                re[i * c + j] = creal(val);
-                im[i * c + j] = cimag(val);
-            }
+    uint32_t mx = 0, mn = UINT32_MAX;
+    for (size_t i0 = 0; i0 < r; i0 += AB_PACK_ROWS) {
+        const size_t i1 = r - i0 > AB_PACK_ROWS ? i0 + AB_PACK_ROWS : r;
+        for (size_t j = 0; j < c; j++) {
+            const double* restrict x = X + j * l;
+            for (size_t i = i0; i < i1; i++) dst[i * c + j] = x[i];
+            for (size_t i = i0; i < i1; i++) AB_RANGE_ADD(x[i], mx, mn);
+        }
     }
+    *range = (ab_range_t){mx, mn};
+}
+
+// Complex variant: split op(X) into row-major real and imaginary parts
+// (statistics only if re and im are NULL), conjugating for CblasConjTrans,
+// and gather the lines' magnitudes into st (complex statistics).
+static void pack_op_complex_stats(enum CBLAS_TRANSPOSE t, const double complex* X, int ld,
+                                  int rows, int cols, double* restrict re, double* restrict im,
+                                  bool by_row, ab_line_stats_t* st) {
+    size_t r = (size_t)rows, c = (size_t)cols, l = (size_t)ld;
+    uint32_t* restrict rx = st->rmax;
+    uint32_t* restrict ix = st->imax;
+    uint32_t* restrict mn = st->min;
+    if (t == CblasNoTrans) {
+        for (size_t i0 = 0; i0 < r; i0 += AB_PACK_ROWS) {
+            const size_t i1 = r - i0 > AB_PACK_ROWS ? i0 + AB_PACK_ROWS : r;
+            for (size_t j = 0; j < c; j++) {
+                const double* restrict x = (const double*)(X + j * l);
+                // The strided copy, then the statistics over the same
+                // segment (still in L1), which vectorize on their own.
+                if (re) {
+                    for (size_t i = i0; i < i1; i++) {
+                        re[i * c + j] = x[2 * i];
+                        im[i * c + j] = x[2 * i + 1];
+                    }
+                }
+                if (by_row) {
+                    for (size_t i = i0; i < i1; i++)
+                        LINE_ADD_COMPLEX(x[2 * i], x[2 * i + 1], rx[i], ix[i], mn[i]);
+                } else {
+                    uint32_t lrx = rx[j], lix = ix[j], lmn = mn[j];
+                    for (size_t i = i0; i < i1; i++)
+                        LINE_ADD_COMPLEX(x[2 * i], x[2 * i + 1], lrx, lix, lmn);
+                    rx[j] = lrx;
+                    ix[j] = lix;
+                    mn[j] = lmn;
+                }
+            }
+        }
+    } else {
+        double sign = t == CblasConjTrans ? -1.0 : 1.0;
+        for (size_t i = 0; i < r; i++) {
+            const double* restrict x = (const double*)(X + i * l);
+            if (!re) {                  // statistics only: the sign does not matter
+                if (by_row) {
+                    uint32_t lrx = rx[i], lix = ix[i], lmn = mn[i];
+                    for (size_t j = 0; j < c; j++)
+                        LINE_ADD_COMPLEX(x[2 * j], x[2 * j + 1], lrx, lix, lmn);
+                    rx[i] = lrx;
+                    ix[i] = lix;
+                    mn[i] = lmn;
+                } else {
+                    for (size_t j = 0; j < c; j++)
+                        LINE_ADD_COMPLEX(x[2 * j], x[2 * j + 1], rx[j], ix[j], mn[j]);
+                }
+                continue;
+            }
+            double* restrict dr = re + i * c;
+            double* restrict di = im + i * c;
+            if (by_row) {
+                uint32_t lrx = rx[i], lix = ix[i], lmn = mn[i];
+                for (size_t j = 0; j < c; j++) {
+                    double vr = x[2 * j], vi = sign * x[2 * j + 1];
+                    dr[j] = vr;
+                    di[j] = vi;
+                    LINE_ADD_COMPLEX(vr, vi, lrx, lix, lmn);
+                }
+                rx[i] = lrx;
+                ix[i] = lix;
+                mn[i] = lmn;
+            } else {
+                for (size_t j = 0; j < c; j++) {
+                    double vr = x[2 * j], vi = sign * x[2 * j + 1];
+                    dr[j] = vr;
+                    di[j] = vi;
+                    LINE_ADD_COMPLEX(vr, vi, rx[j], ix[j], mn[j]);
+                }
+            }
+        }
+    }
+    for (int i = 0; i < st->n; i++) AB_HIWORD_MAX(rx[i] > ix[i] ? rx[i] : ix[i], st->max[i]);
+}
+
+void ab_line_stats_scan(const ab_op_view_t* v, bool by_row, ab_line_stats_t* s) {
+    const enum CBLAS_TRANSPOSE t = v->trans ? CblasTrans : CblasNoTrans;
+    if (v->complex_pairs)
+        pack_op_complex_stats(t, (const double complex*)v->x, v->ld, v->rows, v->cols, NULL, NULL,
+                              by_row, s);
+    else
+        pack_op_real_stats(t, v->x, v->ld, v->rows, v->cols, NULL, by_row, s);
+}
+
+// |op(X)_ik|, unscaled; max(|Re|, |Im|) for complex.
+static inline double op_mag(const ab_op_view_t* v, int i, int k) {
+    const size_t x = v->trans ? (size_t)i * v->ld + k : (size_t)k * v->ld + i;
+    if (!v->complex_pairs) return fabs(v->x[x]);
+    return fmax(fabs(v->x[2 * x]), fabs(v->x[2 * x + 1]));
+}
+
+static inline int imax2(int a, int b) { return a > b ? a : b; }
+static inline int imin2(int a, int b) { return a < b ? a : b; }
+
+// The exponents of the largest scaled |x| over s's lines (*hi; INT_MIN if all
+// are zero) and of the smallest nonzero one (*lo); false if a line has NaN or
+// Inf.
+static bool lines_extremes(const ab_line_stats_t* s, int* hi, int* lo) {
+    *hi = INT_MIN;
+    *lo = INT_MAX;
+    for (int i = 0; i < s->n; i++) {
+        if (s->max[i] >= AB_HIWORD_NONFINITE) return false;
+        if (s->max[i] == 0) continue;
+        *hi = imax2(*hi, ab_hiword_ilogb(s->max[i]) - s->e[i]);
+        *lo = imin2(*lo, line_min_exp(s, i));
+    }
+    return true;
+}
+
+// The exponent stage 1 asks of a nonzero scaled product: AB_PRODUCT_MIN_EXP,
+// and that again times alpha's scalar when it is below 1.
+static inline int stage1_floor(int alpha_exp) { return AB_PRODUCT_MIN_EXP - imin2(alpha_exp, 0); }
+
+// The scaled product op(A)' op(B)' must keep full DD precision and stay in
+// FP32's range in every C_ij, times a scalar below 2^(alpha_exp + 1):
+//   - Overflow: the largest scaled magnitudes bound every product and sum.
+//   - Stage 1: every nonzero scaled product is at least 2^AB_PRODUCT_MIN_EXP,
+//     by the smallest nonzero magnitudes of the lines.
+//   - Stage 2 (ab_range_guard), for the pairs of lines stage 1 cannot tell
+//     about (lines whose magnitudes span many binades): C_ij's scaled
+//     |op(A)||op(B)| sum is at least |A'_ik| |B'_kj| for k = the column of
+//     row i's largest |A'| and for k = the row of column j's largest |B'|;
+//     one of the two must reach K * 2^AB_PRODUCT_MIN_EXP, so that the at most
+//     K flushed parts below 2^-126 (about 2^-48 of 2^AB_PRODUCT_MIN_EXP) stay
+//     at DD's rounding level.
+// Rows of op(A) and columns of op(B) that are zero, and C_ij with nonzero
+// lines whose terms all vanish, are exact. Pairs with disjoint supports that
+// stage 1 passes are not checked further (their C_ij is 0 either way).
+ab_guard_t ab_range_guard_stage1(int K, const ab_line_stats_t* sa, const ab_line_stats_t* sb,
+                                 int alpha_exp, bool complex_products) {
+    int amax, amin, bmax, bmin;
+    if (!lines_extremes(sa, &amax, &amin) || !lines_extremes(sb, &bmax, &bmin))
+        return AB_GUARD_REJECT;
+    if (amax == INT_MIN || bmax == INT_MIN) return AB_GUARD_CERTIFIED;   // op(A) or op(B) is zero
+    // A complex product's parts (and 3M's sums of them) are at most 4x the
+    // magnitudes' product; alpha's scalar is below 2^(alpha_exp + 1).
+    int headroom = (complex_products ? 2 : 0) + 2 + ilogb((double)K) + 1 + alpha_exp + 1;
+    if (amax + bmax + headroom > AB_SUM_MAX_EXP) return AB_GUARD_REJECT;
+    return amin + bmin >= stage1_floor(alpha_exp) ? AB_GUARD_CERTIFIED : AB_GUARD_STAGE2;
+}
+
+bool ab_range_guard(int K, const ab_line_stats_t* sa, const ab_line_stats_t* sb, int alpha_exp,
+                    const ab_op_view_t* a, const ab_op_view_t* b) {
+    ab_guard_t g = ab_range_guard_stage1(K, sa, sb, alpha_exp, a->complex_pairs);
+    if (g != AB_GUARD_STAGE2) return g == AB_GUARD_CERTIFIED;
+
+    // Stage 2, on the operands as scaled, for the rows and columns with a
+    // partner that stage 1 does not pass: the column of each such row's
+    // largest element, the row of each such column's, then the pairs.
+    const int M = sa->n, N = sb->n, lo = stage1_floor(alpha_exp);
+    int amax, amin, bmax, bmin;
+    lines_extremes(sa, &amax, &amin);
+    lines_extremes(sb, &bmax, &bmin);
+    const double floor_ij = fmax(ldexp((double)K, AB_PRODUCT_MIN_EXP),
+                                 ldexp(1.0, AB_PRODUCT_MIN_EXP - alpha_exp));
+    int *rows = malloc((size_t)M * sizeof *rows), *ka = malloc((size_t)M * sizeof *ka);
+    int *cols = malloc((size_t)N * sizeof *cols), *kb = malloc((size_t)N * sizeof *kb);
+    double *av = malloc((size_t)M * sizeof *av), *bv = malloc((size_t)N * sizeof *bv);
+    bool ok = rows && ka && cols && kb && av && bv;
+    int nr = 0, nc = 0;
+    for (int i = 0; ok && i < M; i++)
+        if (sa->max[i] != 0 && line_min_exp(sa, i) + bmin < lo) rows[nr++] = i;
+    for (int j = 0; ok && j < N; j++)
+        if (sb->max[j] != 0 && line_min_exp(sb, j) + amin < lo) cols[nc++] = j;
+    for (int r = 0; r < nr; r++) {
+        double best = -1.0;
+        for (int k = 0; k < K; k++) {
+            double m = op_mag(a, rows[r], k);
+            if (m > best) { best = m; ka[r] = k; }
+        }
+        av[r] = ldexp(best, -sa->e[rows[r]]);
+    }
+    for (int c = 0; c < nc; c++) {
+        double best = -1.0;
+        for (int k = 0; k < K; k++) {
+            double m = op_mag(b, k, cols[c]);
+            if (m > best) { best = m; kb[c] = k; }
+        }
+        bv[c] = ldexp(best, -sb->e[cols[c]]);
+    }
+    for (int r = 0; ok && r < nr; r++) {
+        const int i = rows[r];
+        for (int c = 0; ok && c < nc; c++) {
+            const int j = cols[c];
+            if (line_min_exp(sa, i) + line_min_exp(sb, j) >= lo) continue;
+            ok = av[r] * ldexp(op_mag(b, ka[r], j), -sb->e[j]) >= floor_ij ||
+                 ldexp(op_mag(a, i, kb[c]), -sa->e[i]) * bv[c] >= floor_ij;
+        }
+    }
+    free(rows); free(ka); free(cols); free(kb); free(av); free(bv);
+    return ok;
+}
+
+// The DGEMM's beta' C', with C' the C scaled as uploaded (r: the range of its
+// values) and |beta'| below 2^(beta_exp + 1), must stay in FP32's range and,
+// where the product part of C_ij is 0 for want of products (a zero row of
+// op(A) or column of op(B)), keep its full DD precision. Elsewhere a C' far
+// below the product part only rounds away, as it would in FP64.
+ab_guard_t ab_range_guard_c_stage1(const ab_line_stats_t* sa, const ab_line_stats_t* sb,
+                                   ab_range_t r, int beta_exp) {
+    if (ab_range_nonfinite(r)) return AB_GUARD_REJECT;
+    if (r.max == 0) return AB_GUARD_CERTIFIED;
+    // C' is stored in DD before beta' multiplies it, and beta' C' joins the sums.
+    if (ab_hiword_ilogb(r.max) + imax2(beta_exp, 0) + 1 > AB_SUM_MAX_EXP) return AB_GUARD_REJECT;
+    if (ab_hiword_ilogb(r.min) + beta_exp >= AB_PRODUCT_MIN_EXP) return AB_GUARD_CERTIFIED;
+    for (int i = 0; i < sa->n; i++) if (sa->max[i] == 0) return AB_GUARD_STAGE2;
+    for (int j = 0; j < sb->n; j++) if (sb->max[j] == 0) return AB_GUARD_STAGE2;
+    return AB_GUARD_CERTIFIED;
+}
+
+// Whether beta' times C'_ij = C_ij 2^-e keeps full DD precision.
+static inline bool c_entry_ok(double c, int e, int beta_exp) {
+    double v = ldexp(fabs(c), -e);
+    return v == 0.0 || ilogb(v) + beta_exp >= AB_PRODUCT_MIN_EXP;
+}
+
+bool ab_range_guard_c(const ab_line_stats_t* sa, const ab_line_stats_t* sb, ab_range_t r,
+                      int beta_exp, const double* C, int ldC, int shift) {
+    ab_guard_t g = ab_range_guard_c_stage1(sa, sb, r, beta_exp);
+    if (g != AB_GUARD_STAGE2) return g == AB_GUARD_CERTIFIED;
+    const int M = sa->n, N = sb->n;
+    for (int i = 0; i < M; i++)
+        if (sa->max[i] == 0)
+            for (int j = 0; j < N; j++)
+                if (!c_entry_ok(C[(size_t)j * ldC + i], sa->e[i] + sb->e[j] + shift, beta_exp))
+                    return false;
+    for (int j = 0; j < N; j++)
+        if (sb->max[j] == 0)
+            for (int i = 0; i < M; i++)
+                if (!c_entry_ok(C[(size_t)j * ldC + i], sa->e[i] + sb->e[j] + shift, beta_exp))
+                    return false;
+    return true;
 }
 
 // The gate of dgemm_blas and zgemm_blas (dispatch.h): Accelerate where the
@@ -288,10 +664,14 @@ static void zgemm_blas(
     }
     prof_stage(p, AB_PROF_STAGE_INIT);
 
-    // GPU path: compute op(A)*op(B) on GPU, apply alpha/beta in epilogue
-    bool ok = false;
+    // GPU path: compute op(A)*op(B) on GPU, apply alpha/beta in epilogue.
+    // Rows of op(A) and columns of op(B) outside the window are scaled by
+    // powers of two on upload, and C back here (see "Exponent range").
+    bool ok = false, scaled = false;
+    ab_prof_fallback_t fallback = AB_PROF_FB_GPU_FAILED;
     double *Ar_data = NULL, *Ai_data = NULL, *Br_data = NULL, *Bi_data = NULL;
     double *Cr_data = NULL, *Ci_data = NULL;
+    ab_line_stats_t sa = {0}, sb = {0};
 
     // Allocate split-complex GPU matrices: op(A) is M×K, op(B) is K×N
     ABMatrix mAr = ab_matrix_create(M, K);
@@ -301,16 +681,19 @@ static void zgemm_blas(
     ABMatrix mCr = ab_matrix_create(M, N);
     ABMatrix mCi = ab_matrix_create(M, N);
     if (!mAr || !mAi || !mBr || !mBi || !mCr || !mCi) goto cleanup;
+    if (!ab_line_stats_init(&sa, M, true) || !ab_line_stats_init(&sb, N, true)) goto cleanup;
 
     // Upload op(A) (column-major to row-major, transposed/conjugated as asked)
     Ar_data = malloc((size_t)M * K * sizeof(double));
     Ai_data = malloc((size_t)M * K * sizeof(double));
     if (!Ar_data || !Ai_data) goto cleanup;
     prof_stage(p, AB_PROF_STAGE_ALLOC);
-    pack_op_complex(ta, A, ldA, M, K, Ar_data, Ai_data);
+    pack_op_complex_stats(ta, A, ldA, M, K, Ar_data, Ai_data, true, &sa);
+    const int* ra = ab_line_scales(&sa);
     prof_stage(p, AB_PROF_STAGE_PACK);
-    if (ab_matrix_upload(mAr, Ar_data, true) != AB_OK ||
-        ab_matrix_upload(mAi, Ai_data, true) != AB_OK) goto cleanup;
+    if (ab_internal_upload_scaled(mAr, Ar_data, ra, NULL, 0, NULL) != AB_OK ||
+        ab_internal_upload_scaled(mAi, Ai_data, ra, NULL, 0, NULL) != AB_OK)
+        goto cleanup;
     prof_stage(p, AB_PROF_STAGE_UPLOAD);
     free(Ar_data); free(Ai_data);
     Ar_data = Ai_data = NULL;
@@ -320,17 +703,32 @@ static void zgemm_blas(
     Bi_data = malloc((size_t)K * N * sizeof(double));
     if (!Br_data || !Bi_data) goto cleanup;
     prof_stage(p, AB_PROF_STAGE_ALLOC);
-    pack_op_complex(tb, B, ldB, K, N, Br_data, Bi_data);
+    pack_op_complex_stats(tb, B, ldB, K, N, Br_data, Bi_data, false, &sb);
+    const int* cb = ab_line_scales(&sb);
     prof_stage(p, AB_PROF_STAGE_PACK);
-    if (ab_matrix_upload(mBr, Br_data, true) != AB_OK ||
-        ab_matrix_upload(mBi, Bi_data, true) != AB_OK) goto cleanup;
+    if (ab_internal_upload_scaled(mBr, Br_data, NULL, cb, 0, NULL) != AB_OK ||
+        ab_internal_upload_scaled(mBi, Bi_data, NULL, cb, 0, NULL) != AB_OK)
+        goto cleanup;
     prof_stage(p, AB_PROF_STAGE_UPLOAD);
     free(Br_data); free(Bi_data);
     Br_data = Bi_data = NULL;
     prof_stage(p, AB_PROF_STAGE_ALLOC);
+    scaled = ra || cb;
 
-    // Compute C = op(A) * op(B)
-    if (ab_zgemm(mAr, mAi, mBr, mBi, mCr, mCi) != AB_OK) goto cleanup;
+    const ab_op_view_t va = {(const double*)A, ldA, M, K, ta != CblasNoTrans, true};
+    const ab_op_view_t vb = {(const double*)B, ldB, K, N, tb != CblasNoTrans, true};
+    if (!ab_range_guard(K, &sa, &sb, 0, &va, &vb)) {
+        fallback = AB_PROF_FB_RANGE;
+        goto cleanup;
+    }
+    prof_stage(p, AB_PROF_STAGE_PACK);
+
+    // Compute C = op(A) * op(B), by 4M where some row of op(A) and column of
+    // op(B) are imbalanced enough to cost Gauss-3M's imaginary part its
+    // accuracy (ab_internal.h).
+    ab_zgemm_method_t method =
+        ab_lines_rho(&sa, &sb) > AB_GAUSS3M_MAX_RHO ? AB_ZGEMM_4M : AB_ZGEMM_3M;
+    if (ab_internal_zgemm(mAr, mAi, mBr, mBi, mCr, mCi, method) != AB_OK) goto cleanup;
     prof_kernel(p);
 
     // Download result and apply alpha/beta epilogue
@@ -343,17 +741,25 @@ static void zgemm_blas(
     prof_stage(p, AB_PROF_STAGE_DOWNLOAD);
 
     // Convert row-major back to column-major with alpha/beta:
-    // C = alpha * (A*B) + beta * C_old
+    // C = alpha * (A*B) + beta * C_old. Bit for bit (ab_internal.h): each
+    // part of the product, as the download made it FP64, times
+    // 2^(ra[row] + cb[col]) in one rounding (ab_scale2), then alpha and beta
+    // in FP64, in the order below.
     double ar = creal(alpha), ai = cimag(alpha);
     double br = creal(beta), bi = cimag(beta);
     bool needs_beta = (br != 0.0 || bi != 0.0);
     bool non_unit_alpha = (ar != 1.0 || ai != 0.0);
 
     for (size_t col = 0; col < (size_t)N; col++) {
+        const int ec = sb.e[col];
         for (size_t row = 0; row < (size_t)M; row++) {
             size_t src = row * N + col;
             size_t dst = col * ldC + row;
             double pr = Cr_data[src], pi = Ci_data[src];
+            if (scaled) {
+                pr = ab_scale2(pr, sa.e[row] + ec);
+                pi = ab_scale2(pi, sa.e[row] + ec);
+            }
 
             // Apply alpha: alpha * (A*B)
             double result_r, result_i;
@@ -381,6 +787,7 @@ static void zgemm_blas(
 cleanup:
     free(Ar_data); free(Ai_data); free(Br_data); free(Bi_data);
     free(Cr_data); free(Ci_data);
+    ab_line_stats_free(&sa); ab_line_stats_free(&sb);
     ab_matrix_destroy(mAr); ab_matrix_destroy(mAi);
     ab_matrix_destroy(mBr); ab_matrix_destroy(mBi);
     ab_matrix_destroy(mCr); ab_matrix_destroy(mCi);
@@ -388,7 +795,8 @@ cleanup:
 
     // Any failure happened before C was written: redo the whole call on CPU.
     if (!ok) {
-        note_gpu_fallback(p, "zgemm", M, N, K, AB_PROF_FB_GPU_FAILED, "GPU step failed");
+        note_gpu_fallback(p, "zgemm", M, N, K, fallback,
+                          fallback == AB_PROF_FB_RANGE ? AB_RANGE_WHY : "GPU step failed");
         ab_internal_zgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }
@@ -426,21 +834,28 @@ static void dgemm_blas(
     }
     prof_stage(p, AB_PROF_STAGE_INIT);
 
-    // GPU path: supports arbitrary alpha/beta and transpose via scaled kernel
+    // GPU path: supports arbitrary alpha/beta and transpose via scaled kernel.
+    // Rows of op(A) and columns of op(B) outside the window are scaled by
+    // powers of two on upload, alpha and beta outside theirs give their
+    // exponents to C's scale, and C is scaled back here (see "Exponent range").
     bool ok = false;
+    ab_prof_fallback_t fallback = AB_PROF_FB_GPU_FAILED;
     double *A_row = NULL, *B_row = NULL, *C_row = NULL;
+    ab_line_stats_t sa = {0}, sb = {0};
     ABMatrix mA = ab_matrix_create(M, K);
     ABMatrix mB = ab_matrix_create(K, N);
     ABMatrix mC = ab_matrix_create(M, N);
     if (!mA || !mB || !mC) goto cleanup;
+    if (!ab_line_stats_init(&sa, M, false) || !ab_line_stats_init(&sb, N, false)) goto cleanup;
 
     // Upload op(A) as M×K and op(B) as K×N, row-major
     A_row = malloc((size_t)M * K * sizeof(double));
     if (!A_row) goto cleanup;
     prof_stage(p, AB_PROF_STAGE_ALLOC);
-    pack_op_real(ta, A, ldA, M, K, A_row);
+    pack_op_real_stats(ta, A, ldA, M, K, A_row, true, &sa);
+    const int* ra = ab_line_scales(&sa);
     prof_stage(p, AB_PROF_STAGE_PACK);
-    if (ab_matrix_upload(mA, A_row, true) != AB_OK) goto cleanup;
+    if (ab_internal_upload_scaled(mA, A_row, ra, NULL, 0, NULL) != AB_OK) goto cleanup;
     prof_stage(p, AB_PROF_STAGE_UPLOAD);
     free(A_row);
     A_row = NULL;
@@ -448,12 +863,26 @@ static void dgemm_blas(
     B_row = malloc((size_t)K * N * sizeof(double));
     if (!B_row) goto cleanup;
     prof_stage(p, AB_PROF_STAGE_ALLOC);
-    pack_op_real(tb, B, ldB, K, N, B_row);
+    pack_op_real_stats(tb, B, ldB, K, N, B_row, false, &sb);
+    const int* cb = ab_line_scales(&sb);
     prof_stage(p, AB_PROF_STAGE_PACK);
-    if (ab_matrix_upload(mB, B_row, true) != AB_OK) goto cleanup;
+    if (ab_internal_upload_scaled(mB, B_row, NULL, cb, 0, NULL) != AB_OK) goto cleanup;
     prof_stage(p, AB_PROF_STAGE_UPLOAD);
     free(B_row);
     B_row = NULL;
+
+    // The GPU multiplies by alpha * 2^-ea and beta * 2^-eb; C_ij's scale is
+    // 2^(ra[i] + cb[j] + ea), so C goes up as C * 2^-(ra[i] + cb[j] + ea - eb).
+    int ea = ab_scalar_exp(alpha, AB_SCALAR_WINDOW), eb = ab_scalar_exp(beta, AB_SCALAR_WINDOW);
+    double alpha_s = ab_scale2(alpha, -ea), beta_s = ab_scale2(beta, -eb);
+    if (!isfinite(alpha) || !isfinite(beta) ||
+        !ab_range_guard(K, &sa, &sb, ilogb(alpha_s),
+                        &(ab_op_view_t){A, ldA, M, K, ta != CblasNoTrans, false},
+                        &(ab_op_view_t){B, ldB, K, N, tb != CblasNoTrans, false})) {
+        fallback = AB_PROF_FB_RANGE;
+        goto cleanup;
+    }
+    prof_stage(p, AB_PROF_STAGE_PACK);
 
     // Upload existing C only when beta != 0 (C = alpha*A*B + beta*C); with
     // beta == 0 C is never read, per BLAS (the kernel skips beta*C).
@@ -461,27 +890,47 @@ static void dgemm_blas(
     if (!C_row) goto cleanup;
     prof_stage(p, AB_PROF_STAGE_ALLOC);
     if (beta != 0.0) {
-        pack_op_real(CblasNoTrans, C, ldC, M, N, C_row);
+        ab_range_t cr;
+        pack_c(C, ldC, M, N, C_row, &cr);
         prof_stage(p, AB_PROF_STAGE_PACK);
-        if (ab_matrix_upload(mC, C_row, true) != AB_OK) goto cleanup;
+        // Scaled, C is measured again as uploaded.
+        bool scaled_c = ra || cb || ea != eb;
+        if (ab_internal_upload_scaled(mC, C_row, ra, cb, ea - eb, scaled_c ? &cr : NULL) != AB_OK)
+            goto cleanup;
         prof_stage(p, AB_PROF_STAGE_UPLOAD);
+        if (!ab_range_guard_c(&sa, &sb, cr, ilogb(beta_s), C, ldC, ea - eb)) {
+            fallback = AB_PROF_FB_RANGE;
+            goto cleanup;
+        }
+        prof_stage(p, AB_PROF_STAGE_PACK);
     }
 
     // Compute C = alpha*A*B + beta*C on GPU
-    if (ab_dgemm_scaled(alpha, mA, mB, beta, mC) != AB_OK) goto cleanup;
+    if (ab_dgemm_scaled(alpha_s, mA, mB, beta_s, mC) != AB_OK) goto cleanup;
     prof_kernel(p);
 
-    // Download result (row-major to column-major)
+    // Download result (row-major to column-major); bit for bit
+    // (ab_internal.h), each C_ij as the download made it FP64, times
+    // 2^(ra[i] + cb[j] + ea) in one rounding (ab_scale2).
     if (ab_matrix_download(mC, C_row, true) != AB_OK) goto cleanup;
     prof_stage(p, AB_PROF_STAGE_DOWNLOAD);
-    for (size_t j = 0; j < (size_t)N; j++)
-        for (size_t i = 0; i < (size_t)M; i++)
-            C[j * ldC + i] = C_row[i * N + j];
+    if (ra || cb || ea) {
+        for (size_t j = 0; j < (size_t)N; j++) {
+            const int ej = sb.e[j] + ea;
+            for (size_t i = 0; i < (size_t)M; i++)
+                C[j * ldC + i] = ab_scale2(C_row[i * N + j], sa.e[i] + ej);
+        }
+    } else {
+        for (size_t j = 0; j < (size_t)N; j++)
+            for (size_t i = 0; i < (size_t)M; i++)
+                C[j * ldC + i] = C_row[i * N + j];
+    }
     ok = true;
     prof_stage(p, AB_PROF_STAGE_EPILOGUE);
 
 cleanup:
     free(A_row); free(B_row); free(C_row);
+    ab_line_stats_free(&sa); ab_line_stats_free(&sb);
     ab_matrix_destroy(mA);
     ab_matrix_destroy(mB);
     ab_matrix_destroy(mC);
@@ -489,7 +938,8 @@ cleanup:
 
     // Any failure happened before C was written: redo the whole call on CPU.
     if (!ok) {
-        note_gpu_fallback(p, "dgemm", M, N, K, AB_PROF_FB_GPU_FAILED, "GPU step failed");
+        note_gpu_fallback(p, "dgemm", M, N, K, fallback,
+                          fallback == AB_PROF_FB_RANGE ? AB_RANGE_WHY : "GPU step failed");
         ab_internal_dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }

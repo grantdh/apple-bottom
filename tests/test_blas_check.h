@@ -63,6 +63,11 @@ static inline size_t nelem(Layout l) {
     return n ? n : 1;
 }
 
+// The index of op(X)_ik in a stored operand X, in elements.
+static inline size_t op_index(char t, Layout l, int i, int k) {
+    return is_notrans(t) ? (size_t)k * l.ld + i : (size_t)i * l.ld + k;
+}
+
 static inline enum CBLAS_TRANSPOSE ref_trans(char t, bool cplx) {
     switch (t) {
     case 'N': case 'n': return CblasNoTrans;
@@ -89,7 +94,7 @@ static inline void abs_op(const void *X, Layout l, char t, bool cplx, int rows, 
                           double *out) {
     for (int j = 0; j < cols; j++)
         for (int i = 0; i < rows; i++) {
-            size_t x = is_notrans(t) ? (size_t)j * l.ld + i : (size_t)i * l.ld + j;
+            size_t x = op_index(t, l, i, j);
             out[(size_t)j * rows + i] = cplx ? cabs(((const double complex *)X)[x])
                                              : fabs(((const double *)X)[x]);
         }

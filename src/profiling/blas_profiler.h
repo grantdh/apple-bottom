@@ -43,7 +43,7 @@ extern "C" {
 typedef enum {
     AB_PROF_STAGE_INIT,      // routing, size checks, Metal context creation on first use
     AB_PROF_STAGE_ALLOC,     // ABMatrix and host scratch allocation and release
-    AB_PROF_STAGE_PACK,      // column-major op(A), op(B), C -> row-major host copies
+    AB_PROF_STAGE_PACK,      // column-major op(A), op(B), C -> row-major host copies; range check
     AB_PROF_STAGE_UPLOAD,    // FP64 -> DD conversion into the GPU buffers
     AB_PROF_STAGE_KERNEL,    // command-buffer GPU time (wall time if Metal reports none)
     AB_PROF_STAGE_DOWNLOAD,  // DD -> FP64 conversion out of the GPU buffers
@@ -58,6 +58,7 @@ typedef enum {
     AB_PROF_FB_TOO_LARGE,    // an operand beyond the ABMatrix size limits
     AB_PROF_FB_GPU_FAILED,   // an allocation, upload or kernel failed before C was written
     AB_PROF_FB_OTHER,
+    AB_PROF_FB_RANGE,        // values beyond double-float's exponent range, or NaN/Inf
     AB_PROF_FB_COUNT
 } ab_prof_fallback_t;
 

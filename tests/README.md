@@ -44,15 +44,15 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 150, every test but
-the chaos ones, and `make ci-local` all 168 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 157, every test but
+the chaos ones, and `make ci-local` all 175 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
 (its `TEST_QE_GOLDEN` line says `PASS`, or `SKIP` on another device).
 
 - **Registry-based (ghost-guarded):**
-  - `tests/test_correctness.c` — 73 tests
+  - `tests/test_correctness.c` — 78 tests
   - `tests/test_chaos.c` — 18 tests
   - `tests/test_device_api.c` — 16 tests (152 `CHECK`s); the GEMM
     tests compare `ab_dev_dgemm` / `ab_dev_zgemm` with column-major
@@ -61,7 +61,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     the device path is bitwise the host API on the transposed operands
   - `tests/test_dispatch.c` — 9 tests of the BLAS-ABI routing, no GPU,
     see below
-  - `tests/test_blas_abi.c` — 31 suites (1028 cases), see below
+  - `tests/test_blas_abi.c` — 33 suites (1069 cases), see below
   - `tests/test_trace.c` — 5 tests of `AB_TRACE` and
     `AB_TEST_FAIL_STAGE`, see below
 
@@ -150,10 +150,45 @@ memory suites print their measured values on every run:
   run, as at a Fortran `STOP`), not `_exit()`; it must exit with status 0
   within 30 s (an alarm ends it then, and the case fails).
 
+`test_exponent_range` gives the GEMMs data outside FP32's exponent range,
+which double-float shares. Each case starts from magnitudes in [0.5, 1)
+with random signs, so the pattern alone sets the span.
+- **Through `dgemm_` / `zgemm_`** in `AB_MODE=gpu` without `ab_init()`:
+  - every entry × 1e-25 or × 1e25;
+  - rows of op(A) and columns of op(B) scaled from 2⁻¹²⁰ to 2¹²⁰, with
+    C0 alike;
+  - even-k / odd-k factors 2^±70, aligned (the GPU must certify it) and
+    misaligned (Accelerate must take it);
+  - an Inf in A;
+  - DGEMM alpha 1e-45 and 1e45;
+  - DGEMM with a zero row of op(A), where beta·C0 is all of C: with that
+    row of C0 × 2⁻¹⁰⁰ (Accelerate must take it), and with the other rows
+    × 2⁻¹⁰⁰ instead (the GPU must certify it);
+  - DGEMM C0 × 2¹³⁵ with beta = 2⁻²⁰: beta·C0 fits FP32's range but C0 does
+    not, so Accelerate must take it.
+
+  These run with every TRANS kind of op(). Each must give C within 1e-11
+  of cblas (Inf and NaN where cblas has them), on the route the case
+  names.
+- **Exactness**: C of data scaled by 2^{-100, 0, 100} per row and column
+  must be bit for bit that power of two times C of the unscaled data.
+- **Native `ab_dgemm`, `ab_dgemm_scaled` and `ab_zgemm`**: the same 1e±25
+  data, rows spread over 2⁻¹⁰⁰…2⁻⁶⁰, columns over 2⁶⁰…2¹⁰⁰, and an
+  exactness case (A and B × 2⁹⁰).
+
+`test_zgemm_imbalance` gives `zgemm_` (`AB_MODE=gpu`, alpha = 1, beta = 0,
+every TRANS kind) data whose real and imaginary parts are 10⁻⁶ apart:
+nearly real A and B, nearly imaginary ones, and rows of op(A) and columns
+of op(B) that alternate between the two. Re(C) and Im(C) must each be
+within 8 u² of a Dot2 reference, relative to their own componentwise
+scales. Gauss's three-product form misses Im(C) by about 10⁶ u² there, so
+the call must run as four products.
+
 Known failures live in the file's `XFAIL` table, each with a short tag
 naming the defect. An XFAIL that now passes (XPASS), or an entry that matches
 no case (STALE), fails the run: when a fix lands, delete its entries.
-`./build/test_blas_abi -v` lists every case. `make test-symbols` is the
+`./build/test_blas_abi -v` lists every case, and `./build/test_blas_abi
+<test_name>…` runs only those suites (the STALE check then needs a full run). `make test-symbols` is the
 strict export check: the dylib and the static archive must each export
 exactly `_dgemm_` / `_zgemm_`, and not the `$NEWLAPACK` variants (before 1.4.0 they exported only the latter, so Fortran calls bypassed the library).
 

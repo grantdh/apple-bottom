@@ -144,7 +144,7 @@ In practice, random matrices exhibit `~√N` scaling due to statistical cancella
 |-----------|-----------|----------------------|-------|
 | `ab_dgemm(A, B, C)` | ~N·10⁻¹⁵ | 1.10× | C = A × B |
 | `ab_dgemm_scaled(α, A, B, β, C)` | ~N·10⁻¹⁵ | 1.10× | C = αAB + βC |
-| `ab_zgemm(Ar, Ai, Br, Bi, Cr, Ci)` | ~3N·10⁻¹⁵ | 1.18-1.29× | Complex GEMM (Gauss 3-multiply) |
+| `ab_zgemm(Ar, Ai, Br, Bi, Cr, Ci)` | ~3N·10⁻¹⁵ | 1.18-1.29× | Complex GEMM (Gauss 3-multiply; 4 products for imbalanced parts) |
 | `ab_dsyrk(A, C)` | ~N·10⁻¹⁵ | 0.9-1.1× | C = A × Aᵀ (symmetric) |
 | `ab_matrix_scale(α, A)` | ~10⁻¹⁵ | — | Element-wise scaling |
 
@@ -395,10 +395,10 @@ apple-bottom is suitable for production use in:
 
 | Condition | Status | Behavior |
 |-----------|--------|----------|
-| **Exponents outside [10⁻³⁰, 10³⁰]** | ❌ Undefined | FP32 overflow/underflow |
+| **Exponents far from 1** | ✓ Scaled by powers of two | BLAS ABI: rows/columns rescaled, Accelerate where no scaling suffices; native: one scale per matrix, spans up to 2⁷⁸ ([LIMITATIONS.md](LIMITATIONS.md#exponent-range)) |
 | **Condition number κ > 10¹²** | ❌ Insufficient precision | Error becomes `κ·N·2⁻⁴⁸ > 10⁻³` |
-| **Denormals (< 10⁻³⁸)** | ⚠ Flushed to zero | Document if critical |
-| **NaN, ±Infinity** | ⚠ Propagates | Document behavior |
+| **FP32 subnormals (< 2⁻¹²⁶ after scaling)** | ⚠ Flushed to zero by the GPU | The scaling keeps data clear of them |
+| **NaN, ±Infinity** | ⚠ BLAS ABI: Accelerate; native: propagates | Native: DD's `∞ − ∞` gives NaN |
 
 ### 5.3 Algorithmic Limitations
 

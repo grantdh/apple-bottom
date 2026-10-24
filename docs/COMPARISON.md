@@ -29,7 +29,8 @@ choice on this hardware today, and apple-bottom's default routing
 apple-bottom keeps each value as an unevaluated sum of two FP32 numbers and
 runs error-free transformations on the GPU's FP32 units, compiled without
 fast math. That gives about 10⁻¹⁵ relative error per element instead of
-FP64's 10⁻¹⁶, and FP32's exponent range. Where it helps:
+FP64's 10⁻¹⁶, with FP32's exponent range bridged by power-of-two scaling
+(and Accelerate for BLAS-ABI calls no scaling keeps in range). Where it helps:
 
 - Large GEMMs on matrices kept on the GPU between calls (the native
   `ABMatrix` API), where it overtakes Accelerate on an M2 Max from about
@@ -39,7 +40,8 @@ FP64's 10⁻¹⁶, and FP32's exponent range. Where it helps:
 
 Where it does not:
 
-- Bit-for-bit IEEE FP64 results, or values outside FP32's exponent range.
+- Bit-for-bit IEEE FP64 results, or native-API matrices whose entries span
+  more than about 10²³.
 - GEMMs issued one call at a time from host memory through the BLAS ABI:
   on an M2 Max no measured shape is more than 1.02× faster than Accelerate
   except ZGEMM with both operands transposed at N ≥ 4096 (1.11–1.20×).

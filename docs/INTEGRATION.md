@@ -72,6 +72,46 @@ as in BLAS. Column-major arrays uploaded into `ABMatrix` handles are read
 transposed, and `ab_dgemm` then returns B·A instead of A·B, with no error;
 use the BLAS ABI for column-major data.
 
+### Values far from 1
+
+Double-float values are pairs of FP32 numbers, so on their own they have
+FP32's exponent range: products below about 2⁻⁷⁸ lose their low part,
+values below 2⁻¹²⁶ flush to zero on the GPU, and sums overflow at 2¹²⁸.
+The library bridges that with exact powers of two, which leave the bits of
+in-range data unchanged:
+
+- **BLAS ABI** (`dgemm_`, `zgemm_`, `ab_*gemm_blas`).
+  - A row of op(A) or column of op(B) whose largest entry lies outside
+    2^±20 is scaled on its way to the GPU, by the power of two that brings
+    that entry to about 2³⁰, and C back.
+  - A DGEMM alpha or beta outside 2^±20 joins C's scale.
+  - A call the scaled data still cannot keep in range runs on Accelerate.
+    So does a call with NaN or Inf in A or B (or in C, for DGEMM with
+    beta ≠ 0), which then gets IEEE results. `AB_REPORT` counts such calls
+    as `range` fallbacks.
+- **Native `ABMatrix` API.**
+  - `ab_matrix_upload` gives each matrix one power-of-two scale, and
+    `ab_matrix_download` removes it; the GPU operations carry it through.
+  - Data such as 1e-25 × uniform or 1e25 × uniform therefore multiplies
+    correctly.
+  - A single matrix whose nonzero entries span more than about 2⁷⁸ (10²³)
+    keeps FP32's range relative to its scale, and has no fallback.
+- **Device-buffer API** (`ab_dev_dgemm`, `ab_dev_zgemm`): converts through
+  `ABMatrix` handles, so it behaves as the native API does.
+
+The thresholds and their measurements are in
+[LIMITATIONS.md](vv/LIMITATIONS.md#exponent-range).
+
+### Complex data with imbalanced parts
+
+ZGEMM uses Gauss's three-product form, whose imaginary part loses accuracy
+when the real and imaginary parts differ greatly in size (nearly real or
+nearly imaginary data). Such calls run as four real products instead, at
+1.00–1.10× the time through `zgemm_`. The BLAS ABI decides per row of op(A)
+and column of op(B); the native and device APIs decide per matrix, from the
+magnitudes `ab_matrix_upload` measured, and keep the three-product form for
+matrices computed on the GPU. Details: [LIMITATIONS.md](vv/LIMITATIONS.md#complex-products).
+
 ### Where the GPU pays off
 
 ```
@@ -465,7 +505,7 @@ it also rewrites `src/dispatch_table.h`.
 AB_REPORT[<pid>] apple-bottom <version> (<commit>[-dirty]) AB_MODE=<mode|unset>
 AB_REPORT[<pid>] <routine> calls=… gpu_calls=… cpu_calls=… gpu_calls%=… total_ms=… gpu_ms=… cpu_ms=… gpu_time%=… fallbacks=…
 AB_REPORT[<pid>] <routine> gpu_stages_ms init=… alloc=… pack=… upload=… kernel=… download=… epilogue=… other=…
-AB_REPORT[<pid>] <routine> fallbacks no_device=… too_large=… gpu_failed=… other=…
+AB_REPORT[<pid>] <routine> fallbacks no_device=… too_large=… gpu_failed=… other=… range=…
 ```
 
 - **The first line names the library build**, as `ab_build_info()` returns it:
@@ -480,7 +520,8 @@ AB_REPORT[<pid>] <routine> fallbacks no_device=… too_large=… gpu_failed=… 
 - **The stage line** splits the GPU calls' `gpu_ms`: `init` (routing, size
   checks, and creating the Metal context on the first GPU call), `alloc`
   (GPU buffers and host scratch, allocation and release), `pack` (copying
-  column-major op(A), op(B) and C to row-major), `upload` (FP64 → DD),
+  column-major op(A), op(B) and C to row-major, and the exponent-range
+  check), `upload` (FP64 → DD, with the power-of-two scaling),
   `kernel` (command-buffer GPU execution time; wall time if Metal reports
   none), `download` (DD → FP64), `epilogue` (the row-major result into
   column-major C, with alpha and beta for ZGEMM) and `other`, the rest:
@@ -489,8 +530,10 @@ AB_REPORT[<pid>] <routine> fallbacks no_device=… too_large=… gpu_failed=… 
 - **Fallbacks** are calls the routing sent to the GPU that ran on Accelerate
   instead: `no_device` (no Metal context: no GPU, or a `fork()`ed child),
   `too_large` (an operand beyond the size limits), `gpu_failed` (an
-  allocation, upload or kernel failed before C was written). They count as
-  CPU calls, and their `cpu_ms` includes the failed GPU attempt.
+  allocation, upload or kernel failed before C was written), `range` (NaN
+  or Inf, or values that power-of-two scaling cannot keep in double-float's
+  exponent range; see [Values far from 1](#values-far-from-1)). They count
+  as CPU calls, and their `cpu_ms` includes the failed GPU attempt.
 - **Each process reports once**, tagged with its pid, so MPI ranks sharing
   stderr stay apart. A `fork()`ed child starts with empty counters and
   reports only its own calls (nothing if it made none). There is no report
@@ -532,7 +575,7 @@ seq=2 t0_ns=411972254072166 t1_ns=411972258538707 routine=zgemm ta=C tb=N M=96 N
   them with `float.fromhex`).
 - **`path`**: `cpu`, `gpu`, or `fallback:<reason>` for a call the routing
   sent to the GPU that ran on Accelerate (`no_device`, `too_large`,
-  `gpu_failed`, `other`; see the run report).
+  `gpu_failed`, `other`, `range`; see the run report).
 - **GPU calls** add the stages of the run report in ns (`init_ns` …
   `epilogue_ns`, then `other_ns`), which sum exactly to `t1_ns - t0_ns`, and
   split `other_ns` exactly into `temps_ns` (creating and destroying ZGEMM's
