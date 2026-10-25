@@ -87,7 +87,8 @@ All notable changes to this project will be documented in this file.
   A tall C (M ≥ 4N) moves off the tall-skinny kernel while the 32×32 grid
   takes at most twice as many steps: 2.1× on 200×40×18277, 1.1-1.35× where
   N pads more on 32-column tiles (1024×40, 1200×100). The rule is
-  `use_narrow_tiles` in `src/apple_bottom.m`. Results are bitwise
+  `use_narrow_tiles` in `src/apple_bottom.m`. Measurements:
+  `benchmarks/results/2026-10-25-2825d2a-narrow-tiles/`. Results are bitwise
   unchanged. `tests/test_precision.c` gains a 64×64 scaled case and a
   tall-skinny ZGEMM case (16 tests), so every kernel stays covered.
 - `tests/test_blas_abi` takes test names (`./build/test_blas_abi

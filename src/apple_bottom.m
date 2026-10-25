@@ -1872,7 +1872,7 @@ static bool encode_align_zgemm(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
 // Measured on M2 Max (38-core GPU), kernel GPU time: alone on the GPU, every
 // kernel's time rises in steps of about AB_GPU_STEP_GROUPS threadgroups. A
 // narrow threadgroup's step costs half a tall-skinny one's and 0.29x a 64×64
-// one's (~14% more per output at full occupancy), so the finer tiles win
+// one's (~16% more per output at full occupancy), so the finer tiles win
 // while a grid takes few steps: 1.04-1.46x from 544×544 to 1024×1024 (but
 // 0.92-0.98x at 832×832 and 896×896, whose 64×64 grids fill their last
 // step), and 1.1-1.35x over tall-skinny on small grids whose N the 32-column
