@@ -107,10 +107,10 @@ The thresholds and their measurements are in
 ZGEMM uses Gauss's three-product form, whose imaginary part loses accuracy
 when the real and imaginary parts differ greatly in size (nearly real or
 nearly imaginary data). Such calls run as four real products instead, at
-1.00–1.10× the time through `zgemm_`. The BLAS ABI decides per row of op(A)
-and column of op(B); the native and device APIs decide per matrix, from the
-magnitudes `ab_matrix_upload` measured, and keep the three-product form for
-matrices computed on the GPU. Details: [LIMITATIONS.md](vv/LIMITATIONS.md#complex-products).
+1.00–1.10× the time through `zgemm_`. The BLAS ABI and the device API decide
+per row of op(A) and column of op(B); the native API decides per matrix, from
+the magnitudes `ab_matrix_upload` measured, and keeps the three-product form
+for matrices computed on the GPU. Details: [LIMITATIONS.md](vv/LIMITATIONS.md#complex-products).
 
 ### Where the GPU pays off
 

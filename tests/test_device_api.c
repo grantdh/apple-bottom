@@ -10,7 +10,8 @@
 //   5. NULL / out-of-range error paths
 //   6. Stream create / sync / destroy doesn't crash
 // and the BLAS entry points: ab_dev_dgemm / ab_dev_zgemm against column-major
-// cblas, plus the element-wise ops.
+// cblas, ab_dev_zgemm on imbalanced real and imaginary parts against Dot2,
+// plus the element-wise ops.
 //
 // Pass criteria: all assertions hold. Exits non-zero on first failure.
 // =============================================================================
@@ -165,7 +166,10 @@ static void test_streams(void) {
 
 #include <math.h>
 #include <complex.h>
+#include <float.h>
 #include <Accelerate/Accelerate.h>
+
+#include "test_dot2.h"
 
 #define GEMM_TOL 1e-11
 
@@ -238,15 +242,20 @@ static bool outside_block_unchanged(Operand o, const double* X, const double* X0
     return true;
 }
 
+// The stored A, B and C of c, w doubles per element.
+static void gemm_operands(GemmCase c, int w, Operand* oA, Operand* oB, Operand* oC) {
+    bool tA = (c.ta != AB_NO_TRANS), tB = (c.tb != AB_NO_TRANS);
+    int a_rows = tA ? c.k : c.m, b_rows = tB ? c.n : c.k;
+    *oA = (Operand){c.off, a_rows + c.pad, a_rows, tA ? c.m : c.k, w};
+    *oB = (Operand){c.off, b_rows + c.pad, b_rows, tB ? c.k : c.n, w};
+    *oC = (Operand){c.off, c.m + c.pad, c.m, c.n, w};
+}
+
 // One ab_dev_dgemm / ab_dev_zgemm call against cblas ColMajor (3 CHECKs).
 static void check_gemm(bool cplx, GemmCase c) {
-    bool tA = (c.ta != AB_NO_TRANS), tB = (c.tb != AB_NO_TRANS);
     int w = cplx ? 2 : 1;
-    int a_rows = tA ? c.k : c.m, a_cols = tA ? c.m : c.k;
-    int b_rows = tB ? c.n : c.k, b_cols = tB ? c.k : c.n;
-    Operand oA = {c.off, a_rows + c.pad, a_rows, a_cols, w};
-    Operand oB = {c.off, b_rows + c.pad, b_rows, b_cols, w};
-    Operand oC = {c.off, c.m + c.pad, c.m, c.n, w};
+    Operand oA, oB, oC;
+    gemm_operands(c, w, &oA, &oB, &oC);
     size_t bytesA = operand_elems(oA) * w * sizeof(double);
     size_t bytesB = operand_elems(oB) * w * sizeof(double);
     size_t bytesC = operand_elems(oC) * w * sizeof(double);
@@ -363,21 +372,25 @@ static void test_zgemm_all_trans(void) {
     check_all_trans(true, CMPLX(1.25, -0.5), CMPLX(-0.75, 0.25));
 }
 
-// alpha = 1, beta = 0: the direct ab_zgemm_ex path.
+// alpha = 1, beta = 0: the direct path, with no host epilogue.
 static void test_zgemm_all_trans_unit(void) {
     printf("[GEMM-6] ZGEMM all trans pairs, alpha=1 beta=0, vs cblas ColMajor\n");
     check_all_trans(true, 1.0, 0.0);
 }
 
-// The QE cegterg 'C','N' pattern (m, n << k) plus tall-skinny either way.
+// The QE cegterg 'C','N' pattern (m, n << k), tall-skinny either way, and a
+// C of 2^20 elements read for beta != 0, which is staged in chunks across
+// cores.
 static void test_zgemm_shapes(void) {
-    printf("[GEMM-7] ZGEMM QE-like and tall-skinny shapes vs cblas ColMajor\n");
+    printf("[GEMM-7] ZGEMM QE-like, tall-skinny and large-C shapes vs cblas ColMajor\n");
     check_gemm(true, (GemmCase){AB_CONJ_TRANS, AB_NO_TRANS, 150, 150, 2000, 4, 0,
                                 1.0, 0.0});
     check_gemm(true, (GemmCase){AB_NO_TRANS, AB_CONJ_TRANS, 300, 40, 56, 2, 9,
                                 CMPLX(0.5, 1.0), 0.0});
     check_gemm(true, (GemmCase){AB_TRANS, AB_TRANS, 40, 300, 56, 2, 0,
                                 CMPLX(1.25, -0.5), 1.0});
+    check_gemm(true, (GemmCase){AB_NO_TRANS, AB_TRANS, 1024, 1024, 48, 1, 3,
+                                CMPLX(0.5, -0.25), CMPLX(-0.75, 0.25)});
 }
 
 // Invalid flags, short leading dimensions and operands that run past their
@@ -422,10 +435,11 @@ static void test_gemm_arg_errors(void) {
     ab_dev_free(dA); ab_dev_free(dB); ab_dev_free(dC);
 }
 
-// The device path adds nothing but the layout change. Column-major A, B, C
-// with ld = rows are row-major A^T, B^T, C^T, so ab_dev_dgemm NN must be
-// bitwise ab_dgemm_scaled(B^T, A^T) and ab_dev_zgemm 'C','N' (alpha = 1,
-// beta = 0) bitwise ab_zgemm_ex('N', 'C', B^T, A^T) on those handles.
+// On balanced data the device path adds nothing but the layout change.
+// Column-major A, B, C with ld = rows are row-major A^T, B^T, C^T, so
+// ab_dev_dgemm NN must be bitwise ab_dgemm_scaled(B^T, A^T) and ab_dev_zgemm
+// 'C','N' (alpha = 1, beta = 0) bitwise ab_zgemm_ex('N', 'C', B^T, A^T) on
+// those handles (both Gauss-3M).
 static void test_gemm_matches_host_api(void) {
     printf("[GEMM-9] device GEMM bitwise equal to the host API on C^T\n");
     enum { M = 96, N = 80, K = 72 };
@@ -507,6 +521,118 @@ static void test_gemm_matches_host_api(void) {
     free(A); free(B); free(C); free(Cd); free(Ch);
 }
 
+// Gauss-3M's imaginary part under Re/Im imbalance (audit K-P1-2): the
+// ImagData check of test_blas_abi's test_zgemm_imbalance (test_dot2.h), on
+// ab_dev_zgemm_offset. IMAG_LINES needs the row- and column-wise rule: A's
+// and B's largest parts are balanced.
+
+// The complex element op(X)_ij of a column-major X at o.
+static size_t op_elem(Operand o, ABTranspose t, int i, int j) {
+    return o.off + (t == AB_NO_TRANS ? (size_t)j * o.ld + i : (size_t)i * o.ld + j);
+}
+
+// op(X) (rows x cols) into row-major real and imaginary parts.
+static void op_split(const double* X, Operand o, ABTranspose t, int rows, int cols,
+                     double* re, double* im) {
+    const double sign = t == AB_CONJ_TRANS ? -1.0 : 1.0;
+    for (int i = 0; i < rows; i++)
+        for (int j = 0; j < cols; j++) {
+            size_t e = op_elem(o, t, i, j);
+            re[(size_t)i * cols + j] = X[2 * e];
+            im[(size_t)i * cols + j] = sign * X[2 * e + 1];
+        }
+}
+
+// One ab_dev_zgemm_offset call on d with beta = 0 and a real alpha: 1 takes
+// the direct path, 2 (exact in the host epilogue) the general one (2 CHECKs).
+static void check_imbalance(GemmCase c, ImagData d) {
+    const int M = c.m, N = c.n, K = c.k;
+    const double alpha = creal(c.alpha);
+    Operand oA, oB, oC;
+    gemm_operands(c, 2, &oA, &oB, &oC);
+    size_t bytesA = operand_elems(oA) * 2 * sizeof(double);
+    size_t bytesB = operand_elems(oB) * 2 * sizeof(double);
+    size_t bytesC = operand_elems(oC) * 2 * sizeof(double);
+
+    srand(11);
+    double* A = make_operand(oA, false);
+    double* B = make_operand(oB, false);
+    double* C = make_operand(oC, true);         // beta = 0: C must not be read
+    for (size_t e = 0; e < operand_elems(oA) * 2; e++) A[e] = half_to_one(A[e]);  // NaN stays
+    for (size_t e = 0; e < operand_elems(oB) * 2; e++) B[e] = half_to_one(B[e]);
+    for (int i = 0; i < M; i++)
+        for (int k = 0; k < K; k++)
+            A[2 * op_elem(oA, c.ta, i, k) + !imag_small_re(d, i)] *= IMAG_RATIO;
+    for (int k = 0; k < K; k++)
+        for (int j = 0; j < N; j++)
+            B[2 * op_elem(oB, c.tb, k, j) + !imag_small_re(d, j)] *= IMAG_RATIO;
+
+    ab_dev_buffer_t dA = ab_dev_malloc(bytesA);
+    ab_dev_buffer_t dB = ab_dev_malloc(bytesB);
+    ab_dev_buffer_t dC = ab_dev_malloc(bytesC);
+    assert(dA && dB && dC);
+    ab_dev_memcpy_h2d(dA, 0, A, bytesA);
+    ab_dev_memcpy_h2d(dB, 0, B, bytesB);
+    ab_dev_memcpy_h2d(dC, 0, C, bytesC);
+    double al[2] = {alpha, 0.0}, zero[2] = {0.0, 0.0};
+    ABStatus s = ab_dev_zgemm_offset(c.ta, c.tb, M, N, K, al, dA, c.off, oA.ld, dB, c.off,
+                                     oB.ld, zero, dC, c.off, oC.ld);
+    ab_dev_memcpy_d2h(C, dC, 0, bytesC);
+    ab_dev_free(dA); ab_dev_free(dB); ab_dev_free(dC);
+
+    double *Ar = malloc((size_t)M * K * sizeof *Ar), *Ai = malloc((size_t)M * K * sizeof *Ai);
+    double *Br = malloc((size_t)K * N * sizeof *Br), *Bi = malloc((size_t)K * N * sizeof *Bi);
+    assert(Ar && Ai && Br && Bi);
+    op_split(A, oA, c.ta, M, K, Ar, Ai);
+    op_split(B, oB, c.tb, K, N, Br, Bi);
+    double err[2];
+    dot2_zgemm_parts_err(M, N, K, Ar, Ai, Br, Bi, alpha, C + 2 * oC.off, (size_t)oC.ld, err);
+
+    char label[96], msg[192];
+    snprintf(label, sizeof(label), "zgemm %s%s %dx%dx%d imag-%s alpha %g", trans_name(c.ta),
+             trans_name(c.tb), M, N, K, imag_tag(d), alpha);
+    snprintf(msg, sizeof(msg), "%s: returns AB_OK", label);
+    CHECK(s == AB_OK, msg);
+    snprintf(msg, sizeof(msg), "%s: Re err %.2f u², Im err %.2f u² (bound %.0f u²)", label,
+             err[0] / U2, err[1] / U2, IMAG_BOUND);
+    CHECK(err[0] <= IMAG_BOUND * U2 && err[1] <= IMAG_BOUND * U2, msg);  // false for NaN
+
+    free(Ar); free(Ai); free(Br); free(Bi);
+    free(A); free(B); free(C);
+}
+
+// Nearly real and nearly imaginary data, and lines of both kinds: op(A)'s
+// rows are A's rows ('N') or columns, op(B)'s columns B's columns ('N') or
+// rows, so the four flag pairs of IMAG_LINES cover each way of gathering a
+// line's parts; then the same for operands of 2^20 elements, which are
+// staged in chunks across cores.
+static void test_zgemm_imbalance(void) {
+    printf("[GEMM-10] ZGEMM Re/Im imbalance, per row and column, vs Dot2\n");
+    static const struct { ABTranspose ta, tb; ImagData d; double alpha; } IMB[] = {
+        {AB_NO_TRANS,   AB_NO_TRANS,   IMAG_SMALL, 1.0},
+        {AB_CONJ_TRANS, AB_NO_TRANS,   IMAG_SMALL, 2.0},
+        {AB_NO_TRANS,   AB_TRANS,      IMAG_LARGE, 1.0},
+        {AB_TRANS,      AB_CONJ_TRANS, IMAG_LARGE, 2.0},
+        {AB_NO_TRANS,   AB_NO_TRANS,   IMAG_LINES, 1.0},
+        {AB_CONJ_TRANS, AB_NO_TRANS,   IMAG_LINES, 1.0},
+        {AB_NO_TRANS,   AB_TRANS,      IMAG_LINES, 1.0},
+        {AB_TRANS,      AB_CONJ_TRANS, IMAG_LINES, 1.0},
+        {AB_CONJ_TRANS, AB_NO_TRANS,   IMAG_LINES, 2.0},
+        {AB_NO_TRANS,   AB_TRANS,      IMAG_LINES, 2.0},
+    };
+    for (size_t i = 0; i < sizeof IMB / sizeof IMB[0]; i++)
+        check_imbalance((GemmCase){IMB[i].ta, IMB[i].tb, 96, 80, 72, 3, 5, IMB[i].alpha, 0.0},
+                        IMB[i].d);
+    // A, then A and B (the QE 'C','N' pattern), then B of 2^20 elements: lines
+    // that are A's rows, A's and B's columns, B's rows.
+    check_imbalance((GemmCase){AB_NO_TRANS, AB_NO_TRANS, 8192, 32, 128, 3, 5, 1.0, 0.0},
+                    IMAG_LINES);
+    check_imbalance((GemmCase){AB_CONJ_TRANS, AB_NO_TRANS, 128, 128, 8192, 3, 5, 1.0, 0.0},
+                    IMAG_LINES);
+    check_imbalance((GemmCase){AB_CONJ_TRANS, AB_TRANS, 32, 8192, 128, 3, 5, 1.0, 0.0},
+                    IMAG_LINES);
+}
+
 // Test element-wise operations
 static void test_elementwise(void) {
     printf("[BLAS-3] element-wise ops\n");
@@ -565,6 +691,7 @@ static const TestCase TESTS[] = {
     {"test_zgemm_shapes",             test_zgemm_shapes},
     {"test_gemm_arg_errors",          test_gemm_arg_errors},
     {"test_gemm_matches_host_api",    test_gemm_matches_host_api},
+    {"test_zgemm_imbalance",          test_zgemm_imbalance},
     {"test_elementwise",              test_elementwise},
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);

@@ -43,8 +43,7 @@
 // FMA contraction in this file either.
 #pragma STDC FP_CONTRACT OFF
 
-#define U2       0x1p-48   // u² = 2⁻⁴⁸, DD unit roundoff
-#define CW_BOUND 2.0       // componentwise bound, units of √K·u²
+#define CW_BOUND 2.0       // componentwise bound, units of √K·u² (U2, test_dot2.h)
 #define NW_BOUND 1.0       // normwise bound, units of √K·u²
 
 typedef enum { OP_DGEMM, OP_DGEMM_SCALED, OP_ZGEMM } GemmOp;

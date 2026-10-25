@@ -30,6 +30,7 @@
 
 #include "apple_bottom.h"
 #include "apple_bottom_device.h"
+#include "ab_internal.h"
 
 // -----------------------------------------------------------------------------
 // Opaque types
@@ -232,6 +233,8 @@ ABStatus ab_dev_stream_sync(ab_dev_stream_t stream) {
 // operate on DD format (two FP32 per value).  We bridge the gap by creating
 // temporary ABMatrix handles, uploading FP64→DD, dispatching through the
 // existing ab_dgemm_scaled / ab_zgemm_ex machinery, then downloading DD→FP64.
+// A ZGEMM chooses between Gauss-3M and 4M as the BLAS ABI does, per row of
+// op(A) and column of op(B) (ab_internal.h), not per matrix as ab_zgemm_ex.
 //
 // Each call therefore converts and allocates, with the per-call costs of the
 // BLAS ABI. DD-native device buffers would remove the per-call conversion and the
@@ -316,27 +319,89 @@ static ABStatus dev_download_real_submatrix(
     return AB_OK;
 }
 
+// Helper: copy columns [j0, j1) of interleaved complex column-major data
+// (`l` complex per column, `r` rows) into separate real and imaginary arrays
+// of `r` doubles per column.  If rmax is not NULL, the high words of each
+// column's (by_col) or row's largest |Re| and |Im| are added to rmax and
+// imax as the copy goes.
+static void dev_split_complex(const double* x, size_t l, size_t r, size_t j0, size_t j1,
+                              double* re, double* im, uint32_t* rmax, uint32_t* imax,
+                              bool by_col)
+{
+    for (size_t j = j0; j < j1; j++) {
+        const double* s = x + j * l * 2;
+        double* dr = re + j * r;
+        double* di = im + j * r;
+        if (!rmax) {
+            for (size_t i = 0; i < r; i++) {
+                double vr = s[2 * i], vi = s[2 * i + 1];
+                dr[i] = vr;
+                di[i] = vi;
+            }
+        } else if (by_col) {        // the column's maxima in registers
+            uint32_t mr = rmax[j], mi = imax[j];
+            for (size_t i = 0; i < r; i++) {
+                double vr = s[2 * i], vi = s[2 * i + 1];
+                dr[i] = vr;
+                di[i] = vi;
+                AB_HIWORD_MAX(ab_abs_hiword(vr), mr);
+                AB_HIWORD_MAX(ab_abs_hiword(vi), mi);
+            }
+            rmax[j] = mr;
+            imax[j] = mi;
+        } else {
+            for (size_t i = 0; i < r; i++) {
+                double vr = s[2 * i], vi = s[2 * i + 1];
+                dr[i] = vr;
+                di[i] = vi;
+                AB_HIWORD_MAX(ab_abs_hiword(vr), rmax[i]);
+                AB_HIWORD_MAX(ab_abs_hiword(vi), imax[i]);
+            }
+        }
+    }
+}
+
 // Helper: extract interleaved complex column-major data into separate real
 // and imaginary ABMatrix handles, which receive X^T (cols × rows).  Complex
 // data is stored as [r0,i0,r1,i1,...] with leading dimension `ld` (in complex
-// elements, so 2*ld doubles per column).
+// elements, so 2*ld doubles per column).  If `lines` is not NULL, its rmax
+// and imax (zeroed) receive the high words of the largest |Re| and |Im| of
+// each column of X (by_col) or each row, the statistics ab_lines_rho reads,
+// gathered by the copy as it goes (a pass of their own cost 9-14% of a QE-
+// shaped ab_dev_zgemm).  The copy runs in chunks of whole columns across
+// cores; a row's maxima span the chunks, so each chunk gathers those into a
+// part of its own, merged after.
 static ABStatus dev_upload_complex_submatrix(
     ABMatrix dst_r, ABMatrix dst_i,
     ab_dev_buffer_t src, size_t cmplx_offset, int ld,
-    int rows, int cols)
+    int rows, int cols, ab_line_stats_t* lines, bool by_col)
 {
     const double* base = (const double*)[src->mtl contents] + cmplx_offset * 2;
     size_t r = (size_t)rows, c = (size_t)cols, l = (size_t)ld;
     size_t n = r * c;
     double* re = (double*)malloc(n * sizeof(double));
     double* im = (double*)malloc(n * sizeof(double));
-    if (!re || !im) { free(re); free(im); return AB_ERROR_ALLOC_FAILED; }
+    const bool row_lines = lines && !by_col;
+    const size_t nparts = c < AB_CONVERT_CHUNKS ? c : AB_CONVERT_CHUNKS;
+    uint32_t* parts = row_lines ? (uint32_t*)calloc(nparts * 2 * r, sizeof(uint32_t)) : NULL;
+    if (!re || !im || (row_lines && !parts)) {
+        free(re); free(im); free(parts);
+        return AB_ERROR_ALLOC_FAILED;
+    }
 
-    for (size_t j = 0; j < c; j++)
+    uint32_t* rmax = lines ? lines->rmax : NULL;
+    uint32_t* imax = lines ? lines->imax : NULL;
+    ab_internal_for_each_chunk(c, r, ^(size_t t, size_t j0, size_t k) {
+        uint32_t* rx = row_lines ? parts + t * 2 * r : rmax;
+        uint32_t* ix = row_lines ? rx + r : imax;
+        dev_split_complex(base, l, r, j0, j0 + k, re, im, rx, ix, by_col);
+    });
+    for (size_t t = 0; row_lines && t < nparts; t++)
         for (size_t i = 0; i < r; i++) {
-            re[j * r + i] = base[(j * l + i) * 2];
-            im[j * r + i] = base[(j * l + i) * 2 + 1];
+            AB_HIWORD_MAX(parts[t * 2 * r + i], rmax[i]);
+            AB_HIWORD_MAX(parts[t * 2 * r + r + i], imax[i]);
         }
+    free(parts);
 
     ABStatus s = ab_matrix_upload(dst_r, re, true);
     if (s == AB_OK) s = ab_matrix_upload(dst_i, im, true);
@@ -490,31 +555,40 @@ ABStatus ab_dev_zgemm_offset(ABTranspose transA, ABTranspose transB,
     ABMatrix mBi = ab_matrix_create(B_cols, B_rows);
     ABMatrix mCr = ab_matrix_create(n, m);
     ABMatrix mCi = ab_matrix_create(n, m);
+    ab_line_stats_t sa = {}, sb = {};
     ABStatus s = AB_ERROR_ALLOC_FAILED;
     if (!mAr || !mAi || !mBr || !mBi || !mCr || !mCi) goto zgemm_cleanup;
+    if (!ab_line_parts_init(&sa, m) || !ab_line_parts_init(&sb, n)) goto zgemm_cleanup;
 
-    // Upload: deinterleave complex → separate real/imag, FP64→DD
-    s = dev_upload_complex_submatrix(mAr, mAi, A, a_offset, lda, A_rows, A_cols);
+    // Upload: deinterleave complex → separate real/imag, FP64→DD, gathering
+    // the parts' largest magnitudes of each row of op(A) (a column of A if
+    // transposed) and each column of op(B) (a row of B if transposed)
+    s = dev_upload_complex_submatrix(mAr, mAi, A, a_offset, lda, A_rows, A_cols,
+                                     &sa, transA != AB_NO_TRANS);
     if (s != AB_OK) goto zgemm_cleanup;
-    s = dev_upload_complex_submatrix(mBr, mBi, B, b_offset, ldb, B_rows, B_cols);
+    s = dev_upload_complex_submatrix(mBr, mBi, B, b_offset, ldb, B_rows, B_cols,
+                                     &sb, transB == AB_NO_TRANS);
     if (s != AB_OK) goto zgemm_cleanup;
 
     // For beta != 0: upload C's current contents
     if (need_beta) {
-        s = dev_upload_complex_submatrix(mCr, mCi, C, c_offset, ldc, m, n);
+        s = dev_upload_complex_submatrix(mCr, mCi, C, c_offset, ldc, m, n, NULL, false);
         if (s != AB_OK) goto zgemm_cleanup;
     }
 
-    // Dispatch via ab_zgemm_ex (handles transpose on GPU).
-    // ab_zgemm_ex computes C = op(A) * op(B) with alpha=1, beta=0.
+    // Dispatch via ab_internal_zgemm (ab_zgemm_ex by the given method, which
+    // handles transpose on GPU): C = op(A) * op(B) with alpha=1, beta=0.
     // For general alpha/beta, we need to scale manually.
     // op(X)^T = op(X^T) for every flag ((X^H)^T = conj(X) = (X^T)^H), so
-    // C^T = op(B)^T * op(A)^T is ab_zgemm_ex with the operands and their
+    // C^T = op(B)^T * op(A)^T is that product with the operands and their
     // flags swapped. The alpha/beta epilogue is elementwise, so it runs on
-    // C^T unchanged.
+    // C^T unchanged. The method is the BLAS ABI's (ab_lines_method): rho(p, q)
+    // is symmetric, and C^T's rows and columns are op(B)'s columns and
+    // op(A)'s rows, so C^T takes the decision C = op(A) * op(B) would.
     if (!need_beta && alpha[0] == 1.0 && alpha[1] == 0.0) {
         // Simple case: C = A * B (the most common case in QE)
-        s = ab_zgemm_ex(transB, transA, mBr, mBi, mAr, mAi, mCr, mCi);
+        s = ab_internal_zgemm(transB, transA, mBr, mBi, mAr, mAi, mCr, mCi,
+                              ab_lines_method(&sa, &sb));
     } else {
         // General case: C_new = alpha * op(A)*op(B) + beta * C_old
         // Step 1: compute T = (op(A)*op(B))^T into temporary matrices
@@ -526,7 +600,8 @@ ABStatus ab_dev_zgemm_offset(ABTranspose transA, ABTranspose transB,
             s = AB_ERROR_ALLOC_FAILED;
             goto zgemm_cleanup;
         }
-        s = ab_zgemm_ex(transB, transA, mBr, mBi, mAr, mAi, mTr, mTi);
+        s = ab_internal_zgemm(transB, transA, mBr, mBi, mAr, mAi, mTr, mTi,
+                              ab_lines_method(&sa, &sb));
         if (s != AB_OK) {
             ab_matrix_destroy(mTr);
             ab_matrix_destroy(mTi);
@@ -579,6 +654,8 @@ ABStatus ab_dev_zgemm_offset(ABTranspose transA, ABTranspose transB,
     s = dev_download_complex_submatrix(C, c_offset, ldc, mCr, mCi, m, n);
 
 zgemm_cleanup:
+    ab_line_stats_free(&sa);
+    ab_line_stats_free(&sb);
     ab_matrix_destroy(mAr);
     ab_matrix_destroy(mAi);
     ab_matrix_destroy(mBr);
