@@ -2062,10 +2062,11 @@ static void test_morton_qe_realistic_dims(void) {
 
 // K-P0-1: power-of-2 tile grids that are neither square nor 2:1 wide, where
 // the Morton remap is not a bijection and used to leave tiles of C unwritten.
-// 64x64 tiles: 256x1024 (grid 16x4), 1024x256 (4x16). 32x32 tiles (C of at
-// most 480x480 elements): 256x128 (4x8), 512x256 (8x16), 128x512 (16x4),
-// 1024x64 (2x32). Tall-skinny 128x16 tiles (ab_dgemm_scaled with M >= 4N):
-// 2048x128 (8x16). ab_dgemm_async also covers K-P1-3 under MTL_DEBUG_LAYER=1.
+// 64x64 tiles: 256x1024 (grid 16x4), 1024x256 (4x16), 8192x256 (4x128).
+// 32x32 tiles (small grids, use_narrow_tiles): 256x128 (4x8), 512x256 (8x16),
+// 128x512 (16x4), 1024x64 (2x32), and with ab_dgemm_scaled 1024x256 (8x32)
+// and 2048x128 (4x64). Tall-skinny 128x16 tiles (ab_dgemm_scaled with M >= 4N):
+// 8192x256 (16x64). ab_dgemm_async also covers K-P1-3 under MTL_DEBUG_LAYER=1.
 typedef enum { MR_DGEMM, MR_DGEMM_SCALED, MR_DGEMM_ASYNC } MortonRectOp;
 
 static double morton_rect_err(MortonRectOp op, int M, int N, int K) {
@@ -2113,7 +2114,7 @@ static void test_morton_rect_pow2_grids(void) {
 
     static const struct { int M, N; } shapes[] = {
         {512, 256}, {256, 1024}, {1024, 256}, {1024, 64}, {2048, 128},
-        {256, 128}, {128, 512},
+        {256, 128}, {128, 512}, {8192, 256},
     };
     static const MortonRectOp ops[] = {MR_DGEMM, MR_DGEMM_SCALED, MR_DGEMM_ASYNC};
 
@@ -2577,14 +2578,14 @@ extern uint64_t ab_internal_prefetch_dispatches(void);   // src/apple_bottom.m
 // 'y' ab_dsyrk (A is M×K, C is M×M)
 typedef struct { char op; int M, N, K; } PrefetchCase;
 static const PrefetchCase PF_CASES[] = {
-    {'d',  520,  500,  300},   // dd_dgemm_pf
+    {'d', 1100, 1000,  300},   // dd_dgemm_pf
     {'d',  300,  200,  513},   // dd_dgemm_narrow_pf
-    {'s',  490,  500,  129},   // dd_dgemm_ab_pf
+    {'s', 1000, 1100,  129},   // dd_dgemm_ab_pf
     {'s',  500,  300,  700},   // dd_dgemm_ab_narrow_pf
-    {'s', 2000,   40,  300},   // dd_dgemm_ab_ts_pf
-    {'z',  520,  500,  100},   // three concurrent products each: dd_dgemm_pf,
+    {'s', 4000,   40,  300},   // dd_dgemm_ab_ts_pf
+    {'z', 1100, 1000,  100},   // three concurrent products each: dd_dgemm_pf,
     {'z',  256,  200,  300},   // dd_dgemm_narrow_pf,
-    {'z', 1024,   40,  513},   // dd_dgemm_ab_ts_pf
+    {'z', 4000,   40,  513},   // dd_dgemm_ab_ts_pf
     {'y',  500,  500, 1000},   // dd_dsyrk_pf
     {'y',  130,  130,   64},
 };

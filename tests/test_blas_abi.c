@@ -654,7 +654,7 @@ static void add_native(Op op, int M, int N, int K) {
 }
 
 // Native ABMatrix GEMMs (row-major) on tile grids that are powers of two but
-// neither square nor 2:1 wide (K-P0-1 regressions; 2048x128 uses the 128x16
+// neither square nor 2:1 wide (K-P0-1 regressions; 8192x256 uses the 128x16
 // tall-skinny tiles where the entry point routes M >= 4N there, 512x256 and
 // 1024x64 the 32x32 ones).
 // 256x512 (grid 8x4) is a control. The suite runs under MTL_DEBUG_LAYER=1,
@@ -662,7 +662,7 @@ static void add_native(Op op, int M, int N, int K) {
 static void gen_native(const Suite *s) {
     (void)s;
     static const int SHAPES[][2] = {
-        {512, 256}, {256, 1024}, {1024, 256}, {1024, 64}, {2048, 128}, {256, 512},
+        {512, 256}, {256, 1024}, {1024, 256}, {1024, 64}, {8192, 256}, {256, 512},
     };
     static const Op OPS[] = {
         OP_DGEMM, OP_DGEMM_SCALED, OP_ZGEMM, OP_BATCH_DGEMM, OP_DGEMM_ASYNC,

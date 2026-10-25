@@ -186,7 +186,9 @@ fused multiply-add of the GEMM inner loop has a conservative 8u² envelope
   decimal digits.
 - GEMM tiles are 64 × 64 with 4 × 4 outputs per thread, with a 128 × 16
   variant for tall-skinny shapes (M ≥ 4N) and a 32 × 32 one (2 × 2 per
-  thread) for outputs of at most 480 × 480 elements. On grids that leave
+  thread) for grids of up to about a thousand threadgroups (fewer for
+  concurrent products), whose finer tiles spread more evenly over the GPU's
+  cores. On grids that leave
   the GPU's cores with few threadgroups, and on the 32 × 32 tiles always,
   a kernel loads the next K-tile into registers while it computes the
   current one. Every variant computes each output the same way. Long dot
