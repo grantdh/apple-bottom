@@ -55,6 +55,7 @@
 #include "apple_bottom.h"
 #include "test_blas_check.h"
 #include "test_dot2.h"
+#include "test_kernels.h"
 #include "test_registry.h"
 #include "test_spawn.h"
 #include <Accelerate/Accelerate.h>
@@ -240,6 +241,7 @@ typedef struct {
     RangeData data;                     // KIND_RANGE only
     ImagData imag;                      // KIND_IMAG only
     const void *sym;                    // OP_SYMBOL only
+    const char *kernel;                 // gen_native: what every GEMM dispatch runs (or its _pf)
 } AbiCase;
 
 static AbiCase CASES[MAX_CASES];
@@ -646,30 +648,53 @@ static void gen_imbalance(const Suite *s) {
     }
 }
 
-static void add_native(Op op, int M, int N, int K) {
+static void add_native(Op op, int M, int N, int K, const char *kernel) {
     AbiCase *c = new_case();
     snprintf(c->name, sizeof c->name, "%s/%dx%dx%d", OP_NAME[op], M, N, K);
     c->op = op; c->M = M; c->N = N; c->K = K;
     c->alpha = SCALARS[SC_GEN].alpha; c->beta = SCALARS[SC_GEN].beta;   // ab_dgemm_scaled only
+    c->kernel = kernel;
 }
 
 // Native ABMatrix GEMMs (row-major) on tile grids that are powers of two but
-// neither square nor 2:1 wide (K-P0-1 regressions; 8192x256 uses the 128x16
-// tall-skinny tiles where the entry point routes M >= 4N there, 512x256 and
-// 1024x64 the 32x32 ones).
-// 256x512 (grid 8x4) is a control. The suite runs under MTL_DEBUG_LAYER=1,
-// which also catches unbound kernel buffers (K-P1-3).
+// neither square nor 2:1 wide (K-P0-1 regressions); 256x512, a 2:1 grid, is a
+// control. Each call must run the kernel its shape names for its entry point
+// (run_native), and the shapes must name every kernel in KERNEL: ab_dgemm and
+// ab_dgemm_async dispatch dd_dgemm or dd_dgemm_narrow, ab_dgemm_scaled a
+// dd_dgemm_ab kernel, and ab_zgemm (Gauss-3M's products in a concurrent
+// encoder) and ab_batch_dgemm the scaled kernels with alpha 1, beta 0 where
+// M >= 4N. The suite runs under MTL_DEBUG_LAYER=1, which also catches unbound
+// kernel buffers (K-P1-3).
 static void gen_native(const Suite *s) {
     (void)s;
-    static const int SHAPES[][2] = {
-        {512, 256}, {256, 1024}, {1024, 256}, {1024, 64}, {8192, 256}, {256, 512},
-    };
     static const Op OPS[] = {
         OP_DGEMM, OP_DGEMM_SCALED, OP_ZGEMM, OP_BATCH_DGEMM, OP_DGEMM_ASYNC,
     };
+    enum { K64, K32, AB64, AB32, ABTS };
+    static const char *const KERNEL[] = {
+        [K64] = "dd_dgemm", [K32] = "dd_dgemm_narrow", [AB64] = "dd_dgemm_ab",
+        [AB32] = "dd_dgemm_ab_narrow", [ABTS] = "dd_dgemm_ab_ts",
+    };
+    // Each shape's kernel for each of OPS
+    static const struct { int M, N, kernel[TEST_REGISTRY_SIZE(OPS)]; } SHAPES[] = {
+        {512,  256,  {K32, AB32, K32,  K32,  K32}},
+        {256,  1024, {K64, AB64, K32,  K64,  K64}},
+        {1024, 256,  {K64, AB32, AB32, AB32, K64}},
+        {1024, 64,   {K32, AB32, AB32, AB32, K32}},
+        {8192, 256,  {K64, ABTS, ABTS, ABTS, K64}},
+        {256,  512,  {K32, AB32, K32,  K32,  K32}},
+    };
+    unsigned named = 0;
     for (size_t o = 0; o < TEST_REGISTRY_SIZE(OPS); o++)
-        for (size_t i = 0; i < TEST_REGISTRY_SIZE(SHAPES); i++)
-            add_native(OPS[o], SHAPES[i][0], SHAPES[i][1], 64);
+        for (size_t i = 0; i < TEST_REGISTRY_SIZE(SHAPES); i++) {
+            add_native(OPS[o], SHAPES[i].M, SHAPES[i].N, 64, KERNEL[SHAPES[i].kernel[o]]);
+            named |= 1u << SHAPES[i].kernel[o];
+        }
+    for (size_t k = 0; k < TEST_REGISTRY_SIZE(KERNEL); k++)
+        if (!(named & 1u << k)) {   // a re-pinned case must not drop a kernel's coverage
+            fprintf(stderr, "test_blas_abi: no gen_native case runs %s\n", KERNEL[k]);
+            abort();
+        }
 }
 
 static void add_symbol(const char *sym, const void *addr) {
@@ -1133,6 +1158,20 @@ static bool run_native_complex(const AbiCase *c, char *detail, size_t n) {
     ab_matrix_destroy(mBi); ab_matrix_destroy(mCr); ab_matrix_destroy(mCi);
     free(A); free(B); free(C0); free(C); free(Cref); free(Cr); free(Ci); free(absAB);
     return st == AB_OK && err <= TOL;
+}
+
+// A native case (gen_native) by run, which must also have run only c->kernel's
+// GEMM dispatches; its detail gets the kernels that ran.
+static bool run_native(const AbiCase *c, bool (*run)(const AbiCase *, char *, size_t),
+                       char *detail, size_t n) {
+    KernelCounts before = kernel_counts();
+    bool ok = run(c, detail, n);
+    KernelCounts ran = kernel_counts_since(&before);
+    size_t len = strlen(detail);
+    char kernels[256];
+    bool on_kernel = kernel_check(&ran, c->kernel, kernels, sizeof kernels);
+    snprintf(detail + len, n - len, " %s", kernels);
+    return ok && on_kernel;
 }
 
 // The address the static linker bound for this executable is what a Fortran
@@ -2140,13 +2179,13 @@ static bool run_case(int idx, char *detail, size_t n) {
     case OP_ZGEMM_BLAS: case OP_ZGEMM_F: case OP_ZGEMM_SYM:
         return run_blas_complex(c, detail, n);
     case OP_ZGEMM:
-        return run_native_complex(c, detail, n);
+        return run_native(c, run_native_complex, detail, n);
     case OP_SYMBOL:
         return run_symbol(c, detail, n);
     case OP_REPORT:
         return run_report(c, detail, n);
     default:
-        return run_native_real(c, detail, n);
+        return run_native(c, run_native_real, detail, n);
     }
 }
 

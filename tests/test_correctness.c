@@ -3,6 +3,7 @@
 // =============================================================================
 
 #include "apple_bottom.h"
+#include "test_kernels.h"
 #include "test_registry.h"
 #include <limits.h>
 #include <stdio.h>
@@ -2062,12 +2063,18 @@ static void test_morton_qe_realistic_dims(void) {
 
 // K-P0-1: power-of-2 tile grids that are neither square nor 2:1 wide, where
 // the Morton remap is not a bijection and used to leave tiles of C unwritten.
-// 64x64 tiles: 256x1024 (grid 16x4), 1024x256 (4x16), 8192x256 (4x128).
-// 32x32 tiles (small grids, use_narrow_tiles): 256x128 (4x8), 512x256 (8x16),
-// 128x512 (16x4), 1024x64 (2x32), and with ab_dgemm_scaled 1024x256 (8x32)
-// and 2048x128 (4x64). Tall-skinny 128x16 tiles (ab_dgemm_scaled with M >= 4N):
-// 8192x256 (16x64). ab_dgemm_async also covers K-P1-3 under MTL_DEBUG_LAYER=1.
+// The shapes must put every GEMM kernel but dd_dsyrk (square grids only) on
+// such grids: 64x64 (dd_dgemm, dd_dgemm_ab), 32x32 for small grids
+// (dd_dgemm_narrow, dd_dgemm_ab_narrow; use_narrow_tiles) and tall-skinny
+// 128x16 (dd_dgemm_ab_ts: ab_dgemm_scaled with M >= 4N), and each call the
+// kernel its shape names. ab_dgemm_async also covers K-P1-3 under
+// MTL_DEBUG_LAYER=1.
 typedef enum { MR_DGEMM, MR_DGEMM_SCALED, MR_DGEMM_ASYNC } MortonRectOp;
+
+static const char *const MORTON_RECT_OP[] = {
+    [MR_DGEMM] = "ab_dgemm", [MR_DGEMM_SCALED] = "ab_dgemm_scaled",
+    [MR_DGEMM_ASYNC] = "ab_dgemm_async",
+};
 
 static double morton_rect_err(MortonRectOp op, int M, int N, int K) {
     double* A = malloc((size_t)M * K * sizeof(double));
@@ -2112,25 +2119,45 @@ static void test_morton_rect_pow2_grids(void) {
     TEST("K-P0-1: DGEMM non-square pow2 tile grids");
     ab_init();
 
-    static const struct { int M, N; } shapes[] = {
-        {512, 256}, {256, 1024}, {1024, 256}, {1024, 64}, {2048, 128},
-        {256, 128}, {128, 512}, {8192, 256},
+    // The kernels of ab_dgemm and ab_dgemm_async (one dispatch helper) and of
+    // ab_dgemm_scaled, with their tile grids (columns x rows)
+    static const struct { int M, N; const char *kernel, *scaled; } shapes[] = {
+        {512,  256,  "dd_dgemm_narrow", "dd_dgemm_ab_narrow"},   // 8x16
+        {256,  1024, "dd_dgemm",        "dd_dgemm_ab"},          // 16x4
+        {1024, 256,  "dd_dgemm",        "dd_dgemm_ab_narrow"},   // 4x16, 8x32
+        {1024, 64,   "dd_dgemm_narrow", "dd_dgemm_ab_narrow"},   // 2x32
+        {2048, 128,  "dd_dgemm",        "dd_dgemm_ab_narrow"},   // 2x32, 4x64
+        {256,  128,  "dd_dgemm_narrow", "dd_dgemm_ab_narrow"},   // 4x8
+        {128,  512,  "dd_dgemm_narrow", "dd_dgemm_ab_narrow"},   // 16x4
+        {8192, 256,  "dd_dgemm",        "dd_dgemm_ab_ts"},       // 4x128, 16x64
     };
     static const MortonRectOp ops[] = {MR_DGEMM, MR_DGEMM_SCALED, MR_DGEMM_ASYNC};
 
     int all_ok = 1;
     double worst_err = 0;
+    char moved[256] = "", ran[192];
+    KernelCounts start = kernel_counts();
     for (size_t si = 0; si < TEST_REGISTRY_SIZE(shapes); si++) {
         for (size_t oi = 0; oi < TEST_REGISTRY_SIZE(ops); oi++) {
+            const char *want = ops[oi] == MR_DGEMM_SCALED ? shapes[si].scaled : shapes[si].kernel;
+            KernelCounts before = kernel_counts();
             double err = morton_rect_err(ops[oi], shapes[si].M, shapes[si].N, 64);
+            KernelCounts k = kernel_counts_since(&before);
+            if (!kernel_check(&k, want, ran, sizeof ran) && !moved[0])
+                snprintf(moved, sizeof moved, "%s %dx%d %s", MORTON_RECT_OP[ops[oi]],
+                         shapes[si].M, shapes[si].N, ran);
             if (!(err < 1e-13)) all_ok = 0;
             if (err > worst_err) worst_err = err;
         }
     }
+    KernelCounts all = kernel_counts_since(&start);
+    const char *missing = kernel_missing(&all, false, "dd_dsyrk");
+    if (missing && !moved[0]) snprintf(moved, sizeof moved, "no shape runs %s", missing);
 
     ab_shutdown();
 
-    if (all_ok) PASS();
+    if (moved[0]) FAIL(moved);
+    else if (all_ok) PASS();
     else { char buf[80]; snprintf(buf, 80, "worst=%.2e", worst_err); FAIL(buf); }
 }
 
@@ -2568,26 +2595,26 @@ static void test_xr_elementwise(void) {
 // Each case runs with AB_PREFETCH=1, which puts every GEMM-family dispatch on
 // a register-prefetch kernel, and with AB_PREFETCH=0, which keeps them all on
 // the plain kernels, each pass on a freshly initialized library. The FP64
-// results must be bitwise equal, and each call must have dispatched as many
-// prefetch kernels as it has products (three for ZGEMM's Gauss-3M), none
-// with AB_PREFETCH=0. Together the cases run every prefetch kernel.
+// results must be bitwise equal, and each call must have dispatched its
+// kernel's prefetch instance (AB_PREFETCH=1) or plain one (AB_PREFETCH=0) once
+// per product (three for ZGEMM's Gauss-3M) and nothing else. Together the
+// cases must run every prefetch kernel.
 
-extern uint64_t ab_internal_prefetch_dispatches(void);   // src/apple_bottom.m
-
-// op: 'd' ab_dgemm, 's' ab_dgemm_scaled (alpha -0.7, beta 1.3), 'z' ab_zgemm,
-// 'y' ab_dsyrk (A is M×K, C is M×M)
-typedef struct { char op; int M, N, K; } PrefetchCase;
+// op: 'd' ab_dgemm, 's' ab_dgemm_scaled (alpha -0.7, beta 1.3), 'z' ab_zgemm
+// (three concurrent products), 'y' ab_dsyrk (A is M×K, C is M×M); kernel:
+// the kernel of its products
+typedef struct { char op; int M, N, K; const char *kernel; } PrefetchCase;
 static const PrefetchCase PF_CASES[] = {
-    {'d', 1100, 1000,  300},   // dd_dgemm_pf
-    {'d',  300,  200,  513},   // dd_dgemm_narrow_pf
-    {'s', 1000, 1100,  129},   // dd_dgemm_ab_pf
-    {'s',  500,  300,  700},   // dd_dgemm_ab_narrow_pf
-    {'s', 4000,   40,  300},   // dd_dgemm_ab_ts_pf
-    {'z', 1100, 1000,  100},   // three concurrent products each: dd_dgemm_pf,
-    {'z',  256,  200,  300},   // dd_dgemm_narrow_pf,
-    {'z', 4000,   40,  513},   // dd_dgemm_ab_ts_pf
-    {'y',  500,  500, 1000},   // dd_dsyrk_pf
-    {'y',  130,  130,   64},
+    {'d', 1100, 1000,  300, "dd_dgemm"},
+    {'d',  300,  200,  513, "dd_dgemm_narrow"},
+    {'s', 1000, 1100,  129, "dd_dgemm_ab"},
+    {'s',  500,  300,  700, "dd_dgemm_ab_narrow"},
+    {'s', 4000,   40,  300, "dd_dgemm_ab_ts"},
+    {'z', 1100, 1000,  100, "dd_dgemm"},
+    {'z',  256,  200,  300, "dd_dgemm_narrow"},
+    {'z', 4000,   40,  513, "dd_dgemm_ab_ts"},
+    {'y',  500,  500, 1000, "dd_dsyrk"},
+    {'y',  130,  130,   64, "dd_dsyrk"},
 };
 #define N_PF_CASES ((int)TEST_REGISTRY_SIZE(PF_CASES))
 
@@ -2636,16 +2663,35 @@ static double *pf_case(const PrefetchCase *c, long seed, size_t *n) {
 }
 
 // Every case on a fresh library with AB_PREFETCH=mode: res[c] NULL where one
-// failed, pf[c] its prefetch dispatches
-static void pf_run(const char *mode, double **res, size_t *n, uint64_t *pf) {
+// failed, ran[c] the kernels it dispatched
+static void pf_run(const char *mode, double **res, size_t *n, KernelCounts *ran) {
     setenv("AB_PREFETCH", mode, 1);
     bool ok = ab_init() == AB_OK;
     for (int c = 0; c < N_PF_CASES; c++) {
-        uint64_t before = ab_internal_prefetch_dispatches();
+        KernelCounts before = kernel_counts();
         res[c] = ok ? pf_case(&PF_CASES[c], 4000 + 10 * c, &n[c]) : NULL;
-        pf[c] = ab_internal_prefetch_dispatches() - before;
+        ran[c] = kernel_counts_since(&before);
     }
     if (ok) ab_shutdown();
+}
+
+// Checks that case p dispatched its kernel's _pf instance once per product
+// with AB_PREFETCH=1 (on) and its plain instance with AB_PREFETCH=0 (off), and
+// nothing else; if not, msg says what ran
+static void pf_check_kernels(const PrefetchCase *p, const KernelCounts *on,
+                             const KernelCounts *off, char *msg, size_t n) {
+    const uint64_t products = p->op == 'z' ? 3 : 1;
+    const KernelCounts *ran[2] = {off, on};
+    for (int pf = 1; pf >= 0; pf--) {
+        int k = kernel_kind(ran[pf], p->kernel);
+        if (k >= 0 && ran[pf]->n[k][pf] == products && kernel_total(ran[pf]) == products)
+            continue;
+        char got[192];
+        snprintf(msg, n, "%c %dx%dx%d with AB_PREFETCH=%d ran %s, not %s%s x%llu", p->op, p->M,
+                 p->N, p->K, pf, kernel_list(ran[pf], got, sizeof got), p->kernel,
+                 pf ? "_pf" : "", (unsigned long long)products);
+        return;
+    }
 }
 
 static void test_prefetch_same_bits(void) {
@@ -2654,25 +2700,28 @@ static void test_prefetch_same_bits(void) {
     char *keep = saved ? strdup(saved) : NULL;
     double *on[N_PF_CASES], *off[N_PF_CASES];
     size_t n_on[N_PF_CASES], n_off[N_PF_CASES];
-    uint64_t pf_on[N_PF_CASES], pf_off[N_PF_CASES];
+    KernelCounts ran_on[N_PF_CASES], ran_off[N_PF_CASES];
 
-    pf_run("1", on, n_on, pf_on);
-    pf_run("0", off, n_off, pf_off);
+    KernelCounts start = kernel_counts();
+    pf_run("1", on, n_on, ran_on);
+    KernelCounts all_on = kernel_counts_since(&start);
+    pf_run("0", off, n_off, ran_off);
     if (keep) setenv("AB_PREFETCH", keep, 1); else unsetenv("AB_PREFETCH");
     free(keep);
 
-    char msg[128] = "";
+    char msg[256] = "";
     for (int c = 0; c < N_PF_CASES && !msg[0]; c++) {
         const PrefetchCase *p = &PF_CASES[c];
-        uint64_t products = p->op == 'z' ? 3 : 1;
         if (!on[c] || !off[c])
             snprintf(msg, sizeof msg, "%c %dx%dx%d failed", p->op, p->M, p->N, p->K);
         else if (n_on[c] != n_off[c] || memcmp(on[c], off[c], n_on[c] * sizeof(double)))
             snprintf(msg, sizeof msg, "%c %dx%dx%d: bits differ", p->op, p->M, p->N, p->K);
-        else if (pf_on[c] != products || pf_off[c] != 0)
-            snprintf(msg, sizeof msg, "%c %dx%dx%d: %llu prefetch dispatches, %llu with AB_PREFETCH=0",
-                     p->op, p->M, p->N, p->K, (unsigned long long)pf_on[c], (unsigned long long)pf_off[c]);
+        else
+            pf_check_kernels(p, &ran_on[c], &ran_off[c], msg, sizeof msg);
     }
+    // Then every kernel's prefetch instance must have run in a case
+    const char *missing = kernel_missing(&all_on, true, NULL);
+    if (missing && !msg[0]) snprintf(msg, sizeof msg, "no case runs %s_pf", missing);
     for (int c = 0; c < N_PF_CASES; c++) { free(on[c]); free(off[c]); }
     if (msg[0]) FAIL(msg); else PASS();
 }

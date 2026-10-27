@@ -32,6 +32,7 @@
 
 #include "apple_bottom.h"
 #include "test_dot2.h"
+#include "test_kernels.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,6 +55,7 @@ typedef struct {
     GemmOp op;
     int M, K, N;
     double alpha, beta;    // OP_DGEMM_SCALED only
+    const char* kernel;    // if set, every GEMM dispatch must run it (or its _pf instance)
 } PrecisionCase;
 
 // Number of real planes per matrix: ZGEMM has real and imaginary parts.
@@ -155,7 +157,9 @@ static int run_case(const PrecisionCase* pc) {
     if (pc->op == OP_DGEMM_SCALED) C0 = random_matrix(nC);
 
     int passed = 0;
+    KernelCounts before = kernel_counts();
     ABStatus st = gpu_gemm(pc, A, B, C0, G);
+    KernelCounts ran = kernel_counts_since(&before);
     if (st != AB_OK) {
         printf("  %-34s │ %s │ ✗ FAIL\n", pc->label, ab_status_string(st));
         goto cleanup;
@@ -173,9 +177,12 @@ static int run_case(const PrecisionCase* pc) {
         }
     }
     double nw = sqrt(d2 / r2), unit = sqrt((double)pc->K) * U2;
-    passed = nw / unit <= NW_BOUND && cw / unit <= CW_BOUND;
+    char kernels[192];
+    int on_kernel = !pc->kernel || kernel_check(&ran, pc->kernel, kernels, sizeof kernels);
+    passed = nw / unit <= NW_BOUND && cw / unit <= CW_BOUND && on_kernel;
     printf("  %-34s │ %.2e %8.3g │ %.2e %8.3g │ %s\n",
            pc->label, nw, nw / unit, cw, cw / unit, passed ? "✓ PASS" : "✗ FAIL");
+    if (!on_kernel) printf("    %s\n", kernels);
 
 cleanup:
     for (int p = 0; p < 2; p++) { free(A[p]); free(B[p]); free(G[p]); free(R[p]); free(L[p]); }
@@ -223,26 +230,32 @@ int main(void) {
     printf("  Case (kernel)                      │ normwise   /√K·u² │ compwise   /√K·u² │ Status\n");
     printf("─────────────────────────────────────┼───────────────────┼───────────────────┼────────\n");
 
+    // A label's kernel in parentheses is the case's `kernel`, which it must run
     static const PrecisionCase cases[] = {
         // ab_dgemm: dd_dgemm, or dd_dgemm_narrow for a small grid (see use_narrow_tiles)
-        {"ab_dgemm 64x64 K=64 (narrow)",         OP_DGEMM,   64,   64,   64, 0, 0},
-        {"ab_dgemm 128x128 K=128",               OP_DGEMM,  128,  128,  128, 0, 0},
-        {"ab_dgemm 256x256 K=256",               OP_DGEMM,  256,  256,  256, 0, 0},
-        {"ab_dgemm 512x512 K=512 (dd_dgemm)",    OP_DGEMM,  512,  512,  512, 0, 0},
-        {"ab_dgemm 1024x1024 K=1024",            OP_DGEMM, 1024, 1024, 1024, 0, 0},
-        {"ab_dgemm 2048x2048 K=2048",            OP_DGEMM, 2048, 2048, 2048, 0, 0},
-        {"ab_dgemm 100x100 K=4096 (narrow)",     OP_DGEMM,  100, 4096,  100, 0, 0},
-        {"ab_dgemm 1000x50 K=200 (narrow)",      OP_DGEMM, 1000,  200,   50, 0, 0},
+        {"ab_dgemm 64x64 K=64 (narrow)",      OP_DGEMM,   64,   64,   64, 0, 0, "dd_dgemm_narrow"},
+        {"ab_dgemm 128x128 K=128",            OP_DGEMM,  128,  128,  128, 0, 0, NULL},
+        {"ab_dgemm 256x256 K=256",            OP_DGEMM,  256,  256,  256, 0, 0, NULL},
+        {"ab_dgemm 512x512 K=512 (dd_dgemm)", OP_DGEMM,  512,  512,  512, 0, 0, "dd_dgemm"},
+        {"ab_dgemm 1024x1024 K=1024",         OP_DGEMM, 1024, 1024, 1024, 0, 0, NULL},
+        {"ab_dgemm 2048x2048 K=2048",         OP_DGEMM, 2048, 2048, 2048, 0, 0, NULL},
+        {"ab_dgemm 100x100 K=4096 (narrow)",  OP_DGEMM,  100, 4096,  100, 0, 0, "dd_dgemm_narrow"},
+        {"ab_dgemm 1000x50 K=200 (narrow)",   OP_DGEMM, 1000,  200,   50, 0, 0, "dd_dgemm_narrow"},
         // ab_dgemm_scaled: dd_dgemm_ab, dd_dgemm_ab_ts when M >= 4N, or
         // dd_dgemm_ab_narrow for a small grid (see use_narrow_tiles)
-        {"scaled 1100x1000 K=500 (dd_dgemm_ab)", OP_DGEMM_SCALED,  1100, 500, 1000, 0.7, -1.3},
-        {"scaled 500x300 K=700 (narrow)",        OP_DGEMM_SCALED,   500, 700, 300, 0.7, -1.3},
-        {"scaled 1000x50 K=200 a1b0 (narrow)",   OP_DGEMM_SCALED,  1000, 200,  50, 1.0,  0.0},
-        {"scaled 18277x150 K=300 (ts, QE)",      OP_DGEMM_SCALED, 18277, 300, 150, 0.7, -1.3},
-        // ab_zgemm: Gauss 3M, three real GEMMs plus DD add/sub
-        {"ab_zgemm 256x256 K=256 (narrow)",      OP_ZGEMM,  256,  256,  256, 0, 0},
-        {"ab_zgemm 1024x64 K=512 (narrow)",      OP_ZGEMM, 1024,  512,   64, 0, 0},
-        {"ab_zgemm 4000x40 K=512 (ts)",          OP_ZGEMM, 4000,  512,   40, 0, 0},
+        {"scaled 1100x1000 K=500 (dd_dgemm_ab)", OP_DGEMM_SCALED, 1100, 500, 1000, 0.7, -1.3,
+         "dd_dgemm_ab"},
+        {"scaled 500x300 K=700 (narrow)",        OP_DGEMM_SCALED, 500, 700, 300, 0.7, -1.3,
+         "dd_dgemm_ab_narrow"},
+        {"scaled 1000x50 K=200 a1b0 (narrow)",   OP_DGEMM_SCALED, 1000, 200, 50, 1.0, 0.0,
+         "dd_dgemm_ab_narrow"},
+        {"scaled 18277x150 K=300 (ts, QE)",      OP_DGEMM_SCALED, 18277, 300, 150, 0.7, -1.3,
+         "dd_dgemm_ab_ts"},
+        // ab_zgemm: Gauss 3M, three real GEMMs plus DD add/sub, on the scaled
+        // kernels (alpha 1, beta 0) when M >= 4N
+        {"ab_zgemm 256x256 K=256 (narrow)",   OP_ZGEMM,  256,  256,  256, 0, 0, "dd_dgemm_narrow"},
+        {"ab_zgemm 1024x64 K=512 (narrow)",   OP_ZGEMM, 1024,  512,   64, 0, 0, "dd_dgemm_ab_narrow"},
+        {"ab_zgemm 4000x40 K=512 (ts)",       OP_ZGEMM, 4000,  512,   40, 0, 0, "dd_dgemm_ab_ts"},
     };
     const int n_cases = (int)(sizeof(cases) / sizeof(cases[0]));
     const int n_total = n_cases + 1;   // + the smoke test
