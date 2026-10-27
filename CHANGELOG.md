@@ -163,6 +163,21 @@ All notable changes to this project will be documented in this file.
   transposed copies of A and B, the copies that bring real and imaginary
   parts to one scale, and the operands that the host path of the BLAS ABI
   (`AB_HOST_PACK=1`) and `ab_dev_zgemm` copy in are still made every call.
+- **The device-buffer API converts its operands where they lie, across
+  cores.** `ab_dev_dgemm` and `ab_dev_zgemm` copied each operand out of its
+  buffer into FP64 arrays (complex ones split into real and imaginary
+  parts) before converting those to double-float, and copied C back the
+  same way, the copies of C and of real operands on one core. One pass now
+  converts each operand in its buffer, in chunks across cores, measuring
+  each part's range for its scale and gathering ZGEMM's per-line
+  statistics as it goes; C converts back into its buffer the same way, and
+  a transposed DGEMM operand through a small tile in cache. The host
+  epilogue of a ZGEMM with general alpha and beta runs across cores too.
+  Results are bitwise unchanged. On an M2 Max, at QE's shapes, a call
+  takes 0.79× the time at 160×160×9140 'C','N' (`ab_dev_zgemm`, 10.5 →
+  8.3 ms) and 0.75× at 9140×160×160 'N','N' (0.70× with general alpha and
+  beta); `ab_dev_dgemm` takes 0.64× at 'T','N' 160×160×18280 and 0.77× at
+  'N','N' 18280×160×160.
 
 ### Fixed
 - **Data outside FP32's exponent range no longer gives silently wrong GPU
@@ -210,10 +225,9 @@ All notable changes to this project will be documented in this file.
   - 4M costs 1.07–1.34× the native call time, 1.05–1.19× through
     `ab_dev_zgemm` and 1.00–1.10× end to end through `zgemm_` (M2 Max).
     Balanced data keeps the three-product form and its bits.
-  - `ab_dev_zgemm` gathers the parts as it copies op(A) and op(B) out of
-    their buffers, a copy that now runs across cores, as the FP64→DD
-    conversion after it already did: on balanced data its calls take 2–6%
-    less time than before at QE shapes, and 3% less at 1024³.
+  - `ab_dev_zgemm` gathers the parts in the pass that converts op(A) and
+    op(B) out of their buffers (see Changed); a pass of their own would
+    cost 9–14% of a call at QE shapes.
   - New tests: `test_blas_abi test_zgemm_imbalance` (6 cases),
     `test_device_api test_zgemm_imbalance` (13 cases) and
     `test_correctness test_imbalance_zgemm_paths`. Limits:

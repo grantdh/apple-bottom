@@ -1789,43 +1789,42 @@ static ab_range_t for_each_chunk(size_t count, size_t work,
         parts[c] = body(offset, n);
     });
     ab_range_t r = AB_RANGE_EMPTY;
-    for (int c = 0; c < AB_CONVERT_CHUNKS; c++) {
-        r.max = parts[c].max > r.max ? parts[c].max : r.max;
-        r.min = parts[c].min < r.min ? parts[c].min : r.min;
-    }
+    for (int c = 0; c < AB_CONVERT_CHUNKS; c++) r = ab_range_merge(r, parts[c]);
     return r;
 }
 
-// src * 2^-e to DD, each value rounded once; with range, also returns the range
-// of the converted values (in the same vectorized loop; AB_RANGE_EMPTY without).
+// src[i * S] * 2^-e to dst[i] in DD, each value rounded once; with range, also
+// returns the range of the converted values (in the same vectorized loop;
+// AB_RANGE_EMPTY without).
+template <size_t S = 1>
 static ab_range_t convert_fp64_to_dd(const double* __restrict src, DDFloat* __restrict dst,
                                      size_t count, int e, bool range) {
     uint32_t mx = 0, mn = UINT32_MAX;
     if (e < -1023 || e > 1022) {                // 2^-e is not a normal double
         for (size_t i = 0; i < count; i++) {
-            double v = ldexp(src[i], -e);
+            double v = ldexp(src[i * S], -e);
             if (range) AB_RANGE_ADD(v, mx, mn);
             dst[i] = fp64_to_dd(v);
         }
     } else if (e == 0) {
         if (range) {
             for (size_t i = 0; i < count; i++) {
-                AB_RANGE_ADD(src[i], mx, mn);
-                dst[i] = fp64_to_dd(src[i]);
+                AB_RANGE_ADD(src[i * S], mx, mn);
+                dst[i] = fp64_to_dd(src[i * S]);
             }
         } else {
-            for (size_t i = 0; i < count; i++) dst[i] = fp64_to_dd(src[i]);
+            for (size_t i = 0; i < count; i++) dst[i] = fp64_to_dd(src[i * S]);
         }
     } else {
         double f = ab_pow2(-e);
         if (range) {
             for (size_t i = 0; i < count; i++) {
-                double v = src[i] * f;
+                double v = src[i * S] * f;
                 AB_RANGE_ADD(v, mx, mn);
                 dst[i] = fp64_to_dd(v);
             }
         } else {
-            for (size_t i = 0; i < count; i++) dst[i] = fp64_to_dd(src[i] * f);
+            for (size_t i = 0; i < count; i++) dst[i] = fp64_to_dd(src[i * S] * f);
         }
     }
     return range ? (ab_range_t){mx, mn} : AB_RANGE_EMPTY;
@@ -1916,6 +1915,13 @@ static int native_scale_exp(ab_range_t r) {
     if (lo >= AB_STORE_MIN_EXP && hi <= AB_STORE_MAX_EXP) return 0;
     if (hi - lo <= AB_STORE_MAX_EXP - AB_STORE_MIN_EXP) return centre;
     return hi - AB_STORE_MAX_EXP;
+}
+
+// Gives m, as an upload measures it, the scale of the range r of its values
+// (native_scale_exp) and their largest magnitude.
+static inline void set_scale_measured(ABMatrix m, ab_range_t r) {
+    m->exp2 = native_scale_exp(r);
+    m->maxhw = r.max;
 }
 
 // =============================================================================
@@ -2089,8 +2095,7 @@ ABStatus ab_matrix_upload(ABMatrix m, const double* data, bool parallel) {
     DDFloat* dst = (DDFloat*)m->buffer.contents;
     ab_range_t range = parallel ? convert_fp64_to_dd_parallel(data, dst, m->count, 0, true)
                                 : convert_fp64_to_dd(data, dst, m->count, 0, true);
-    m->exp2 = native_scale_exp(range);
-    m->maxhw = range.max;
+    set_scale_measured(m, range);
     if (m->exp2 != 0) {
         if (parallel)
             convert_fp64_to_dd_parallel(data, dst, m->count, m->exp2, false);
@@ -2162,8 +2167,7 @@ extern "C" ABStatus ab_internal_upload_scaled(ABMatrix m, const double* data, co
                     }
                     ri = (ab_range_t){mx, mn};
                 }
-                part.max = ri.max > part.max ? ri.max : part.max;
-                part.min = ri.min < part.min ? ri.min : part.min;
+                part = ab_range_merge(part, ri);
             }
             return part;
         });
@@ -2173,6 +2177,201 @@ extern "C" ABStatus ab_internal_upload_scaled(ABMatrix m, const double* data, co
     set_scale_unmeasured(m, 0);
     m->uploaded = true;
     stats_add_upload(get_time_ms() - t0, m->count);
+    return AB_OK;
+}
+
+// =============================================================================
+// Operands Where They Lie (device_api.m)
+// =============================================================================
+// device_api.m's column-major operands are converted in their buffers,
+// without a staging copy, in chunks of whole rows (of the ABMatrix) across
+// cores, each part to the values, scale and largest magnitude that
+// ab_matrix_upload gives an array of it.
+
+// Interleaved pairs x[2i], x[2i+1] to DD re[i] and im[i], unscaled, as
+// convert_fp64_to_dd converts each, with the parts' ranges in *rr and *ri;
+// with COLS, also adds their magnitudes to rmax[i] and imax[i].
+template <bool COLS>
+static void convert_pairs_to_dd(const double* __restrict x, DDFloat* __restrict re,
+                                DDFloat* __restrict im, size_t n, ab_range_t* rr, ab_range_t* ri,
+                                uint32_t* __restrict rmax, uint32_t* __restrict imax) {
+    uint32_t mxr = 0, mnr = UINT32_MAX, mxi = 0, mni = UINT32_MAX;
+    for (size_t i = 0; i < n; i++) {
+        double vr = x[2 * i], vi = x[2 * i + 1];
+        uint32_t hr = ab_abs_hiword(vr), hm = ab_abs_hiword(vi);
+        AB_HIWORD_ADD(hr, mxr, mnr);
+        AB_HIWORD_ADD(hm, mxi, mni);
+        if (COLS) {
+            AB_HIWORD_MAX(hr, rmax[i]);
+            AB_HIWORD_MAX(hm, imax[i]);
+        }
+        re[i] = fp64_to_dd(vr);
+        im[i] = fp64_to_dd(vi);
+    }
+    *rr = (ab_range_t){mxr, mnr};
+    *ri = (ab_range_t){mxi, mni};
+}
+
+// DD re[i] * 2^er and im[i] * 2^ei to the interleaved pairs x[2i], x[2i+1],
+// each as convert_dd_to_fp64 converts it.
+static void convert_dd_to_pairs(const DDFloat* __restrict re, const DDFloat* __restrict im,
+                                double* __restrict x, size_t n, int er, int ei) {
+    if (er == 0 && ei == 0) {
+        for (size_t i = 0; i < n; i++) {
+            x[2 * i] = dd_to_fp64(re[i]);
+            x[2 * i + 1] = dd_to_fp64(im[i]);
+        }
+    } else {
+        for (size_t i = 0; i < n; i++) {
+            x[2 * i] = ab_scale2(dd_to_fp64(re[i]), er);
+            x[2 * i + 1] = ab_scale2(dd_to_fp64(im[i]), ei);
+        }
+    }
+}
+
+// Rows [r0, r0 + nr) of the matrix whose element (i, j) is x[j * ld + i] to
+// DD at 2^-e, as convert_fp64_to_dd converts each value (with range, also
+// returning their range), through tiles of 16 rows (a 128-byte line of each
+// column) by 128 columns transposed in L1.
+static ab_range_t convert_cols_to_dd(const double* x, size_t ld, DDFloat* dst, size_t cols,
+                                     size_t r0, size_t nr, int e, bool range) {
+    enum { TILE_ROWS = 16, TILE_COLS = 128 };
+    double tile[TILE_ROWS * TILE_COLS];
+    ab_range_t r = AB_RANGE_EMPTY;
+    for (size_t b = r0; b < r0 + nr; b += TILE_ROWS) {
+        const size_t h = MIN((size_t)TILE_ROWS, r0 + nr - b);
+        for (size_t j0 = 0; j0 < cols; j0 += TILE_COLS) {
+            const size_t w = MIN((size_t)TILE_COLS, cols - j0);
+            for (size_t j = 0; j < w; j++)
+                for (size_t i = 0; i < h; i++)
+                    tile[i * TILE_COLS + j] = x[(j0 + j) * ld + b + i];
+            for (size_t i = 0; i < h; i++)
+                r = ab_range_merge(r, convert_fp64_to_dd(tile + i * TILE_COLS,
+                                                         dst + (b + i) * cols + j0, w, e, range));
+        }
+    }
+    return r;
+}
+
+// Gives m, whose rows were converted unscaled from x (row i from x + i *
+// stride, values S apart), the scale of their range r, and converts them
+// again where it is not 0.
+template <size_t S>
+static void upload_rows_rescale(ABMatrix m, ab_range_t r, const double* x, size_t stride) {
+    set_scale_measured(m, r);
+    m->uploaded = true;
+    if (m->exp2 == 0) return;
+    const size_t cols = (size_t)m->cols;
+    const int e = m->exp2;
+    DDFloat* dst = (DDFloat*)m->buffer.contents;
+    ab_internal_for_each_chunk((size_t)m->rows, cols, ^(size_t, size_t r0, size_t nr) {
+        for (size_t i = r0; i < r0 + nr; i++)
+            convert_fp64_to_dd<S>(x + i * stride, dst + i * cols, cols, e, false);
+    });
+}
+
+// One pass converts every part unscaled and measures it; a part whose scale
+// is not 0 is converted again (upload_rows_rescale). A column's maxima span
+// the chunks, so each chunk gathers those into a part of its own, merged
+// after.
+extern "C" ABStatus ab_internal_upload_rows(ABMatrix re, ABMatrix im, const double* x, size_t ld,
+                                            ab_line_stats_t* lines, bool by_row) {
+    if (!re || !x || (im && (im->rows != re->rows || im->cols != re->cols)))
+        return AB_ERROR_INVALID_ARG;
+    double t0 = get_time_ms();
+    const size_t rows = (size_t)re->rows, cols = (size_t)re->cols;
+    const size_t w = im ? 2 : 1, stride = w * ld;   // doubles per element and from row to row
+    DDFloat* dr = (DDFloat*)re->buffer.contents;
+    DDFloat* di = im ? (DDFloat*)im->buffer.contents : NULL;
+    const bool row_lines = im && lines && by_row, col_lines = im && lines && !by_row;
+    const size_t nparts = MIN(rows, (size_t)AB_CONVERT_CHUNKS);
+    uint32_t* colmax = col_lines ? (uint32_t*)calloc(nparts * 2 * cols, sizeof(uint32_t)) : NULL;
+    if (col_lines && !colmax) return AB_ERROR_ALLOC_FAILED;
+
+    ab_range_t range_storage[2 * AB_CONVERT_CHUNKS], *ranges = range_storage;  // blocks write through it
+    for (int c = 0; c < 2 * AB_CONVERT_CHUNKS; c++) ranges[c] = AB_RANGE_EMPTY;
+    ab_internal_for_each_chunk(rows, w * cols, ^(size_t c, size_t r0, size_t nr) {
+        uint32_t* pr = col_lines ? colmax + c * 2 * cols : NULL;
+        ab_range_t a = AB_RANGE_EMPTY, b = AB_RANGE_EMPTY;
+        for (size_t i = r0; i < r0 + nr; i++) {
+            const double* xi = x + i * stride;
+            ab_range_t ra = AB_RANGE_EMPTY, rb = AB_RANGE_EMPTY;
+            if (!im)
+                ra = convert_fp64_to_dd(xi, dr + i * cols, cols, 0, true);
+            else if (pr)
+                convert_pairs_to_dd<true>(xi, dr + i * cols, di + i * cols, cols, &ra, &rb, pr, pr + cols);
+            else
+                convert_pairs_to_dd<false>(xi, dr + i * cols, di + i * cols, cols, &ra, &rb, NULL, NULL);
+            if (row_lines) {
+                AB_HIWORD_MAX(ra.max, lines->rmax[i]);
+                AB_HIWORD_MAX(rb.max, lines->imax[i]);
+            }
+            a = ab_range_merge(a, ra);
+            b = ab_range_merge(b, rb);
+        }
+        ranges[2 * c] = a;
+        ranges[2 * c + 1] = b;
+    });
+
+    ab_range_t range_re = AB_RANGE_EMPTY, range_im = AB_RANGE_EMPTY;
+    for (int c = 0; c < AB_CONVERT_CHUNKS; c++) {
+        range_re = ab_range_merge(range_re, ranges[2 * c]);
+        range_im = ab_range_merge(range_im, ranges[2 * c + 1]);
+    }
+    for (size_t c = 0; c < nparts && col_lines; c++)
+        for (size_t j = 0; j < cols; j++) {
+            AB_HIWORD_MAX(colmax[c * 2 * cols + j], lines->rmax[j]);
+            AB_HIWORD_MAX(colmax[c * 2 * cols + cols + j], lines->imax[j]);
+        }
+    free(colmax);
+
+    if (!im) {
+        upload_rows_rescale<1>(re, range_re, x, stride);
+    } else {
+        upload_rows_rescale<2>(re, range_re, x, stride);
+        upload_rows_rescale<2>(im, range_im, x + 1, stride);
+    }
+    stats_add_upload(get_time_ms() - t0, w * re->count);
+    return AB_OK;
+}
+
+extern "C" ABStatus ab_internal_upload_cols(ABMatrix m, const double* x, size_t ld) {
+    if (!m || !x) return AB_ERROR_INVALID_ARG;
+    double t0 = get_time_ms();
+    const size_t rows = (size_t)m->rows, cols = (size_t)m->cols;
+    DDFloat* dst = (DDFloat*)m->buffer.contents;
+    ab_range_t r = for_each_chunk(rows, cols, ^(size_t r0, size_t nr) {
+        return convert_cols_to_dd(x, ld, dst, cols, r0, nr, 0, true);
+    });
+    set_scale_measured(m, r);
+    if (m->exp2 != 0) {
+        const int e = m->exp2;
+        for_each_chunk(rows, cols, ^(size_t r0, size_t nr) {
+            return convert_cols_to_dd(x, ld, dst, cols, r0, nr, e, false);
+        });
+    }
+    m->uploaded = true;
+    stats_add_upload(get_time_ms() - t0, m->count);
+    return AB_OK;
+}
+
+extern "C" ABStatus ab_internal_download_rows(ABMatrix re, ABMatrix im, double* x, size_t ld) {
+    if (!re || !x || (im && (im->rows != re->rows || im->cols != re->cols)))
+        return AB_ERROR_INVALID_ARG;
+    double t0 = get_time_ms();
+    const size_t cols = (size_t)re->cols, w = im ? 2 : 1;
+    const DDFloat* dr = (const DDFloat*)re->buffer.contents;
+    const DDFloat* di = im ? (const DDFloat*)im->buffer.contents : NULL;
+    const int er = re->exp2, ei = im ? im->exp2 : 0;
+    ab_internal_for_each_chunk((size_t)re->rows, w * cols, ^(size_t, size_t r0, size_t nr) {
+        for (size_t i = r0; i < r0 + nr; i++) {
+            if (im)
+                convert_dd_to_pairs(dr + i * cols, di + i * cols, x + 2 * i * ld, cols, er, ei);
+            else
+                convert_dd_to_fp64(dr + i * cols, x + i * ld, cols, er);
+        }
+    });
+    stats_add_download(get_time_ms() - t0, w * re->count);
     return AB_OK;
 }
 
