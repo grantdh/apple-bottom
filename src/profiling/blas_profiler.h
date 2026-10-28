@@ -72,6 +72,24 @@ typedef enum {
     AB_PROF_FB_COUNT
 } ab_prof_fallback_t;
 
+// Whether a GPU-routed call kept the staged path's result (gpu_stage.h), and
+// if not, why it took the host path, in the order the staged path checks. A
+// call's reasons are a mask of bits 1 << reason (0: it never reached the
+// staged path); the reports count each call once, by its lowest bit.
+typedef enum {
+    AB_PROF_STAGED_KEPT,        // the staged path computed C
+    AB_PROF_STAGED_HOST_PACK,   // AB_HOST_PACK=1
+    AB_PROF_STAGED_FPCR,        // the caller's floating-point control is not the default
+    AB_PROF_STAGED_SCALAR,      // a DGEMM alpha or beta outside 2^±AB_SCALAR_WINDOW, or not finite
+    AB_PROF_STAGED_ALLOC,       // no GPU buffers for it
+    AB_PROF_STAGED_GPU_FAILED,  // its command buffer failed
+    AB_PROF_STAGED_NONFINITE,   // Inf or NaN in the GPU epilogue
+    AB_PROF_STAGED_SCALED,      // the exponent-range guard scales a row of op(A) or column of op(B)
+    AB_PROF_STAGED_FOUR_M,      // a ZGEMM whose parts call for 4M
+    AB_PROF_STAGED_RANGE,       // the guard does not certify it
+    AB_PROF_STAGED_COUNT
+} ab_prof_staged_t;
+
 // Dimension bins (by max(M,N)):
 //   [0] 1-32     [1] 33-128   [2] 129-512   [3] 513-1024
 //   [4] 1025-2048 [5] 2049-4096 [6] 4097-8192 [7] 8193+
@@ -83,6 +101,7 @@ typedef struct {
     uint64_t gpu_ns, cpu_ns;                // wall time of those calls
     uint64_t stage_ns[AB_PROF_STAGE_COUNT]; // GPU calls only; the rest of gpu_ns is "other"
     uint64_t fallbacks[AB_PROF_FB_COUNT];   // counted in cpu_calls
+    uint64_t staged[AB_PROF_STAGED_COUNT];  // calls that reached the staged path, by first reason
 
     // Dimension histogram — by max(M,N)
     uint64_t dim_histogram[AB_PROF_HISTOGRAM_BINS];
@@ -97,10 +116,11 @@ typedef struct {
 // used_gpu: the GPU computed C, not just the routing chose it; a GPU-routed
 // call that ran on cblas is a CPU call with fallback set. stage_ns: the
 // call's AB_PROF_STAGE_COUNT stage times (GPU calls; NULL otherwise).
-// No-op unless AB_PROFILE or AB_REPORT is set.
+// staged: the call's ab_prof_staged_t mask. No-op unless AB_PROFILE or
+// AB_REPORT is set.
 void ab_prof_record(const char* routine, uint64_t elapsed_ns,
                     size_t m, size_t n, size_t k, int used_gpu,
-                    const uint64_t* stage_ns, ab_prof_fallback_t fallback);
+                    const uint64_t* stage_ns, ab_prof_fallback_t fallback, unsigned staged);
 
 // Dump the AB_PROFILE table to an open stream.
 void ab_prof_dump(FILE* out);
@@ -119,6 +139,9 @@ int  ab_prof_verbose(void);
 
 // Stage names, for per-call lines.
 extern const char* const ab_prof_stage_names[AB_PROF_STAGE_COUNT];
+
+// The name of an ab_prof_staged_t mask's first reason ("kept", ...); "" for 0.
+const char* ab_prof_staged_name(unsigned staged);
 
 // Convert mach_absolute_time() ticks to nanoseconds using timebase.
 uint64_t ab_prof_ticks_to_ns(uint64_t ticks);
@@ -186,7 +209,7 @@ int  ab_trace_hash_enabled(void);
 // started at t0_ns (mach_absolute_time in ns) and took elapsed_ns; the other
 // arguments are those of ab_prof_record (stage_ns non-NULL: the GPU computed C).
 void ab_trace_record(const ab_trace_call_t* call, uint64_t t0_ns, uint64_t elapsed_ns,
-                     const uint64_t* stage_ns, ab_prof_fallback_t fallback);
+                     const uint64_t* stage_ns, ab_prof_fallback_t fallback, unsigned staged);
 
 // AB_TEST_FAIL_STAGE (test-only): AB_PROF_STAGE_ALLOC makes every
 // ab_matrix_create() fail, AB_PROF_STAGE_KERNEL the command buffer of every

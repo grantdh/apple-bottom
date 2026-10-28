@@ -1864,8 +1864,8 @@ static int report_child_main(void) {
 
 // What one process's reports say about one routine (times in ms).
 typedef struct {
-    int rows, stage_rows, fallback_rows, prof_rows;
-    unsigned long long calls, gpu, cpu, fallbacks, reasons[4];
+    int rows, stage_rows, fallback_rows, staged_rows, prof_rows;
+    unsigned long long calls, gpu, cpu, fallbacks, reasons[4], staged;
     double calls_pct, total, gpu_ms, cpu_ms, time_pct, stages[8];   // [7]: other
     unsigned long long prof_calls, prof_gpu, prof_fallbacks;
     double prof_time_pct, prof_total, prof_gpu_ms;
@@ -1920,7 +1920,24 @@ static bool parse_report_line(const char *line, const char *build, ProcessReport
         else if (sscanf(rest, "fallbacks no_device=%llu too_large=%llu gpu_failed=%llu other=%llu",
                         &r->reasons[0], &r->reasons[1], &r->reasons[2], &r->reasons[3]) == 4)
             r->fallback_rows++;
-        else
+        else if (!strncmp(rest, "staged ", 7)) {
+            // Each GPU-routed call that reached the staged path once, by reason.
+            static const char *const keys[] = {"kept", "host_pack", "fpcr", "scalar", "alloc",
+                                               "gpu_failed", "nonfinite", "scaled", "four_m",
+                                               "range"};
+            rest += 7;
+            for (size_t k = 0; k < TEST_REGISTRY_SIZE(keys); k++) {
+                unsigned long long v;
+                char key[24];
+                snprintf(key, sizeof key, "%s=%%llu%%n", keys[k]);
+                if (sscanf(rest, key, &v, &end) != 1) return false;
+                r->staged += v;
+                rest += end;
+                if (*rest == ' ') rest++;
+            }
+            if (*rest) return false;
+            r->staged_rows++;
+        } else
             return false;
         return true;
     }
@@ -2001,6 +2018,10 @@ static const char *check_routine(const RoutineReport *r, unsigned long long call
         (no_device && (r->reasons[0] != no_device ||
                        r->reasons[1] + r->reasons[2] + r->reasons[3] != 0)))
         return "fallback counts do not match";
+    // Every GPU call reached the staged path (whether it kept its result or
+    // not); the no_device fallbacks did not.
+    if (r->staged_rows != (gpu > 0) || r->staged != gpu)
+        return "staged-path counts do not match the GPU calls";
     return NULL;
 }
 

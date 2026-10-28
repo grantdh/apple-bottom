@@ -42,6 +42,15 @@ All notable changes to this project will be documented in this file.
   certifies only in its second stage, scales, runs as 4M (imbalanced complex
   parts) or sends to Accelerate (Inf, NaN, overflow): the staged result must
   stand exactly where the host path computes the call unscaled on the GPU.
+- **Why a call left the staged path**: `AB_REPORT` adds a line
+  `<routine> staged kept=… host_pack=… fpcr=… scalar=… alloc=… gpu_failed=…
+  nonfinite=… scaled=… four_m=… range=…` that counts each GPU-routed call
+  once, by whether it kept the staged result or else the first reason it
+  went to the host path; `AB_PROFILE` adds the same as a table and
+  `staged=<outcome>` to each GPU call's line, and `AB_TRACE` adds
+  `staged=kept` or the reasons joined by `+` (`staged=scaled+four_m`) to
+  each call that reached the staged path. See "Reading a run report" in
+  `docs/INTEGRATION.md`.
 - **`AB_TRACE=<path>`**: every BLAS-ABI call (`dgemm_`, `zgemm_`,
   `ab_*gemm_`, `ab_*gemm_blas`; Accelerate and GPU, every `AB_MODE`) appends
   one `key=value` line to `<path>.<pid>` when it returns (a call with an

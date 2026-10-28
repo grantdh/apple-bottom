@@ -448,19 +448,20 @@ static const char *const HASH_KEYS[] = {"hash_a", "hash_b", "hash_c"};
 typedef struct {
     char val[N_BASE + N_GPU + 3][96];   // in key order: base, GPU (if any), hashes
     bool gpu;
+    char staged[64];                    // the staged field, "" if none
     bool hashed[3];
     unsigned long long hash[3];
 } TraceLine;
 
 // Splits a line into key=value fields and checks that the keys are exactly
 // the documented ones in order: the base keys, the GPU keys on a gpu line,
-// then any hashes.
+// staged on a call that reached the staged path, then any hashes.
 static bool parse_trace_line(const char *line, TraceLine *t) {
     memset(t, 0, sizeof *t);
     char copy[2048], *save = NULL;
     snprintf(copy, sizeof copy, "%s", line);
-    const char *keys[N_BASE + N_GPU + 3];
-    char *vals[N_BASE + N_GPU + 3];
+    const char *keys[N_BASE + N_GPU + 4];
+    char *vals[N_BASE + N_GPU + 4];
     size_t n = 0;
     for (char *tok = strtok_r(copy, " ", &save); tok; tok = strtok_r(NULL, " ", &save)) {
         char *eq = strchr(tok, '=');
@@ -480,6 +481,7 @@ static bool parse_trace_line(const char *line, TraceLine *t) {
             if (i >= n || strcmp(keys[i], GPU_KEYS[i - N_BASE]))
                 return expect(false, "field %zu is not %s in: %s", i, GPU_KEYS[i - N_BASE], line);
     size_t fixed = i;
+    if (i < n && !strcmp(keys[i], "staged")) snprintf(t->staged, sizeof t->staged, "%s", vals[i++]);
     for (int h = 0; h < 3 && i < n; h++)
         if (!strcmp(keys[i], HASH_KEYS[h])) {
             char *end;
@@ -535,6 +537,10 @@ static bool get_scalar(const TraceLine *t, const char *key, double complex want,
 // times its GPU temporaries in temps_ns) rather than on the staged path.
 static bool g_host_pack;
 
+// Under AB_TEST_FAIL_STAGE, the staged field of the calls that fall back:
+// the staged path fails first, at the same step.
+static const char *g_fail_staged = "";
+
 // One line against the call it records: the arguments exactly, the path, and
 // for a GPU call stages that sum to the call's time and a split that sums to
 // other_ns, with the GPU's start and end inside the call.
@@ -553,6 +559,13 @@ static bool check_line(const TraceLine *t, const Call *c, const char *path,
         !expect(!strcmp(get(t, "path"), path), "path=%s, expected %s", get(t, "path"), path) ||
         !get_u64(t, "t0_ns", t0) || !get_u64(t, "t1_ns", t1) ||
         !expect(*t0 > 0 && *t0 <= *t1, "t0_ns=%llu t1_ns=%llu", *t0, *t1))
+        return false;
+    // These operands need no scaling and suit Gauss-3M: a GPU call keeps the
+    // staged result unless AB_HOST_PACK=1; a call the routing keeps on cblas,
+    // or one without Metal, never reaches the staged path.
+    const char *staged = !strcmp(path, "gpu") ? (g_host_pack ? "host_pack" : "kept")
+                       : !strcmp(path, "fallback:gpu_failed") ? g_fail_staged : "";
+    if (!expect(!strcmp(t->staged, staged), "staged=%s, expected '%s'", t->staged, staged))
         return false;
     if (!t->gpu) return true;
 
@@ -794,6 +807,7 @@ static void test_fail_stage(int stage_index) {
     snprintf(fail, sizeof fail, "AB_TEST_FAIL_STAGE=%s", stage);
     const char *env[] = {"AB_MODE=gpu", "AB_REPORT=1", trace, fail, NULL};
     ChildRun r = {0};
+    g_fail_staged = stage_index == 0 ? "alloc" : "gpu_failed";
     if (run_child("fail", dir, env, &r)) {
         for (int i = 0; i < N_FAIL_CALLS && !first_failure[0]; i++) {
             const Call *c = &LINE_CALLS[i];
@@ -822,8 +836,18 @@ static void test_fail_stage(int stage_index) {
             snprintf(prefix, sizeof prefix, "AB_REPORT[%d] %s fallbacks ", (int)r.pid, routine);
             snprintf(want, sizeof want, "AB_REPORT[%d] %s fallbacks no_device=0 too_large=0 "
                      "gpu_failed=1 other=0 range=0", (int)r.pid, routine);
+            if (!expect(find_line(r.out, prefix, line, sizeof line) && !strcmp(line, want),
+                        "%s: AB_REPORT does not give the fallback as gpu_failed: %s", routine,
+                        r.out))
+                break;
+            // The staged path failed first, at the same step.
+            snprintf(prefix, sizeof prefix, "AB_REPORT[%d] %s staged ", (int)r.pid, routine);
+            snprintf(want, sizeof want, "AB_REPORT[%d] %s staged kept=0 host_pack=0 fpcr=0 "
+                     "scalar=0 alloc=%d gpu_failed=%d nonfinite=0 scaled=0 four_m=0 range=0",
+                     (int)r.pid, routine, stage_index == 0, stage_index == 1);
             expect(find_line(r.out, prefix, line, sizeof line) && !strcmp(line, want),
-                   "%s: AB_REPORT does not give the fallback as gpu_failed: %s", routine, r.out);
+                   "%s: AB_REPORT does not give the staged path's failure as %s: %s", routine,
+                   g_fail_staged, r.out);
         }
         const char *paths[] = {"fallback:gpu_failed", "fallback:gpu_failed"};
         if (!first_failure[0])

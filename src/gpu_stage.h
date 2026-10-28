@@ -83,11 +83,16 @@ void *ab_internal_stage_host(ab_stage_t *s, ab_stage_operand_t which, int *ld);
 // The operands of s used in place.
 int ab_internal_stage_in_place(const ab_stage_t *s);
 
-// Runs g on the GPU: true if it ran (the result as ab_internal_stage_host()
-// or ab_internal_stage_split() gives it, to use if the guard lets it stand);
-// false if a value was Inf or NaN or the GPU failed, and then C is as it was
-// unless it is in place.
-bool ab_internal_stage_run(ab_stage_t *s, const ab_stage_gemm_t *g);
+// How a staged run ended.
+typedef enum {
+    AB_STAGE_RAN,           // the result as ab_internal_stage_host() or ab_internal_stage_split()
+                            // gives it, to use if the guard lets it stand
+    AB_STAGE_NONFINITE,     // the epilogue met Inf or NaN
+    AB_STAGE_FAILED,        // the command buffer failed
+} ab_stage_result_t;
+
+// Runs g on the GPU. Unless it ran, C is as it was unless it is in place.
+ab_stage_result_t ab_internal_stage_run(ab_stage_t *s, const ab_stage_gemm_t *g);
 
 // The guard's statistics the run gathered: op(A)'s rows into *sa, op(B)'s
 // columns into *sb, as ab_line_stats_scan leaves them (their arrays are the

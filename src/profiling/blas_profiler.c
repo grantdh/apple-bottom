@@ -68,6 +68,15 @@ static const char* const fallback_names[AB_PROF_FB_COUNT] = {
     "no_device", "too_large", "gpu_failed", "other", "range"
 };
 
+static const char* const staged_names[AB_PROF_STAGED_COUNT] = {
+    "kept", "host_pack", "fpcr", "scalar", "alloc", "gpu_failed", "nonfinite", "scaled",
+    "four_m", "range"
+};
+
+const char* ab_prof_staged_name(unsigned staged) {
+    return staged ? staged_names[__builtin_ctz(staged)] : "";
+}
+
 // =============================================================================
 // Init, fork & env-var handling
 // =============================================================================
@@ -217,7 +226,7 @@ static ab_prof_entry_t* find_or_create_locked(const char* name) {
 
 void ab_prof_record(const char* routine, uint64_t elapsed_ns,
                     size_t m, size_t n, size_t k, int used_gpu,
-                    const uint64_t* stage_ns, ab_prof_fallback_t fallback) {
+                    const uint64_t* stage_ns, ab_prof_fallback_t fallback, unsigned staged) {
     if (!ab_prof_enabled()) return;
     if (elapsed_ns < g_threshold_ns) return;
 
@@ -237,6 +246,7 @@ void ab_prof_record(const char* routine, uint64_t elapsed_ns,
             if (fallback > AB_PROF_FB_NONE && fallback < AB_PROF_FB_COUNT)
                 e->fallbacks[fallback]++;
         }
+        if (staged) e->staged[__builtin_ctz(staged)]++;
 
         size_t max_mn = m > n ? m : n;
         int bin = dim_to_bin(max_mn);
@@ -264,6 +274,12 @@ static double pct(uint64_t part, uint64_t whole) {
 static uint64_t fallback_total(const ab_prof_entry_t* e) {
     uint64_t t = 0;
     for (int r = 0; r < AB_PROF_FB_COUNT; r++) t += e->fallbacks[r];
+    return t;
+}
+
+static uint64_t staged_total(const ab_prof_entry_t* e) {
+    uint64_t t = 0;
+    for (int r = 0; r < AB_PROF_STAGED_COUNT; r++) t += e->staged[r];
     return t;
 }
 
@@ -322,11 +338,12 @@ void ab_prof_dump(FILE* out) {
     int idx[AB_PROF_MAX_ROUTINES];
     sort_by_time(idx);
 
-    uint64_t grand_total_ns = 0, any_gpu = 0, any_fallback = 0;
+    uint64_t grand_total_ns = 0, any_gpu = 0, any_fallback = 0, any_staged = 0;
     for (int i = 0; i < g_entry_count; i++) {
         grand_total_ns += g_entries[i].total_ns;
         any_gpu += g_entries[i].gpu_calls;
         any_fallback += fallback_total(&g_entries[i]);
+        any_staged += staged_total(&g_entries[i]);
     }
 
     for (int i = 0; i < g_entry_count; i++) {
@@ -383,6 +400,21 @@ void ab_prof_dump(FILE* out) {
             fprintf(out, "%-12s", e->name);
             for (int r = 0; r < AB_PROF_FB_COUNT; r++)
                 fprintf(out, " %10llu", (unsigned long long)e->fallbacks[r]);
+            fprintf(out, "\n");
+        }
+    }
+
+    if (any_staged) {
+        fprintf(out, "\nStaged path: GPU-routed calls that kept its result, else by the first "
+                     "reason they took the host path:\n%-12s", "routine");
+        for (int r = 0; r < AB_PROF_STAGED_COUNT; r++) fprintf(out, " %10s", staged_names[r]);
+        fprintf(out, "\n");
+        for (int i = 0; i < g_entry_count; i++) {
+            ab_prof_entry_t* e = &g_entries[idx[i]];
+            if (staged_total(e) == 0) continue;
+            fprintf(out, "%-12s", e->name);
+            for (int r = 0; r < AB_PROF_STAGED_COUNT; r++)
+                fprintf(out, " %10llu", (unsigned long long)e->staged[r]);
             fprintf(out, "\n");
         }
     }
@@ -482,6 +514,13 @@ void ab_prof_report(FILE* out) {
             line_add(&l, "\n");
             line_emit(&l, out);
         }
+        if (staged_total(e)) {
+            line_add(&l, "AB_REPORT[%d] %s staged", pid, e->name);
+            for (int r = 0; r < AB_PROF_STAGED_COUNT; r++)
+                line_add(&l, " %s=%llu", staged_names[r], (unsigned long long)e->staged[r]);
+            line_add(&l, "\n");
+            line_emit(&l, out);
+        }
     }
 }
 
@@ -533,6 +572,8 @@ static void trace_header(int fd, pid_t pid) {
     line_add(&l, " other_ns (sum: t1_ns - t0_ns),\n"
                  "#   other_ns = temps_ns + encode_ns + submit_ns + wake_ns + rest_ns,\n"
                  "#   gpu_start_ns gpu_end_ns: GPUStartTime, GPUEndTime (0: none reported)\n"
+                 "# calls that reached the staged path add staged: kept, or the reasons it gave\n"
+                 "#   the call to the host path, joined by +\n"
                  "# AB_TRACE_HASH=1 adds hash_a, hash_b (op(A), op(B) when read) and hash_c "
                  "(C on entry when beta != 0):\n"
                  "#   FNV-1a over the 64-bit words of the referenced elements, column by "
@@ -583,7 +624,7 @@ static const char* trans_text(char t, char out[8]) {
 // rest_ns is what the kernel step's split leaves, and may be a few ns below
 // zero from rounding between the host and GPU clocks.
 void ab_trace_record(const ab_trace_call_t* c, uint64_t t0_ns, uint64_t elapsed_ns,
-                     const uint64_t* stage_ns, ab_prof_fallback_t fallback) {
+                     const uint64_t* stage_ns, ab_prof_fallback_t fallback, unsigned staged) {
     static const char* const hash_keys[3] = {"hash_a", "hash_b", "hash_c"};
     bool z = c->routine[0] == 'z';
     char ta[8], tb[8];
@@ -617,6 +658,9 @@ void ab_trace_record(const ab_trace_call_t* c, uint64_t t0_ns, uint64_t elapsed_
     } else {
         line_add(&l, " path=cpu");
     }
+    for (int r = 0; r < AB_PROF_STAGED_COUNT; r++)
+        if (staged >> r & 1u)
+            line_add(&l, "%s%s", staged & ((1u << r) - 1) ? "+" : " staged=", staged_names[r]);
     for (int h = 0; h < 3; h++)
         if (c->hashed[h])
             line_add(&l, " %s=%016llx", hash_keys[h], (unsigned long long)c->hash[h]);
@@ -683,6 +727,10 @@ void ab_prof_dump_json(const char* path) {
         for (int r = 0; r < AB_PROF_FB_COUNT; r++)
             fprintf(f, "%s\"%s\": %llu", r ? ", " : "", fallback_names[r],
                     (unsigned long long)e->fallbacks[r]);
+        fprintf(f, "},\n      \"staged\": {");
+        for (int r = 0; r < AB_PROF_STAGED_COUNT; r++)
+            fprintf(f, "%s\"%s\": %llu", r ? ", " : "", staged_names[r],
+                    (unsigned long long)e->staged[r]);
         fprintf(f,
             "},\n"
             "      \"max_m\": %zu, \"max_n\": %zu, \"max_k\": %zu,\n"

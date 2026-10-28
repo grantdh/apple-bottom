@@ -544,6 +544,7 @@ AB_REPORT[<pid>] apple-bottom <version> (<commit>[-dirty]) AB_MODE=<mode|unset>
 AB_REPORT[<pid>] <routine> calls=… gpu_calls=… cpu_calls=… gpu_calls%=… total_ms=… gpu_ms=… cpu_ms=… gpu_time%=… fallbacks=…
 AB_REPORT[<pid>] <routine> gpu_stages_ms init=… alloc=… pack=… upload=… kernel=… download=… epilogue=… other=…
 AB_REPORT[<pid>] <routine> fallbacks no_device=… too_large=… gpu_failed=… other=… range=…
+AB_REPORT[<pid>] <routine> staged kept=… host_pack=… fpcr=… scalar=… alloc=… gpu_failed=… nonfinite=… scaled=… four_m=… range=…
 ```
 
 - **The first line names the library build**, as `ab_build_info()` returns it:
@@ -580,6 +581,19 @@ AB_REPORT[<pid>] <routine> fallbacks no_device=… too_large=… gpu_failed=… 
   or Inf, or values that power-of-two scaling cannot keep in double-float's
   exponent range; see [Values far from 1](#values-far-from-1)). They count
   as CPU calls, and their `cpu_ms` includes the failed GPU attempt.
+- **The staged line** counts the GPU-routed calls that reached the staged
+  path: `kept` its result, or else the first reason it gave the call to
+  the host path, in the order it checks them: `host_pack`
+  (`AB_HOST_PACK=1`), `fpcr` (the caller changed the floating-point
+  control: rounding mode, flush to zero or default NaN), `scalar` (a DGEMM
+  alpha or beta outside 2^±20, or not finite), `alloc` (no GPU buffers),
+  `gpu_failed` (its command buffer failed), `nonfinite` (Inf or NaN in the
+  GPU epilogue), `scaled` (the exponent-range guard scales a row of op(A)
+  or a column of op(B)), `four_m` (a ZGEMM whose real and imaginary parts
+  call for 4M, see [Complex data with imbalanced parts](#complex-data-with-imbalanced-parts)) and `range` (the
+  guard does not certify the call; the host path then sends it to
+  Accelerate as a `range` fallback). Each call counts once, whether the
+  host path then computed it on the GPU or on Accelerate.
 - **Each process reports once**, tagged with its pid, so MPI ranks sharing
   stderr stay apart. A `fork()`ed child starts with empty counters and
   reports only its own calls (nothing if it made none). There is no report
@@ -588,10 +602,11 @@ AB_REPORT[<pid>] <routine> fallbacks no_device=… too_large=… gpu_failed=… 
 
 `AB_PROFILE=1` prints the same counts as a table (`calls`, `gpu_calls`,
 `gpu_calls%`, `total_ms`, `gpu_ms`, `cpu_ms`, `gpu_time%`, `fallbacks`),
-tables of the GPU stages and of the fallbacks, and the dimension histogram of
-the routine with the most time. During the run it prints an
-`AB_PROFILE <routine> M=… N=… K=…` line with the stages of each GPU call and
-one for each fallback, with its reason.
+tables of the GPU stages, the fallbacks and the staged path's outcomes, and
+the dimension histogram of the routine with the most time. During the run it
+prints an `AB_PROFILE <routine> M=… N=… K=…` line with the stages of each GPU
+call and its staged outcome (`staged=kept`, or the first reason it took the
+host path), and one for each fallback, with its reason.
 
 ### Per-call trace (AB_TRACE)
 
@@ -635,6 +650,10 @@ seq=2 t0_ns=411972254072166 t1_ns=411972258538707 routine=zgemm ta=C tb=N M=96 N
   `rest_ns` (everything else; a few ns below zero is clock rounding).
   `gpu_start_ns` and `gpu_end_ns` are the command buffer's `GPUStartTime`
   and `GPUEndTime` on the same clock (0 if Metal reported none).
+- **`staged`**, on a call that reached the staged path: `kept`, or the
+  reasons of the run report's staged line that sent it to the host path,
+  joined by `+` (`scaled+four_m`: both apply; the range check runs only
+  when neither does).
 - **`AB_TRACE_HASH=1`** adds `hash_a` and `hash_b`, 64-bit hashes (16 hex
   digits) of op(A) and op(B) as stored, when the call reads them
   (M, N, K > 0 and alpha ≠ 0), and `hash_c` of C on entry when beta ≠ 0.

@@ -4474,10 +4474,10 @@ static void encode_stage_prep(id<MTLComputeCommandEncoder> enc, ABContextImpl* c
     [enc dispatchThreadgroups:grid threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
 }
 
-bool ab_internal_stage_run(ab_stage_t* s, const ab_stage_gemm_t* g) {
+ab_stage_result_t ab_internal_stage_run(ab_stage_t* s, const ab_stage_gemm_t* g) {
     ABAutoreleaseScope pool;
     ABContextImpl* ctx = [ABContextImpl shared];
-    if (!ctx) return false;
+    if (!ctx) return AB_STAGE_FAILED;
     bool z = g->routine == 'z';
     int M = g->M, N = g->N, K = g->K;
     struct ABMatrix_s A, Ai, A3, B, Bi, B4, T1, T2, C, Ci;
@@ -4549,12 +4549,12 @@ bool ab_internal_stage_run(ab_stage_t* s, const ab_stage_gemm_t* g) {
         [enc endEncoding];
     }
 
-    bool completed = commit_and_wait(cmdBuf, encode_ns);
-    if (!completed || (flag && *flag)) return false;
+    if (!commit_and_wait(cmdBuf, encode_ns)) return AB_STAGE_FAILED;
+    if (flag && *flag) return AB_STAGE_NONFINITE;
     stats_add_kernel(get_time_ms() - t0);
     // A complex line's largest |x| is the larger of its parts' (ab_line_stats_scan).
     for (size_t i = 0; z && i < (size_t)M + N; i++) st[i] = MAX(st[3 * n + i], st[4 * n + i]);
-    return true;
+    return AB_STAGE_RAN;
 }
 
 void ab_internal_stage_stats(ab_stage_t* s, const ab_stage_gemm_t* g, ab_line_stats_t* sa,
