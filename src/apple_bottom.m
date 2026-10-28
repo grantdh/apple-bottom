@@ -2770,9 +2770,6 @@ static bool zgemm_uses_4m(ab_zgemm_method_t method, ABMatrix Ar, ABMatrix Ai, AB
     return ab_gauss3m_rho(p, q) > AB_GAUSS3M_MAX_RHO;
 }
 
-static ab_stage_t* stage_views(ABContextImpl* ctx, int n, const int rows[], const int cols[],
-                               ABMatrix out[]);     // BLAS-ABI Staging, below
-
 // One ZGEMM's temporaries, NULL where unused: T1..T4 for encode_zgemm_3m or
 // encode_zgemm_4m, views of a staging-pool slot's buffers, and the copies
 // encode_align_zgemm makes for 3M. Blocks capture it by value.
@@ -2793,7 +2790,7 @@ static void zgemm_temps_free(ZgemmTemps t) {
 static bool zgemm_temps(bool four_m, int M, int N, int K, ZgemmTemps* t) {
     *t = ZgemmTemps();
     const int rows[4] = {M, M, M, four_m ? M : K}, cols[4] = {N, N, four_m ? N : K, N};
-    t->slot = stage_views([ABContextImpl shared], 4, rows, cols, t->T);
+    t->slot = ab_internal_stage_views(4, rows, cols, t->T);
     return t->slot != NULL;
 }
 
@@ -4386,8 +4383,9 @@ static void registrations_shutdown(void) {
 // settles at about what its largest calls need, whatever their mix. A fresh buffer costs
 // first-touch page faults on the host and, in its first command buffer,
 // ~12-16 ms/GB between commit and the GPU's start; a reused one neither.
-// The native ZGEMMs' temporaries come from here too (stage_views): only the
-// GPU touches those, and a fresh one costs about 32 ms/GiB before it starts.
+// The native ZGEMMs' temporaries come from here too (ab_internal_stage_views):
+// only the GPU touches those, and a fresh one costs about 32 ms/GiB before it
+// starts. So do device_api.m's ABMatrix handles.
 
 typedef enum {
     STAGE_SA, STAGE_SB, STAGE_SC,   // FP64 staging copies of A, B, C (AB_STAGE_A + i)
@@ -4625,14 +4623,13 @@ static void stage_matrix(struct ABMatrix_s* m, id<MTLBuffer> b, int rows, int co
     set_scale_unmeasured(m, 0);
 }
 
-// n (at most STAGE_ROLES) DD matrices of the given shapes from one slot, each
-// seen through a new ABMatrix in out; view i takes role i (stage_fit matches
-// by size alone). The caller frees the views with ab_matrix_destroy() and the
-// slot with ab_internal_stage_release(). NULL if Metal refuses a buffer.
-static ab_stage_t* stage_views(ABContextImpl* ctx, int n, const int rows[], const int cols[],
-                               ABMatrix out[]) {
+// View i takes role i (stage_fit matches by size alone).
+ab_stage_t* ab_internal_stage_views(int n, const int rows[], const int cols[], ABMatrix out[]) {
+    ABAutoreleaseScope pool;
+    ABContextImpl* ctx = [ABContextImpl shared];
     // AB_TEST_FAIL_STAGE=alloc (test-only): no buffers, as for ab_matrix_create().
-    if (!ctx || ab_test_fail_stage() == AB_PROF_STAGE_ALLOC) return NULL;
+    if (!ctx || n < 1 || n > STAGE_ROLES || ab_test_fail_stage() == AB_PROF_STAGE_ALLOC)
+        return NULL;
     size_t need[STAGE_ROLES] = {};
     for (int i = 0; i < n; i++) need[i] = (size_t)rows[i] * cols[i] * sizeof(DDFloat);
     struct ab_stage_s* s = stage_take();

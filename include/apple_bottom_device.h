@@ -29,7 +29,8 @@
 //   - ab_dev_dgemm / ab_dev_zgemm (column-major, transA/transB, ld, offsets).
 //     Each call converts its FP64 operands to DD and back, so it has the
 //     per-call costs of the BLAS ABI, not the resident speed of the ABMatrix
-//     API.
+//     API. The DD copies live in GPU buffers the library keeps between calls
+//     (at most AB_STAGING_MB, apple_bottom.h).
 //
 // Thread safety: functions are serialized through a single command queue,
 // same as the rest of apple-bottom. Concurrent callers from Fortran (OpenMP

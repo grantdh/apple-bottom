@@ -33,7 +33,8 @@
 // (ab_staging_cap_bytes()). Slots are per call, so threads calling at once
 // each get their own. ab_shutdown() empties it.
 // The native ZGEMMs (ab_zgemm, ab_zgemm_ex, the batched and asynchronous
-// ones) take their Gauss-3M or 4M temporaries from it too.
+// ones) take their Gauss-3M or 4M temporaries from it too, and the device
+// API (device_api.m) its operands' ABMatrix handles (ab_internal_stage_views).
 // =============================================================================
 #ifndef AB_GPU_STAGE_H
 #define AB_GPU_STAGE_H
@@ -107,6 +108,13 @@ void ab_internal_stage_count(const ab_stage_gemm_t *g, double copy_in_ms, double
 
 // Returns the slot to the pool, or frees what is beyond AB_STAGING_MB.
 void ab_internal_stage_release(ab_stage_t *s);
+
+// n (1 to 15) DD matrices of the given shapes, each a new ABMatrix in out over
+// a buffer of one slot, unscaled (as ab_matrix_create() makes them) but
+// holding what the buffer last held. The caller frees them with
+// ab_matrix_destroy() and then the slot with ab_internal_stage_release().
+// NULL if Metal refuses a buffer (as under AB_TEST_FAIL_STAGE=alloc).
+ab_stage_t *ab_internal_stage_views(int n, const int rows[], const int cols[], ABMatrix out[]);
 
 // Bytes the pool holds, in use or idle (tests).
 size_t ab_internal_stage_pool_bytes(void);

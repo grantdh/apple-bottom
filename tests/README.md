@@ -56,7 +56,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     runs every register-prefetch kernel (`AB_PREFETCH=1`) against the
     plain ones (`AB_PREFETCH=0`) and requires bitwise-equal results
   - `tests/test_chaos.c` — 18 tests
-  - `tests/test_device_api.c` — 17 tests (181 `CHECK`s); the GEMM
+  - `tests/test_device_api.c` — 18 tests (192 `CHECK`s); the GEMM
     tests compare `ab_dev_dgemm` / `ab_dev_zgemm` with column-major
     cblas over all trans pairs, non-square and tall-skinny shapes,
     `ld > rows`, buffer offsets and a C of 2²⁰ elements, and check that
@@ -64,7 +64,12 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     `test_zgemm_imbalance` holds `ab_dev_zgemm_offset` to the Dot2 check
     of the BLAS ABI's `test_zgemm_imbalance` (below, `tests/test_dot2.h`)
     on both its alpha/beta paths, every way it gathers a line's parts, and
-    operands of 2²⁰ elements, which it stages in chunks across cores
+    operands of 2²⁰ elements, which it stages in chunks across cores;
+    `test_gemm_pool` checks the GEMMs on the staging pool's reused
+    buffers: a call repeated leaves the pool as it was, and each call
+    gives its first bits again right after NaN data (which a beta = 0
+    call must not read), after larger and smaller shapes, and from 4
+    threads at once
   - `tests/test_dispatch.c` — 9 tests of the BLAS-ABI routing, no GPU,
     see below
   - `tests/test_blas_abi.c` — 33 suites (1069 cases), see below

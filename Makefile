@@ -104,7 +104,7 @@ $(BUILD)/build_sha.stamp: FORCE | $(BUILD)
 $(BUILD)/blas_profiler.o: $(SRC)/profiling/blas_profiler.c $(SRC)/profiling/blas_profiler.h $(SRC)/dispatch.h $(INCLUDE)/apple_bottom.h $(BUILD)/build_sha.stamp | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) '-DAB_BUILD_SHA="$(AB_BUILD_SHA)"' -c $(SRC)/profiling/blas_profiler.c -o $@
 
-$(BUILD)/device_api.o: $(SRC)/device_api.m $(SRC)/ab_internal.h $(INCLUDE)/apple_bottom.h $(INCLUDE)/apple_bottom_device.h | $(BUILD)
+$(BUILD)/device_api.o: $(SRC)/device_api.m $(SRC)/ab_internal.h $(SRC)/gpu_stage.h $(INCLUDE)/apple_bottom.h $(INCLUDE)/apple_bottom_device.h | $(BUILD)
 	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/device_api.m -o $@
 
 LIB_OBJS = $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o \
@@ -190,8 +190,8 @@ $(BUILD)/test_correctness: tests/test_correctness.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
-$(BUILD)/test_device_api: tests/test_device_api.c tests/test_dot2.h lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+$(BUILD)/test_device_api: tests/test_device_api.c tests/test_dot2.h $(SRC)/gpu_stage.h lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
 # BLAS-ABI conformance harness: column-major ab_*gemm_blas / ab_*gemm_ /
@@ -601,7 +601,7 @@ build-check: | $(BUILD)/check
 	@echo "Compiling test_dispatch.c..."
 	@$(CC) $(CFLAGS) -I$(SRC) -c tests/test_dispatch.c -o $(BUILD)/check/test_dispatch.o
 	@echo "Compiling test_device_api.c..."
-	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_device_api.c -o $(BUILD)/check/test_device_api.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c tests/test_device_api.c -o $(BUILD)/check/test_device_api.o
 	@echo "Compiling calibrate.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c benchmarks/calibrate.c -o $(BUILD)/check/calibrate.o
 	@echo "Compiling replay.c..."

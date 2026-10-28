@@ -162,7 +162,7 @@ All notable changes to this project will be documented in this file.
   Results are bitwise unchanged. Only these four are pooled: `ab_zgemm_ex`'s
   transposed copies of A and B, the copies that bring real and imaginary
   parts to one scale, and the operands that the host path of the BLAS ABI
-  (`AB_HOST_PACK=1`) and `ab_dev_zgemm` copy in are still made every call.
+  (`AB_HOST_PACK=1`) copies in are still made every call.
 - **The device-buffer API converts its operands where they lie, across
   cores.** `ab_dev_dgemm` and `ab_dev_zgemm` copied each operand out of its
   buffer into FP64 arrays (complex ones split into real and imaginary
@@ -178,6 +178,20 @@ All notable changes to this project will be documented in this file.
   8.3 ms) and 0.75× at 9140×160×160 'N','N' (0.70× with general alpha and
   beta); `ab_dev_dgemm` takes 0.64× at 'T','N' 160×160×18280 and 0.77× at
   'N','N' 18280×160×160.
+- **The device-buffer API keeps its double-float buffers between calls.**
+  `ab_dev_dgemm` and `ab_dev_zgemm` made the `ABMatrix` handles of their
+  operands (3 and 6; 11.7 MB each for a part of a 9140×160 complex operand)
+  as fresh GPU buffers every call, and paid for them in page faults as the
+  conversion first wrote them, before the GPU started on them and when the
+  host first read the result. They now take them from the staged path's
+  pool (at most `AB_STAGING_MB`), as the native ZGEMMs take their
+  temporaries; `ab_dev_zgemm` with general alpha and beta still makes the
+  two handles of its product every call. Results are bitwise unchanged. On
+  an M2 Max, at QE's shapes, a call takes 0.79× the time at 160×160×9140
+  'C','N' (`ab_dev_zgemm`, 7.9 → 6.3 ms) and 0.76× at 9140×160×160 'N','N';
+  `ab_dev_dgemm` takes 0.65× at 'T','N' 160×160×18280 and 0.64× at 'N','N'
+  18280×160×160. The host's part of these calls, above the GEMM alone,
+  fell from 2.8-4.4 ms to 1.3-1.6 ms.
 
 ### Fixed
 - **Data outside FP32's exponent range no longer gives silently wrong GPU

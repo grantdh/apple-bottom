@@ -31,6 +31,7 @@
 #include "apple_bottom.h"
 #include "apple_bottom_device.h"
 #include "ab_internal.h"
+#include "gpu_stage.h"
 
 // -----------------------------------------------------------------------------
 // Opaque types
@@ -230,15 +231,18 @@ ABStatus ab_dev_stream_sync(ab_dev_stream_t stream) {
 // -----------------------------------------------------------------------------
 //
 // Strategy: device buffers hold raw FP64 in shared Metal storage.  GPU kernels
-// operate on DD format (two FP32 per value).  We bridge the gap by creating
+// operate on DD format (two FP32 per value).  We bridge the gap with
 // temporary ABMatrix handles, uploading FP64→DD, dispatching through the
 // existing ab_dgemm_scaled / ab_zgemm_ex machinery, then downloading DD→FP64.
 // A ZGEMM chooses between Gauss-3M and 4M as the BLAS ABI does, per row of
 // op(A) and column of op(B) (ab_internal.h), not per matrix as ab_zgemm_ex.
 //
-// Each call therefore converts and allocates, with the per-call costs of the
-// BLAS ABI. DD-native device buffers would remove the per-call conversion and the
-// temporary allocation; they are not implemented.
+// Each call therefore converts, with the per-call costs of the BLAS ABI. The
+// handles are views of buffers the staged path's pool keeps between calls
+// (ab_internal_stage_views, gpu_stage.h): fresh ones paid first-touch page
+// faults as the conversion wrote them and again before the GPU started.
+// DD-native device buffers would remove the per-call conversion; they are not
+// implemented.
 //
 // For _offset variants: we offset into the raw FP64 data in shared memory
 // before uploading into the temp ABMatrix.  The Fortran offset is in elements
@@ -358,18 +362,18 @@ ABStatus ab_dev_dgemm_offset(ABTranspose transA, ABTranspose transB,
     ABStatus fit = dev_operands_fit(m, n, k);
     if (fit != AB_OK) return fit;
 
-    // Create temporary ABMatrix handles (heap-allocated, FP64→DD conversion)
-    // for op(A)^T (k×m), op(B)^T (n×k) and C^T (n×m).
-    ABMatrix mA = ab_matrix_create(k, m);
-    ABMatrix mB = ab_matrix_create(n, k);
-    ABMatrix mC = ab_matrix_create(n, m);
-    ABStatus s = AB_ERROR_ALLOC_FAILED;
-    if (!mA || !mB || !mC) goto dgemm_cleanup;
+    // Temporary ABMatrix handles (FP64→DD conversion) for op(A)^T (k×m),
+    // op(B)^T (n×k) and C^T (n×m), from the pool.
+    const int rows[3] = {k, n, n}, cols[3] = {m, k, m};
+    ABMatrix h[3];
+    ab_stage_t* slot = ab_internal_stage_views(3, rows, cols, h);
+    if (!slot) return AB_ERROR_ALLOC_FAILED;
+    ABMatrix mA = h[0], mB = h[1], mC = h[2];
 
     // Upload from device buffer shared memory into DD-format ABMatrix.
     // op(X)^T is X^T for NO_TRANS and X (transposed on the host as it is
     // converted) otherwise; ab_dgemm_scaled takes no transpose flags.
-    s = dev_upload_real_submatrix(mA, A, a_offset, lda, tA);
+    ABStatus s = dev_upload_real_submatrix(mA, A, a_offset, lda, tA);
     if (s != AB_OK) goto dgemm_cleanup;
     s = dev_upload_real_submatrix(mB, B, b_offset, ldb, tB);
     if (s != AB_OK) goto dgemm_cleanup;
@@ -388,9 +392,8 @@ ABStatus ab_dev_dgemm_offset(ABTranspose transA, ABTranspose transB,
     s = dev_download_real_submatrix(C, c_offset, ldc, mC);
 
 dgemm_cleanup:
-    ab_matrix_destroy(mA);
-    ab_matrix_destroy(mB);
-    ab_matrix_destroy(mC);
+    for (int i = 0; i < 3; i++) ab_matrix_destroy(h[i]);
+    ab_internal_stage_release(slot);
     return s;
 
 }
@@ -432,16 +435,16 @@ ABStatus ab_dev_zgemm_offset(ABTranspose transA, ABTranspose transB,
     ABStatus fit = dev_operands_fit(m, n, k);
     if (fit != AB_OK) return fit;
 
-    // Create 6 ABMatrix handles: separate real + imaginary for A^T, B^T, C^T
-    ABMatrix mAr = ab_matrix_create(A_cols, A_rows);
-    ABMatrix mAi = ab_matrix_create(A_cols, A_rows);
-    ABMatrix mBr = ab_matrix_create(B_cols, B_rows);
-    ABMatrix mBi = ab_matrix_create(B_cols, B_rows);
-    ABMatrix mCr = ab_matrix_create(n, m);
-    ABMatrix mCi = ab_matrix_create(n, m);
+    // 6 ABMatrix handles from the pool: separate real + imaginary for A^T,
+    // B^T, C^T
+    const int rows[6] = {A_cols, A_cols, B_cols, B_cols, n, n};
+    const int cols[6] = {A_rows, A_rows, B_rows, B_rows, m, m};
+    ABMatrix h[6];
+    ab_stage_t* slot = ab_internal_stage_views(6, rows, cols, h);
+    if (!slot) return AB_ERROR_ALLOC_FAILED;
+    ABMatrix mAr = h[0], mAi = h[1], mBr = h[2], mBi = h[3], mCr = h[4], mCi = h[5];
     ab_line_stats_t sa = {}, sb = {};
     ABStatus s = AB_ERROR_ALLOC_FAILED;
-    if (!mAr || !mAi || !mBr || !mBi || !mCr || !mCi) goto zgemm_cleanup;
     if (!ab_line_parts_init(&sa, m) || !ab_line_parts_init(&sb, n)) goto zgemm_cleanup;
 
     // Upload: deinterleave complex → separate real/imag, FP64→DD, gathering
@@ -540,12 +543,8 @@ ABStatus ab_dev_zgemm_offset(ABTranspose transA, ABTranspose transB,
 zgemm_cleanup:
     ab_line_stats_free(&sa);
     ab_line_stats_free(&sb);
-    ab_matrix_destroy(mAr);
-    ab_matrix_destroy(mAi);
-    ab_matrix_destroy(mBr);
-    ab_matrix_destroy(mBi);
-    ab_matrix_destroy(mCr);
-    ab_matrix_destroy(mCi);
+    for (int i = 0; i < 6; i++) ab_matrix_destroy(h[i]);
+    ab_internal_stage_release(slot);
     return s;
 }
 
