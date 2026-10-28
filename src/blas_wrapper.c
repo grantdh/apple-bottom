@@ -62,6 +62,13 @@ bool ab_line_stats_init(ab_line_stats_t* s, int n, bool complex_parts) {
     return true;
 }
 
+bool ab_line_parts_init(ab_line_stats_t* s, int n) {
+    *s = (ab_line_stats_t){.n = n};
+    s->rmax = calloc((size_t)n, sizeof *s->rmax);
+    s->imax = calloc((size_t)n, sizeof *s->imax);
+    return s->rmax && s->imax;
+}
+
 void ab_line_stats_free(ab_line_stats_t* s) {
     free(s->max);
     free(s->min);
@@ -638,14 +645,6 @@ static ab_prof_fallback_t fallback_reason(ABStatus st) {
          : st == AB_ERROR_TOO_LARGE ? AB_PROF_FB_TOO_LARGE : AB_PROF_FB_OTHER;
 }
 
-// How the BLAS ABI computes a ZGEMM's product from its lines' statistics:
-// 4M where some row of op(A) and column of op(B) give Gauss-3M a rho above
-// AB_GAUSS3M_MAX_RHO (ab_internal.h), else 3M. The staged path keeps a result
-// only where this is 3M.
-static ab_zgemm_method_t blas_zgemm_method(const ab_line_stats_t* sa, const ab_line_stats_t* sb) {
-    return ab_lines_rho(sa, sb) > AB_GAUSS3M_MAX_RHO ? AB_ZGEMM_4M : AB_ZGEMM_3M;
-}
-
 // The ZGEMM epilogue of the host path, C = alpha * P + beta * C, from the
 // product P = op(A) * op(B) as row-major real and imaginary parts (M x N).
 // Bit for bit (ab_internal.h): with the line scales re (rows of op(A)) and
@@ -730,7 +729,7 @@ static bool staged_path(void) {
 
 // Copies of at least STAGE_COPY_PARALLEL bytes run in STAGE_COPY_CHUNKS
 // pieces on the global queue (~54 GB/s on one thread, ~100 on several; cf.
-// AB_CONVERT_PARALLEL_MIN in apple_bottom.m for the host path's conversion).
+// AB_CONVERT_PARALLEL_MIN in ab_internal.h for the host path's conversion).
 #define STAGE_COPY_PARALLEL ((size_t)4 << 20)
 #define STAGE_COPY_CHUNKS 4
 
@@ -796,7 +795,7 @@ static bool staged_certified(ab_stage_t *s, const ab_stage_gemm_t *g) {
     const ab_op_view_t va = {A->ptr, A->ld, g->M, g->K, g->ta != 'N', z};
     const ab_op_view_t vb = {B->ptr, B->ld, g->K, g->N, g->tb != 'N', z};
     if (ab_line_scales(&sa) || ab_line_scales(&sb) ||
-        (z && blas_zgemm_method(&sa, &sb) != AB_ZGEMM_3M) ||
+        (z && ab_lines_method(&sa, &sb) != AB_ZGEMM_3M) ||
         !ab_range_guard(g->K, &sa, &sb, z ? 0 : ilogb(g->alpha[0]), &va, &vb))
         return false;
     return z || !g->c_in || ab_range_guard_c(&sa, &sb, c, ilogb(g->beta[0]), C->ptr, C->ld, 0);
@@ -995,8 +994,9 @@ static void zgemm_blas(
     // Compute C = op(A) * op(B), by 4M where some row of op(A) and column of
     // op(B) are imbalanced enough to cost Gauss-3M's imaginary part its
     // accuracy (ab_internal.h).
-    ab_zgemm_method_t method = blas_zgemm_method(&sa, &sb);
-    if (ab_internal_zgemm(mAr, mAi, mBr, mBi, mCr, mCi, method) != AB_OK) goto cleanup;
+    if (ab_internal_zgemm(AB_NO_TRANS, AB_NO_TRANS, mAr, mAi, mBr, mBi, mCr, mCi,
+                          ab_lines_method(&sa, &sb)) != AB_OK)
+        goto cleanup;
     prof_kernel(p);
 
     // Download result and apply alpha/beta epilogue

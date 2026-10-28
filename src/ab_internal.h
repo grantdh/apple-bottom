@@ -4,7 +4,8 @@
 //
 // apple_bottom.m owns the ABMatrix layout and the FP64 <-> double-float (DD)
 // conversion; blas_wrapper.c's BLAS-ABI path uses these to scale operands by
-// powers of two on the way in (the exponent-range guard, blas_wrapper.c).
+// powers of two on the way in (the exponent-range guard, blas_wrapper.c), and
+// device_api.m's ZGEMM to choose between Gauss-3M and 4M as that path does.
 // =============================================================================
 #ifndef AB_INTERNAL_H
 #define AB_INTERNAL_H
@@ -54,6 +55,24 @@ static inline int ab_scalar_exp(double x, int window) {
     int e = ilogb(x);
     return e >= -window && e <= window ? 0 : e;
 }
+
+// =============================================================================
+// Host loops across cores
+// =============================================================================
+// apple_bottom.m's FP64 <-> DD conversions and device_api.m's staging copies
+// split large arrays into chunks across cores.
+#define AB_CONVERT_PARALLEL_MIN ((size_t)1 << 20)  // elements; serial below this
+#define AB_CONVERT_CHUNKS 8
+
+#ifdef __BLOCKS__
+// Runs body(chunk, offset, n) on contiguous ranges [offset, offset + n) of at
+// least one unit that cover [0, count) units of `work` elements each: all of
+// it as chunk 0 below AB_CONVERT_PARALLEL_MIN elements (or for one unit),
+// else up to min(count, AB_CONVERT_CHUNKS) chunks in parallel, numbered
+// from 0.
+void ab_internal_for_each_chunk(size_t count, size_t work,
+                                void (^body)(size_t chunk, size_t offset, size_t n));
+#endif
 
 // =============================================================================
 // Magnitudes as high words
@@ -176,6 +195,9 @@ typedef struct {
 // n lines (of a complex operand, if complex_parts), all zero so far; false
 // if out of memory (free it anyway).
 bool ab_line_stats_init(ab_line_stats_t* s, int n, bool complex_parts);
+// n lines' rmax and imax only, zeroed (max, min and e stay NULL): what
+// ab_lines_rho reads; false if out of memory (free it anyway).
+bool ab_line_parts_init(ab_line_stats_t* s, int n);
 void ab_line_stats_free(ab_line_stats_t* s);
 
 // Adds the statistics of op(X)'s rows (by_row) or columns to s, as the BLAS
@@ -236,8 +258,7 @@ static inline double ab_gauss3m_rho(double p, double q) {
 }
 
 // The largest rho of a row of op(A) and a column of op(B), from their
-// complex statistics (rmax, imax); 0 if op(A) or op(B) is zero. A BLAS-ABI
-// ZGEMM runs as 4M above AB_GAUSS3M_MAX_RHO.
+// complex statistics (rmax, imax); 0 if op(A) or op(B) is zero.
 double ab_lines_rho(const ab_line_stats_t* sa, const ab_line_stats_t* sb);
 
 typedef enum {
@@ -246,14 +267,23 @@ typedef enum {
     AB_ZGEMM_4M,
 } ab_zgemm_method_t;
 
+// The method of a BLAS-ABI or device-API ZGEMM: 4M where ab_lines_rho
+// exceeds AB_GAUSS3M_MAX_RHO, else Gauss-3M. The BLAS ABI's staged path
+// keeps a result only where it is 3M.
+static inline ab_zgemm_method_t ab_lines_method(const ab_line_stats_t* sa,
+                                                const ab_line_stats_t* sb) {
+    return ab_lines_rho(sa, sb) > AB_GAUSS3M_MAX_RHO ? AB_ZGEMM_4M : AB_ZGEMM_3M;
+}
+
 // =============================================================================
 // Entry points of apple_bottom.m
 // =============================================================================
 
-// C = A B for split-complex A (Ar, Ai) and B (Br, Bi), as ab_zgemm computes
-// it, by the given method.
-ABStatus ab_internal_zgemm(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr,
-                           ABMatrix Ci, ab_zgemm_method_t method);
+// C = op(A) op(B) for split-complex A (Ar, Ai) and B (Br, Bi), as ab_zgemm_ex
+// computes it, by the given method.
+ABStatus ab_internal_zgemm(ABTranspose transA, ABTranspose transB, ABMatrix Ar, ABMatrix Ai,
+                           ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci,
+                           ab_zgemm_method_t method);
 
 // Uploads row-major rows x cols data (the matrix's own shape) as
 // x * 2^-(row_exp[i] + col_exp[j] + shift) into m, whose power-of-two scale

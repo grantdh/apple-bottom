@@ -85,10 +85,7 @@ void ab_prof_dump(FILE *out);
 #define CASE_TIMEOUT_S  120
 #define FORK_WAIT_S     30      // a fork()ed child still running then is ended by SIGALRM
 
-#define U2              0x1p-48 // u² = 2⁻⁴⁸, DD unit roundoff (u = 2⁻²⁴, FP32)
-#define LONG_K_BOUND    8.0     // long-K error bound, units of u² (see gen_long_k)
-#define IMAG_BOUND      8.0     // Re/Im error bound under imbalance, units of u² (gen_imbalance)
-#define IMAG_RATIO      1e-6    // the smaller part's magnitude, relative (ImagData)
+#define LONG_K_BOUND    8.0     // long-K error bound, units of u² (U2, see gen_long_k)
 #define N_THREADS       8
 #define THREAD_REPS     3       // calls per routine and thread
 #define MEM_WARMUP_CALLS 200
@@ -170,20 +167,6 @@ typedef enum {
                         // away beside the products (the GPU must certify it)
     RANGE_C_HUGE,       // C0 x 2^135, beta = 2^-20: beta C0 fits FP32, C0 does not (Accelerate)
 } RangeData;
-
-// KIND_IMAG data: entries of magnitude [0.5, 1) with random signs, as for
-// KIND_RANGE, then one part of each row of op(A) and each column of op(B)
-// multiplied by IMAG_RATIO, which Gauss-3M's imaginary part cannot take.
-typedef enum {
-    IMAG_SMALL,         // Im x IMAG_RATIO: nearly real A and B
-    IMAG_LARGE,         // Re x IMAG_RATIO: nearly imaginary
-    IMAG_LINES,         // even rows of op(A) and columns of op(B) nearly real, odd ones nearly
-                        // imaginary: every row and column imbalanced, A and B as a whole not
-} ImagData;
-
-static const char *const IMAG_TAG[] = {
-    [IMAG_SMALL] = "small-im", [IMAG_LARGE] = "small-re", [IMAG_LINES] = "lines",
-};
 
 static const char *const RANGE_TAG[] = {
     [RANGE_TINY] = "tiny", [RANGE_HUGE] = "huge", [RANGE_ROWCOL] = "rowcol",
@@ -642,7 +625,7 @@ static void gen_imbalance(const Suite *s) {
                               SC_A1B0);
         c->imag = IMB[i].d;
         snprintf(c->name, sizeof c->name, "zgemm_/%s/%c%c/96x80x72/imag-%s", s->label,
-                 IMB[i].ta, IMB[i].tb, IMAG_TAG[IMB[i].d]);
+                 IMB[i].ta, IMB[i].tb, imag_tag(IMB[i].d));
     }
 }
 
@@ -1489,9 +1472,6 @@ static bool run_memory(const AbiCase *c, char *detail, size_t n) {
 
 // --- Exponent range -------------------------------------------------------------
 
-// x's sign, with a magnitude in [0.5, 1).
-static double half_to_one(double x) { return copysign(0.5 + 0.5 * fabs(x), x); }
-
 // i of n (0 <= i < n) spread evenly over the integers [lo, hi].
 static int spread(int i, int n, int lo, int hi) {
     return n > 1 ? lo + (int)lround((double)(hi - lo) * i / (n - 1)) : lo;
@@ -1785,13 +1765,7 @@ static bool run_range(const AbiCase *c, char *detail, size_t n) {
                ? run_range_native(c, detail, n) : run_range_blas(c, detail, n);
 }
 
-// --- Re/Im imbalance ------------------------------------------------------------
-
-// Whether line l of op(A) (rows) or op(B) (columns) gets its real part (else
-// its imaginary part) multiplied by IMAG_RATIO.
-static bool imag_small_re(ImagData d, int l) {
-    return d == IMAG_LARGE || (d == IMAG_LINES && l % 2);
-}
+// --- Re/Im imbalance (ImagData, test_dot2.h) ------------------------------------
 
 static void imag_apply(Call *k, ImagData d) {
     const AbiCase *c = &k->c;
@@ -1814,42 +1788,19 @@ static bool run_imag(const AbiCase *c, char *detail, size_t n) {
     uint64_t g0 = gpu_gemm_count();
     bool gpu = call_run(&k, C) && gpu_gemm_count() > g0;
 
-    // R = op(A) op(B) in Dot2, and each part's componentwise scale D:
-    // |Ar||Br| + |Ai||Bi| for Re, |Ar||Bi| + |Ai||Br| for Im.
-    const size_t na = (size_t)M * K, nb = (size_t)K * N, nr = (size_t)M * N;
+    const size_t na = (size_t)M * K, nb = (size_t)K * N;
     double *Ar = malloc(na * sizeof *Ar), *Ai = malloc(na * sizeof *Ai);
     double *Br = malloc(nb * sizeof *Br), *Bi = malloc(nb * sizeof *Bi);
-    double *S[2], *E[2], *D[2];
-    for (int p = 0; p < 2; p++) {
-        S[p] = calloc(nr, sizeof(double)); E[p] = calloc(nr, sizeof(double));
-        D[p] = calloc(nr, sizeof(double));
-    }
     pack_rows(k.A, k.la, c->ta, true, M, K, Ar, Ai);
     pack_rows(k.B, k.lb, c->tb, true, K, N, Br, Bi);
-    dot2_zgemm_acc(M, N, K, Ar, Ai, Br, Bi, S, E);
-    abs_gemm_acc(M, N, K, Ar, NULL, Br, NULL, D[0]);
-    abs_gemm_acc(M, N, K, Ai, NULL, Bi, NULL, D[0]);
-    abs_gemm_acc(M, N, K, Ar, NULL, Bi, NULL, D[1]);
-    abs_gemm_acc(M, N, K, Ai, NULL, Br, NULL, D[1]);
+    double err[2];
+    dot2_zgemm_parts_err(M, N, K, Ar, Ai, Br, Bi, 1.0, C, (size_t)k.lc.ld, err);
     free(Ar); free(Ai); free(Br); free(Bi);
-
-    double err[2] = {0.0, 0.0};
-    for (int j = 0; j < N; j++)
-        for (int i = 0; i < M; i++) {
-            const double complex v = ((const double complex *)C)[(size_t)j * k.lc.ld + i];
-            const double got[2] = {creal(v), cimag(v)};
-            for (int p = 0; p < 2; p++) {
-                size_t y = (size_t)i * N + j;
-                double e = fabs(got[p] - (S[p][y] + E[p][y])) / (D[p][y] + DBL_MIN);
-                if (isnan(e) || e > err[p]) err[p] = e;
-            }
-        }
     bool outside_ok = outside_block_unchanged(C, k.C0, k.nc, k.lc, k.es);
     snprintf(detail, n, "Re err=%.2f u² Im err=%.2f u² (bound %.0f u²) path=%s%s%s", err[0] / U2,
              err[1] / U2, IMAG_BOUND, ab_get_last_dispatch_path(),
              gpu ? "" : " [GPU path not taken]", outside_ok ? "" : " [C outside MxN modified]");
 
-    for (int p = 0; p < 2; p++) { free(S[p]); free(E[p]); free(D[p]); }
     free(C);
     call_free(&k);
     return gpu && outside_ok && err[0] <= IMAG_BOUND * U2 && err[1] <= IMAG_BOUND * U2;

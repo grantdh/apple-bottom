@@ -205,12 +205,17 @@ All notable changes to this project will be documented in this file.
   1 u² with four products.
   - A ZGEMM whose parts give ρ = (1+p)(1+q)/(p+q) above 4, where p and q are
     the parts' magnitude ratios, now runs as four real products (4M). The
-    BLAS ABI takes p and q per row of op(A) and column of op(B); the native
-    API per uploaded matrix.
-  - 4M costs 1.07–1.34× the native call time and 1.00–1.10× end to end
-    through `zgemm_` (M2 Max). Balanced data keeps the three-product form
-    and its bits.
-  - New tests: `test_blas_abi test_zgemm_imbalance` (6 cases) and
+    BLAS ABI and the device-buffer API (`ab_dev_zgemm`) take p and q per row
+    of op(A) and column of op(B); the native API per uploaded matrix.
+  - 4M costs 1.07–1.34× the native call time, 1.05–1.19× through
+    `ab_dev_zgemm` and 1.00–1.10× end to end through `zgemm_` (M2 Max).
+    Balanced data keeps the three-product form and its bits.
+  - `ab_dev_zgemm` gathers the parts as it copies op(A) and op(B) out of
+    their buffers, a copy that now runs across cores, as the FP64→DD
+    conversion after it already did: on balanced data its calls take 2–6%
+    less time than before at QE shapes, and 3% less at 1024³.
+  - New tests: `test_blas_abi test_zgemm_imbalance` (6 cases),
+    `test_device_api test_zgemm_imbalance` (13 cases) and
     `test_correctness test_imbalance_zgemm_paths`. Limits:
     `docs/vv/LIMITATIONS.md`, "Complex products".
 

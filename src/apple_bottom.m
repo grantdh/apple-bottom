@@ -1762,23 +1762,31 @@ id<MTLComputePipelineState> ab_internal_sub_pipeline(void) {
 // Conversion Helpers
 // =============================================================================
 // Plain loops the compiler vectorizes (~30 GB/s on one core). Large arrays are
-// split into a few contiguous chunks across cores; one dispatch_apply block per
-// element ran at ~125 MB/s (H-P0-3). Results are identical either way.
+// split into a few contiguous chunks across cores (ab_internal_for_each_chunk);
+// one dispatch_apply block per element ran at ~125 MB/s (H-P0-3). Results are
+// identical either way.
 
-#define AB_CONVERT_PARALLEL_MIN ((size_t)1 << 20)  // elements; serial below this
-#define AB_CONVERT_CHUNKS 8
-
-// Runs body(offset, n) over [0, count) units of `work` elements each, in
-// contiguous ranges, in parallel when there are enough elements, and returns
-// the merge of the ranges the bodies return.
-static ab_range_t for_each_chunk(size_t count, size_t work,
-                                 ab_range_t (^body)(size_t offset, size_t n)) {
-    if (count * work < AB_CONVERT_PARALLEL_MIN || count < 2) return body(0, count);
-    ab_range_t part_storage[AB_CONVERT_CHUNKS], *parts = part_storage;  // blocks write through it
+extern "C" void ab_internal_for_each_chunk(size_t count, size_t work,
+                                           void (^body)(size_t chunk, size_t offset, size_t n)) {
+    if (count * work < AB_CONVERT_PARALLEL_MIN || count < 2) {
+        body(0, 0, count);
+        return;
+    }
     size_t chunk = (count + AB_CONVERT_CHUNKS - 1) / AB_CONVERT_CHUNKS;
     dispatch_apply(AB_CONVERT_CHUNKS, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t c) {
         size_t offset = c * chunk;
-        parts[c] = offset < count ? body(offset, MIN(chunk, count - offset)) : AB_RANGE_EMPTY;
+        if (offset < count) body(c, offset, MIN(chunk, count - offset));
+    });
+}
+
+// Runs body(offset, n) on the chunks of ab_internal_for_each_chunk and
+// returns the merge of the ranges the bodies return.
+static ab_range_t for_each_chunk(size_t count, size_t work,
+                                 ab_range_t (^body)(size_t offset, size_t n)) {
+    ab_range_t part_storage[AB_CONVERT_CHUNKS], *parts = part_storage;  // blocks write through it
+    for (int c = 0; c < AB_CONVERT_CHUNKS; c++) parts[c] = AB_RANGE_EMPTY;
+    ab_internal_for_each_chunk(count, work, ^(size_t c, size_t offset, size_t n) {
+        parts[c] = body(offset, n);
     });
     ab_range_t r = AB_RANGE_EMPTY;
     for (int c = 0; c < AB_CONVERT_CHUNKS; c++) {
@@ -2898,9 +2906,10 @@ ABStatus ab_zgemm_ex(ABTranspose transA, ABTranspose transB, ABMatrix Ar, ABMatr
     return zgemm_ex(transA, transB, Ar, Ai, Br, Bi, Cr, Ci, AB_ZGEMM_AUTO);
 }
 
-extern "C" ABStatus ab_internal_zgemm(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
-                                      ABMatrix Cr, ABMatrix Ci, ab_zgemm_method_t method) {
-    return zgemm_ex(AB_NO_TRANS, AB_NO_TRANS, Ar, Ai, Br, Bi, Cr, Ci, method);
+extern "C" ABStatus ab_internal_zgemm(ABTranspose transA, ABTranspose transB, ABMatrix Ar,
+                                      ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr,
+                                      ABMatrix Ci, ab_zgemm_method_t method) {
+    return zgemm_ex(transA, transB, Ar, Ai, Br, Bi, Cr, Ci, method);
 }
 
 // ZGEMM using Gauss's trick: 3 real multiplications instead of 4
