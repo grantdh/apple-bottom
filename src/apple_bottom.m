@@ -1128,8 +1128,9 @@ kernel void dd_conj_transpose(
 //   dd_to_fp64  (double)hi + (double)lo, finite hi and lo
 // An epilogue that meets Inf or NaN sets *special, and the host then redoes
 // the call on its own path instead of using the result. The pre-passes take
-// their ABStage at buffer(4) and their statistics at (5) to (7); the
-// epilogues take a special flag at (4) and their ABStage at (5).
+// their ABStage at buffer(4), their statistics at (5) to (7) and the lines'
+// scales at (8); the epilogues take a special flag at (4), their ABStage at
+// (5) and the scales at (6).
 
 constant ulong AB_F64_SIGN = 0x8000000000000000ul;
 constant ulong AB_F64_INF = 0x7FF0000000000000ul;
@@ -1236,6 +1237,45 @@ static ulong ab_f64_add(ulong a, ulong b) {
 static ulong ab_f64_pos0(ulong x) { return x & AB_F64_SIGN; }
 static ulong ab_f64_neg0(ulong x) { return (x & AB_F64_SIGN) ^ AB_F64_SIGN; }
 
+// m * 2^q (0 < m < 2^53) to FP64 magnitude bits: nearest even, subnormal
+// results kept, +Inf past the range (ab_rn_f32's FP64 twin).
+static ulong ab_rn_f64(ulong m, int q) {
+    int p = 63 - int(clz(m));
+    int ex = q + p;
+    if (ex >= 1024) return AB_F64_INF;
+    int shift = ex >= -1022 ? p - 52 : -1074 - q;
+    ulong k;
+    if (shift <= 0) {
+        k = m << uint(-shift);
+    } else if (shift > 63) {
+        k = 0;
+    } else {
+        ulong rem = m & ((1ul << uint(shift)) - 1ul), tie = 1ul << uint(shift - 1);
+        k = m >> uint(shift);
+        if (rem > tie || (rem == tie && (k & 1ul))) k += 1ul;
+    }
+    return ex >= -1022 ? (ulong(ex + 1023) << 52) + (k - (1ul << 52)) : k;
+}
+
+// x * 2^e, as the CPU's multiply by a power of two or ldexp rounds it (the
+// exponent-range guard's scaling, ab_scale2): exact unless the result is
+// subnormal, +-Inf past the range; zero, Inf and NaN stay (a NaN quieted).
+static ulong ab_f64_scale(ulong x, int e) {
+    ulong a = x & ~AB_F64_SIGN;
+    if (e == 0 || a == 0ul) return x;
+    if (a >= AB_F64_INF) return a > AB_F64_INF ? x | 0x0008000000000000ul : x;
+    int E = int(a >> 52);
+    ulong M = (a & 0xFFFFFFFFFFFFFul) | (E ? 1ul << 52 : 0ul);
+    return (x & AB_F64_SIGN) | ab_rn_f64(M, (E ? E - 1075 : -1074) + e);
+}
+
+// The same on an FP64 as its (low, high) words.
+static uint2 ab_scale_words(uint2 v, int e) {
+    if (e == 0) return v;
+    ulong s = ab_f64_scale(ulong(v.x) | (ulong(v.y) << 32), e);
+    return uint2(uint(s), uint(s >> 32));
+}
+
 // dd_to_fp64 of DD bits d; *special if hi or lo is Inf or NaN.
 static ulong ab_dd_to_f64(uint2 d, thread bool &special) {
     special = special || ab_f32_special(d.x) || ab_f32_special(d.y);
@@ -1244,8 +1284,10 @@ static ulong ab_dd_to_f64(uint2 d, thread bool &special) {
 
 // rows x cols, the leading dimension of the FP64 matrix read (pre-pass) or
 // written (epilogue), each kernel's flag k (the pre-pass's conjugate, ZGEMM's
-// epilogue's beta = 1) and the statistics the pre-pass gathers (stat).
-struct ABStage { uint rows, cols, ld, k, stat; };
+// epilogue's beta = 1), the statistics the pre-pass gathers (stat), the
+// scales a fix-up applies (fix, below) and where the columns' scales start in
+// the array of scales (ecol: M, op(B)'s columns following op(A)'s rows).
+struct ABStage { uint rows, cols, ld, k, stat, fix, ecol; };
 
 // Pre-pass. op(X) is rows x cols: X (op(X) = X, X stored rows x cols) or
 // X^T, X^H (X stored cols x rows); X column-major with leading dimension
@@ -1356,6 +1398,55 @@ static void ab_direct_stat(uint stat, uint r, uint c, uint2 h, uint2 lt,
     }
 }
 
+// The exponent-range guard's scales on the GPU (ab_line_scales). Once the
+// pre-passes have gathered the lines' statistics, ab_scales gives each line
+// its scale, and a fix-up pass then converts again, as x * 2^-scale, every
+// element of op(A) in a scaled row (fix 1), of op(B) in a scaled column
+// (fix 2), and all of a DGEMM's C, by its row's and column's scales (fix 3,
+// gathering the range of C as uploaded); the epilogue multiplies the result
+// by 2^(row's + column's). Each fix-up's grid comes from indirect arguments
+// that stay zero unless ab_scales sets them, so a call without scaled lines
+// runs none.
+
+// The scale of a line whose largest |x| has high word h: 0 inside
+// 2^±window, else ilogb(|x|) - target.
+static int ab_line_scale(uint h, int window, int target) {
+    if (h == 0u || h >= 0x7FF00000u) return 0;
+    int e = h >= 0x00100000u ? int(h >> 20) - 1023 : (31 - int(clz(h))) - 1042;
+    return e >= -window && e < window ? 0 : e - target;
+}
+
+// lines: op(A)'s M rows, then op(B)'s columns; grid: the fix-ups' grids
+// (op(A), op(B), C), the indirect arguments a scaled line sets.
+struct ABScales { uint lines, M; int window, target; uint grid[9]; };
+
+// One thread per line: its largest |x| (complex: the larger of its parts',
+// smax and simax; a real call binds smax twice) and its scale into e.
+kernel void ab_scales(device const uint* smax [[buffer(0)]], device const uint* simax [[buffer(1)]],
+                      device int* e [[buffer(2)]], device atomic_uint* args [[buffer(3)]],
+                      constant ABScales& p [[buffer(4)]], uint i [[thread_position_in_grid]]) {
+    if (i >= p.lines) return;
+    int s = ab_line_scale(max(smax[i], simax[i]), p.window, p.target);
+    e[i] = s;
+    if (s == 0) return;
+    uint g = i < p.M ? 0 : 3;
+    for (uint d = 0; d < 3; d++) {
+        atomic_store_explicit(&args[g + d], p.grid[g + d], memory_order_relaxed);
+        atomic_store_explicit(&args[6 + d], p.grid[6 + d], memory_order_relaxed);
+    }
+}
+
+// A pass's exponent for element (r, c) of op(X): 0 in a pre-pass, else minus
+// the scales p.fix selects (1: its row's, 2: its column's, at es[p.ecol + c]).
+static int ab_fix_exp(constant ABStage& p, device const int* es, uint r, uint c) {
+    if (p.fix == 0u) return 0;
+    return -(((p.fix & 1u) ? es[r] : 0) + ((p.fix & 2u) ? es[p.ecol + c] : 0));
+}
+
+// Whether a pass converts an element at exponent x: a pre-pass every one, a
+// fix-up those it scales, or every one when it gathers statistics.
+static bool ab_fix_work(constant ABStage& p, int x) { return p.fix == 0u || p.stat != 0u || x != 0; }
+
 static void ab_store_z(device uint2* re, device uint2* im, device uint2* sum, uint o,
                        uint2 a, uint2 b) {
     re[o] = a;
@@ -1371,6 +1462,7 @@ kernel void ab_prep_d_n(device const uint2* X [[buffer(0)]], device uint2* out [
                         constant ABStage& p [[buffer(4)]],
                         device atomic_uint* smax [[buffer(5)]],
                         device atomic_uint* smin [[buffer(6)]],
+                        device const int* es [[buffer(8)]],
                         uint2 tg [[threadgroup_position_in_grid]],
                         uint2 lt [[thread_position_in_threadgroup]]) {
     threadgroup uint2 t[32][33];
@@ -1382,9 +1474,12 @@ kernel void ab_prep_d_n(device const uint2* X [[buffer(0)]], device uint2* out [
     for (uint j = lt.y; j < 32; j += 8) {
         uint r = r0 + lt.x, c = c0 + j, h = 0;
         if (r < p.rows && c < p.cols) {
-            uint2 v = X[ulong(c) * p.ld + r];
-            t[j][lt.x] = ab_f64_to_dd(v.x, v.y);
-            h = ab_hiword(v.y);
+            int x = ab_fix_exp(p, es, r, c);
+            if (ab_fix_work(p, x)) {
+                uint2 v = ab_scale_words(X[ulong(c) * p.ld + r], x);
+                t[j][lt.x] = ab_f64_to_dd(v.x, v.y);
+                h = ab_hiword(v.y);
+            }
         }
         ab_tile_stat(p.stat, c, uint2(h, 0), mx, mn, st);
     }
@@ -1393,7 +1488,8 @@ kernel void ab_prep_d_n(device const uint2* X [[buffer(0)]], device uint2* out [
     ab_tile_stat_rows(p.stat, r0, lt, sm, sn, st);
     for (uint i = lt.y; i < 32; i += 8) {
         uint r = r0 + i, c = c0 + lt.x;
-        if (r < p.rows && c < p.cols) out[r * p.cols + c] = t[lt.x][i];
+        if (r < p.rows && c < p.cols && ab_fix_work(p, ab_fix_exp(p, es, r, c)))
+            out[r * p.cols + c] = t[lt.x][i];
     }
 }
 
@@ -1403,6 +1499,7 @@ kernel void ab_prep_z_n(device const uint4* X [[buffer(0)]], device uint2* re [[
                         device atomic_uint* smax [[buffer(5)]],
                         device atomic_uint* smin [[buffer(6)]],
                         device atomic_uint* simax [[buffer(7)]],
+                        device const int* es [[buffer(8)]],
                         uint2 tg [[threadgroup_position_in_grid]],
                         uint2 lt [[thread_position_in_threadgroup]]) {
     threadgroup uint4 t[32][33];
@@ -1415,9 +1512,13 @@ kernel void ab_prep_z_n(device const uint4* X [[buffer(0)]], device uint2* re [[
         uint r = r0 + lt.x, c = c0 + j;
         uint2 h = 0;
         if (r < p.rows && c < p.cols) {
-            uint4 v = X[ulong(c) * p.ld + r];
-            t[j][lt.x] = uint4(ab_f64_to_dd(v.x, v.y), ab_f64_to_dd(v.z, v.w));
-            h = uint2(ab_hiword(v.y), ab_hiword(v.w));
+            int x = ab_fix_exp(p, es, r, c);
+            if (ab_fix_work(p, x)) {
+                uint4 v = X[ulong(c) * p.ld + r];
+                uint2 a = ab_scale_words(v.xy, x), b = ab_scale_words(v.zw, x);
+                t[j][lt.x] = uint4(ab_f64_to_dd(a.x, a.y), ab_f64_to_dd(b.x, b.y));
+                h = uint2(ab_hiword(a.y), ab_hiword(b.y));
+            }
         }
         ab_tile_stat(p.stat, c, h, mx, mn, st);
     }
@@ -1426,7 +1527,7 @@ kernel void ab_prep_z_n(device const uint4* X [[buffer(0)]], device uint2* re [[
     ab_tile_stat_rows(p.stat, r0, lt, sm, sn, st);
     for (uint i = lt.y; i < 32; i += 8) {
         uint r = r0 + i, c = c0 + lt.x;
-        if (r < p.rows && c < p.cols) {
+        if (r < p.rows && c < p.cols && ab_fix_work(p, ab_fix_exp(p, es, r, c))) {
             uint4 v = t[lt.x][i];
             ab_store_z(re, im, sum, r * p.cols + c, v.xy, v.zw);
         }
@@ -1440,15 +1541,19 @@ kernel void ab_prep_d_t(device const uint2* X [[buffer(0)]], device uint2* out [
                         constant ABStage& p [[buffer(4)]],
                         device atomic_uint* smax [[buffer(5)]],
                         device atomic_uint* smin [[buffer(6)]],
+                        device const int* es [[buffer(8)]],
                         uint2 tg [[threadgroup_position_in_grid]],
                         uint2 lt [[thread_position_in_threadgroup]]) {
     threadgroup uint2 sm[8][32];
     threadgroup uint sn[8][32];
     uint c = tg.x * 32 + lt.x, r = tg.y * 8 + lt.y, h = 0;
     if (c < p.cols && r < p.rows) {
-        uint2 v = X[ulong(r) * p.ld + c];
-        out[r * p.cols + c] = ab_f64_to_dd(v.x, v.y);
-        h = ab_hiword(v.y);
+        int x = ab_fix_exp(p, es, r, c);
+        if (ab_fix_work(p, x)) {
+            uint2 v = ab_scale_words(X[ulong(r) * p.ld + c], x);
+            out[r * p.cols + c] = ab_f64_to_dd(v.x, v.y);
+            h = ab_hiword(v.y);
+        }
     }
     ab_direct_stat(p.stat, r, c, uint2(h, 0), lt, sm, sn, ABLineStats{smax, smax, smin});
 }
@@ -1459,6 +1564,7 @@ kernel void ab_prep_z_t(device const uint4* X [[buffer(0)]], device uint2* re [[
                         device atomic_uint* smax [[buffer(5)]],
                         device atomic_uint* smin [[buffer(6)]],
                         device atomic_uint* simax [[buffer(7)]],
+                        device const int* es [[buffer(8)]],
                         uint2 tg [[threadgroup_position_in_grid]],
                         uint2 lt [[thread_position_in_threadgroup]]) {
     threadgroup uint2 sm[8][32];
@@ -1466,21 +1572,27 @@ kernel void ab_prep_z_t(device const uint4* X [[buffer(0)]], device uint2* re [[
     uint c = tg.x * 32 + lt.x, r = tg.y * 8 + lt.y;
     uint2 h = 0;
     if (c < p.cols && r < p.rows) {
-        uint4 v = X[ulong(r) * p.ld + c];
-        ab_store_z(re, im, sum, r * p.cols + c, ab_f64_to_dd(v.x, v.y),
-                   ab_f64_to_dd(v.z, v.w ^ (p.k ? 0x80000000u : 0u)));
-        h = uint2(ab_hiword(v.y), ab_hiword(v.w));
+        int x = ab_fix_exp(p, es, r, c);
+        if (ab_fix_work(p, x)) {
+            uint4 v = X[ulong(r) * p.ld + c];
+            uint2 a = ab_scale_words(v.xy, x), b = ab_scale_words(v.zw, x);
+            ab_store_z(re, im, sum, r * p.cols + c, ab_f64_to_dd(a.x, a.y),
+                       ab_f64_to_dd(b.x, b.y ^ (p.k ? 0x80000000u : 0u)));
+            h = uint2(ab_hiword(a.y), ab_hiword(b.y));
+        }
     }
     ab_direct_stat(p.stat, r, c, h, lt, sm, sn, ABLineStats{smax, simax, smin});
 }
 
 // Epilogues: the GEMM's row-major DD result (rows x cols) to column-major
-// FP64 C with leading dimension ld, through 32 x 32 tiles.
+// FP64 C with leading dimension ld, through 32 x 32 tiles, each value times
+// 2^(its row's + its column's scale) first (es, the GPU's scales).
 // Threadgroups (32, 8), grid ceil(rows/32) x ceil(cols/32).
 
 // DGEMM: C = dd_to_fp64(P); alpha and beta were applied in DD by the GEMM.
 kernel void ab_epi_d(device const uint2* P [[buffer(0)]], device ulong* out [[buffer(3)]],
                      device atomic_uint* special [[buffer(4)]], constant ABStage& p [[buffer(5)]],
+                     device const int* es [[buffer(6)]],
                      uint2 tg [[threadgroup_position_in_grid]],
                      uint2 lt [[thread_position_in_threadgroup]]) {
     threadgroup ulong t[32][33];
@@ -1488,7 +1600,11 @@ kernel void ab_epi_d(device const uint2* P [[buffer(0)]], device ulong* out [[bu
     bool sp = false;
     for (uint i = lt.y; i < 32; i += 8) {
         uint r = r0 + i, c = c0 + lt.x;
-        if (r < p.rows && c < p.cols) t[lt.x][i] = ab_dd_to_f64(P[r * p.cols + c], sp);
+        if (r < p.rows && c < p.cols) {
+            ulong v = ab_f64_scale(ab_dd_to_f64(P[r * p.cols + c], sp), es[r] + es[p.ecol + c]);
+            sp = sp || ab_f64_special(v);
+            t[lt.x][i] = v;
+        }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint j = lt.y; j < 32; j += 8) {
@@ -1507,6 +1623,7 @@ kernel void ab_epi_d(device const uint2* P [[buffer(0)]], device ulong* out [[bu
 kernel void ab_epi_z(device const uint2* Pr [[buffer(0)]], device const uint2* Pi [[buffer(1)]],
                      device ulong2* out [[buffer(3)]],
                      device atomic_uint* special [[buffer(4)]], constant ABStage& p [[buffer(5)]],
+                     device const int* es [[buffer(6)]],
                      uint2 tg [[threadgroup_position_in_grid]],
                      uint2 lt [[thread_position_in_threadgroup]]) {
     threadgroup ulong2 t[32][33];
@@ -1516,7 +1633,9 @@ kernel void ab_epi_z(device const uint2* Pr [[buffer(0)]], device const uint2* P
         uint r = r0 + i, c = c0 + lt.x;
         if (r < p.rows && c < p.cols) {
             uint o = r * p.cols + c;
-            t[lt.x][i] = ulong2(ab_dd_to_f64(Pr[o], sp), ab_dd_to_f64(Pi[o], sp));
+            int x = es[r] + es[p.ecol + c];
+            t[lt.x][i] = ulong2(ab_f64_scale(ab_dd_to_f64(Pr[o], sp), x),
+                                ab_f64_scale(ab_dd_to_f64(Pi[o], sp), x));
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1580,6 +1699,7 @@ typedef enum { AB_PREFETCH_RULE, AB_PREFETCH_OFF, AB_PREFETCH_ALL } ABPrefetchMo
 @property (nonatomic, strong) id<MTLComputePipelineState> prepZTPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> epiDPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> epiZPipeline;
+@property (nonatomic, strong) id<MTLComputePipelineState> scalesPipeline;
 + (instancetype)shared;
 + (void)shutdown;
 @end
@@ -1711,10 +1831,10 @@ static void ab_atfork_child(void) { g_forked_child = true; }
         if (!_conjTransposePipeline) { NSLog(@"Pipeline creation failed (dd_conj_transpose): %@", error); return nil; }
 
         NSString* const stageKernels[] = {@"ab_prep_d_n", @"ab_prep_d_t", @"ab_prep_z_n",
-                                          @"ab_prep_z_t", @"ab_epi_d", @"ab_epi_z"};
+                                          @"ab_prep_z_t", @"ab_epi_d", @"ab_epi_z", @"ab_scales"};
         id<MTLComputePipelineState> __strong* const stagePipelines[] = {
             &_prepDNPipeline, &_prepDTPipeline, &_prepZNPipeline, &_prepZTPipeline,
-            &_epiDPipeline, &_epiZPipeline};
+            &_epiDPipeline, &_epiZPipeline, &_scalesPipeline};
         for (size_t i = 0; i < sizeof stageKernels / sizeof stageKernels[0]; i++) {
             *stagePipelines[i] = [_device newComputePipelineStateWithFunction:[library newFunctionWithName:stageKernels[i]] error:&error];
             if (!*stagePipelines[i]) { NSLog(@"Pipeline creation failed (%@): %@", stageKernels[i], error); return nil; }
@@ -4243,11 +4363,23 @@ static void stage_layout(struct ab_stage_s* s, const ab_stage_gemm_t* g) {
 // The guard's statistics (STAGE_STATS) are uint32 words for n lines: the
 // rows of op(A) (lines 0 .. M-1), the columns of op(B) (M .. M+N-1) and C
 // (DGEMM, beta != 0; line M+N). Line i's largest high word is word i, its
-// smallest nonzero one word n + i and its scale exponent word 2n + i; a
-// ZGEMM's lines' largest real and imaginary parts are words 3n + i and
-// 4n + i (rmax, imax), and its largest high words follow from them at the
-// end of the run.
+// smallest nonzero one word n + i and its scale exponent, as the host sets
+// it, word 2n + i; a ZGEMM's lines' largest real and imaginary parts are
+// words 3n + i and 4n + i (rmax, imax), and its largest high words follow
+// from them at the end of the run. Then (stage_word): the scales the GPU
+// gave the lines, C's range as uploaded scaled (largest, smallest: a DGEMM
+// reading C whose lines are scaled), and the indirect arguments of the
+// fix-ups of op(A), op(B) and C (three words each).
 static size_t stage_stats_lines(const ab_stage_gemm_t* g) { return (size_t)g->M + g->N + 1; }
+
+typedef enum { STATS_GPU_SCALES, STATS_C_SCALED, STATS_FIX_ARGS, STATS_WORDS } StatsPart;
+
+static size_t stage_word(const ab_stage_gemm_t* g, StatsPart part) {
+    size_t n = stage_stats_lines(g), w = (g->routine == 'z' ? 5 : 3) * n;
+    const size_t sizes[] = {n, 2, 9};
+    for (int i = 0; i < part; i++) w += sizes[i];
+    return w;
+}
 
 // Bytes each role needs for g; 0 for a role it does not use.
 static void stage_needs(const struct ab_stage_s* s, const ab_stage_gemm_t* g,
@@ -4269,7 +4401,7 @@ static void stage_needs(const struct ab_stage_s* s, const ab_stage_gemm_t* g,
         need[STAGE_T1] = need[STAGE_T2] = need[STAGE_CI] = mn;
     }
     if (!g->split) need[STAGE_FLAG] = sizeof(uint32_t);
-    need[STAGE_STATS] = (z ? 5 : 3) * stage_stats_lines(g) * sizeof(uint32_t);
+    need[STAGE_STATS] = stage_word(g, STATS_WORDS) * sizeof(uint32_t);
 }
 
 static id<MTLBuffer> stage_buf(const struct ab_stage_s* s, int role) {
@@ -4445,20 +4577,33 @@ static ab_stage_t* stage_views(ABContextImpl* ctx, int n, const int rows[], cons
     return s;
 }
 
-typedef struct { uint32_t rows, cols, ld, k, stat; } StageParams;   // ABStage
+typedef struct { uint32_t rows, cols, ld, k, stat, fix, ecol; } StageParams;   // ABStage
+typedef struct { uint32_t lines, M; int32_t window, target; uint32_t grid[9]; } StageScales;
 enum { STAT_ROWS = 1, STAT_COLS, STAT_ALL };                        // AB_STAT_*
+enum { FIX_ROWS = 1, FIX_COLS, FIX_ALL };                           // ABStage.fix
 
-// The pre-pass of one operand (ab_prep_*): op(X), rows x cols, from X (its
+// The grid of a pass over op(X), rows x cols (ab_prep_*).
+static MTLSize stage_pass_grid(char op, int rows, int cols) {
+    return op != 'N' ? MTLSizeMake((cols + 31) / 32, (rows + 7) / 8, 1)
+                     : MTLSizeMake((rows + 31) / 32, (cols + 31) / 32, 1);
+}
+
+// One pass over an operand of g (ab_prep_*): op(X), rows x cols, from X (its
 // staging buffer, or registered memory) at byte x_off with leading dimension
-// ld into DD re (and im, sum), with the statistics stat of its lines from
-// line `line` on (stage_stats_lines(): n of them in stats; a complex one's
-// largest parts into rmax and imax).
-static void encode_stage_prep(id<MTLComputeCommandEncoder> enc, ABContextImpl* ctx, bool z,
-                              char op, id<MTLBuffer> X, size_t x_off, int rows, int cols, int ld,
-                              id<MTLBuffer> re, id<MTLBuffer> im, id<MTLBuffer> sum,
-                              uint32_t stat, id<MTLBuffer> stats, size_t line, size_t n) {
+// ld into DD re (and im, sum), the statistics stat of its lines into the
+// words of stats from w[0] (largest high words), w[1] (smallest nonzero
+// ones) and w[2] (complex: largest imaginary parts). A pre-pass (fix 0)
+// converts every element; a fix-up (FIX_*) converts again, by the GPU's
+// scales, those its lines' scales change, on the grid of its indirect
+// arguments (stage_word).
+static void encode_stage_pass(id<MTLComputeCommandEncoder> enc, ABContextImpl* ctx,
+                              const ab_stage_gemm_t* g, bool z, char op, id<MTLBuffer> X,
+                              size_t x_off, int rows, int cols, int ld, id<MTLBuffer> re,
+                              id<MTLBuffer> im, id<MTLBuffer> sum, id<MTLBuffer> stats,
+                              uint32_t stat, const size_t w[3], uint32_t fix) {
     bool trans = op != 'N';
-    StageParams p = {(uint32_t)rows, (uint32_t)cols, (uint32_t)ld, z && op == 'C', stat};
+    StageParams p = {(uint32_t)rows, (uint32_t)cols, (uint32_t)ld, z && op == 'C', stat, fix,
+                     (uint32_t)g->M};
     [enc setComputePipelineState:z ? (trans ? ctx.prepZTPipeline : ctx.prepZNPipeline)
                                    : (trans ? ctx.prepDTPipeline : ctx.prepDNPipeline)];
     [enc setBuffer:X offset:x_off atIndex:0];
@@ -4466,12 +4611,76 @@ static void encode_stage_prep(id<MTLComputeCommandEncoder> enc, ABContextImpl* c
     [enc setBuffer:im offset:0 atIndex:2];
     [enc setBuffer:sum offset:0 atIndex:3];
     [enc setBytes:&p length:sizeof p atIndex:4];
-    [enc setBuffer:stats offset:((z ? 3 * n : 0) + line) * sizeof(uint32_t) atIndex:5];
-    [enc setBuffer:stats offset:(n + line) * sizeof(uint32_t) atIndex:6];
-    if (z) [enc setBuffer:stats offset:(4 * n + line) * sizeof(uint32_t) atIndex:7];
-    MTLSize grid = trans ? MTLSizeMake((cols + 31) / 32, (rows + 7) / 8, 1)
-                         : MTLSizeMake((rows + 31) / 32, (cols + 31) / 32, 1);
-    [enc dispatchThreadgroups:grid threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
+    [enc setBuffer:stats offset:w[0] * sizeof(uint32_t) atIndex:5];
+    [enc setBuffer:stats offset:w[1] * sizeof(uint32_t) atIndex:6];
+    if (z) [enc setBuffer:stats offset:w[2] * sizeof(uint32_t) atIndex:7];
+    [enc setBuffer:stats offset:stage_word(g, STATS_GPU_SCALES) * sizeof(uint32_t) atIndex:8];
+    if (!fix)
+        [enc dispatchThreadgroups:stage_pass_grid(op, rows, cols)
+            threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
+    else
+        [enc dispatchThreadgroupsWithIndirectBuffer:stats
+                               indirectBufferOffset:(stage_word(g, STATS_FIX_ARGS) + 3 * (fix - 1)) *
+                                                    sizeof(uint32_t)
+                              threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
+}
+
+// A staged call's DD matrices, over its slot's buffers, and its operands
+// (the staging buffers, or the caller's memory in place).
+typedef struct {
+    struct ABMatrix_s A, Ai, A3, B, Bi, B4, T1, T2, C, Ci;
+    id<MTLBuffer> X[3];
+    size_t x_off[3];
+} StageViews;
+
+static void stage_views_of(ab_stage_t* s, const ab_stage_gemm_t* g, StageViews* v) {
+    int M = g->M, N = g->N, K = g->K;
+    stage_matrix(&v->A, stage_buf(s, STAGE_A), M, K);
+    stage_matrix(&v->Ai, stage_buf(s, STAGE_AI), M, K);
+    stage_matrix(&v->A3, stage_buf(s, STAGE_A3), M, K);
+    stage_matrix(&v->B, stage_buf(s, STAGE_B), K, N);
+    stage_matrix(&v->Bi, stage_buf(s, STAGE_BI), K, N);
+    stage_matrix(&v->B4, stage_buf(s, STAGE_B4), K, N);
+    stage_matrix(&v->T1, stage_buf(s, STAGE_T1), M, N);
+    stage_matrix(&v->T2, stage_buf(s, STAGE_T2), M, N);
+    stage_matrix(&v->C, stage_buf(s, STAGE_C), M, N);
+    stage_matrix(&v->Ci, stage_buf(s, STAGE_CI), M, N);
+    for (int i = 0; i < 3; i++) {
+        v->X[i] = s->ext[i] ? s->ext[i] : stage_buf(s, STAGE_SA + i);
+        v->x_off[i] = s->ext[i] ? s->ext_off[i] : 0;
+    }
+}
+
+// The epilogue (ab_epi_*): the GEMM's DD result to C, in place or into its
+// staging buffer; nothing for a split call, whose product stays in DD for
+// ab_internal_stage_split().
+static void encode_stage_epilogue(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx, ab_stage_t* s,
+                                  const ab_stage_gemm_t* g, const StageViews* v) {
+    if (g->split) return;
+    bool z = g->routine == 'z';
+    StageParams ep = {(uint32_t)g->M, (uint32_t)g->N, (uint32_t)s->ld[2], z && g->c_in, 0, 0,
+                      (uint32_t)g->M};
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+    [enc setComputePipelineState:z ? ctx.epiZPipeline : ctx.epiDPipeline];
+    [enc setBuffer:v->C.buffer offset:0 atIndex:0];
+    [enc setBuffer:v->Ci.buffer offset:0 atIndex:1];
+    [enc setBuffer:v->X[2] offset:v->x_off[2] atIndex:3];   // read too for ZGEMM, beta = 1
+    [enc setBuffer:stage_buf(s, STAGE_FLAG) offset:0 atIndex:4];
+    [enc setBytes:&ep length:sizeof ep atIndex:5];
+    [enc setBuffer:stage_buf(s, STAGE_STATS)
+            offset:stage_word(g, STATS_GPU_SCALES) * sizeof(uint32_t) atIndex:6];
+    [enc dispatchThreadgroups:MTLSizeMake((g->M + 31) / 32, (g->N + 31) / 32, 1)
+        threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
+    [enc endEncoding];
+}
+
+// Commits a staged command buffer and reads the epilogue's flag.
+static ab_stage_result_t stage_commit(id<MTLCommandBuffer> cmdBuf, uint64_t encode_ns,
+                                      volatile uint32_t* flag, double t0) {
+    if (!commit_and_wait(cmdBuf, encode_ns)) return AB_STAGE_FAILED;
+    if (flag && *flag) return AB_STAGE_NONFINITE;
+    stats_add_kernel(get_time_ms() - t0);
+    return AB_STAGE_RAN;
 }
 
 ab_stage_result_t ab_internal_stage_run(ab_stage_t* s, const ab_stage_gemm_t* g) {
@@ -4480,26 +4689,10 @@ ab_stage_result_t ab_internal_stage_run(ab_stage_t* s, const ab_stage_gemm_t* g)
     if (!ctx) return AB_STAGE_FAILED;
     bool z = g->routine == 'z';
     int M = g->M, N = g->N, K = g->K;
-    struct ABMatrix_s A, Ai, A3, B, Bi, B4, T1, T2, C, Ci;
-    stage_matrix(&A, stage_buf(s, STAGE_A), M, K);
-    stage_matrix(&Ai, stage_buf(s, STAGE_AI), M, K);
-    stage_matrix(&A3, stage_buf(s, STAGE_A3), M, K);
-    stage_matrix(&B, stage_buf(s, STAGE_B), K, N);
-    stage_matrix(&Bi, stage_buf(s, STAGE_BI), K, N);
-    stage_matrix(&B4, stage_buf(s, STAGE_B4), K, N);
-    stage_matrix(&T1, stage_buf(s, STAGE_T1), M, N);
-    stage_matrix(&T2, stage_buf(s, STAGE_T2), M, N);
-    stage_matrix(&C, stage_buf(s, STAGE_C), M, N);
-    stage_matrix(&Ci, stage_buf(s, STAGE_CI), M, N);
-    id<MTLBuffer> FLAG = stage_buf(s, STAGE_FLAG), STATS = stage_buf(s, STAGE_STATS);
-    // Each operand from its staging buffer, or in place.
-    id<MTLBuffer> X[3];
-    size_t x_off[3];
-    for (int i = 0; i < 3; i++) {
-        X[i] = s->ext[i] ? s->ext[i] : stage_buf(s, STAGE_SA + i);
-        x_off[i] = s->ext[i] ? s->ext_off[i] : 0;
-    }
-    volatile uint32_t* flag = (volatile uint32_t*)FLAG.contents;
+    StageViews v;
+    stage_views_of(s, g, &v);
+    id<MTLBuffer> STATS = stage_buf(s, STAGE_STATS);
+    volatile uint32_t* flag = (volatile uint32_t*)stage_buf(s, STAGE_FLAG).contents;
     if (flag) *flag = 0;
     size_t n = stage_stats_lines(g);           // the largest high words start at 0, the
     uint32_t* st = (uint32_t*)STATS.contents;  // smallest at all ones
@@ -4508,57 +4701,104 @@ ab_stage_result_t ab_internal_stage_run(ab_stage_t* s, const ab_stage_gemm_t* g)
         memset(st + 3 * n, 0, 2 * n * sizeof *st);   // the largest real, imaginary parts
     else
         memset(st, 0, n * sizeof *st);           // the largest high words
+    size_t cw = stage_word(g, STATS_C_SCALED), aw = stage_word(g, STATS_FIX_ARGS);
+    st[cw] = 0;                                 // C's range as uploaded scaled
+    st[cw + 1] = UINT32_MAX;
+    memset(st + aw, 0, 9 * sizeof *st);         // no fix-up unless a line has a scale
+    bool c_pass = !z && g->c_in;
 
     double t0 = get_time_ms();
     uint64_t encode_ns = host_ns();
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
+    // The statistics words of op(A)'s rows, op(B)'s columns and C (line M + N).
+    const size_t wa[3] = {z ? 3 * n : 0, n, 4 * n}, wb[3] = {wa[0] + M, n + M, 4 * n + M},
+                 wc[3] = {(size_t)M + N, n + M + N, 0}, wcs[3] = {cw, cw + 1, 0};
     // The pre-passes write different buffers: one concurrent encoder.
     id<MTLComputeCommandEncoder> enc =
         [cmdBuf computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
-    encode_stage_prep(enc, ctx, z, g->ta, X[0], x_off[0], M, K, s->ld[0], A.buffer, Ai.buffer,
-                      A3.buffer, STAT_ROWS, STATS, 0, n);
-    encode_stage_prep(enc, ctx, z, g->tb, X[1], x_off[1], K, N, s->ld[1], B.buffer, Bi.buffer,
-                      B4.buffer, STAT_COLS, STATS, M, n);
-    if (!z && g->c_in)
-        encode_stage_prep(enc, ctx, false, 'N', X[2], x_off[2], M, N, s->ld[2], C.buffer, nil, nil,
-                          STAT_ALL, STATS, M + N, n);
+    encode_stage_pass(enc, ctx, g, z, g->ta, v.X[0], v.x_off[0], M, K, s->ld[0], v.A.buffer,
+                      v.Ai.buffer, v.A3.buffer, STATS, STAT_ROWS, wa, 0);
+    encode_stage_pass(enc, ctx, g, z, g->tb, v.X[1], v.x_off[1], K, N, s->ld[1], v.B.buffer,
+                      v.Bi.buffer, v.B4.buffer, STATS, STAT_COLS, wb, 0);
+    if (c_pass)
+        encode_stage_pass(enc, ctx, g, false, 'N', v.X[2], v.x_off[2], M, N, s->ld[2],
+                          v.C.buffer, nil, nil, STATS, STAT_ALL, wc, 0);
+    [enc endEncoding];
+
+    // The lines' scales (ab_scales), then the fix-ups of the operands that have
+    // scaled lines; each operand's fix-up has its pre-pass's grid.
+    MTLSize ga = stage_pass_grid(g->ta, M, K), gb = stage_pass_grid(g->tb, K, N),
+            gc = c_pass ? stage_pass_grid('N', M, N) : MTLSizeMake(0, 0, 0);
+    StageScales sc = {(uint32_t)(M + N), (uint32_t)M, AB_SCALE_WINDOW, AB_SCALE_TARGET,
+                      {(uint32_t)ga.width, (uint32_t)ga.height, 1, (uint32_t)gb.width,
+                       (uint32_t)gb.height, 1, (uint32_t)gc.width, (uint32_t)gc.height,
+                       (uint32_t)gc.depth}};
+    enc = [cmdBuf computeCommandEncoder];
+    [enc setComputePipelineState:ctx.scalesPipeline];
+    [enc setBuffer:STATS offset:wa[0] * sizeof(uint32_t) atIndex:0];
+    [enc setBuffer:STATS offset:(z ? wa[2] : wa[0]) * sizeof(uint32_t) atIndex:1];
+    [enc setBuffer:STATS offset:stage_word(g, STATS_GPU_SCALES) * sizeof(uint32_t) atIndex:2];
+    [enc setBuffer:STATS offset:aw * sizeof(uint32_t) atIndex:3];
+    [enc setBytes:&sc length:sizeof sc atIndex:4];
+    [enc dispatchThreads:MTLSizeMake((NSUInteger)M + N, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(MIN((NSUInteger)M + N, (NSUInteger)256), 1, 1)];
+    [enc endEncoding];
+    enc = [cmdBuf computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
+    encode_stage_pass(enc, ctx, g, z, g->ta, v.X[0], v.x_off[0], M, K, s->ld[0], v.A.buffer,
+                      v.Ai.buffer, v.A3.buffer, STATS, 0, wa, FIX_ROWS);
+    encode_stage_pass(enc, ctx, g, z, g->tb, v.X[1], v.x_off[1], K, N, s->ld[1], v.B.buffer,
+                      v.Bi.buffer, v.B4.buffer, STATS, 0, wb, FIX_COLS);
+    if (c_pass)
+        encode_stage_pass(enc, ctx, g, false, 'N', v.X[2], v.x_off[2], M, N, s->ld[2],
+                          v.C.buffer, nil, nil, STATS, STAT_ALL, wcs, FIX_ALL);
     [enc endEncoding];
 
     if (z) {                                 // Gauss-3M as ab_zgemm, T3 and T4 formed above
-        const ABMatrix T[4] = {&T1, &T2, &A3, &B4};
-        encode_zgemm_3m_from_sums(cmdBuf, ctx, &A, &Ai, &B, &Bi, T, &C, &Ci);
+        const ABMatrix T[4] = {&v.T1, &v.T2, &v.A3, &v.B4};
+        encode_zgemm_3m_from_sums(cmdBuf, ctx, &v.A, &v.Ai, &v.B, &v.Bi, T, &v.C, &v.Ci);
     } else {
         enc = [cmdBuf computeCommandEncoder];
-        encode_dgemm_scaled_dispatch(enc, ctx, g->alpha[0], &A, &B, g->beta[0], &C);
+        encode_dgemm_scaled_dispatch(enc, ctx, g->alpha[0], &v.A, &v.B, g->beta[0], &v.C);
         [enc endEncoding];
     }
+    encode_stage_epilogue(cmdBuf, ctx, s, g, &v);
 
-    // A split call's product stays in DD for ab_internal_stage_split(); the
-    // epilogue writes C, in place or into its staging buffer.
-    if (!g->split) {
-        StageParams ep = {(uint32_t)M, (uint32_t)N, (uint32_t)s->ld[2], z && g->c_in, 0};
-        enc = [cmdBuf computeCommandEncoder];
-        [enc setComputePipelineState:z ? ctx.epiZPipeline : ctx.epiDPipeline];
-        [enc setBuffer:C.buffer offset:0 atIndex:0];
-        [enc setBuffer:Ci.buffer offset:0 atIndex:1];
-        [enc setBuffer:X[2] offset:x_off[2] atIndex:3];   // read too for ZGEMM, beta = 1
-        [enc setBuffer:FLAG offset:0 atIndex:4];
-        [enc setBytes:&ep length:sizeof ep atIndex:5];
-        [enc dispatchThreadgroups:MTLSizeMake((M + 31) / 32, (N + 31) / 32, 1)
-            threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
-        [enc endEncoding];
-    }
-
-    if (!commit_and_wait(cmdBuf, encode_ns)) return AB_STAGE_FAILED;
-    if (flag && *flag) return AB_STAGE_NONFINITE;
-    stats_add_kernel(get_time_ms() - t0);
+    ab_stage_result_t r = stage_commit(cmdBuf, encode_ns, flag, t0);
     // A complex line's largest |x| is the larger of its parts' (ab_line_stats_scan).
-    for (size_t i = 0; z && i < (size_t)M + N; i++) st[i] = MAX(st[3 * n + i], st[4 * n + i]);
-    return AB_STAGE_RAN;
+    for (size_t i = 0; r == AB_STAGE_RAN && z && i < (size_t)M + N; i++)
+        st[i] = MAX(st[3 * n + i], st[4 * n + i]);
+    return r;
+}
+
+// 4M after a Gauss-3M run (encode_zgemm_4m): its Cr = Ar*Br - Ai*Bi is 3M's,
+// formed from the same products, so T1 and T2 take Ai*Br and Ar*Bi, Ci
+// becomes T1 + T2, and the epilogue runs again.
+ab_stage_result_t ab_internal_stage_redo_4m(ab_stage_t* s, const ab_stage_gemm_t* g) {
+    ABAutoreleaseScope pool;
+    ABContextImpl* ctx = [ABContextImpl shared];
+    if (!ctx) return AB_STAGE_FAILED;
+    StageViews v;
+    stage_views_of(s, g, &v);
+    volatile uint32_t* flag = (volatile uint32_t*)stage_buf(s, STAGE_FLAG).contents;
+    if (flag) *flag = 0;
+
+    double t0 = get_time_ms();
+    uint64_t encode_ns = host_ns();
+    id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
+    id<MTLComputeCommandEncoder> enc =
+        [cmdBuf computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
+    encode_dgemm_dispatch(enc, ctx, &v.Ai, &v.B, &v.T1);
+    encode_dgemm_dispatch(enc, ctx, &v.A, &v.Bi, &v.T2);
+    [enc endEncoding];
+    enc = [cmdBuf computeCommandEncoder];
+    encode_elemwise_dispatch(enc, ctx.addPipeline, &v.T1, &v.T2, &v.Ci);
+    [enc endEncoding];
+    encode_stage_epilogue(cmdBuf, ctx, s, g, &v);
+    return stage_commit(cmdBuf, encode_ns, flag, t0);
 }
 
 void ab_internal_stage_stats(ab_stage_t* s, const ab_stage_gemm_t* g, ab_line_stats_t* sa,
-                             ab_line_stats_t* sb, ab_range_t* c) {
+                             ab_line_stats_t* sb, ab_range_t* c, const int** gpu_scales) {
     ABAutoreleaseScope pool;
     size_t M = (size_t)g->M, n = stage_stats_lines(g);
     bool z = g->routine == 'z';
@@ -4568,7 +4808,11 @@ void ab_internal_stage_stats(ab_stage_t* s, const ab_stage_gemm_t* g, ab_line_st
     *sa = (ab_line_stats_t){g->M, st, st + n, e, rmax, imax};
     *sb = (ab_line_stats_t){g->N, st + M, st + n + M, e + M, z ? rmax + M : NULL,
                             z ? imax + M : NULL};
-    *c = (ab_range_t){st[M + g->N], st[n + M + g->N]};
+    // C as uploaded: scaled where C's fix-up ran (its threadgroups were set).
+    size_t cw = stage_word(g, STATS_C_SCALED);
+    *c = st[stage_word(g, STATS_FIX_ARGS) + 6] ? (ab_range_t){st[cw], st[cw + 1]}
+                                               : (ab_range_t){st[M + g->N], st[n + M + g->N]};
+    *gpu_scales = (const int*)(st + stage_word(g, STATS_GPU_SCALES));
 }
 
 void ab_internal_stage_split(ab_stage_t* s, const ab_stage_gemm_t* g, const double** Cr,

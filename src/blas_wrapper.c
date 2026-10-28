@@ -788,48 +788,58 @@ static void copy_matrix(void *dst, int dst_ld, const void *src, int src_ld, size
 }
 
 // Whether the exponent-range guard (see "Exponent range") lets the staged
-// result stand: exactly where the host path would compute the call unscaled
-// on the GPU, a ZGEMM by Gauss-3M, which is what the staged path computed.
-// From the statistics the GPU gathered: no line of op(A) or op(B) to scale,
-// parts balanced enough for 3M, the product certified, and a DGEMM's C when
-// it is read, stage 2 reading the caller's operands as the host path does
-// (the staged run wrote none of them it reads). The host path makes every
-// other call itself: scaled, by 4M, or on Accelerate. (A DGEMM's alpha and
-// beta were checked before the run: dgemm_staged.) Returns the
-// ab_prof_staged_t bits of the reasons it does not (0 if it does): scaling
-// and 4M both, else the guard's verdict, which the host path then repeats.
-static unsigned staged_refusals(ab_stage_t *s, const ab_stage_gemm_t *g) {
+// result stand: exactly where the host path would compute the call on the
+// GPU, as the staged path did. From the statistics the GPU gathered: the
+// lines' scales the host path would give them, which the GPU applied, the
+// product certified, and a DGEMM's C when it is read, stage 2 reading the
+// caller's operands as the host path does (the staged run wrote none of them
+// it reads). A call it does not certify runs on Accelerate, as the host
+// path's guard, from the same statistics, would send it. (A DGEMM's alpha
+// and beta were checked before the run: dgemm_staged.) Returns the
+// ab_prof_staged_t bit of the reason it does not (0 if it does). Also returns
+// whether a ZGEMM's parts call for 4M (ab_lines_method) and the lines'
+// scales, *re for op(A)'s rows and *ce for op(B)'s columns (NULL if none).
+static unsigned staged_refusals(ab_stage_t *s, const ab_stage_gemm_t *g, bool *four_m,
+                                const int **re, const int **ce) {
     ab_line_stats_t sa, sb;
     ab_range_t c;
-    ab_internal_stage_stats(s, g, &sa, &sb, &c);
+    const int *gpu;
+    ab_internal_stage_stats(s, g, &sa, &sb, &c, &gpu);
     bool z = g->routine == 'z';
     const ab_stage_matrix_t *A = &g->x[0], *B = &g->x[1], *C = &g->x[2];
     const ab_op_view_t va = {A->ptr, A->ld, g->M, g->K, g->ta != 'N', z};
     const ab_op_view_t vb = {B->ptr, B->ld, g->K, g->N, g->tb != 'N', z};
-    unsigned why = 0;
-    bool ra = ab_line_scales(&sa) != NULL, cb = ab_line_scales(&sb) != NULL;
-    if (ra || cb) why |= 1u << AB_PROF_STAGED_SCALED;
-    if (z && ab_lines_method(&sa, &sb) != AB_ZGEMM_3M) why |= 1u << AB_PROF_STAGED_FOUR_M;
-    if (why) return why;
+    *four_m = z && ab_lines_method(&sa, &sb) == AB_ZGEMM_4M;
+    bool scaled = (ab_line_scales(&sa) != NULL) | (ab_line_scales(&sb) != NULL);
+    *re = scaled ? sa.e : NULL;
+    *ce = scaled ? sb.e : NULL;
+    if (memcmp(sa.e, gpu, (size_t)g->M * sizeof *gpu) ||
+        memcmp(sb.e, gpu + g->M, (size_t)g->N * sizeof *gpu))
+        return 1u << AB_PROF_STAGED_SCALED;
     if (!ab_range_guard(g->K, &sa, &sb, z ? 0 : ilogb(g->alpha[0]), &va, &vb) ||
         (!z && g->c_in && !ab_range_guard_c(&sa, &sb, c, ilogb(g->beta[0]), C->ptr, C->ld, 0)))
         return 1u << AB_PROF_STAGED_RANGE;
     return 0;
 }
 
+static unsigned stage_result_why(ab_stage_result_t r) {
+    return r == AB_STAGE_FAILED ? 1u << AB_PROF_STAGED_GPU_FAILED
+         : r == AB_STAGE_NONFINITE ? 1u << AB_PROF_STAGED_NONFINITE : 0;
+}
+
 static double ms_since(uint64_t ticks) {
     return ab_prof_ticks_to_ns(ab_prof_now_ticks() - ticks) / 1e6;
 }
 
-// One staged call, g describing it: true if C holds the result; false
-// leaves C as it was.
-static bool run_staged(CallProf *p, const ab_stage_gemm_t *g) {
+// One staged call, g describing it: 0 if C holds the result; else the
+// ab_prof_staged_t bits of why not, C as it was.
+static unsigned run_staged(CallProf *p, const ab_stage_gemm_t *g) {
     size_t elem = g->routine == 'z' ? sizeof(double complex) : sizeof(double);
     ab_stage_t *s = ab_internal_stage_acquire(g);
     prof_stage(p, AB_PROF_STAGE_ALLOC);
     if (!s) {
         note_staged(p, AB_PROF_STAGED_ALLOC);
-        return false;
+        return 1u << AB_PROF_STAGED_ALLOC;
     }
 
     uint64_t t = ab_prof_now_ticks();
@@ -842,14 +852,28 @@ static bool run_staged(CallProf *p, const ab_stage_gemm_t *g) {
     double in_ms = ms_since(t);
     prof_stage(p, AB_PROF_STAGE_UPLOAD);
 
-    ab_stage_result_t ran = ab_internal_stage_run(s, g);
+    bool four_m = false;
+    const int *re = NULL, *ce = NULL;
+    unsigned why = stage_result_why(ab_internal_stage_run(s, g));
     prof_kernel(p);
-    unsigned why = ran == AB_STAGE_FAILED      ? 1u << AB_PROF_STAGED_GPU_FAILED
-                 : ran == AB_STAGE_NONFINITE   ? 1u << AB_PROF_STAGED_NONFINITE
-                                               : staged_refusals(s, g);
-    if (p) p->staged |= why ? why : 1u << AB_PROF_STAGED_KEPT;
-    bool ok = !why;
+    if (!why) why = staged_refusals(s, g, &four_m, &re, &ce);
     prof_stage(p, AB_PROF_STAGE_PACK);
+    if (!why && four_m) {
+        // 4M instead of the run's Gauss-3M, on the GPU (gpu_stage.h), C
+        // copied in again where the epilogue reads it.
+        if (g->c_in) {
+            int ld;
+            t = ab_prof_now_ticks();
+            copy_matrix(ab_internal_stage_host(s, AB_STAGE_C, &ld), ld, g->x[2].ptr, g->x[2].ld,
+                        elem, g->M, g->N);
+            in_ms += ms_since(t);
+            prof_stage(p, AB_PROF_STAGE_UPLOAD);
+        }
+        why = stage_result_why(ab_internal_stage_redo_4m(s, g));
+        prof_kernel(p);
+    }
+    if (p) p->staged |= why ? why : 1u << (four_m ? AB_PROF_STAGED_KEPT_4M : AB_PROF_STAGED_KEPT);
+    bool ok = !why;
     if (ok) {
         void *C = (void *)g->x[2].ptr;
         int ldC = g->x[2].ld, ld;
@@ -860,7 +884,7 @@ static bool run_staged(CallProf *p, const ab_stage_gemm_t *g) {
             double out_ms = ms_since(t);
             prof_stage(p, AB_PROF_STAGE_DOWNLOAD);
             zgemm_epilogue(g->M, g->N, CMPLX(g->alpha[0], g->alpha[1]),
-                           CMPLX(g->beta[0], g->beta[1]), Cr_data, Ci_data, C, ldC, NULL, NULL);
+                           CMPLX(g->beta[0], g->beta[1]), Cr_data, Ci_data, C, ldC, re, ce);
             prof_stage(p, AB_PROF_STAGE_EPILOGUE);
             ab_internal_stage_count(g, in_ms, out_ms);
         } else {
@@ -874,7 +898,7 @@ static bool run_staged(CallProf *p, const ab_stage_gemm_t *g) {
     }
     ab_internal_stage_release(s);
     prof_stage(p, AB_PROF_STAGE_ALLOC);
-    return ok;
+    return why;
 }
 
 // op(X) is op_rows x op_cols: X as stored.
@@ -888,7 +912,7 @@ static char op_char(enum CBLAS_TRANSPOSE t) {
     return t == CblasNoTrans ? 'N' : t == CblasConjTrans ? 'C' : 'T';
 }
 
-static bool zgemm_staged(CallProf *p, enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
+static unsigned zgemm_staged(CallProf *p, enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
                          int M, int N, int K, double complex alpha,
                          const double complex *A, int ldA, const double complex *B, int ldB,
                          double complex beta, double complex *C, int ldC) {
@@ -904,7 +928,7 @@ static bool zgemm_staged(CallProf *p, enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSP
     return run_staged(p, &g);
 }
 
-static bool dgemm_staged(CallProf *p, enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
+static unsigned dgemm_staged(CallProf *p, enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
                          int M, int N, int K, double alpha, const double *A, int ldA,
                          const double *B, int ldB, double beta, double *C, int ldC) {
     // An alpha or beta the host path would fold into C's scale, or one it
@@ -912,7 +936,7 @@ static bool dgemm_staged(CallProf *p, enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSP
     if (!isfinite(alpha) || !isfinite(beta) || ab_scalar_exp(alpha, AB_SCALAR_WINDOW) ||
         ab_scalar_exp(beta, AB_SCALAR_WINDOW)) {
         note_staged(p, AB_PROF_STAGED_SCALAR);
-        return false;
+        return 1u << AB_PROF_STAGED_SCALAR;
     }
     ab_stage_gemm_t g = {
         .routine = 'd', .ta = op_char(ta), .tb = op_char(tb), .M = M, .N = N, .K = K,
@@ -952,9 +976,18 @@ static void zgemm_blas(
         return;
     }
     prof_stage(p, AB_PROF_STAGE_INIT);
-    if (staged_path(p) && zgemm_staged(p, ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC)) {
-        _ab_last_path = "gpu";
-        return;
+    if (staged_path(p)) {
+        unsigned why = zgemm_staged(p, ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+        if (!why) {
+            _ab_last_path = "gpu";
+            return;
+        }
+        // The guard's verdict on the same statistics is the host path's too.
+        if (why & 1u << AB_PROF_STAGED_RANGE) {
+            note_gpu_fallback(p, "zgemm", M, N, K, AB_PROF_FB_RANGE, AB_RANGE_WHY);
+            ab_internal_zgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+            return;
+        }
     }
 
     // The host path: compute op(A)*op(B) on GPU, apply alpha/beta in epilogue.
@@ -1090,9 +1123,18 @@ static void dgemm_blas(
         return;
     }
     prof_stage(p, AB_PROF_STAGE_INIT);
-    if (staged_path(p) && dgemm_staged(p, ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC)) {
-        _ab_last_path = "gpu";
-        return;
+    if (staged_path(p)) {
+        unsigned why = dgemm_staged(p, ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+        if (!why) {
+            _ab_last_path = "gpu";
+            return;
+        }
+        // As for ZGEMM.
+        if (why & 1u << AB_PROF_STAGED_RANGE) {
+            note_gpu_fallback(p, "dgemm", M, N, K, AB_PROF_FB_RANGE, AB_RANGE_WHY);
+            ab_internal_dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+            return;
+        }
     }
 
     // The host path: supports arbitrary alpha/beta and transpose via scaled kernel.

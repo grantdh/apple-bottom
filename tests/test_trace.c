@@ -842,8 +842,8 @@ static void test_fail_stage(int stage_index) {
                 break;
             // The staged path failed first, at the same step.
             snprintf(prefix, sizeof prefix, "AB_REPORT[%d] %s staged ", (int)r.pid, routine);
-            snprintf(want, sizeof want, "AB_REPORT[%d] %s staged kept=0 host_pack=0 fpcr=0 "
-                     "scalar=0 alloc=%d gpu_failed=%d nonfinite=0 scaled=0 four_m=0 range=0",
+            snprintf(want, sizeof want, "AB_REPORT[%d] %s staged kept=0 kept_4m=0 host_pack=0 "
+                     "fpcr=0 scalar=0 alloc=%d gpu_failed=%d nonfinite=0 scaled=0 range=0",
                      (int)r.pid, routine, stage_index == 0, stage_index == 1);
             expect(find_line(r.out, prefix, line, sizeof line) && !strcmp(line, want),
                    "%s: AB_REPORT does not give the staged path's failure as %s: %s", routine,

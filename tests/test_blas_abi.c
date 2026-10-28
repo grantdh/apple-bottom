@@ -1922,8 +1922,8 @@ static bool parse_report_line(const char *line, const char *build, ProcessReport
             r->fallback_rows++;
         else if (!strncmp(rest, "staged ", 7)) {
             // Each GPU-routed call that reached the staged path once, by reason.
-            static const char *const keys[] = {"kept", "host_pack", "fpcr", "scalar", "alloc",
-                                               "gpu_failed", "nonfinite", "scaled", "four_m",
+            static const char *const keys[] = {"kept", "kept_4m", "host_pack", "fpcr", "scalar",
+                                               "alloc", "gpu_failed", "nonfinite", "scaled",
                                                "range"};
             rest += 7;
             for (size_t k = 0; k < TEST_REGISTRY_SIZE(keys); k++) {

@@ -78,15 +78,15 @@ typedef enum {
 // staged path); the reports count each call once, by its lowest bit.
 typedef enum {
     AB_PROF_STAGED_KEPT,        // the staged path computed C
+    AB_PROF_STAGED_KEPT_4M,     // ... a ZGEMM by 4M, after its Gauss-3M run
     AB_PROF_STAGED_HOST_PACK,   // AB_HOST_PACK=1
     AB_PROF_STAGED_FPCR,        // the caller's floating-point control is not the default
     AB_PROF_STAGED_SCALAR,      // a DGEMM alpha or beta outside 2^±AB_SCALAR_WINDOW, or not finite
     AB_PROF_STAGED_ALLOC,       // no GPU buffers for it
     AB_PROF_STAGED_GPU_FAILED,  // its command buffer failed
     AB_PROF_STAGED_NONFINITE,   // Inf or NaN in the GPU epilogue
-    AB_PROF_STAGED_SCALED,      // the exponent-range guard scales a row of op(A) or column of op(B)
-    AB_PROF_STAGED_FOUR_M,      // a ZGEMM whose parts call for 4M
-    AB_PROF_STAGED_RANGE,       // the guard does not certify it
+    AB_PROF_STAGED_SCALED,      // the GPU's line scales are not the host path's (a defect)
+    AB_PROF_STAGED_RANGE,       // the exponent-range guard does not certify it
     AB_PROF_STAGED_COUNT
 } ab_prof_staged_t;
 

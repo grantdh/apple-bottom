@@ -18,16 +18,25 @@ All notable changes to this project will be documented in this file.
   bit patterns with integer arithmetic, rounding as the host does, and
   follow the operations of the compiled host epilogue, signed zeros
   included. The conversion also gathers the exponent-range guard's
-  statistics (see Fixed), and the staged result stands only where the guard
-  scales nothing, keeps a ZGEMM on Gauss-3M and certifies the call from
-  them. Every other call, one that meets Inf or NaN in the GPU epilogue, and
-  one whose staged run fails are redone on the host path, as is every call
-  when the CPU's floating-point control is not the default (rounding mode,
-  flush to zero, default NaN). `AB_HOST_PACK=1` keeps every call on the host
-  path. A staged call's stages in the run report and trace: `pack` is the
-  guard's check, `upload` the copies into the GPU buffers, `kernel` includes
-  the GPU's conversion and epilogue, and `download` is the copy of the
-  result into C.
+  statistics (see Fixed), from which the GPU scales lines, in the same
+  command buffer, as the host path does: the elements of a scaled row of
+  op(A) or column of op(B) (and a DGEMM's C) are converted again at
+  x · 2^-scale, rounded as the host rounds, and C is multiplied back in the
+  epilogue. A ZGEMM whose parts call for 4M runs as Gauss-3M first, then a
+  second command buffer forms 4M's imaginary part from the same operands
+  (its real part is Gauss-3M's) and runs the epilogue again. The staged
+  result stands where the guard certifies the call and the GPU's scales
+  are the host's. A call the guard does not certify goes straight to
+  Accelerate (the host path's guard, on the same statistics, would send it
+  there). One that meets Inf or NaN in the GPU epilogue, one whose staged
+  run fails, and a DGEMM whose alpha or beta lies outside 2^±20 are made on
+  the host path, as is every
+  call when the CPU's floating-point control is not the default (rounding
+  mode, flush to zero, default NaN). `AB_HOST_PACK=1` keeps every call on
+  the host path. A staged call's stages in the run report and trace: `pack`
+  is the guard's check, `upload` the copies into the GPU buffers, `kernel`
+  includes the GPU's conversion, scaling and epilogue, and `download` is
+  the copy of the result into C.
 - **`ab_register_host_memory(ptr, nbytes)` /
   `ab_unregister_host_memory(ptr)`**: BLAS-ABI operands that lie in
   registered memory are read in place by the GPU, without the copies, and C
@@ -43,14 +52,16 @@ All notable changes to this project will be documented in this file.
   parts) or sends to Accelerate (Inf, NaN, overflow): the staged result must
   stand exactly where the host path computes the call unscaled on the GPU.
 - **Why a call left the staged path**: `AB_REPORT` adds a line
-  `<routine> staged kept=… host_pack=… fpcr=… scalar=… alloc=… gpu_failed=…
-  nonfinite=… scaled=… four_m=… range=…` that counts each GPU-routed call
-  once, by whether it kept the staged result or else the first reason it
-  went to the host path; `AB_PROFILE` adds the same as a table and
-  `staged=<outcome>` to each GPU call's line, and `AB_TRACE` adds
-  `staged=kept` or the reasons joined by `+` (`staged=scaled+four_m`) to
-  each call that reached the staged path. See "Reading a run report" in
-  `docs/INTEGRATION.md`.
+  `<routine> staged kept=… kept_4m=… host_pack=… fpcr=… scalar=… alloc=…
+  gpu_failed=… nonfinite=… scaled=… range=…` that counts each GPU-routed
+  call once, by whether it kept the staged result (`kept_4m`: by 4M) or
+  else the first reason it went to the host path; `AB_PROFILE` adds the
+  same as a table and `staged=<outcome>` to each GPU call's line, and
+  `AB_TRACE` adds `staged=<outcome>` (reasons joined by `+`) to each call
+  that reached the staged path. See "Reading a run report" in
+  `docs/INTEGRATION.md`. On Quantum ESPRESSO si64 (input B, one rank)
+  this showed that 501 of 1,098 GPU calls left the staged path, and why;
+  see Fixed.
 - **`AB_TRACE=<path>`**: every BLAS-ABI call (`dgemm_`, `zgemm_`,
   `ab_*gemm_`, `ab_*gemm_blas`; Accelerate and GPU, every `AB_MODE`) appends
   one `key=value` line to `<path>.<pid>` when it returns (a call with an

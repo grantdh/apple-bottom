@@ -69,8 +69,8 @@ static const char* const fallback_names[AB_PROF_FB_COUNT] = {
 };
 
 static const char* const staged_names[AB_PROF_STAGED_COUNT] = {
-    "kept", "host_pack", "fpcr", "scalar", "alloc", "gpu_failed", "nonfinite", "scaled",
-    "four_m", "range"
+    "kept", "kept_4m", "host_pack", "fpcr", "scalar", "alloc", "gpu_failed", "nonfinite",
+    "scaled", "range"
 };
 
 const char* ab_prof_staged_name(unsigned staged) {
@@ -572,8 +572,9 @@ static void trace_header(int fd, pid_t pid) {
     line_add(&l, " other_ns (sum: t1_ns - t0_ns),\n"
                  "#   other_ns = temps_ns + encode_ns + submit_ns + wake_ns + rest_ns,\n"
                  "#   gpu_start_ns gpu_end_ns: GPUStartTime, GPUEndTime (0: none reported)\n"
-                 "# calls that reached the staged path add staged: kept, or the reasons it gave\n"
-                 "#   the call to the host path, joined by +\n"
+                 "# calls that reached the staged path add staged: kept (kept_4m: a ZGEMM by 4M\n"
+                 "#   after its Gauss-3M run), or the reasons it gave the call to the host path,\n"
+                 "#   joined by +\n"
                  "# AB_TRACE_HASH=1 adds hash_a, hash_b (op(A), op(B) when read) and hash_c "
                  "(C on entry when beta != 0):\n"
                  "#   FNV-1a over the 64-bit words of the referenced elements, column by "
