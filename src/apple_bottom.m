@@ -1793,6 +1793,29 @@ static ab_range_t for_each_chunk(size_t count, size_t work,
     return r;
 }
 
+// The ranges of a complex matrix's real and imaginary parts.
+typedef struct {
+    ab_range_t re, im;
+} parts_range_t;
+
+// Runs body(chunk, offset, n) on the chunks of ab_internal_for_each_chunk and
+// returns the merge of the parts' ranges the bodies return.
+static parts_range_t for_each_chunk_parts(size_t count, size_t work,
+                                          parts_range_t (^body)(size_t chunk, size_t offset,
+                                                                size_t n)) {
+    parts_range_t part_storage[AB_CONVERT_CHUNKS], *parts = part_storage;  // blocks write through it
+    for (int c = 0; c < AB_CONVERT_CHUNKS; c++) parts[c] = {AB_RANGE_EMPTY, AB_RANGE_EMPTY};
+    ab_internal_for_each_chunk(count, work, ^(size_t c, size_t offset, size_t n) {
+        parts[c] = body(c, offset, n);
+    });
+    parts_range_t r = {AB_RANGE_EMPTY, AB_RANGE_EMPTY};
+    for (int c = 0; c < AB_CONVERT_CHUNKS; c++) {
+        r.re = ab_range_merge(r.re, parts[c].re);
+        r.im = ab_range_merge(r.im, parts[c].im);
+    }
+    return r;
+}
+
 // src[i * S] * 2^-e to dst[i] in DD, each value rounded once; with range, also
 // returns the range of the converted values (in the same vectorized loop;
 // AB_RANGE_EMPTY without).
@@ -2288,9 +2311,7 @@ extern "C" ABStatus ab_internal_upload_rows(ABMatrix re, ABMatrix im, const doub
     uint32_t* colmax = col_lines ? (uint32_t*)calloc(nparts * 2 * cols, sizeof(uint32_t)) : NULL;
     if (col_lines && !colmax) return AB_ERROR_ALLOC_FAILED;
 
-    ab_range_t range_storage[2 * AB_CONVERT_CHUNKS], *ranges = range_storage;  // blocks write through it
-    for (int c = 0; c < 2 * AB_CONVERT_CHUNKS; c++) ranges[c] = AB_RANGE_EMPTY;
-    ab_internal_for_each_chunk(rows, w * cols, ^(size_t c, size_t r0, size_t nr) {
+    const parts_range_t range = for_each_chunk_parts(rows, w * cols, ^(size_t c, size_t r0, size_t nr) {
         uint32_t* pr = col_lines ? colmax + c * 2 * cols : NULL;
         ab_range_t a = AB_RANGE_EMPTY, b = AB_RANGE_EMPTY;
         for (size_t i = r0; i < r0 + nr; i++) {
@@ -2309,15 +2330,8 @@ extern "C" ABStatus ab_internal_upload_rows(ABMatrix re, ABMatrix im, const doub
             a = ab_range_merge(a, ra);
             b = ab_range_merge(b, rb);
         }
-        ranges[2 * c] = a;
-        ranges[2 * c + 1] = b;
+        return (parts_range_t){a, b};
     });
-
-    ab_range_t range_re = AB_RANGE_EMPTY, range_im = AB_RANGE_EMPTY;
-    for (int c = 0; c < AB_CONVERT_CHUNKS; c++) {
-        range_re = ab_range_merge(range_re, ranges[2 * c]);
-        range_im = ab_range_merge(range_im, ranges[2 * c + 1]);
-    }
     for (size_t c = 0; c < nparts && col_lines; c++)
         for (size_t j = 0; j < cols; j++) {
             AB_HIWORD_MAX(colmax[c * 2 * cols + j], lines->rmax[j]);
@@ -2326,10 +2340,10 @@ extern "C" ABStatus ab_internal_upload_rows(ABMatrix re, ABMatrix im, const doub
     free(colmax);
 
     if (!im) {
-        upload_rows_rescale<1>(re, range_re, x, stride);
+        upload_rows_rescale<1>(re, range.re, x, stride);
     } else {
-        upload_rows_rescale<2>(re, range_re, x, stride);
-        upload_rows_rescale<2>(im, range_im, x + 1, stride);
+        upload_rows_rescale<2>(re, range.re, x, stride);
+        upload_rows_rescale<2>(im, range.im, x + 1, stride);
     }
     stats_add_upload(get_time_ms() - t0, w * re->count);
     return AB_OK;
@@ -2372,6 +2386,143 @@ extern "C" ABStatus ab_internal_download_rows(ABMatrix re, ABMatrix im, double* 
         }
     });
     stats_add_download(get_time_ms() - t0, w * re->count);
+    return AB_OK;
+}
+
+// ab_internal_zgemm_epilogue (ab_internal.h) in three passes: C's ranges,
+// which give its parts' scales; the epilogue from T's DD and C where they
+// lie, which writes the result into C and measures it; and the result's
+// round trip in place.
+
+// A part's scale e for the round trips below, which give the values of an
+// upload at exp2 = e (convert_fp64_to_dd) and a download (convert_dd_to_fp64):
+// FAST, by multiplies by 2^-e and 2^e, both normal doubles (1 for e = 0, which
+// changes no value); else as those functions form them.
+typedef struct {
+    int e;
+    double down, up;
+} part_scale_t;
+
+static inline bool part_scale_fast(int e) { return e >= -1022 && e <= 1022; }
+
+static inline part_scale_t part_scale(int e) {
+    bool fast = part_scale_fast(e);
+    return {e, fast ? ab_pow2(-e) : 0.0, fast ? ab_pow2(e) : 0.0};
+}
+
+template <bool FAST>
+static inline double dd_download(DDFloat d, part_scale_t s) {
+    return FAST ? dd_to_fp64(d) * s.up : ab_scale2(dd_to_fp64(d), s.e);
+}
+
+template <bool FAST>
+static inline double dd_round_trip(double x, part_scale_t s) {
+    double v = FAST ? x * s.down : ab_scale2(x, -s.e);
+    return dd_download<FAST>(fp64_to_dd(v), s);
+}
+
+// One epilogue: T's parts (cols per row) and C's rows of complex pairs, ld
+// pairs apart, with alpha, beta and the parts' scales.
+typedef struct {
+    const DDFloat *tr, *ti;
+    double* x;
+    size_t ld, cols;
+    double ar, ai, br, bi;
+    part_scale_t str, sti, scr, sci;
+} zgemm_epilogue_t;
+
+// Rows [r0, r0 + nr) of C = alpha T + beta C (cr = ci = 0 without BETA), the
+// result into C unrounded; returns its ranges. The expression, and how its
+// operands are formed, fix the result's bits (FP contraction in this -O3
+// ObjC++ file, operand order for NaNs): keep both.
+template <bool BETA, bool FAST>
+static parts_range_t epilogue_rows(const zgemm_epilogue_t& p, size_t r0, size_t nr) {
+    uint32_t mxr = 0, mnr = UINT32_MAX, mxi = 0, mni = UINT32_MAX;
+    // Locals, which the stores into C cannot alias
+    const double ar = p.ar, ai = p.ai, br = p.br, bi = p.bi;
+    const part_scale_t str = p.str, sti = p.sti, scr = p.scr, sci = p.sci;
+    const size_t cols = p.cols;
+    for (size_t i = r0; i < r0 + nr; i++) {
+        const DDFloat* t_r = p.tr + i * cols;
+        const DDFloat* t_i = p.ti + i * cols;
+        double* c = p.x + 2 * i * p.ld;
+        for (size_t j = 0; j < cols; j++) {
+            double tr = dd_download<FAST>(t_r[j], str), ti = dd_download<FAST>(t_i[j], sti);
+            double cr = BETA ? dd_round_trip<FAST>(c[2 * j], scr) : 0.0;
+            double ci = BETA ? dd_round_trip<FAST>(c[2 * j + 1], sci) : 0.0;
+            double new_r = (ar * tr - ai * ti) + (br * cr - bi * ci);
+            double new_i = (ar * ti + ai * tr) + (br * ci + bi * cr);
+            c[2 * j] = new_r;
+            c[2 * j + 1] = new_i;
+            AB_RANGE_ADD(new_r, mxr, mnr);
+            AB_RANGE_ADD(new_i, mxi, mni);
+        }
+    }
+    return {{mxr, mnr}, {mxi, mni}};
+}
+
+// Rows [r0, r0 + nr) of complex pairs (x, ld) uploaded and downloaded in
+// place, each part at its scale.
+template <bool FAST>
+static void round_trip_rows(double* x, size_t ld, size_t cols, size_t r0, size_t nr,
+                            part_scale_t sr, part_scale_t si) {
+    for (size_t i = r0; i < r0 + nr; i++) {
+        double* c = x + 2 * i * ld;
+        for (size_t j = 0; j < cols; j++) {
+            c[2 * j] = dd_round_trip<FAST>(c[2 * j], sr);
+            c[2 * j + 1] = dd_round_trip<FAST>(c[2 * j + 1], si);
+        }
+    }
+}
+
+extern "C" ABStatus ab_internal_zgemm_epilogue(ABMatrix tr, ABMatrix ti, double* x, size_t ld,
+                                               const double alpha[2], const double beta[2]) {
+    if (!tr || !ti || !x || !alpha || !beta || ti->rows != tr->rows || ti->cols != tr->cols)
+        return AB_ERROR_INVALID_ARG;
+    double t0 = get_time_ms();
+    const size_t rows = (size_t)tr->rows, cols = (size_t)tr->cols;
+    const bool use_c = beta[0] != 0.0 || beta[1] != 0.0;
+
+    // C's ranges, as its upload measures them
+    parts_range_t rc = {AB_RANGE_EMPTY, AB_RANGE_EMPTY};
+    if (use_c)
+        rc = for_each_chunk_parts(rows, 2 * cols, ^(size_t, size_t r0, size_t nr) {
+            uint32_t mxr = 0, mnr = UINT32_MAX, mxi = 0, mni = UINT32_MAX;
+            for (size_t i = r0; i < r0 + nr; i++) {
+                const double* c = x + 2 * i * ld;
+                for (size_t j = 0; j < cols; j++) {
+                    AB_RANGE_ADD(c[2 * j], mxr, mnr);
+                    AB_RANGE_ADD(c[2 * j + 1], mxi, mni);
+                }
+            }
+            return (parts_range_t){{mxr, mnr}, {mxi, mni}};
+        });
+
+    const zgemm_epilogue_t p = {
+        (const DDFloat*)tr->buffer.contents, (const DDFloat*)ti->buffer.contents, x, ld, cols,
+        alpha[0], alpha[1], beta[0], beta[1], part_scale(tr->exp2), part_scale(ti->exp2),
+        part_scale(native_scale_exp(rc.re)), part_scale(native_scale_exp(rc.im))};
+    const bool fast = part_scale_fast(p.str.e) && part_scale_fast(p.sti.e) &&
+                      part_scale_fast(p.scr.e) && part_scale_fast(p.sci.e);
+    parts_range_t (*epilogue)(const zgemm_epilogue_t&, size_t, size_t) =
+        use_c ? (fast ? epilogue_rows<true, true> : epilogue_rows<true, false>)
+              : (fast ? epilogue_rows<false, true> : epilogue_rows<false, false>);
+    parts_range_t rn = for_each_chunk_parts(rows, 2 * cols, ^(size_t, size_t r0, size_t nr) {
+        return epilogue(p, r0, nr);
+    });
+
+    // The result's round trip, at the scales an upload gives its parts
+    const part_scale_t sr = part_scale(native_scale_exp(rn.re));
+    const part_scale_t si = part_scale(native_scale_exp(rn.im));
+    void (*round_trip)(double*, size_t, size_t, size_t, size_t, part_scale_t, part_scale_t) =
+        part_scale_fast(sr.e) && part_scale_fast(si.e) ? round_trip_rows<true>
+                                                       : round_trip_rows<false>;
+    ab_internal_for_each_chunk(rows, 2 * cols, ^(size_t, size_t r0, size_t nr) {
+        round_trip(x, ld, cols, r0, nr, sr, si);
+    });
+    // The conversions of the round trips it stands for: T's parts down, C's
+    // (when read) and the result's up and down
+    stats_add_download(get_time_ms() - t0, (use_c ? 10 : 6) * tr->count);
     return AB_OK;
 }
 

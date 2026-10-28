@@ -26,7 +26,6 @@
 #include <fenv.h>
 #include <os/lock.h>
 #include <string.h>
-#include <stdlib.h>
 
 #include "apple_bottom.h"
 #include "apple_bottom_device.h"
@@ -322,6 +321,16 @@ static ABStatus dev_download_complex_submatrix(
     return ab_internal_download_rows(src_r, src_i, base, (size_t)ld);
 }
 
+// Helper: C = alpha * T + beta * C in the complex submatrix C, from separate
+// real/imag ABMatrix handles holding T^T (C is read only if beta != 0).
+static ABStatus dev_epilogue_complex_submatrix(
+    ab_dev_buffer_t dst, size_t cmplx_offset, int ld,
+    ABMatrix t_r, ABMatrix t_i, const double alpha[2], const double beta[2])
+{
+    double* base = (double*)[dst->mtl contents] + cmplx_offset * 2;
+    return ab_internal_zgemm_epilogue(t_r, t_i, base, (size_t)ld, alpha, beta);
+}
+
 // ---- DGEMM dispatch --------------------------------------------------------
 
 ABStatus ab_dev_dgemm(ABTranspose transA, ABTranspose transB,
@@ -452,90 +461,25 @@ ABStatus ab_dev_zgemm_offset(ABTranspose transA, ABTranspose transB,
     s = dev_upload_complex_submatrix(mBr, mBi, B, b_offset, ldb, &sb, transB == AB_NO_TRANS);
     if (s != AB_OK) goto zgemm_cleanup;
 
-    // For beta != 0: upload C's current contents
-    if (need_beta) {
-        s = dev_upload_complex_submatrix(mCr, mCi, C, c_offset, ldc, NULL, false);
-        if (s != AB_OK) goto zgemm_cleanup;
-    }
-
     // Dispatch via ab_internal_zgemm (ab_zgemm_ex by the given method, which
-    // handles transpose on GPU): C = op(A) * op(B) with alpha=1, beta=0.
-    // For general alpha/beta, we need to scale manually.
-    // op(X)^T = op(X^T) for every flag ((X^H)^T = conj(X) = (X^T)^H), so
-    // C^T = op(B)^T * op(A)^T is that product with the operands and their
-    // flags swapped. The alpha/beta epilogue is elementwise, so it runs on
-    // C^T unchanged. The method is the BLAS ABI's (ab_lines_method): rho(p, q)
-    // is symmetric, and C^T's rows and columns are op(B)'s columns and
-    // op(A)'s rows, so C^T takes the decision C = op(A) * op(B) would.
-    if (!need_beta && alpha[0] == 1.0 && alpha[1] == 0.0) {
-        // Simple case: C = A * B (the most common case in QE)
-        s = ab_internal_zgemm(transB, transA, mBr, mBi, mAr, mAi, mCr, mCi,
-                              ab_lines_method(&sa, &sb));
-    } else {
-        // General case: C_new = alpha * op(A)*op(B) + beta * C_old
-        // Step 1: compute T = (op(A)*op(B))^T into temporary matrices
-        ABMatrix mTr = ab_matrix_create(n, m);
-        ABMatrix mTi = ab_matrix_create(n, m);
-        if (!mTr || !mTi) {
-            ab_matrix_destroy(mTr);
-            ab_matrix_destroy(mTi);
-            s = AB_ERROR_ALLOC_FAILED;
-            goto zgemm_cleanup;
-        }
-        s = ab_internal_zgemm(transB, transA, mBr, mBi, mAr, mAi, mTr, mTi,
-                              ab_lines_method(&sa, &sb));
-        if (s != AB_OK) {
-            ab_matrix_destroy(mTr);
-            ab_matrix_destroy(mTi);
-            goto zgemm_cleanup;
-        }
-
-        // Step 2: C_new = alpha * T + beta * C_old (element-wise on host)
-        size_t mn = (size_t)m * n;
-        double* tr = (double*)malloc(mn * sizeof(double));
-        double* ti = (double*)malloc(mn * sizeof(double));
-        double* cr = (double*)malloc(mn * sizeof(double));
-        double* ci = (double*)malloc(mn * sizeof(double));
-        if (!tr || !ti || !cr || !ci) {
-            free(tr); free(ti); free(cr); free(ci);
-            ab_matrix_destroy(mTr);
-            ab_matrix_destroy(mTi);
-            s = AB_ERROR_ALLOC_FAILED;
-            goto zgemm_cleanup;
-        }
-
-        ab_matrix_download(mTr, tr, true);
-        ab_matrix_download(mTi, ti, true);
-        if (need_beta) {
-            ab_matrix_download(mCr, cr, true);
-            ab_matrix_download(mCi, ci, true);
-        } else {
-            memset(cr, 0, mn * sizeof(double));
-            memset(ci, 0, mn * sizeof(double));
-        }
-
-        // Complex scale+add: C = alpha*T + beta*C, in chunks across cores
-        double ar = alpha[0], ai = alpha[1];
-        double br = beta[0],  bi = beta[1];
-        ab_internal_for_each_chunk(mn, 1, ^(size_t, size_t j0, size_t len) {
-            for (size_t j = j0; j < j0 + len; j++) {
-                double new_r = (ar * tr[j] - ai * ti[j]) + (br * cr[j] - bi * ci[j]);
-                double new_i = (ar * ti[j] + ai * tr[j]) + (br * ci[j] + bi * cr[j]);
-                cr[j] = new_r;
-                ci[j] = new_i;
-            }
-        });
-        ab_matrix_upload(mCr, cr, true);
-        ab_matrix_upload(mCi, ci, true);
-
-        free(tr); free(ti); free(cr); free(ci);
-        ab_matrix_destroy(mTr);
-        ab_matrix_destroy(mTi);
-    }
+    // handles transpose on GPU): T = op(A) * op(B), with alpha and beta
+    // applied afterwards. op(X)^T = op(X^T) for every flag ((X^H)^T = conj(X)
+    // = (X^T)^H), so C^T = op(B)^T * op(A)^T is that product with the operands
+    // and their flags swapped. The alpha/beta epilogue is elementwise, so it
+    // runs on C^T unchanged. The method is the BLAS ABI's (ab_lines_method):
+    // rho(p, q) is symmetric, and C^T's rows and columns are op(B)'s columns
+    // and op(A)'s rows, so C^T takes the decision C = op(A) * op(B) would.
+    s = ab_internal_zgemm(transB, transA, mBr, mBi, mAr, mAi, mCr, mCi,
+                          ab_lines_method(&sa, &sb));
     if (s != AB_OK) goto zgemm_cleanup;
 
-    // Download: reinterleave real/imag → interleaved complex, DD→FP64
-    s = dev_download_complex_submatrix(C, c_offset, ldc, mCr, mCi);
+    // Download (reinterleave real/imag → interleaved complex, DD→FP64) when
+    // C = op(A) * op(B), the most common case in QE; else C = alpha * T +
+    // beta * C on the host, into C's buffer
+    if (!need_beta && alpha[0] == 1.0 && alpha[1] == 0.0)
+        s = dev_download_complex_submatrix(C, c_offset, ldc, mCr, mCi);
+    else
+        s = dev_epilogue_complex_submatrix(C, c_offset, ldc, mCr, mCi, alpha, beta);
 
 zgemm_cleanup:
     ab_line_stats_free(&sa);
