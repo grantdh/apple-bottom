@@ -1,0 +1,8 @@
+# runs/time-755a-np1/B_si64_160b_k222/gpu_r1_1: time-755a-np1 B_si64_160b_k222 np=1 mode=gpu wall=217.37 s power=AC Power E=-2990.44093535 iters=9 build=415cb5d4d888 lib=<1.5.0>/libapplebottom.dylib args=
+AB_REPORT[18314] apple-bottom 1.4.0 (415cb5d4d888) AB_MODE=gpu
+AB_REPORT[18314] zgemm calls=29048 gpu_calls=1088 cpu_calls=27960 gpu_calls%=3.7 total_ms=58388.764 gpu_ms=54708.399 cpu_ms=3680.365 gpu_time%=93.7 fallbacks=2
+AB_REPORT[18314] zgemm gpu_stages_ms init=2.234 alloc=112.411 pack=10652.935 upload=7301.827 kernel=31501.029 download=627.218 epilogue=2292.193 other=2218.553
+AB_REPORT[18314] zgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=2
+AB_REPORT[18314] dgemm calls=2580 gpu_calls=10 cpu_calls=2570 gpu_calls%=0.4 total_ms=5724.573 gpu_ms=3433.437 cpu_ms=2291.135 gpu_time%=60.0 fallbacks=10
+AB_REPORT[18314] dgemm gpu_stages_ms init=0.022 alloc=1.935 pack=1011.530 upload=108.914 kernel=333.429 download=142.595 epilogue=1703.030 other=131.982
+AB_REPORT[18314] dgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=10

@@ -240,3 +240,7 @@ It also runs `replay_summary.py`.
 - 2026-10-26 to 10-28, library 415cb5d (the 1.5.0 release check) and
   c5a1fa6 (1.4.0) on one fresh QE develop build (86c214974), inputs A and
   B, 1 rank and 8 ranks: [`../results/2026-10-28-415cb5d-qe-si64-release-check/`](../results/2026-10-28-415cb5d-qe-si64-release-check/)
+- 2026-10-29, library 351d56c (the staged path keeping scaled lines and
+  4M) against 415cb5d on the same QE build, inputs A and B, 1 rank and
+  8 ranks, with the reasons calls left the staged path:
+  [`../results/2026-10-29-351d56c-staged-refusals/`](../results/2026-10-29-351d56c-staged-refusals/)

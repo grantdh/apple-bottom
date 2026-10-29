@@ -1,0 +1,2 @@
+# label input np omp reps modes args
+time-351d56c-np8 A_si64_500b_k222 8 1 1 cpu -nk 4

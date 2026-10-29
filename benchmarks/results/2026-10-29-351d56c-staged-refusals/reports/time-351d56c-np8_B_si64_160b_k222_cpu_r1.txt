@@ -1,0 +1,25 @@
+# runs/time-351d56c-np8/B_si64_160b_k222/cpu_r1: time-351d56c-np8 B_si64_160b_k222 np=8 mode=cpu wall=54.28 s power=AC Power E=-2990.44093534 iters=9 build=351d56ced974 lib=<fix>/libapplebottom.dylib args=-nk 4
+AB_REPORT[20478] apple-bottom 1.4.0 (351d56ced974) AB_MODE=cpu
+AB_REPORT[20478] zgemm calls=6116 gpu_calls=0 cpu_calls=6116 gpu_calls%=0.0 total_ms=15514.489 gpu_ms=0.000 cpu_ms=15514.489 gpu_time%=0.0 fallbacks=0
+AB_REPORT[20478] dgemm calls=660 gpu_calls=0 cpu_calls=660 gpu_calls%=0.0 total_ms=291.527 gpu_ms=0.000 cpu_ms=291.527 gpu_time%=0.0 fallbacks=0
+AB_REPORT[20472] apple-bottom 1.4.0 (351d56ced974) AB_MODE=cpu
+AB_REPORT[20472] zgemm calls=5978 gpu_calls=0 cpu_calls=5978 gpu_calls%=0.0 total_ms=15493.924 gpu_ms=0.000 cpu_ms=15493.924 gpu_time%=0.0 fallbacks=0
+AB_REPORT[20472] dgemm calls=660 gpu_calls=0 cpu_calls=660 gpu_calls%=0.0 total_ms=293.016 gpu_ms=0.000 cpu_ms=293.016 gpu_time%=0.0 fallbacks=0
+AB_REPORT[20479] apple-bottom 1.4.0 (351d56ced974) AB_MODE=cpu
+AB_REPORT[20479] zgemm calls=6116 gpu_calls=0 cpu_calls=6116 gpu_calls%=0.0 total_ms=18360.922 gpu_ms=0.000 cpu_ms=18360.922 gpu_time%=0.0 fallbacks=0
+AB_REPORT[20479] dgemm calls=660 gpu_calls=0 cpu_calls=660 gpu_calls%=0.0 total_ms=293.039 gpu_ms=0.000 cpu_ms=293.039 gpu_time%=0.0 fallbacks=0
+AB_REPORT[20476] apple-bottom 1.4.0 (351d56ced974) AB_MODE=cpu
+AB_REPORT[20476] zgemm calls=10159 gpu_calls=0 cpu_calls=10159 gpu_calls%=0.0 total_ms=18969.056 gpu_ms=0.000 cpu_ms=18969.056 gpu_time%=0.0 fallbacks=0
+AB_REPORT[20476] dgemm calls=660 gpu_calls=0 cpu_calls=660 gpu_calls%=0.0 total_ms=289.852 gpu_ms=0.000 cpu_ms=289.852 gpu_time%=0.0 fallbacks=0
+AB_REPORT[20475] apple-bottom 1.4.0 (351d56ced974) AB_MODE=cpu
+AB_REPORT[20474] apple-bottom 1.4.0 (351d56ced974) AB_MODE=cpu
+AB_REPORT[20474] zgemm calls=7732 gpu_calls=0 cpu_calls=7732 gpu_calls%=0.0 total_ms=15856.172 gpu_ms=0.000 cpu_ms=15856.172 gpu_time%=0.0 fallbacks=0
+AB_REPORT[20474] dgemm calls=660 gpu_calls=0 cpu_calls=660 gpu_calls%=0.0 total_ms=297.164 gpu_ms=0.000 cpu_ms=297.164 gpu_time%=0.0 fallbacks=0
+AB_REPORT[20475] zgemm calls=7732 gpu_calls=0 cpu_calls=7732 gpu_calls%=0.0 total_ms=18725.335 gpu_ms=0.000 cpu_ms=18725.335 gpu_time%=0.0 fallbacks=0
+AB_REPORT[20475] dgemm calls=660 gpu_calls=0 cpu_calls=660 gpu_calls%=0.0 total_ms=289.044 gpu_ms=0.000 cpu_ms=289.044 gpu_time%=0.0 fallbacks=0
+AB_REPORT[20477] apple-bottom 1.4.0 (351d56ced974) AB_MODE=cpu
+AB_REPORT[20477] zgemm calls=10159 gpu_calls=0 cpu_calls=10159 gpu_calls%=0.0 total_ms=17854.277 gpu_ms=0.000 cpu_ms=17854.277 gpu_time%=0.0 fallbacks=0
+AB_REPORT[20477] dgemm calls=660 gpu_calls=0 cpu_calls=660 gpu_calls%=0.0 total_ms=291.013 gpu_ms=0.000 cpu_ms=291.013 gpu_time%=0.0 fallbacks=0
+AB_REPORT[20473] apple-bottom 1.4.0 (351d56ced974) AB_MODE=cpu
+AB_REPORT[20473] zgemm calls=5978 gpu_calls=0 cpu_calls=5978 gpu_calls%=0.0 total_ms=16023.311 gpu_ms=0.000 cpu_ms=16023.311 gpu_time%=0.0 fallbacks=0
+AB_REPORT[20473] dgemm calls=660 gpu_calls=0 cpu_calls=660 gpu_calls%=0.0 total_ms=308.135 gpu_ms=0.000 cpu_ms=308.135 gpu_time%=0.0 fallbacks=0

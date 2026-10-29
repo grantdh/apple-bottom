@@ -59,9 +59,11 @@ All notable changes to this project will be documented in this file.
   same as a table and `staged=<outcome>` to each GPU call's line, and
   `AB_TRACE` adds `staged=<outcome>` (reasons joined by `+`) to each call
   that reached the staged path. See "Reading a run report" in
-  `docs/INTEGRATION.md`. On Quantum ESPRESSO si64 (input B, one rank)
-  this showed that 501 of 1,098 GPU calls left the staged path, and why;
-  see Fixed.
+  `docs/INTEGRATION.md`. On Quantum ESPRESSO si64 (input B, one rank) it
+  showed that 512 of the 1,110 calls that reached the staged path left it:
+  492 ZGEMMs whose parts call for 4M and 20 DGEMMs with scaled lines, which
+  the staged path now keeps (above). Measurements:
+  `benchmarks/results/2026-10-29-351d56c-staged-refusals/`.
 - **`AB_TRACE=<path>`**: every BLAS-ABI call (`dgemm_`, `zgemm_`,
   `ab_*gemm_`, `ab_*gemm_blas`; Accelerate and GPU, every `AB_MODE`) appends
   one `key=value` line to `<path>.<pid>` when it returns (a call with an

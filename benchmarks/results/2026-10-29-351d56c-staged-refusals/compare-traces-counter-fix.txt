@@ -1,0 +1,4 @@
+31628 calls vs 31628
+first difference at call 1:
+  {'routine': 'dgemm', 'ta': 'C', 'tb': 'N', 'M': '171', 'N': '64', 'K': '287330', 'lda': '287330', 'ldb': '287330', 'ldc': '171', 'alpha': '0x1p+0', 'beta': '0x0p+0', 'hash_a': '8abb5e5f92392239', 'hash_b': '256ff963367f6f45', 'hash_c': '-'}
+  {'routine': 'dgemm', 'ta': 'C', 'tb': 'N', 'M': '171', 'N': '64', 'K': '287330', 'lda': '287330', 'ldb': '287330', 'ldc': '171', 'alpha': '0x1p+0', 'beta': '0x0p+0', 'hash_a': '8abb5e5f92392239', 'hash_b': 'ecd50712d8c1d682', 'hash_c': '-'}

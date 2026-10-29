@@ -1,0 +1,16 @@
+B_si64_160b_k222 np=1: Accelerate zgemm total (cpu mode, n=1): 28.60 s (runs 28.60)
+time-351d56c-np1             n=2 kernel 26.5, 26.5 s; kernel/Accelerate 1.055, 1.054; wall 191.3, 191.3 s; power AC Power; gpu_calls 1088; staged {'kept': 597, 'kept_4m': 491, 'host_pack': 0, 'fpcr': 0, 'scalar': 0, 'alloc': 0, 'gpu_failed': 0, 'nonfinite': 0, 'scaled': 0, 'range': 2}
+time-755a-np1                n=2 kernel 31.5, 31.5 s; kernel/Accelerate 1.266, 1.264; wall 217.4, 217.4 s; power AC Power; gpu_calls 1088
+
+A_si64_500b_k222 np=8: Accelerate zgemm total (cpu mode, n=1): 232.20 s (runs 232.20)
+cause-755a-hostpack          n=1 kernel 208.5 s; kernel/Accelerate 0.939; wall 102.8 s; power AC Power; gpu_calls 1790
+cause-755a-hostpack-pf0      n=1 kernel 225.1 s; kernel/Accelerate 1.016; wall 103.2 s; power AC Power; gpu_calls 1790
+cause-serial3m-hostpack      n=1 kernel 207.3 s; kernel/Accelerate 0.935; wall 102.1 s; power AC Power; gpu_calls 1790
+cause-serial3m-hostpack-pf0  n=1 kernel 215.2 s; kernel/Accelerate 0.969; wall 103.1 s; power AC Power; gpu_calls 1790
+time-351d56c-np8             n=2 kernel 290.0, 287.5 s; kernel/Accelerate 1.313, 1.297; wall 102.7, 102.2 s; power AC Power; gpu_calls 1790; staged {'kept': 1198, 'kept_4m': 592, 'host_pack': 0, 'fpcr': 0, 'scalar': 0, 'alloc': 0, 'gpu_failed': 0, 'nonfinite': 0, 'scaled': 0, 'range': 10}
+time-755a-np8                n=2 kernel 316.1, 305.8 s; kernel/Accelerate 1.436, 1.384; wall 114.7, 112.2 s; power AC Power; gpu_calls 1790
+
+B_si64_160b_k222 np=8: Accelerate zgemm total (cpu mode, n=1): 136.80 s (runs 136.80)
+time-351d56c-np8             n=2 kernel 145.7, 145.6 s; kernel/Accelerate 1.190, 1.178; wall 54.9, 54.4 s; power AC Power; gpu_calls 2177; staged {'kept': 1256, 'kept_4m': 921, 'host_pack': 0, 'fpcr': 0, 'scalar': 0, 'alloc': 0, 'gpu_failed': 0, 'nonfinite': 0, 'scaled': 0, 'range': 3}
+time-755a-np8                n=2 kernel 141.8, 142.6 s; kernel/Accelerate 1.138, 1.146; wall 62.4, 60.5 s; power AC Power; gpu_calls 2177
+
