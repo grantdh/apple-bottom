@@ -1,0 +1,353 @@
+# 1.5.0-np8nk4 B_si64_160b_k222 gpu_r3 (np=8 omp=1, args: -nk 4): stderr without dyld lines and without AB_PROFILE per-call lines
+loaded: <ab-frozen>/755a46613bf2/libapplebottom.dylib
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35918  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE zgemm M=1152 N=256 K=8918  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE zgemm M=1152 N=256 K=8927  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE zgemm M=1152 N=256 K=9002  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35918  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35918  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35918  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35918  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35918  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35918  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35918  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35918  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35918  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+AB_PROFILE dgemm M=171 N=64 K=35916  GPU fallback to cblas: values beyond double-float's exponent range, or NaN/Inf
+Note: The following floating-point exceptions are signalling: IEEE_INVALID_FLAG IEEE_DIVIDE_BY_ZERO IEEE_UNDERFLOW_FLAG
+Note: The following floating-point exceptions are signalling: IEEE_DIVIDE_BY_ZERO IEEE_UNDERFLOW_FLAG
+=== apple-bottom 1.4.0 (415cb5d4d888) BLAS profile, pid 28953 ===
+gpu_calls%: share of calls whose C the GPU computed; gpu_time%: share of wall time spent in those calls.
+routine           calls  gpu_calls  gpu_calls%     total_ms       gpu_ms       cpu_ms  gpu_time%  fallbacks     avg_us   max_dim    hotbin
+------------------------------------------------------------------------------------------------------------------------------
+zgemm              5978        261        4.4%    27119.281    25587.427     1531.854      94.4%          1     4536.5      8918       8K+
+dgemm               660         10        1.5%     1818.848      973.458      845.390      53.5%         10     2755.8     35918       8K+
+
+GPU calls by stage, ms (kernel: command-buffer GPU time; other: rest of gpu_ms):
+routine            init      alloc       pack     upload     kernel   download   epilogue      other       gpu_ms
+=== apple-bottom 1.4.0 (415cb5d4d888) BLAS profile, pid 28954 ===
+gpu_calls%: share of calls whose C the GPU computed; gpu_time%: share of wall time spent in those calls.
+routine           calls  gpu_calls  gpu_calls%     total_ms       gpu_ms       cpu_ms  gpu_time%  fallbacks     avg_us   max_dim    hotbin
+------------------------------------------------------------------------------------------------------------------------------
+zgemm              7732        272        3.5%    25960.337    24495.597     1464.740      94.4%          0     3357.5      9014       8K+
+dgemm               660         10        1.5%     1839.264      914.038      925.225      49.7%         10     2786.8     35916   129-512
+
+GPU calls by stage, ms (kernel: command-buffer GPU time; other: rest of gpu_ms):
+routine            init      alloc       pack     upload     kernel   download   epilogue      other       gpu_ms
+zgemm             0.814     30.784   1719.654   1640.412  18600.508    151.904    322.251   2029.271    24495.597
+dgemm             0.028      1.428    158.009     32.259    126.665     42.390    411.673    141.587      914.038
+
+Fallbacks: GPU-routed calls that ran on cblas (in cpu_ms):
+routine       no_device  too_large gpu_failed      other      range
+dgemm                 0          0          0          0         10
+
+Total BLAS time: 27799.6 ms across 2 routines
+
+Dimension distribution for 'zgemm' (by max(M,N)):
+  bin         calls      time_ms   pct_time
+  1-32            3072          3.1      0.0%
+  33-128          1280          7.6      0.0%
+  129-512         3058       2953.3     11.4%
+  1K-2K             65      11132.0     42.9%
+  8K+              257      11864.4     45.7%
+
+AB_REPORT[28954] apple-bottom 1.4.0 (415cb5d4d888) AB_MODE=gpu
+AB_REPORT[28954] zgemm calls=7732 gpu_calls=272 cpu_calls=7460 gpu_calls%=3.5 total_ms=25960.337 gpu_ms=24495.597 cpu_ms=1464.740 gpu_time%=94.4 fallbacks=0
+AB_REPORT[28954] zgemm gpu_stages_ms init=0.814 alloc=30.784 pack=1719.654 upload=1640.412 kernel=18600.508 download=151.904 epilogue=322.251 other=2029.271
+AB_REPORT[28954] dgemm calls=660 gpu_calls=10 cpu_calls=650 gpu_calls%=1.5 total_ms=1839.264 gpu_ms=914.038 cpu_ms=925.225 gpu_time%=49.7 fallbacks=10
+AB_REPORT[28954] dgemm gpu_stages_ms init=0.028 alloc=1.428 pack=158.009 upload=32.259 kernel=126.665 download=42.390 epilogue=411.673 other=141.587
+AB_REPORT[28954] dgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=10
+
+Fallbacks: GPU-routed calls that ran on cblas (in cpu_ms):
+routine       no_device  too_large gpu_failed      other      range
+zgemm                 0          0          0          0          1
+dgemm                 0          0          0          0         10
+
+Total BLAS time: 28938.1 ms across 2 routines
+
+Dimension distribution for 'zgemm' (by max(M,N)):
+  bin         calls      time_ms   pct_time
+  1-32            1536          2.7      0.0%
+  33-128          1152          6.3      0.0%
+  129-512         3032       1452.5      5.4%
+  1K-2K             54       9177.6     33.8%
+  8K+              204      16480.1     60.8%
+
+AB_REPORT[28953] apple-bottom 1.4.0 (415cb5d4d888) AB_MODE=gpu
+AB_REPORT[28953] zgemm calls=5978 gpu_calls=261 cpu_calls=5717 gpu_calls%=4.4 total_ms=27119.281 gpu_ms=25587.427 cpu_ms=1531.854 gpu_time%=94.4 fallbacks=1
+AB_REPORT[28953] zgemm gpu_stages_ms init=0.761 alloc=35.041 pack=3233.855 upload=2097.168 kernel=17686.428 download=199.515 epilogue=604.923 other=1729.737
+AB_REPORT[28953] zgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=1
+AB_REPORT[28953] dgemm calls=660 gpu_calls=10 cpu_calls=650 gpu_calls%=1.5 total_ms=1818.848 gpu_ms=973.458 cpu_ms=845.390 gpu_time%=53.5 fallbacks=10
+AB_REPORT[28953] dgemm gpu_stages_ms init=0.033 alloc=1.576 pack=159.608 upload=51.987 kernel=155.964 download=41.826 epilogue=424.295 other=138.168
+Note: The following floating-point exceptions are signalling: IEEE_DIVIDE_BY_ZERO IEEE_UNDERFLOW_FLAG
+AB_REPORT[28953] dgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=10
+Note: The following floating-point exceptions are signalling: IEEE_DIVIDE_BY_ZERO IEEE_UNDERFLOW_FLAG
+Note: The following floating-point exceptions are signalling: IEEE_INVALID_FLAG IEEE_DIVIDE_BY_ZERO IEEE_UNDERFLOW_FLAG
+Note: The following floating-point exceptions are signalling: IEEE_DIVIDE_BY_ZERO IEEE_UNDERFLOW_FLAG
+Note: The following floating-point exceptions are signalling: IEEE_INVALID_FLAG IEEE_DIVIDE_BY_ZERO IEEE_UNDERFLOW_FLAG
+=== apple-bottom 1.4.0 (415cb5d4d888) BLAS profile, pid 28957 ===
+gpu_calls%: share of calls whose C the GPU computed; gpu_time%: share of wall time spent in those calls.
+routine           calls  gpu_calls  gpu_calls%     total_ms       gpu_ms       cpu_ms  gpu_time%  fallbacks     avg_us   max_dim    hotbin
+------------------------------------------------------------------------------------------------------------------------------
+zgemm             10159        291        2.9%    26629.143    24524.872     2104.272      92.1%          0     2621.2      8968       8K+
+dgemm               660         10        1.5%     1890.902      934.384      956.518      49.4%         10     2865.0     35916   129-512
+
+GPU calls by stage, ms (kernel: command-buffer GPU time; other: rest of gpu_ms):
+routine            init      alloc       pack     upload     kernel   download   epilogue      other       gpu_ms
+zgemm             0.864     23.186   1432.444   1657.930  18835.903    162.372    307.380   2104.792    24524.872
+dgemm             0.031      1.492    153.763     36.061    158.132     42.995    396.771    145.139      934.384
+
+Fallbacks: GPU-routed calls that ran on cblas (in cpu_ms):
+routine       no_device  too_large gpu_failed      other      range
+dgemm                 0          0          0          0         10
+
+Total BLAS time: 28520.0 ms across 2 routines
+
+Dimension distribution for 'zgemm' (by max(M,N)):
+  bin         calls      time_ms   pct_time
+  1-32            5120          5.7      0.0%
+  33-128          1280          7.3      0.0%
+  129-512         3350       2871.8     10.8%
+  1K-2K             79      10447.0     39.2%
+  8K+              330      13297.2     49.9%
+
+AB_REPORT[28957] apple-bottom 1.4.0 (415cb5d4d888) AB_MODE=gpu
+AB_REPORT[28957] zgemm calls=10159 gpu_calls=291 cpu_calls=9868 gpu_calls%=2.9 total_ms=26629.143 gpu_ms=24524.872 cpu_ms=2104.272 gpu_time%=92.1 fallbacks=0
+AB_REPORT[28957] zgemm gpu_stages_ms init=0.864 alloc=23.186 pack=1432.444 upload=1657.930 kernel=18835.903 download=162.372 epilogue=307.380 other=2104.792
+AB_REPORT[28957] dgemm calls=660 gpu_calls=10 cpu_calls=650 gpu_calls%=1.5 total_ms=1890.902 gpu_ms=934.384 cpu_ms=956.518 gpu_time%=49.4 fallbacks=10
+AB_REPORT[28957] dgemm gpu_stages_ms init=0.031 alloc=1.492 pack=153.763 upload=36.061 kernel=158.132 download=42.995 epilogue=396.771 other=145.139
+AB_REPORT[28957] dgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=10
+Note: The following floating-point exceptions are signalling: IEEE_INVALID_FLAG IEEE_DIVIDE_BY_ZERO IEEE_UNDERFLOW_FLAG
+=== apple-bottom 1.4.0 (415cb5d4d888) BLAS profile, pid 28952 ===
+gpu_calls%: share of calls whose C the GPU computed; gpu_time%: share of wall time spent in those calls.
+routine           calls  gpu_calls  gpu_calls%     total_ms       gpu_ms       cpu_ms  gpu_time%  fallbacks     avg_us   max_dim    hotbin
+------------------------------------------------------------------------------------------------------------------------------
+zgemm              5978        261        4.4%    27505.820    26143.898     1361.922      95.0%          1     4601.2      8927       8K+
+dgemm               660         10        1.5%     1788.318      989.633      798.685      55.3%         10     2709.6     35916       8K+
+
+GPU calls by stage, ms (kernel: command-buffer GPU time; other: rest of gpu_ms):
+routine            init      alloc       pack     upload     kernel   download   epilogue      other       gpu_ms
+zgemm             0.773     40.079   3463.988   2203.972  17864.735    200.838    607.438   1762.074    26143.898
+dgemm             0.032      1.202    160.984     54.634    152.831     52.476    428.932    138.543      989.633
+
+Fallbacks: GPU-routed calls that ran on cblas (in cpu_ms):
+routine       no_device  too_large gpu_failed      other      range
+zgemm                 0          0          0          0          1
+dgemm                 0          0          0          0         10
+
+Total BLAS time: 29294.1 ms across 2 routines
+
+Dimension distribution for 'zgemm' (by max(M,N)):
+  bin         calls      time_ms   pct_time
+  1-32            1536          2.5      0.0%
+  33-128          1152          6.7      0.0%
+  129-512         3032       1589.6      5.8%
+  1K-2K             54       9266.1     33.7%
+  8K+              204      16640.9     60.5%
+
+AB_REPORT[28952] apple-bottom 1.4.0 (415cb5d4d888) AB_MODE=gpu
+=== apple-bottom 1.4.0 (415cb5d4d888) BLAS profile, pid 28955 ===
+gpu_calls%: share of calls whose C the GPU computed; gpu_time%: share of wall time spent in those calls.
+routine           calls  gpu_calls  gpu_calls%     total_ms       gpu_ms       cpu_ms  gpu_time%  fallbacks     avg_us   max_dim    hotbin
+------------------------------------------------------------------------------------------------------------------------------
+zgemm              7732        271        3.5%    25308.209    23196.352     2111.858      91.7%          1     3273.2      9002       8K+
+dgemm               660         10        1.5%     1817.298      958.434      858.864      52.7%         10     2753.5     35916       8K+
+
+GPU calls by stage, ms (kernel: command-buffer GPU time; other: rest of gpu_ms):
+routine            init      alloc       pack     upload     kernel   download   epilogue      other       gpu_ms
+zgemm             0.845     28.091   1557.984   1578.994  17687.983    146.296    323.915   1872.244    23196.352
+dgemm             0.032      1.732    159.013     34.867    147.825     65.756    430.548    118.660      958.434
+
+Fallbacks: GPU-routed calls that ran on cblas (in cpu_ms):
+routine       no_device  too_large gpu_failed      other      range
+zgemm                 0          0          0          0          1
+dgemm                 0          0          0          0         10
+
+Total BLAS time: 27125.5 ms across 2 routines
+
+Dimension distribution for 'zgemm' (by max(M,N)):
+  bin         calls      time_ms   pct_time
+  1-32            3072          3.3      0.0%
+  33-128          1280          7.6      0.0%
+  129-512         3058       2738.2     10.8%
+  1K-2K             65      10625.6     42.0%
+  8K+              257      11933.5     47.2%
+
+AB_REPORT[28955] apple-bottom 1.4.0 (415cb5d4d888) AB_MODE=gpu
+AB_REPORT[28955] zgemm calls=7732 gpu_calls=271 cpu_calls=7461 gpu_calls%=3.5 total_ms=25308.209 gpu_ms=23196.352 cpu_ms=2111.858 gpu_time%=91.7 fallbacks=1
+=== apple-bottom 1.4.0 (415cb5d4d888) BLAS profile, pid 28959 ===
+gpu_calls%: share of calls whose C the GPU computed; gpu_time%: share of wall time spent in those calls.
+routine           calls  gpu_calls  gpu_calls%     total_ms       gpu_ms       cpu_ms  gpu_time%  fallbacks     avg_us   max_dim    hotbin
+------------------------------------------------------------------------------------------------------------------------------
+zgemm              6116        265        4.3%    22008.992    21082.672      926.320      95.8%          0     3598.6      8984       8K+
+dgemm               660         10        1.5%     1818.680      953.277      865.403      52.4%         10     2755.6     35916       8K+
+
+GPU calls by stage, ms (kernel: command-buffer GPU time; other: rest of gpu_ms):
+routine            init      alloc       pack     upload     kernel   download   epilogue      other       gpu_ms
+zgemm             0.821     14.450    880.466   1316.133  16782.623     94.399     81.868   1911.912    21082.672
+dgemm             0.033      2.325    152.294     54.340    148.257     52.483    422.427    121.119      953.277
+
+Fallbacks: GPU-routed calls that ran on cblas (in cpu_ms):
+routine       no_device  too_large gpu_failed      other      range
+dgemm                 0          0          0          0         10
+
+Total BLAS time: 23827.7 ms across 2 routines
+
+Dimension distribution for 'zgemm' (by max(M,N)):
+  bin         calls      time_ms   pct_time
+  1-32            1664          2.4      0.0%
+  33-128          1024          5.3      0.0%
+  129-512         3162       2936.6     13.3%
+  1K-2K             55       8748.8     39.8%
+  8K+              211      10315.9     46.9%
+
+AB_REPORT[28959] apple-bottom 1.4.0 (415cb5d4d888) AB_MODE=gpu
+AB_REPORT[28959] zgemm calls=6116 gpu_calls=265 cpu_calls=5851 gpu_calls%=4.3 total_ms=22008.992 gpu_ms=21082.672 cpu_ms=926.320 gpu_time%=95.8 fallbacks=0
+AB_REPORT[28959] zgemm gpu_stages_ms init=0.821 alloc=14.450 pack=880.466 upload=1316.133 kernel=16782.623 download=94.399 epilogue=81.868 other=1911.912
+AB_REPORT[28959] dgemm calls=660 gpu_calls=10 cpu_calls=650 gpu_calls%=1.5 total_ms=1818.680 gpu_ms=953.277 cpu_ms=865.403 gpu_time%=52.4 fallbacks=10
+=== apple-bottom 1.4.0 (415cb5d4d888) BLAS profile, pid 28958 ===
+gpu_calls%: share of calls whose C the GPU computed; gpu_time%: share of wall time spent in those calls.
+routine           calls  gpu_calls  gpu_calls%     total_ms       gpu_ms       cpu_ms  gpu_time%  fallbacks     avg_us   max_dim    hotbin
+------------------------------------------------------------------------------------------------------------------------------
+zgemm              6116        265        4.3%    20844.822    19742.656     1102.166      94.7%          0     3408.2      8920       8K+
+dgemm               660         10        1.5%     1783.860      916.753      867.107      51.4%         10     2702.8     35916       8K+
+
+GPU calls by stage, ms (kernel: command-buffer GPU time; other: rest of gpu_ms):
+routine            init      alloc       pack     upload     kernel   download   epilogue      other       gpu_ms
+zgemm             0.827     11.707    805.332   1202.028  15809.660     93.886     80.389   1738.828    19742.656
+dgemm             0.033      1.363    148.930     53.685    135.314     41.211    411.769    124.449      916.753
+
+Fallbacks: GPU-routed calls that ran on cblas (in cpu_ms):
+routine       no_device  too_large gpu_failed      other      range
+dgemm                 0          0          0          0         10
+
+Total BLAS time: 22628.7 ms across 2 routines
+
+Dimension distribution for 'zgemm' (by max(M,N)):
+  bin         calls      time_ms   pct_time
+  1-32            1664          2.8      0.0%
+  33-128          1024          5.8      0.0%
+  129-512         3162       2858.3     13.7%
+  1K-2K             55       7800.1     37.4%
+  8K+              211      10177.9     48.8%
+
+AB_REPORT[28958] apple-bottom 1.4.0 (415cb5d4d888) AB_MODE=gpu
+AB_REPORT[28958] zgemm calls=6116 gpu_calls=265 cpu_calls=5851 gpu_calls%=4.3 total_ms=20844.822 gpu_ms=19742.656 cpu_ms=1102.166 gpu_time%=94.7 fallbacks=0
+AB_REPORT[28958] zgemm gpu_stages_ms init=0.827 alloc=11.707 pack=805.332 upload=1202.028 kernel=15809.660 download=93.886 epilogue=80.389 other=1738.828
+AB_REPORT[28958] dgemm calls=660 gpu_calls=10 cpu_calls=650 gpu_calls%=1.5 total_ms=1783.860 gpu_ms=916.753 cpu_ms=867.107 gpu_time%=51.4 fallbacks=10
+AB_REPORT[28958] dgemm gpu_stages_ms init=0.033 alloc=1.363 pack=148.930 upload=53.685 kernel=135.314 download=41.211 epilogue=411.769 other=124.449
+AB_REPORT[28952] zgemm calls=5978 gpu_calls=261 cpu_calls=5717 gpu_calls%=4.4 total_ms=27505.820 gpu_ms=26143.898 cpu_ms=1361.922 gpu_time%=95.0 fallbacks=1
+AB_REPORT[28952] zgemm gpu_stages_ms init=0.773 alloc=40.079 pack=3463.988 upload=2203.972 kernel=17864.735 download=200.838 epilogue=607.438 other=1762.074
+AB_REPORT[28952] zgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=1
+AB_REPORT[28952] dgemm calls=660 gpu_calls=10 cpu_calls=650 gpu_calls%=1.5 total_ms=1788.318 gpu_ms=989.633 cpu_ms=798.685 gpu_time%=55.3 fallbacks=10
+AB_REPORT[28952] dgemm gpu_stages_ms init=0.032 alloc=1.202 pack=160.984 upload=54.634 kernel=152.831 download=52.476 epilogue=428.932 other=138.543
+AB_REPORT[28952] dgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=10
+AB_REPORT[28955] zgemm gpu_stages_ms init=0.845 alloc=28.091 pack=1557.984 upload=1578.994 kernel=17687.983 download=146.296 epilogue=323.915 other=1872.244
+AB_REPORT[28955] zgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=1
+AB_REPORT[28955] dgemm calls=660 gpu_calls=10 cpu_calls=650 gpu_calls%=1.5 total_ms=1817.298 gpu_ms=958.434 cpu_ms=858.864 gpu_time%=52.7 fallbacks=10
+AB_REPORT[28955] dgemm gpu_stages_ms init=0.032 alloc=1.732 pack=159.013 upload=34.867 kernel=147.825 download=65.756 epilogue=430.548 other=118.660
+AB_REPORT[28955] dgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=10
+AB_REPORT[28959] dgemm gpu_stages_ms init=0.033 alloc=2.325 pack=152.294 upload=54.340 kernel=148.257 download=52.483 epilogue=422.427 other=121.119
+AB_REPORT[28959] dgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=10
+AB_REPORT[28958] dgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=10
+=== apple-bottom 1.4.0 (415cb5d4d888) BLAS profile, pid 28956 ===
+gpu_calls%: share of calls whose C the GPU computed; gpu_time%: share of wall time spent in those calls.
+routine           calls  gpu_calls  gpu_calls%     total_ms       gpu_ms       cpu_ms  gpu_time%  fallbacks     avg_us   max_dim    hotbin
+------------------------------------------------------------------------------------------------------------------------------
+zgemm             10159        291        2.9%    25922.435    23711.290     2211.145      91.5%          0     2551.7      8988       8K+
+dgemm               660         10        1.5%     1794.509      918.553      875.956      51.2%         10     2719.0     35916       8K+
+
+GPU calls by stage, ms (kernel: command-buffer GPU time; other: rest of gpu_ms):
+routine            init      alloc       pack     upload     kernel   download   epilogue      other       gpu_ms
+zgemm             0.895     27.235   1391.084   1550.129  18138.475    158.536    316.407   2128.528    23711.290
+dgemm             0.033      1.369    149.444     50.315    144.262     38.869    411.351    122.912      918.553
+
+Fallbacks: GPU-routed calls that ran on cblas (in cpu_ms):
+routine       no_device  too_large gpu_failed      other      range
+dgemm                 0          0          0          0         10
+
+Total BLAS time: 27716.9 ms across 2 routines
+
+Dimension distribution for 'zgemm' (by max(M,N)):
+  bin         calls      time_ms   pct_time
+  1-32            5120          5.9      0.0%
+  33-128          1280          8.1      0.0%
+  129-512         3350       2947.7     11.4%
+  1K-2K             79       9895.3     38.2%
+  8K+              330      13065.3     50.4%
+
+AB_REPORT[28956] apple-bottom 1.4.0 (415cb5d4d888) AB_MODE=gpu
+AB_REPORT[28956] zgemm calls=10159 gpu_calls=291 cpu_calls=9868 gpu_calls%=2.9 total_ms=25922.435 gpu_ms=23711.290 cpu_ms=2211.145 gpu_time%=91.5 fallbacks=0
+AB_REPORT[28956] zgemm gpu_stages_ms init=0.895 alloc=27.235 pack=1391.084 upload=1550.129 kernel=18138.475 download=158.536 epilogue=316.407 other=2128.528
+AB_REPORT[28956] dgemm calls=660 gpu_calls=10 cpu_calls=650 gpu_calls%=1.5 total_ms=1794.509 gpu_ms=918.553 cpu_ms=875.956 gpu_time%=51.2 fallbacks=10
+AB_REPORT[28956] dgemm gpu_stages_ms init=0.033 alloc=1.369 pack=149.444 upload=50.315 kernel=144.262 download=38.869 epilogue=411.351 other=122.912
+AB_REPORT[28956] dgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=10

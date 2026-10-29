@@ -1,0 +1,2 @@
+# label          input              np omp reps modes     args
+1.4.0-np8nk4  A_si64_500b_k222  8  1  2  cpu,gpu  -nk 4

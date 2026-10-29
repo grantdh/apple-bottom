@@ -237,3 +237,6 @@ It also runs `replay_summary.py`.
   1.4.0): [`../results/2026-10-14-1dbdb52-qe-si64/`](../results/2026-10-14-1dbdb52-qe-si64/)
 - 2026-10-15, library c5a1fa6 (1.4.0), QE compiled `-O3`, 1 rank and
   8 ranks: [`../results/2026-10-15-c5a1fa6-qe-si64-opt/`](../results/2026-10-15-c5a1fa6-qe-si64-opt/)
+- 2026-10-26 to 10-28, library 415cb5d (the 1.5.0 release check) and
+  c5a1fa6 (1.4.0) on one fresh QE develop build (86c214974), inputs A and
+  B, 1 rank and 8 ranks: [`../results/2026-10-28-415cb5d-qe-si64-release-check/`](../results/2026-10-28-415cb5d-qe-si64-release-check/)
