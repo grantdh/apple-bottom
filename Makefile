@@ -452,6 +452,13 @@ $(BUILD)/bench_device_residency: benchmarks/bench_device_residency.c lib | $(BUI
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
+# One GEMM split between Accelerate and the GPU against either engine alone. Run via
+# benchmarks/split/run.sh (benchmarks/split/README.md). IOKit and CoreFoundation: SMC wall
+# power and IOReport GPU clock, read without root.
+$(BUILD)/bench_split: benchmarks/bench_split.c tests/test_dot2.h lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -Itests $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) -framework IOKit -framework CoreFoundation $(EXE_RPATH)
+	@echo "Built: $@"
+
 $(BUILD)/bench_rect_dgemm: benchmarks/bench_rect_dgemm.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
@@ -606,6 +613,8 @@ build-check: | $(BUILD)/check
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c benchmarks/calibrate.c -o $(BUILD)/check/calibrate.o
 	@echo "Compiling replay.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -Itests -c benchmarks/replay.c -o $(BUILD)/check/replay.o
+	@echo "Compiling bench_split.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -Itests -c benchmarks/bench_split.c -o $(BUILD)/check/bench_split.o
 	@echo "Compiling test_chaos.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_chaos.c -o $(BUILD)/check/test_chaos.o
 	@echo "Compiling test_convergence.c..."
