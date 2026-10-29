@@ -1,0 +1,20 @@
+label,input,mode,run,pw_start,pw_end,power_at_start,power_states_during_run
+1.5.0-np8nk4,B_si64_160b_k222,cpu,cpu_r1,1792941310,1792941366,Battery Power,AC Power
+1.5.0-np8nk4,B_si64_160b_k222,gpu,gpu_r1,1792942093,1792942157,AC Power,AC Power
+1.5.0-np8nk4,B_si64_160b_k222,gpu,gpu_r2,1792943284,1792943346,AC Power,AC Power
+1.5.0-np8nk4,B_si64_160b_k222,cpu,cpu_r2,1792946172,1792946227,AC Power,AC Power/Battery Power
+1.5.0-np8nk4,B_si64_160b_k222,cpu,cpu_r3,1792949423,1792949481,Battery Power,AC Power
+1.5.0-np8nk4,B_si64_160b_k222,gpu,gpu_r3,1792951203,1792951268,AC Power,AC Power
+1.5.0-np8nk4,B_si64_160b_k222,auto,auto_r1,1792967591,1792967645,AC Power,AC Power
+1.4.0-np8nk4,B_si64_160b_k222,cpu,cpu_r1,1792969596,1792969650,AC Power,AC Power
+1.4.0-np8nk4,B_si64_160b_k222,gpu,gpu_r1,1792977348,1792977418,AC Power,AC Power
+1.4.0-np8nk4,B_si64_160b_k222,gpu,gpu_r2,1792982980,1792983054,AC Power,Battery Power
+1.4.0-np8nk4,B_si64_160b_k222,cpu,cpu_r2,1792991385,1792991438,Battery Power,AC Power
+1.5.0-np8nk4,A_si64_500b_k222,cpu,cpu_r1,1793000504,1793000602,AC Power,AC Power
+1.5.0-np8nk4,A_si64_500b_k222,gpu,gpu_r1,1793000648,1793000765,AC Power,AC Power
+1.5.0-np8nk4,A_si64_500b_k222,gpu,gpu_r2,1793001847,1793001962,AC Power,AC Power
+1.5.0-np8nk4,A_si64_500b_k222,cpu,cpu_r2,1793018785,1793018887,AC Power,AC Power
+1.4.0-np8nk4,A_si64_500b_k222,cpu,cpu_r1,1793071983,1793072089,Battery Power,Battery Power
+1.4.0-np8nk4,A_si64_500b_k222,gpu,gpu_r1,1793072090,1793072205,Battery Power,Battery Power
+1.4.0-np8nk4,A_si64_500b_k222,gpu,gpu_r2,1793072205,1793072324,Battery Power,Battery Power
+1.4.0-np8nk4,A_si64_500b_k222,cpu,cpu_r2,1793072324,1793072429,Battery Power,Battery Power
