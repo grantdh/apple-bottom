@@ -1,7 +1,7 @@
 # Double-float FFT against FFTW and vDSP, 2026-10-23
 
-`build/bench_fft_neon --accuracy`, `--speed --patient` (FFTW 3.3.10 built with
-NEON, `~/qe-test/opt/fftw-3.3.10-neon`) and `build/bench_fft --speed --patient
+`build/bench_fft_neon --accuracy`, `--speed --patient` (FFTW 3.3.10 built
+locally with NEON) and `build/bench_fft --speed --patient
 --only fftw,8x1` (Homebrew's FFTW 3.3.10, which has no NEON double-precision
 code), one run each under the machine lock and `caffeinate -is`, library built
 at c138543 (`ab_build_info()`: `1.4.0 (c13854306d56)`). The batch-128 times
