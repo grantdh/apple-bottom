@@ -1,0 +1,38 @@
+apple-bottom 1.4.0 (415cb5d4d888) | VECLIB_MAXIMUM_THREADS=8 AB_MODE=gpu AB_MIN_GPU_DIM=0 AB_STAGING_MB=8192 AB_TRACE=on | 1 procs
+start: Now drawing from 'AC Power'  -InternalBattery-0 (id=37552227)	100%; charged; 0:00 remaining present: true | load { 4.50 5.63 9.77 }
+AB_REPORT[74657] apple-bottom 1.4.0 (415cb5d4d888) AB_MODE=gpu
+AB_REPORT[74657] zgemm calls=123 gpu_calls=123 cpu_calls=0 gpu_calls%=100.0 total_ms=639.444 gpu_ms=639.444 cpu_ms=0.000 gpu_time%=100.0 fallbacks=0
+AB_REPORT[74657] zgemm gpu_stages_ms init=0.157 alloc=0.408 pack=0.227 upload=0.009 kernel=561.421 download=0.019 epilogue=0.000 other=77.203
+AB_REPORT[74652] apple-bottom 1.4.0 (415cb5d4d888) AB_MODE=gpu
+AB_REPORT[74652] no BLAS-ABI calls recorded
+case RK160: ZGEMM 'C','N' M=160 N=160 K=18432 lda=18432 ldb=18432 ldc=160 beta=0, split axis K (align 64), 3.77 GF per call x 1 procs, data uniform [-1,1)
+registration ok (of 4 arrays), per proc: 4
+-- sweep: lockstep medians over 3 interleaved rounds x 3 reps (ms); L = slowest proc, A = mean over procs
+   config      f |      L ms      A ms |    /ACC    /GPU |   cpu ms   gpu ms    join   wake
+   ACC     0.000 |      8.81      8.81 |   1.000   0.996 |     8.81     0.00    0.00   0.00
+   GPU     1.000 |      8.84      8.84 |   1.004   1.000 |     0.00     8.84    0.00   0.00
+   S4608   0.250 |      6.64      6.64 |   0.753   0.750 |     6.61     2.79    0.00   0.01
+   S5504   0.299 |      6.27      6.27 |   0.712   0.709 |     6.24     3.16    0.00   0.01
+   S6464   0.351 |      5.82      5.82 |   0.660   0.658 |     5.79     3.58    0.00   0.01
+   S7360   0.399 |      5.48      5.48 |   0.623   0.620 |     5.46     3.98    0.00   0.01
+   S8320   0.451 |      4.96      4.96 |   0.563   0.561 |     4.94     4.41    0.00   0.01
+   S9216   0.500 |      4.84      4.84 |   0.550   0.548 |     4.44     4.79    0.00   0.01
+   S10112  0.549 |      4.84      4.84 |   0.549   0.547 |     4.04     4.79    0.78   0.01  <- best
+   S11072  0.601 |      5.26      5.26 |   0.597   0.595 |     3.55     5.21    1.67   0.01
+   S11968  0.649 |      5.64      5.64 |   0.640   0.637 |     3.08     5.60    2.65   0.01
+-- fixed block at g=10112 (f=0.549), 3 interleaved rounds; medians of lockstep times (ms) [per-round medians]
+   ACC    n= 9  L      8.76  A      8.76    431.2 GF/s  [8.76 8.72 8.74]
+   GPU    n= 9  L      8.43  A      8.43    447.8 GF/s  [8.43 8.42 8.49]
+   S10112 n=12  L      4.85  A      4.85    778.6 GF/s  [4.83 5.24 4.83]
+   split parts (mean over procs, medians): cpu slice 4.18 ms, gpu slice 4.81 ms, join wait 0.61 ms, gpu wake 0.007 ms, K-add 0.032 ms
+   speedup of the split: vs Accelerate 1.806x, vs GPU 1.739x, vs the faster engine (GPU) 1.739x
+-- bits: split repeats differing from the first 0/12 (max 0 elements), forced completion orders differing 0 elements, cross-proc hashes equal: split yes gpu yes acc yes
+   single engines: GPU repeats differing 0/9, Accelerate repeats differing 0/9
+   whole split C vs Accelerate alone 25600/25600, vs GPU alone 25600/25600 elements differ
+   GPU-routed calls whose C was not computed on the GPU (ab_get_last_dispatch_path): 0 of 123
+-- error vs Dot2 on 16 sampled columns, max |C-R|/(|op(A)||op(B)|+|beta C0|) in u^2 = 2^-48 (u = 2^-24; bound 8 u^2): split 1.218 | GPU alone 1.690 | Accelerate alone 0.0496
+-- power, fixed block, mean over the timed calls (20 Hz SMC): idle 57.8 W | ACC 35.3 W (2 samples), GPU nan W (0), split 35.3 W (2); GPU rails ACC 9.9 GPU nan split 9.9 W
+   energy per call above idle (J): ACC -0.20, GPU nan, split -0.11 (np procs together)
+   proc 0: setup 0.2 s, total 1.0 s
+SUMMARY case=RK160 np=1 data=0 acc_ms=8.755 gpu_ms=8.429 split_ms=4.848 g=10112 f=0.549 sp_acc=1.806 sp_gpu=1.739 sp_best=1.739 acc_gfs=431.2 gpu_gfs=447.8 split_gfs=778.6 bits_repeat=yes split_reps=12 gpu_rep_diff=0 acc_rep_diff=0 err_u2=1.218 err_gpu_u2=1.690 err_acc_u2=0.0496 notgpu=0 pdtr_acc=35.3 pdtr_gpu=nan pdtr_split=35.3 idle=57.8 n=9/9/12
+end: Now drawing from 'AC Power'  -InternalBattery-0 (id=37552227)	100%; charged; 0:00 remaining present: true | load { 4.50 5.63 9.77 } | wall 1.0 s

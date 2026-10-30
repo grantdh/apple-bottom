@@ -1,0 +1,30 @@
+apple-bottom 1.4.0 (415cb5d4d888) | VECLIB_MAXIMUM_THREADS=8 AB_MODE=gpu AB_MIN_GPU_DIM=0 AB_STAGING_MB=8192 | sustained runs, 1 proc
+start: Now drawing from 'AC Power'  -InternalBattery-0 (id=39649379)	80%; AC attached; not charging present: true | load { 5.27 6.06 6.32 }
+AB_REPORT[21703] apple-bottom 1.4.0 (415cb5d4d888) AB_MODE=gpu
+AB_REPORT[21703] dgemm calls=224 gpu_calls=224 cpu_calls=0 gpu_calls%=100.0 total_ms=242841.085 gpu_ms=242841.085 cpu_ms=0.000 gpu_time%=100.0 fallbacks=0
+AB_REPORT[21703] dgemm gpu_stages_ms init=0.744 alloc=0.779 pack=10.098 upload=0.032 kernel=242462.700 download=0.049 epilogue=0.000 other=366.684
+case D8192: DGEMM M=8192 N=8192 K=8192, split axis N; 1099.51 GF per call; registration 4/4 arrays; IOReport on
+runs of 80 s back to back, each after 30 s idle; burst = calls starting in the first 10 s, steady = calls starting 20 s or more into the run
+-- run 0, split: 85 calls in 80.7 s
+   GPU part g=4512 (f=0.551)
+   burst: 1290.7 GF/s (n=12), wall 126.9 W, GPU 1392 MHz | steady: 1134.9 GF/s median (n=62, min 1104.7, max 1185.0), wall 105.8 W, system 105.9 W, battery +1.6 W (1016 samples), GPU 1233 MHz,  48.8 W | idle before:   3.5 W
+   steady split parts: cpu slice 857.1 ms, gpu slice 968.8 ms, join wait 116.3 ms (medians)
+   bits: 0 of 16 checked calls differ from the run's first result
+   every 5 s (s into the run: GF/s, wall W, GPU MHz): [0: 1276, 102, 1396] [5: 1276, 131, 1390] [10: 1182, 111, 1279] [15: 1181, 109, 1275] [20: 1177, 108, 1270] [25: 1176, 108, 1270] [30: 1175, 109, 1268] [35: 1166, 108, 1261] [40: 1151, 108, 1243] [45: 1139, 106, 1231] [50: 1132, 105, 1223] [55: 1125, 104, 1214] [60: 1121, 103, 1209] [65: 1120, 104, 1210] [70: 1114, 103, 1202] [75: 1113, 102, 1202] [80: 1110, 36, 1193]
+-- run 1, GPU alone: 52 calls in 81.5 s
+   burst:  719.7 GF/s (n=7), wall  94.3 W, GPU 1396 MHz | steady:  695.1 GF/s median (n=38, min 690.2, max 720.9), wall  93.1 W, system  93.3 W, battery +1.6 W (1029 samples), GPU 1354 MHz,  59.8 W | idle before:   3.4 W
+   bits: 0 of 10 checked calls differ from the run's first result
+   every 5 s (s into the run: GF/s, wall W, GPU MHz): [0: 710, 76, 1395] [5: 720, 98, 1396] [10: 720, 98, 1397] [15: 720, 99, 1396] [20: 721, 100, 1397] [25: 709, 98, 1377] [30: 703, 94, 1361] [35: 699, 93, 1355] [40: 698, 93, 1353] [45: 697, 92, 1351] [50: 694, 91, 1344] [55: 694, 91, 1345] [60: 694, 91, 1345] [65: 694, 92, 1342] [70: 692, 91, 1341] [75: 691, 91, 1338] [80: 690, 46, 1337]
+-- run 2, Accelerate alone: 45 calls in 80.6 s
+   burst:  614.6 GF/s (n=6), wall  37.8 W, GPU  444 MHz | steady:  615.2 GF/s median (n=33, min 613.4, max 617.5), wall  38.2 W, system  38.2 W, battery +1.5 W (1011 samples), GPU  444 MHz,   0.0 W | idle before:   3.4 W
+   bits: 0 of 8 checked calls differ from the run's first result
+   every 5 s (s into the run: GF/s, wall W, GPU MHz): [0: 613, 31, nan] [5: 615, 38, 444] [10: 615, 38, nan] [15: 614, 38, nan] [20: 615, 38, nan] [25: 616, 39, nan] [30: 615, 38, nan] [35: 617, 38, nan] [40: 615, 38, nan] [45: 616, 38, nan] [50: 615, 38, nan] [55: 615, 38, nan] [60: 615, 38, nan] [65: 616, 38, 444] [70: 616, 38, nan] [75: 614, 38, nan] [80: nan, 14, nan]
+-- run 3, split rebalanced: 85 calls in 80.7 s
+   GPU part g=4256 (f=0.520)
+   burst: 1243.5 GF/s (n=12), wall 117.4 W, GPU 1382 MHz | steady: 1137.2 GF/s median (n=62, min 1111.9, max 1195.7), wall 100.3 W, system 100.4 W, battery +1.6 W (1020 samples), GPU 1170 MHz,  44.0 W | idle before:   2.9 W
+   steady split parts: cpu slice 921.1 ms, gpu slice 966.8 ms, join wait 53.1 ms (medians)
+   bits: 0 of 16 checked calls differ from the run's first result
+   every 5 s (s into the run: GF/s, wall W, GPU MHz): [0: 1239, 96, 1382] [5: 1244, 121, 1383] [10: 1218, 118, 1335] [15: 1193, 107, 1265] [20: 1180, 108, 1273] [25: 1184, 106, 1231] [30: 1145, 101, 1166] [35: 1128, 98, 1147] [40: 1121, 97, 1139] [45: 1122, 96, 1140] [50: 1124, 97, 1144] [55: 1125, 98, 1143] [60: 1135, 99, 1154] [65: 1140, 100, 1160] [70: 1144, 101, 1164] [75: 1152, 103, 1173] [80: 1153, 103, 1172]
+-- steady-state speedup of the split: vs GPU alone 1.633x, vs Accelerate alone 1.845x (rebalanced: 1.636x, 1.849x) | burst: 1.793x, 2.100x
+SUSTAIN case=D8192 g=4512 g_bal=4256 steady_gfs=1134.9/695.1/615.2/1137.2 burst_gfs=1290.7/719.7/614.6/1243.5 sp_gpu=1.633 sp_acc=1.845 sp_gpu_bal=1.636 sp_acc_bal=1.849 wall_w=105.8/93.1/38.2/100.3 sys_w=105.9/93.3/38.2/100.4 batt_w=1.6/1.6/1.5/1.6 mhz=1233/1354/444/1170 burst_mhz=1392/1396/444/1382 bits_diff=0/0/0/0
+end: Now drawing from 'AC Power'  -InternalBattery-0 (id=39649379)	80%; AC attached; not charging present: true | load { 2.75 2.77 4.40 }

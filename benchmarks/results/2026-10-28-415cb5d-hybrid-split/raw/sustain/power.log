@@ -1,0 +1,4 @@
+2026-10-29 01:13:37 before sustain D8192: Now drawing from 'AC Power' | load { 5.27 6.06 6.32 }
+2026-10-29 01:21:05 after sustain D8192 rc=0: Now drawing from 'AC Power' | load { 2.75 2.77 4.40 }
+2026-10-29 01:21:05 before sustain Z8192: Now drawing from 'AC Power' | load { 2.75 2.77 4.40 }
+2026-10-29 01:28:49 after sustain Z8192 rc=0: Now drawing from 'AC Power' | load { 3.23 2.82 3.70 }
