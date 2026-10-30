@@ -1,0 +1,15 @@
+date: 2026-10-29 10:09:22 EDT
+machine: Mac14,6, Apple M2 Max, 8P+4E CPU, 38-core GPU, 64 GB
+os: macOS 27.0.1 (26A434); pmset powermode 0
+power at start: AC Power; 67%; charging; 9:03 remaining
+load at start: 3.59 6.42 7.76
+library: build identity 9fc4547d8bf6, d147266fbdb4f4037ae2205e5792651b46566f6868c3af731a54c2f81cc373d5  libapplebottom.dylib
+fftw: Homebrew 3.3.10_3, static libfftw3.a + libfftw3_threads.a
+accuracy: bench_fft --accuracy --grids <list> --csv accuracy_pK.csv, K = 1..3:
+  p1 48,64,72,96,100,108,120,128
+  p2 100,48,64,72,96,128,108,120,48,64,72,96,100,108,120,128
+  p3 128,120,48,64,72,96,100,108,100,48,64,72,96,128,108,120
+speed: bench_fft --speed --patient --grids 48,64,72,96,100,108,120,128 --batch 128 --reps 3 --warm 3 --threads 8 --only gpu,fftw,8x1 --csv speed_runK.csv
+power at end: AC Power; 77%; charging; 4:13 remaining
+load at end: 2.34 2.71 3.20
+batch: 2216 s

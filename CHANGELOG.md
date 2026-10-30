@@ -20,10 +20,12 @@ All notable changes to this project will be documented in this file.
   `ab_fft_malloc` / `ab_fft_register` memory is used in place. Relative L2
   error 5.9–7.5 × 10⁻¹⁵ on 48³–128³ grids, 20–24× FFTW's FP64 error. Against
   Homebrew FFTW with `FFTW_PATIENT` plans on an M2 Max: in batches of 128,
-  1.3–2.3× faster than eight cores staged and 1.8–3.2× with zero copy; one
-  transform at a time, faster than one thread everywhere and than eight
-  threads from 96³ with zero copy. See "Double-float FFT" in `README.md` and
-  `benchmarks/results/2026-10-23-c138543-fft/`.
+  1.5–2.4× faster than eight cores staged and 1.9–3.2× with zero copy (the
+  medians of five runs); one transform at a time, faster than one thread
+  everywhere and than eight threads from 96³ with zero copy. See
+  "Double-float FFT" in `README.md`,
+  `benchmarks/results/2026-10-23-c138543-fft/` and
+  `benchmarks/results/2026-10-29-9fc4547-fft/`.
 - **`tests/test_fft.c`** (14 tests, in `make test` and `make ci-local`):
   every result against a double-double reference DFT (`tests/fft_ref.h`)
   and, bit for bit, against a CPU emulator of the GPU arithmetic

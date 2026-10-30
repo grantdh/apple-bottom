@@ -4,7 +4,9 @@
 NEON, `~/qe-test/opt/fftw-3.3.10-neon`) and `build/bench_fft --speed --patient
 --only fftw,8x1` (Homebrew's FFTW 3.3.10, which has no NEON double-precision
 code), one run each under the machine lock and `caffeinate -is`, library built
-at c138543 (`ab_build_info()`: `1.4.0 (c13854306d56)`).
+at c138543 (`ab_build_info()`: `1.4.0 (c13854306d56)`). The batch-128 times
+and the accuracy were measured again at 9fc4547, five runs, GPU and FFTW in
+the same process: `../2026-10-29-9fc4547-fft/`.
 
 Machine: MacBook Pro (Mac14,6), Apple M2 Max, 38-core GPU, 8P+4E CPU, 64 GB,
 macOS 27.0.1 (26A434), AC power; 1-minute load 4.95 at the start, 4.6 at the

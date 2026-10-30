@@ -209,8 +209,10 @@ exponent range is FP32's.
 **Speed.** Forward 3D transforms, ms per transform, M2 Max on AC power.
 FFTW is 3.3.10 from Homebrew with `FFTW_PATIENT` plans, faster in every case
 than a NEON build of FFTW. "8 cores" is the faster of one 8-thread plan and
-8 single-thread workers, as 8 MPI ranks would run them
-([data, all eight grids and vDSP](benchmarks/results/2026-10-23-c138543-fft/)):
+8 single-thread workers, as 8 MPI ranks would run them. Batch 1: one run
+([data, all eight grids and vDSP](benchmarks/results/2026-10-23-c138543-fft/));
+batch 128: the median of five runs
+([data, all eight grids](benchmarks/results/2026-10-29-9fc4547-fft/)):
 
 | n³ | batch | GPU staged | GPU zero copy | FFTW 1 thread | FFTW 8 cores |
 |---:|---:|---:|---:|---:|---:|
@@ -218,18 +220,19 @@ than a NEON build of FFTW. "8 cores" is the faster of one 8-thread plan and
 | 72 | 1 | 0.668 | 0.387 | 1.923 | 0.327 |
 | 96 | 1 | 0.959 | 0.551 | 4.899 | 0.825 |
 | 120 | 1 | 1.637 | 1.024 | 10.513 | 2.442 |
-| 48 | 128 | 0.061 | 0.044 | 0.600 | 0.106 |
-| 72 | 128 | 0.207 | 0.173 | 1.996 | 0.310 |
-| 96 | 128 | 0.482 | 0.370 | 4.936 | 0.781 |
-| 120 | 128 | 0.932 | 0.810 | 10.551 | 1.554 |
+| 48 | 128 | 0.057 | 0.043 | 0.596 | 0.106 |
+| 72 | 128 | 0.195 | 0.171 | 1.997 | 0.335 |
+| 96 | 128 | 0.445 | 0.363 | 5.009 | 0.755 |
+| 120 | 128 | 0.925 | 0.809 | 10.543 | 1.511 |
 
 - **Against FFTW on one thread** the GPU is faster on every grid from 48³ to
   128³: 1.7–6.4× staged and 2.4–15× with zero copy one transform at a time,
-  9–14× and 12–20× in batches of 128.
-- **Against eight cores**, a batch of 128 (a band set) is 1.3–2.3× faster
-  staged and 1.8–3.2× faster with zero copy on every grid. One transform at
-  a time it takes 96³ or more with zero copy (1.5–2.4×) and 120³ or more
-  staged (1.0–1.5×); below that FFTW's eight threads win.
+  9–15× and 12–20× in batches of 128.
+- **Against eight cores**, a batch of 128 (a band set) is 1.5–2.4× faster
+  staged and 1.9–3.2× faster with zero copy on every grid (1.4–2.6× and
+  1.9–3.4× in single runs). One transform at a time it takes 96³ or more
+  with zero copy (1.5–2.4×) and 120³ or more staged (1.0–1.5×); below that
+  FFTW's eight threads win.
 
 ## How it works
 

@@ -1,0 +1,58 @@
+bench_fft: apple-bottom 1.4.0 (9fc4547d8bf6); FFTW fftw-3.3.10 (fftw, PATIENT plans), 8 threads, reps 3, warm-up 3.0 s
+speed (forward, complex FP64 in and out):
+  [rank 3 48x48x48 howmany 128 sign -1 norm 0 groups of 128, staged chunks of 16: [N=48 8x3x2 T=6 L=8 f64->dd] [N=48 8x3x2 T=6 L=8 dd(p)->dd(p)] [N=48 8x3x2 T=6 L=8 dd(p)->f64(p)]]
+    48^3 x128  gpu-staged         0.0567 ms/transform    163.5 GF/s  vs FFTW 6.2e-15  gpu 5.829 copy-in 2.672 copy-out 3.029 ms per call
+    48^3 x128  gpu-zc             0.0430 ms/transform    215.5 GF/s  vs FFTW 6.2e-15  gpu 5.249 ms per call
+    48^3 x128  gpu-reg            0.0431 ms/transform    214.8 GF/s  vs FFTW 6.2e-15  gpu 5.255 ms per call
+    48^3 x128  fftw-1             0.5962 ms/transform     15.5 GF/s  vs FFTW 3.4e-16  
+    48^3 x128  fftw-8x1           0.1058 ms/transform     87.6 GF/s  vs FFTW 3.4e-16  
+    48^3 x128  fftw-8             0.1605 ms/transform     57.7 GF/s  vs FFTW 3.4e-16  
+  [rank 3 64x64x64 howmany 128 sign -1 norm 0 groups of 64, staged chunks of 8: [N=64 8x8 T=8 L=8 f64->dd] [N=64 8x8 T=8 L=8 dd(p)->dd(p)] [N=64 8x8 T=8 L=8 dd(p)->f64(p)]]
+    64^3 x128  gpu-staged         0.1297 ms/transform    181.9 GF/s  vs FFTW 5.9e-15  gpu 12.250 copy-in 6.530 copy-out 8.147 ms per call
+    64^3 x128  gpu-zc             0.0840 ms/transform    281.0 GF/s  vs FFTW 5.9e-15  gpu 10.470 ms per call
+    64^3 x128  gpu-reg            0.0839 ms/transform    281.1 GF/s  vs FFTW 5.9e-15  gpu 10.470 ms per call
+    64^3 x128  fftw-1             1.2188 ms/transform     19.4 GF/s  vs FFTW 1.6e-16  
+    64^3 x128  fftw-8x1           0.1895 ms/transform    124.5 GF/s  vs FFTW 1.6e-16  
+    64^3 x128  fftw-8             0.2549 ms/transform     92.6 GF/s  vs FFTW 1.6e-16  
+  [rank 3 72x72x72 howmany 128 sign -1 norm 0 groups of 44, staged chunks of 5: [N=72 8x3x3 T=9 L=6 f64->dd] [N=72 8x3x3 T=9 L=6 dd(p)->dd(p)] [N=72 8x3x3 T=9 L=6 dd(p)->f64(p)]]
+    72^3 x128  gpu-staged         0.1954 ms/transform    176.8 GF/s  vs FFTW 6.9e-15  gpu 23.638 copy-in 9.455 copy-out 10.053 ms per call
+    72^3 x128  gpu-zc             0.1710 ms/transform    202.0 GF/s  vs FFTW 6.9e-15  gpu 21.612 ms per call
+    72^3 x128  gpu-reg            0.1710 ms/transform    202.0 GF/s  vs FFTW 6.9e-15  gpu 21.577 ms per call
+    72^3 x128  fftw-1             1.9947 ms/transform     17.3 GF/s  vs FFTW 4.1e-16  
+    72^3 x128  fftw-8x1           0.3305 ms/transform    104.5 GF/s  vs FFTW 4.1e-16  
+    72^3 x128  fftw-8             0.3893 ms/transform     88.7 GF/s  vs FFTW 4.1e-16  
+  [rank 3 96x96x96 howmany 128 sign -1 norm 0 groups of 18, staged chunks of 2: [N=96 8x4x3 T=12 L=4 f64->dd] [N=96 8x4x3 T=12 L=4 dd(p)->dd(p)] [N=96 8x4x3 T=12 L=4 dd(p)->f64(p)]]
+    96^3 x128  gpu-staged         0.4468 ms/transform    195.6 GF/s  vs FFTW 6.6e-15  gpu 51.938 copy-in 21.808 copy-out 24.501 ms per call
+    96^3 x128  gpu-zc             0.3624 ms/transform    241.1 GF/s  vs FFTW 6.6e-15  gpu 46.128 ms per call
+    96^3 x128  gpu-reg            0.3627 ms/transform    241.0 GF/s  vs FFTW 6.6e-15  gpu 46.152 ms per call
+    96^3 x128  fftw-1             4.9794 ms/transform     17.6 GF/s  vs FFTW 3.3e-16  
+    96^3 x128  fftw-8x1           0.7520 ms/transform    116.2 GF/s  vs FFTW 3.3e-16  
+    96^3 x128  fftw-8             0.8471 ms/transform    103.2 GF/s  vs FFTW 3.3e-16  
+  [rank 3 100x100x100 howmany 128 sign -1 norm 0 groups of 16, staged chunks of 2: [N=100 5x5x4 T=20 L=4 f64->dd] [N=100 5x5x4 T=20 L=4 dd(p)->dd(p)] [N=100 5x5x4 T=20 L=4 dd(p)->f64(p)]]
+   100^3 x128  gpu-staged         0.4847 ms/transform    205.6 GF/s  vs FFTW 7.0e-15  gpu 53.753 copy-in 25.608 copy-out 29.314 ms per call
+   100^3 x128  gpu-zc             0.3713 ms/transform    268.4 GF/s  vs FFTW 7.0e-15  gpu 47.249 ms per call
+   100^3 x128  gpu-reg            0.3714 ms/transform    268.3 GF/s  vs FFTW 7.0e-15  gpu 47.211 ms per call
+   100^3 x128  fftw-1             6.3024 ms/transform     15.8 GF/s  vs FFTW 4.1e-16  
+   100^3 x128  fftw-8x1           0.9214 ms/transform    108.2 GF/s  vs FFTW 4.1e-16  
+   100^3 x128  fftw-8             0.9692 ms/transform    102.8 GF/s  vs FFTW 4.1e-16  
+  [rank 3 108x108x108 howmany 128 sign -1 norm 0 groups of 13, staged chunks of 1: [N=108 4x3x3x3 T=27 L=3 f64->dd] [N=108 4x3x3x3 T=27 L=3 dd(p)->dd(p)] [N=108 4x3x3x3 T=27 L=3 dd(p)->f64(p)]]
+   108^3 x128  gpu-staged         0.6326 ms/transform    201.8 GF/s  vs FFTW 7.5e-15  gpu 71.830 copy-in 30.224 copy-out 32.588 ms per call
+   108^3 x128  gpu-zc             0.5093 ms/transform    250.6 GF/s  vs FFTW 7.5e-15  gpu 64.908 ms per call
+   108^3 x128  gpu-reg            0.5163 ms/transform    247.2 GF/s  vs FFTW 7.5e-15  gpu 66.495 ms per call
+   108^3 x128  fftw-1             7.9201 ms/transform     16.1 GF/s  vs FFTW 4.2e-16  
+   108^3 x128  fftw-8x1           1.1556 ms/transform    110.5 GF/s  vs FFTW 4.2e-16  
+   108^3 x128  fftw-8             1.2324 ms/transform    103.6 GF/s  vs FFTW 4.3e-16  
+  [rank 3 120x120x120 howmany 128 sign -1 norm 0 groups of 9, staged chunks of 1: [N=120 8x5x3 T=15 L=4 f64->dd] [N=120 8x5x3 T=15 L=4 dd(p)->dd(p)] [N=120 8x5x3 T=15 L=4 dd(p)->f64(p)]]
+   120^3 x128  gpu-staged         0.9188 ms/transform    194.8 GF/s  vs FFTW 7.2e-15  gpu 115.934 copy-in 41.402 copy-out 45.456 ms per call
+   120^3 x128  gpu-zc             0.8084 ms/transform    221.5 GF/s  vs FFTW 7.2e-15  gpu 103.165 ms per call
+   120^3 x128  gpu-reg            0.8087 ms/transform    221.4 GF/s  vs FFTW 7.2e-15  gpu 103.266 ms per call
+   120^3 x128  fftw-1            10.5327 ms/transform     17.0 GF/s  vs FFTW 4.3e-16  
+   120^3 x128  fftw-8x1           1.5747 ms/transform    113.7 GF/s  vs FFTW 4.3e-16  
+   120^3 x128  fftw-8             2.1121 ms/transform     84.8 GF/s  vs FFTW 4.3e-16  
+  [rank 3 128x128x128 howmany 128 sign -1 norm 0 groups of 8, staged chunks of 1: [N=128 8x8x2 T=16 L=4 f64->dd] [N=128 8x8x2 T=16 L=4 dd(p)->dd(p)] [N=128 8x8x2 T=16 L=4 dd(p)->f64(p)]]
+   128^3 x128  gpu-staged         1.0168 ms/transform    216.6 GF/s  vs FFTW 6.5e-15  gpu 115.537 copy-in 56.218 copy-out 63.844 ms per call
+   128^3 x128  gpu-zc             0.7576 ms/transform    290.6 GF/s  vs FFTW 6.5e-15  gpu 96.628 ms per call
+   128^3 x128  gpu-reg            0.7590 ms/transform    290.1 GF/s  vs FFTW 6.5e-15  gpu 96.848 ms per call
+   128^3 x128  fftw-1            14.2485 ms/transform     15.5 GF/s  vs FFTW 3.5e-16  
+   128^3 x128  fftw-8x1           2.3200 ms/transform     94.9 GF/s  vs FFTW 3.5e-16  
+   128^3 x128  fftw-8             2.4083 ms/transform     91.4 GF/s  vs FFTW 3.5e-16  
