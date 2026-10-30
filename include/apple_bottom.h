@@ -22,25 +22,29 @@
 // Performance on an M2 Max, against Accelerate (README.md#performance):
 //
 // Native ABMatrix API, matrices resident (upload and FP64<->DD conversion
-// amortized; benchmarks/results/2026-10-14-3253a22-bench-paper/):
+// amortized; benchmarks/results/2026-10-14-3253a22-bench-paper/, measured at
+// 3253a22 before the 1.4.0 release; 1.5.0's kernel changes keep every bit):
 //   DGEMM: faster from about N = 1536 (1.04x), 1.10-1.16x for N = 2048-4096
 //   ZGEMM: faster from about N = 1024 (1.12x), 1.30-1.39x for N = 1536-3072
 //   ZHERK: slower at every measured size (0.06-0.67x, N <= 2048); use cblas_zherk
-//   DSYRK: not re-measured for 1.4.0
+//   DSYRK: no current measurement against Accelerate (none in benchmarks/results/)
 //
 // End-to-end regime — BLAS-ABI (ab_*_blas, raw pointers, no handle persistence; this is
-// the path Fortran host codes hit through dgemm_/zgemm_), measured on 1.4.0, which
-// packed and converted every operand on the host (the staged path below does that
-// on the GPU and has not been calibrated yet):
+// the path Fortran host codes hit through dgemm_/zgemm_), measured at 52f1880 on
+// 1.4.0's host path, which packed and converted every operand on the CPU (the staged
+// path below does that on the GPU and has not been calibrated yet):
 //   The GPU is >= 1.10x faster than Accelerate only for ZGEMM with both operands
 //   transposed or conjugated, M = N = K >= 4096 (1.11x at 4096, 1.20x at 6144). Every
 //   DGEMM through N=6144 and every Quantum ESPRESSO si64 shape is slower on the GPU
 //   (0.06-0.84x); other ZGEMMs reach at most 1.02x (6144, one operand transposed).
 //   Anchor: benchmarks/results/2026-10-14-52f1880-calibrate/
-//   (`make calibrate`). AB_MODE=auto, the default, follows that measurement
-//   (src/dispatch_table.h): a call goes to the GPU only where the GPU was >= 1.10x
-//   faster. DSYRK/ZHERK end-to-end behavior expected to be similar to GEMM (same
-//   conversion path); not directly measured.
+//   (`make calibrate`, which on 1.5.0 measures the staged path). AB_MODE=auto, the
+//   default, follows that measurement (src/dispatch_table.h): a call goes to the GPU
+//   only where the GPU was >= 1.10x faster. DSYRK/ZHERK end-to-end behavior expected
+//   to be similar to GEMM (same conversion path); not directly measured.
+//   Quantum ESPRESSO si64 forced onto the staged path (AB_MODE=gpu) takes 1.01-1.06x
+//   its time on Accelerate, with the same energies:
+//   benchmarks/results/2026-10-29-351d56c-staged-refusals/.
 //
 // API Limits:
 //   - Matrix size: rows * cols <= AB_MAX_MATRIX_ELEMENTS (2^31 - 1) and the DD
@@ -280,17 +284,20 @@ const char* ab_status_string(ABStatus status);
 // They create the Metal context on first GPU use, so callers need not call ab_init().
 // A GPU call copies its operands into GPU buffers the library keeps and
 // reuses (or reads them in place, see ab_register_host_memory), converts
-// them to double-float, multiplies, and converts and applies alpha and beta
-// on the GPU (the "staged path"), with results bit for bit those of the
-// host path: host packing, host conversion and the host epilogue. A ZGEMM
-// with alpha != 1 or beta other than 0 and 1 applies them on the host, as
-// 1.4.0 did. The staged result stands where the BLAS ABI's exponent-range
-// guard scales nothing and certifies the call from statistics the GPU
-// gathers. Every other call, one that meets Inf or NaN, and one whose staged
-// run fails are redone on the host path, as is every call when
-// AB_HOST_PACK=1 or the CPU's floating-point control is not the default
-// (rounding, flush to zero, default NaN), on which the host conversion's
-// bits depend.
+// them to double-float, scales the rows of op(A) and columns of op(B) that
+// the BLAS ABI's exponent-range guard scales, multiplies, and converts and
+// applies alpha and beta on the GPU (the "staged path"), with results bit
+// for bit those of the host path: host packing, host conversion and the
+// host epilogue. A ZGEMM with alpha != 1 or beta other than 0 and 1 applies
+// them on the host, as 1.4.0 did; one whose real and imaginary parts call
+// for 4M takes a second command buffer. The staged result stands where the
+// guard certifies the call from statistics the GPU gathers and the GPU's
+// scales equal the host's; a call the guard does not certify runs on
+// Accelerate. One that meets Inf or NaN, one whose staged run fails and a
+// DGEMM whose alpha or beta lies outside 2^±20 are redone on the host path,
+// as is every call when AB_HOST_PACK=1 or the CPU's floating-point control
+// is not the default (rounding, flush to zero, default NaN), on which the
+// host conversion's bits depend.
 void ab_dgemm_blas(char transA, char transB, int M, int N, int K,
                    double alpha, const double* A, int ldA,
                    const double* B, int ldB,
@@ -344,12 +351,14 @@ const char* ab_build_info(void);
 //                 computed (gpu_calls% is a share of calls, gpu_time% a share
 //                 of time), the GPU calls' stage costs (init, alloc, pack,
 //                 upload, kernel = command-buffer GPU time, download,
-//                 epilogue, other) and fallbacks to cblas by reason
-//                 (no_device, too_large, gpu_failed, other, range). On the
-//                 staged path, pack is the exponent-range check, upload the
-//                 copies into the GPU buffers, kernel includes the GPU's
-//                 conversion and epilogue, and download is the copy of the
-//                 result into C.
+//                 epilogue, other), fallbacks to cblas by reason
+//                 (no_device, too_large, gpu_failed, other, range), and the
+//                 GPU calls that kept the staged result (kept, kept_4m) or
+//                 the first reason each left it. On the staged path, pack
+//                 is the exponent-range check, upload the copies into the
+//                 GPU buffers, kernel includes the GPU's conversion, scaling
+//                 and epilogue, and download is the copy of the result into
+//                 C.
 //   AB_PROFILE=1  the same counts as a detailed table with dimension
 //                 histograms at exit, plus a stderr line per GPU call and per
 //                 fallback. AB_PROFILE_JSON=path also writes JSON at exit.
@@ -360,7 +369,8 @@ const char* ab_build_info(void);
 //                 machine-wide mach_absolute_time clock in ns, the path
 //                 (cpu, gpu, fallback:<reason>) and, for GPU calls, the
 //                 stages with "other" split into temps, encode, submit, wake
-//                 and rest, and the command buffer's GPU start and end.
+//                 and rest, the command buffer's GPU start and end, and the
+//                 staged outcome of a call that reached the staged path.
 //   AB_TRACE_HASH=1  with AB_TRACE: also a hash of op(A), op(B) and C on
 //                 entry (when read), FNV-1a over the 64-bit words of the
 //                 referenced elements, to spot repeated operands.
