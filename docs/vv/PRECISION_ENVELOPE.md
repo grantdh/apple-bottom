@@ -1,8 +1,15 @@
 # Precision Envelope — apple-bottom v1.0.2
 
-**Document Status**: Validated (2026-03-31)
+**Document Status**: Validated for v1.0.2 (2026-03-31); revised since (§9)
 **Validation Baseline**: Git tag `v1.0.2-bugfix` (SHA: f3e2fc1)
 **Test System**: Apple M2 Max, macOS 14.7, Metal 3
+
+> **Status (Revision 1.3, 2026-10-30).** Written for v1.0.2 and kept as its
+> record, with corrections: the per-operation bounds of §1.2 (`dd_mul`
+> below 5u², the fused `dd_fma` within a conservative 8u² envelope), the
+> summary's guarantee restated as the target the measurements meet, notes
+> on the max-element measure (§2.3) and on threads (§4.4), and §5.1 pointed
+> at 1.5.0. The exponent-range text (§3.2, §4.2, §4.3) describes 1.5.0.
 
 > **Correction (2026-10-14).** The Quantum ESPRESSO result of §2.4 came from
 > runs that did not use the GPU (versions before 1.4.0 needed an `ab_init()`
@@ -28,13 +35,15 @@ For matrix multiplication `C = A × B` where:
   of 2⁷⁸ under one power-of-two scale; `LIMITATIONS.md#exponent-range`.
 - Condition number: `κ(A), κ(B) < 10¹²`
 
-apple-bottom guarantees:
+~~apple-bottom guarantees:~~ The V-2 study checks each measured size against:
 
 ```
 ‖C_gpu - C_ref‖_F / ‖C_ref‖_F  <  N · 2⁻⁴⁸
 ```
 
 where `C_ref` is the IEEE FP64 reference result and `2⁻⁴⁸` is the DD mantissa precision.
+
+*Corrected in Revision 1.3: this is a target the measurements meet, not a guarantee for every input. A worst-case bound that holds for every input takes the componentwise form |C_gpu − C|_ij ≤ c·K·u²·(|A||B|)_ij (Higham 2002, Ch. 3, with c from the per-operation envelope of §1.2); a bound relative to ‖C‖ can fail where cancellation makes C small.*
 
 **In practice**: Frobenius relative error for random matrices scales as `~N · 10⁻¹⁵`, but the theoretical `O(N·2⁻⁴⁸)` bound applies to worst-case inputs. See Section 2.3 for critical caveats on element-wise vs. norm-averaged errors.
 
@@ -56,7 +65,7 @@ where:
 
 **Effective precision**: ~48 bits of mantissa (vs. 53 bits for true FP64)
 
-**Error bound**: Single DD operation introduces `≤ 2⁻⁴⁸` relative error
+**Error bound**: ~~Single DD operation introduces `≤ 2⁻⁴⁸` relative error~~ a DD product (`dd_mul`) has relative error below 5u² = 5·2⁻⁴⁸, and the fused multiply-add (`dd_fma`) stays within a conservative 8u² envelope (§1.2; corrected in Revision 1.3)
 
 ### 1.2 Error-Free Transformations
 
@@ -66,11 +75,12 @@ DD operations use Dekker/Knuth algorithms:
 |-----------|-----------|-------|-------------|
 | FP32 addition (error-free transform) | `twoSum` | 6 | `0` (exact: `s + e = a + b`) |
 | FP32 multiplication (error-free transform) | `twoProduct` (FMA) | 2 | `0` (exact: `p + e = a × b`) |
-| DD fused multiply-add | `dd_fma` | ~10 | `< 5u²` (see §1.2 nested-FMA note) |
+| DD multiplication | `dd_mul` | — | `< 5u²` (Muller–Rideau 2022, Theorem 2.7) |
+| DD fused multiply-add | `dd_fma` | ~10 | `≲ 8u²` envelope; no published bound (scope qualifier below; Revision 1.3 corrected `< 5u²`) |
 
-where `u = 2⁻²⁴` is the FP32 unit roundoff (so `ε_mach = 2⁻²³` under the ulp convention used by IEEE 754; `u²  = 2⁻⁴⁸` is the effective DD unit roundoff). The `twoSum` and `twoProduct` algorithms are *error-free transforms*: their outputs represent the exact FP32 operation result as an unevaluated sum with no rounding error, under the standard no-overflow / no-subnormal-input assumptions. The `dd_fma` bound is the per-operation DD-level bound from §1.2 and applies to both `dd_mul` and the compound multiply-add.
+where `u = 2⁻²⁴` is the FP32 unit roundoff (so `ε_mach = 2⁻²³` under the ulp convention used by IEEE 754; `u²  = 2⁻⁴⁸` is the effective DD unit roundoff). The `twoSum` and `twoProduct` algorithms are *error-free transforms*: their outputs represent the exact FP32 operation result as an unevaluated sum with no rounding error, under the standard no-overflow / no-subnormal-input assumptions. ~~The `dd_fma` bound is the per-operation DD-level bound from §1.2 and applies to both `dd_mul` and the compound multiply-add.~~ The `< 5u²` bound below is `dd_mul`'s; the fused `dd_fma` has the conservative `≲ 8u²` envelope of the scope qualifier below (corrected in Revision 1.3).
 
-Cross-term products in `dd_mul` and `dd_fma` use nested FMA chains (JMP 2017 Algorithm 11, "DWTimesDW2") to reduce rounding from 4 truncations to 2 per operation. The relative error is bounded by `5u² / (1 + u)² < 5u²` where `u = 2⁻²⁴`, per Muller-Rideau 2022 Theorem 2.7 (tightened from JMP 2017's original `< 6u²` bound via formal Coq proof).
+Cross-term products in `dd_mul` and `dd_fma` use nested FMA chains (JMP 2017 Algorithm 11, "DWTimesDW2") to reduce rounding from 4 truncations to 2 per operation. The relative error of `dd_mul` is bounded by `5u² / (1 + u)² < 5u²` where `u = 2⁻²⁴`, per Muller-Rideau 2022 Theorem 2.7 (tightened from JMP 2017's original `< 6u²` bound via formal Coq proof).
 
 **Scope qualifier for the fused `dd_fma`.** The `< 5u²/(1+u)²` bound above (Muller–Rideau 2022, Theorem 2.7) applies specifically to the DWTimesDW2 primitive (Joldes–Muller–Popescu 2017, Algorithm 11), which concludes with its own `fastTwoSum` renormalization. apple-bottom's fused `dd_fma(a, b, c) = a·b + c` elides this intermediate renormalization and is not covered by this theorem, and to our knowledge no published analysis rigorously bounds the fused double-word FMA as implemented here. A conservative upper envelope of `≲ 8u² · max(|a·b|, |c|)` follows by triangle inequality over the non-fused composition and is consistent with empirical validation at `N ∈ {1024, 2048, 3072}` in the `N·u²` accumulation regime expected for DGEMM/ZGEMM over `K` products at `u ≈ 6×10⁻⁸` (FP32). The fusion elides one renormalization per FMA — a measurable fraction of per-kernel cost at SIMD widths where renormalization dominates — and empirical validation confirms the envelope holds within the precision requirements of DFT workloads targeted by this library. The tight bound for the fused form is an open theoretical question; the library documents the conservative envelope it can defend.
 
@@ -178,6 +188,8 @@ R² = 0.810
 
 This `~N²·⁵` scaling means max element error grows **faster than the Frobenius bound** and will eventually dominate.
 
+*Note (Revision 1.3).* The max-element column is max |ΔC_ij| / |C_ij| over the entries with |C_ij| > 10⁻¹⁵ (`tests/verification/test_convergence.c`). With random data some entries of C come close to zero by cancellation, and dividing by them makes this measure grow with the number of entries, for any finite-precision GEMM. Errors relative to (|A||B|)_ij, the componentwise measure of `LIMITATIONS.md` and of the tests, do not grow this way. The advice above against pivoting and eigensolvers rests on this column; whether they need more than double-float gives has not been tested either way.
+
 ### 2.4 Production Validation (Quantum ESPRESSO)
 
 *Revised 2026-10-14.* VAL-1 revision 2 (`tests/validation/VAL001_QE_Si64.md`)
@@ -205,7 +217,7 @@ Frobenius-class error is appropriate.
 | Small matrices | `N ≥ 64` | N < 64: CPU overhead dominates |
 | Large matrices | `N ≤ 4096` (validated); `rows·cols ≤ 2³¹ − 1` per matrix (max) | Square limit N = 46340 |
 
-**K-dimension error scaling**: For DGEMM with dimensions M×K × K×N, max element error scales as `O(K)×2⁻⁴⁸`. With K=10000, expect ~1.5×10⁻¹³ max error (still within DD precision class). Rectangular matrices work correctly at all aspect ratios.
+**K-dimension error scaling**: For DGEMM with dimensions M×K × K×N, max element error scales as `O(K)×2⁻⁴⁸`. ~~With K=10000, expect ~1.5×10⁻¹³ max error (still within DD precision class).~~ (Revision 1.3: that figure followed from neither the O(K) nor the √K form.) Rectangular matrices work correctly at all aspect ratios.
 
 ### 3.2 Numerical Range
 
@@ -262,9 +274,10 @@ The following conditions are **outside the validated envelope**. Results are und
 
 ### 4.4 Concurrency
 
-- **Thread safety**: apple-bottom is **NOT thread-safe**
-  - Metal command queue serializes operations
-  - **Workaround**: Use one `ab_init()` per thread, or external locking
+- ~~**Thread safety**: apple-bottom is **NOT thread-safe**~~
+  - ~~Metal command queue serializes operations~~
+  - ~~**Workaround**: Use one `ab_init()` per thread, or external locking~~
+- *Corrected in Revision 1.3* (`include/apple_bottom.h`, Thread Safety): `ab_init` and `ab_shutdown` are safe to call from any thread. Calls on different matrices may come from different threads; one matrix, pool or session must not be used by two threads at once. All work shares one Metal command queue.
 
 ---
 
@@ -272,16 +285,20 @@ The following conditions are **outside the validated envelope**. Results are und
 
 ### 5.1 GPU Crossover Point
 
-*Revised 2026-10-14* (M2 Max, against Accelerate; data in
+*Revised 2026-10-14 and 2026-10-30* (M2 Max, against Accelerate; data in
 `benchmarks/results/2026-10-14-3253a22-bench-paper/` and
 `benchmarks/results/2026-10-14-52f1880-calibrate/`):
 
 - **Matrices resident on the GPU** (native API): DGEMM is faster from about
   N = 1,500 (1.10–1.16× from N = 2,048); ZGEMM from about N = 1,000
   (1.30–1.39× from N = 1,536).
-- **One call at a time from host memory** (BLAS ABI): slower for every
-  measured shape except ZGEMM with both operands transposed at N ≥ 4096
-  (1.11–1.20×). `AB_MODE=auto` routes by this measurement.
+- **One call at a time from host memory** (BLAS ABI, 1.4.0's host path,
+  which packed and converted on the CPU): slower for every measured shape
+  except ZGEMM with both operands transposed at N ≥ 4096 (1.11–1.20×).
+  `AB_MODE=auto` routes by this measurement. 1.5.0's staged path converts
+  on the GPU and has not been calibrated yet; Quantum ESPRESSO forced onto
+  it takes 1.01–1.06× its time on Accelerate
+  (`benchmarks/results/2026-10-29-351d56c-staged-refusals/`).
 
 ### 5.2 Precision vs. Performance
 
@@ -317,7 +334,7 @@ The following conditions are **outside the validated envelope**. Results are und
 - **Precision**: 1 test (Frobenius error < 10⁻¹⁴ for N ∈ {64..2048})
 - **Regression**: 5 tests (BUG-1 through BUG-6 fixes)
 
-**CI**: Run `make test && make test-verification` before each release
+**CI**: Run `make ci-local` before each release (`docs/RELEASING.md`)
 
 ### 6.3 Configuration Management
 
@@ -339,7 +356,7 @@ The following conditions are **outside the validated envelope**. Results are und
 For scientific computing on Apple Silicon:
 
 **✓ USE apple-bottom for**:
-- DFT, molecular dynamics, FEM iterative solvers (norm-averaged quantities)
+- DFT, molecular dynamics, FEM iterative solvers (norm-averaged quantities; candidates: Quantum ESPRESSO is the only application run with apple-bottom)
 - Large products on GPU-resident matrices (§5.1: DGEMM from about N = 1,500, ZGEMM from about N = 1,000 on an M2 Max), condition number `κ < 10⁶`
 - Applications requiring `10⁻¹⁴` to `10⁻¹⁰` Frobenius convergence
 
@@ -347,7 +364,7 @@ For scientific computing on Apple Silicon:
 - Algorithms requiring element-wise accuracy `< 10⁻⁶` (e.g., pivoting, eigensolvers)
 - Ill-conditioned systems (`κ > 10¹²`)
 - Smaller products, and GEMMs issued one call at a time from host memory (§5.1)
-- Thread-unsafe contexts (add external locking)
+- ~~Thread-unsafe contexts (add external locking)~~ One matrix, pool or session used by two threads at once (§4.4)
 
 **Validation requirement**: For mission-critical calculations, perform cross-verification:
 1. Run apple-bottom simulation
@@ -413,6 +430,7 @@ If precision is insufficient:
 | 1.0 | 2026-03-31 | Initial validated precision envelope | Grant Heileman |
 | 1.1 | 2026-04-04 | Add theoretical precision bounds, FMA optimization reference | Grant Heileman |
 | 1.2 | 2026-04-16 | Correct DWTimesDW2 error bound to Muller-Rideau 2022 Thm 2.7 (`< 5u²/(1+u)² < 5u²`); fix EFT table (twoSum/twoProduct are error-free, `dd_fma` at DD level) | Grant Heileman |
+| 1.3 | 2026-10-14 to 2026-10-30 | Correction notice (§2.4 replaced by VAL-1 revision 2, §5.1 by the 1.4.0 measurements); exponent range and complex products for 1.5.0 (§3.2, §3.3, §4.2, §4.3); per-operation bounds corrected (§1.2: `dd_mul` < 5u², `dd_fma` ≲ 8u²); guarantee restated; notes on the max-element measure (§2.3) and threads (§4.4); §5.1 points at 1.5.0 | Grant Heileman |
 
 ---
 

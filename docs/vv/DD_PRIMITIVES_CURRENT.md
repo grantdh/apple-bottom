@@ -1,5 +1,11 @@
 # DD Multiplication Primitives — Current State and v1.3.0 Investigation
 
+> **Status (2026-10-30).** Written during 1.3.0 development and kept as
+> written, with corrections marked. DWTimesDW2 stayed the default
+> ([LIMITATIONS.md](LIMITATIONS.md)), so the question of §3 is settled. The
+> bounds quoted in §1 are those of `dd_mul`; the fused `dd_fma` is not
+> covered by them (see §1.1).
+
 **Purpose.** Document the current `dd_mul` / `dd_fma` implementations so future
 work on the DD multiplication algorithm has a precise, version-stamped baseline
 to measure against.
@@ -60,7 +66,11 @@ down to 2.
 
 **Error bound.** `< 5u² / (1+u)² < 5u²` where `u = 2⁻²⁴` is the FP32 unit
 roundoff — Muller–Rideau 2022 Theorem 2.7, tightened from JMP 2017's original
-`< 6u²` bound via a formal Coq proof.
+`< 6u²` bound via a formal Coq proof. This is `dd_mul`'s bound. The fused
+`dd_fma` skips the product's own renormalization, so the theorem does not
+cover it; `PRECISION_ENVELOPE.md` §1.2 gives it a conservative `≲ 8u²`
+envelope (corrected 2026-10-30: this section first gave `dd_fma` the same
+bound).
 
 ### 1.2 Opt-in: DWTimesDW3 (Alg 12 / Thm 2.8)
 
@@ -108,8 +118,12 @@ Operation counts (DWTimesDW3 vs DWTimesDW2 delta):
 > is +1 mul and +1 add; the FMA count is the same (2) as DWTimesDW2. This is a
 > documentation-only drift in the source comment; worth correcting but out of
 > this doc's scope (no behavior change).
+>
+> *Fixed in 65a4f17: the comment above the `#ifdef APPLEBOTTOM_USE_DWTIMESDW3`
+> block of `src/apple_bottom.m` now gives one multiplication and one add.*
 
-**Error bound.** `< 4u²` — Muller–Rideau 2022 Theorem 2.8. Compared to
+**Error bound.** `< 4u²` — Muller–Rideau 2022 Theorem 2.8, again for
+`dd_mul`; no published bound covers the fused `dd_fma`. Compared to
 DWTimesDW2's `< 5u²`, the gap is 20% at the per-operation level. At
 accumulation length `K`, worst-case Higham bound improves from `O(5K·u²)` to
 `O(4K·u²)`; probabilistic `√K·u²` bound improves by the same ratio.
@@ -138,9 +152,12 @@ unevaluated-pair DW arithmetic.
 
 ## 3. What the v1.3.0 investigation actually needs
 
+*Outcome: DWTimesDW2 stayed the default ([LIMITATIONS.md](LIMITATIONS.md)).
+The plan below is kept as written.*
+
 The open v1.3.0 question is not "how do we tighten the bound further" but
-"which variant should ship as the default." The Makefile comment at
-`Makefile:20-24` frames this as the "v1.3 A/C investigation":
+"which variant should ship as the default." The Makefile comment
+above the `DWTIMESDW3` block frames this as the "v1.3 A/C investigation":
 
 1. **Precision measurement.** Run V-2 convergence study (`make
    test-verification`) under DWTimesDW3 and compare the Frobenius error
@@ -164,8 +181,9 @@ The open v1.3.0 question is not "how do we tighten the bound further" but
      by more than 10%: keep DWTimesDW2 as default and leave DWTimesDW3 as
      opt-in documented for users who need the tighter guarantee.
    - Mid cases: defer to benchmark on real QE / Yambo workloads
-     (`benchmarks/qe_yambo/`, eventual `benchmarks/si64_scf/`) before
-     deciding.
+     (~~`benchmarks/qe_yambo/`, eventual `benchmarks/si64_scf/`~~; neither
+     was created, and the Quantum ESPRESSO campaign is in `benchmarks/qe/`)
+     before deciding.
 
 ---
 
@@ -181,5 +199,5 @@ The open v1.3.0 question is not "how do we tighten the bound further" but
 - `docs/vv/PRECISION_ENVELOPE.md` §1.2 — per-operation DD bound derivation
   for the default (DWTimesDW2) path.
 - `src/apple_bottom.m`, the `#ifdef APPLEBOTTOM_USE_DWTIMESDW3` … `#endif` block — the gated implementations themselves.
-- `Makefile:20-27` — the `DWTIMESDW3=1` build flag and `-DAPPLEBOTTOM_USE_DWTIMESDW3`
-  propagation.
+- The `DWTIMESDW3` block at the top of the `Makefile` — the `DWTIMESDW3=1` build flag and
+  `-DAPPLEBOTTOM_USE_DWTIMESDW3` propagation.
