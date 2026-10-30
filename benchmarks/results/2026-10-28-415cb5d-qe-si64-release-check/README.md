@@ -279,7 +279,7 @@ The last four are part 2's battery block. All the others are part 1.
 | File | |
 |---|---|
 | `results.csv` | One row per reported run, as `run_campaign.sh` writes it. Home and frozen-library paths are shortened. The block's lock was taken before `run_campaign.sh` started, so `start`/`end` bracket the run itself. In `supporting/results.csv`, part 1's `start`/`end` also include the waits for AC power and for the lock. |
-| `outputs/` | Each run's `pw.x` output. |
+| `outputs/` | Each run's `pw.x` output, with its local paths shortened as in `results.csv`: the run directory to `runs/…`, relative to the campaign's directory, and the pseudopotential directory to `<pseudo>`. |
 | `reports/` | Each run's stderr, keeping apple-bottom's lines (`AB_REPORT`, the `AB_PROFILE` tables, fallback lines) and gfortran's IEEE note. Dyld output and per-call `AB_PROFILE` lines are dropped. With 8 ranks, the table lines of different ranks can interleave; the `AB_REPORT` lines stay whole. |
 | `analyze.txt`, `compare.txt`, `tables.md` | Output of `benchmarks/qe/analyze.py`, `compare.py` and `tables.py` (one section per label). |
 | `comparison.md` | The tables above in full: run time, GPU share by time, stages per routine and library, energies. |

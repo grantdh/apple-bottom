@@ -70,7 +70,7 @@
 
 
      PseudoPot. # 1 for Si read from file:
-     ~/qe-test/val1-o3-2026-10-14/pseudo/Si.pbe-n-kjpaw_psl.1.0.0.UPF
+     <pseudo>/Si.pbe-n-kjpaw_psl.1.0.0.UPF
      MD5 check sum: c39c59da582df4a0d9f10159256ea34e
      Pseudo is Projector augmented-wave + core cor, Zval =  4.0
      Generated using &quot;atomic&quot; code by A. Dal Corso  v.6.3
@@ -929,7 +929,7 @@ T_2    3.00  0.00 -1.00 -1.00  1.00
 
      convergence has been achieved in   9 iterations
 
-     Writing all to output data dir ~/qe-test/xp/runs.noindex/v150-qe-release-check-blocks/runs/1.5.0-np1/B_si64_160b_k222/gpu_r1/tmp/si64k.save/ :
+     Writing all to output data dir runs/1.5.0-np1/B_si64_160b_k222/gpu_r1/tmp/si64k.save/ :
      XML data file, charge density, pseudopotentials, collected wavefunctions
 
      init_run     :     12.51s CPU     14.09s WALL (       1 calls)
