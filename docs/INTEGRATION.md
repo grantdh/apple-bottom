@@ -29,8 +29,11 @@ Complete guide for integrating apple-bottom into scientific computing codes.
 **Not yet**, if:
 - Your code calls `dgemm_`/`zgemm_` (or the device-buffer API, which also
   converts on every call) on matrices in host memory, one call at a time.
-  Each call then converts FP64 to DD and back, and on an M2 Max Accelerate
-  is faster for nearly every shape measured. `AB_MODE=auto` keeps
+  Each call then converts FP64 to DD and back. 1.4.0 did that on the CPU,
+  and on an M2 Max Accelerate was faster for nearly every shape measured.
+  1.5.0's staged path does it on the GPU but has not been calibrated yet,
+  and Quantum ESPRESSO forced onto it is still not faster than Accelerate
+  ([what to expect](#quantum-espresso-integration)). `AB_MODE=auto` keeps
   such calls on Accelerate, so linking apple-bottom costs little but gains
   nothing there yet.
 - You need IEEE FP64 results bit for bit, or code that runs off Apple
@@ -131,10 +134,16 @@ N × N operand costs O(N²) against the product's O(N³), so uploading one new
 operand per product is fine at those sizes; converting and transferring
 everything for every call on the host is not. The staged path of the BLAS
 ABI leaves the host a plain copy of each operand into GPU buffers it
-reuses (about 50-100 GB/s; none for memory registered with
+reuses (about 50–100 GB/s; none for memory registered with
 `ab_register_host_memory`, see [Zero-copy operands](#zero-copy-operands))
 and converts on the GPU. It has not been calibrated for `AB_MODE=auto`
-yet: the routing table is still 1.4.0's.
+yet: the routing table is still 1.4.0's. Measured so far, with registered,
+well-scaled operands it ran large squares faster than Accelerate (median
+ms, GPU alone against Accelerate alone: DGEMM 4096² 195.6 against 222.6,
+ZGEMM 4096² 581.7 against 878.9;
+[split benchmark](../benchmarks/results/2026-10-28-415cb5d-hybrid-split/)),
+while Quantum ESPRESSO forced onto it takes 1.01–1.06× its time on
+Accelerate ([below](#quantum-espresso-integration)).
 
 ### Pattern 1: a chain of large products
 
@@ -365,8 +374,9 @@ apple-bottom first.
 `dgemm_`, `zgemm_`, `ab_dgemm_` and `ab_zgemm_` forward each call to
 `ab_dgemm_blas` / `ab_zgemm_blas`, which route it. By default
 (`AB_MODE=auto`) a call goes to the GPU only for shapes where the GPU was
-measured at least 1.10× faster than Accelerate end to end; everything else
-runs on Accelerate. `AB_MODE=gpu` sends every call with all dimensions above
+measured at least 1.10× faster than Accelerate end to end (on 1.4.0's host
+path; the staged path has not been calibrated yet); everything else runs on
+Accelerate. `AB_MODE=gpu` sends every call with all dimensions above
 `AB_MIN_GPU_DIM` to the GPU, `AB_MODE=cpu` none. See
 [Routing](#routing-ab_modeauto).
 
@@ -382,18 +392,28 @@ the PAW routines (`newq`, `addusdens`), among others. Linking apple-bottom
 ahead of the configured BLAS is all it takes; no QE source change is
 needed.
 
-**What to expect on an M2 Max** ([VAL-1](../tests/validation/VAL001_QE_Si64.md),
-QE develop (7.5), 64-atom Si, PAW): the total energy and every printed band energy
-are the same in all three modes. `AB_MODE=auto` keeps every GEMM of these
-runs on Accelerate, because the calibrated table has no GPU row for QE's
-shapes, so its run time is that of `AB_MODE=cpu` (within 0.2%).
-`AB_MODE=gpu` forces the GEMMs onto the GPU and is slower:
-1.3–17.3% more wall time on the three inputs with QE itself compiled at
-`-O0`, because its GEMMs take 2.5–4.9× as long. With QE compiled `-O3` it
-is 14–40% slower with one rank and 5–21% slower with 8 ranks
-([release check](../benchmarks/results/2026-10-15-c5a1fa6-qe-si64-opt/)). On this hardware, linking apple-bottom into QE gives you
-the `AB_REPORT` accounting and a routing that follows measurement, not a
-speed-up.
+**What to expect on an M2 Max** (64-atom Si, PAW, inputs A and B at 1 rank
+and at 8 ranks on one QE develop build compiled `-O3`:
+[1.5.0 release check](../benchmarks/results/2026-10-28-415cb5d-qe-si64-release-check/)
+and the [staged-path fix](../benchmarks/results/2026-10-29-351d56c-staged-refusals/)
+measured after it):
+
+- The energies are the same in every mode. In the release check the total
+  energy, the energy of every SCF iteration and every printed band energy
+  of every run equal those of the `cpu` run; with the fix, every run of an
+  input gives the same total energy and number of SCF iterations.
+- `AB_MODE=auto` keeps every GEMM of these runs on Accelerate, because the
+  calibrated table has no GPU row for QE's shapes, so its run time is that
+  of `AB_MODE=cpu` (within −1.1% to +0.6%).
+- `AB_MODE=gpu` forces the GEMMs onto the GPU and is not faster: with the
+  fix it takes 1.01–1.06× the `cpu` time (input B at 1 rank, A and B at
+  8 ranks), against 1.17–1.20× for the release check's build before the
+  fix and 1.06–1.43× for 1.4.0 on the same QE build.
+
+[VAL-1](../tests/validation/VAL001_QE_Si64.md) has the earlier runs, with
+QE develop (7.5) compiled `-O0`. On this hardware, linking apple-bottom into
+QE gives you the `AB_REPORT` accounting and a routing that follows
+measurement, not a speed-up.
 
 ### make.inc
 
@@ -451,7 +471,7 @@ to every API.
 | `AB_DISPATCH_TABLE` | unset | `auto`: read the dispatch table from this file (the `dispatch_table.txt` that `make calibrate` writes) instead of using the built-in one. A file that cannot be read or parsed is reported on stderr and the built-in table is used. |
 | `AB_CROSSOVER_FLOPS` | unset | `auto`: replaces the table by a FLOP threshold. Calls with at least this many FLOPs (2·M·N·K real, 8·M·N·K complex) go to the GPU: ZGEMM, and DGEMM unless `AB_CROSSOVER_FLOPS_REAL` is set. |
 | `AB_CROSSOVER_FLOPS_REAL` | unset | `auto`: the same for DGEMM only. |
-| `AB_PREFETCH` | unset | Which GPU GEMM kernels load the next K-tile into registers while they compute the current one (register prefetch). Unset or any other value: where the GPU holds few threadgroups, by `use_prefetch` in `src/apple_bottom.m` (on an M2 Max up to 1.43× faster there). `0`: never. `1`: on every grid. The results are bitwise the same in all three; `0` and `1` are for timing comparisons. |
+| `AB_PREFETCH` | unset | Which GPU GEMM kernels load the next K-tile into registers while they compute the current one (register prefetch). Unset or any other value: where the GPU holds few threadgroups, by `use_prefetch` in `src/apple_bottom.m` (on an M2 Max up to 1.47× faster there in kernel GPU time; [measurements](../benchmarks/results/2026-10-24-15ef7b9-prefetch/)). `0`: never. `1`: on every grid. The results are bitwise the same in all three; `0` and `1` are for timing comparisons. |
 | `AB_REPORT` | off | `1`: a short summary on stderr at exit (below). |
 | `AB_PROFILE` | off | `1`: the same counts as a detailed table on stderr at exit, with a dimension histogram, plus one line per GPU call and per fallback. |
 | `AB_PROFILE_JSON` | unset | With `AB_PROFILE=1`: also write the profile as JSON to this path at exit. |
@@ -497,13 +517,15 @@ zgemm T T 4096 4096 4096
 ```
 
 The built-in table was measured on an M2 Max (38-core GPU, macOS 27.0.1;
-data in `benchmarks/results/2026-10-14-52f1880-calibrate/`). The GPU path
+data in `benchmarks/results/2026-10-14-52f1880-calibrate/`) at 52f1880,
+on 1.4.0's host path, which packed and converted on the CPU. The GPU path
 was at least 1.10× faster only for ZGEMM with both operands transposed or
 conjugated, from 4096 up (1.11× at 4096, 1.20× at 6144): that is the
 table's one row. Every QE si64 shape (0.09–0.76× Accelerate's speed) and
 every DGEMM (at most 0.84×) was slower on the GPU, and the other ZGEMMs
 reached at most 1.02× (6144, one operand transposed). So `auto` keeps QE's
-calls on Accelerate. To
+calls on Accelerate. The table has not been measured again on 1.5.0's
+staged path; `make calibrate` on 1.5.0 measures that path. To
 calibrate another machine, run `make calibrate` and set
 `AB_DISPATCH_TABLE` to the `dispatch_table.txt` it writes, or rebuild:
 it also rewrites `src/dispatch_table.h`.

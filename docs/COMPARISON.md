@@ -17,9 +17,11 @@ are as of October 2026, from their repositories.
 ## Accelerate
 
 Accelerate is the reference apple-bottom is measured against. It is exact
-IEEE FP64, complete, and fast: on an M2 Max it beats the GPU path of
-apple-bottom on every DGEMM measured through the BLAS ABI and on every
-Quantum ESPRESSO shape ([README](../README.md#performance)). If your code
+IEEE FP64, complete, and fast: on an M2 Max it beat the GPU path of
+apple-bottom 1.4.0 on every DGEMM measured through the BLAS ABI and on
+every Quantum ESPRESSO shape ([README](../README.md#performance)), and
+Quantum ESPRESSO forced onto 1.5.0's GPU path is still not faster than with
+Accelerate. If your code
 calls BLAS one call at a time on host arrays, Accelerate is the right
 choice on this hardware today, and apple-bottom's default routing
 (`AB_MODE=auto`) sends those calls there anyway.
@@ -42,15 +44,17 @@ Where it does not:
 
 - Bit-for-bit IEEE FP64 results, or native-API matrices whose entries span
   more than about 10²³.
-- GEMMs issued one call at a time from host memory through the BLAS ABI:
-  on an M2 Max no measured shape is more than 1.02× faster than Accelerate
+- GEMMs issued one call at a time from host memory through the BLAS ABI.
+  On an M2 Max, 1.4.0's host path, which packed and converted on the CPU,
+  was no more than 1.02× faster than Accelerate for any measured shape
   except ZGEMM with both operands transposed at N ≥ 4096 (1.11–1.20×).
-  For Quantum ESPRESSO's long-K shapes the GPU kernel alone is no faster
-  than Accelerate in a single process. With 8 ranks, where each rank's
-  Accelerate has one thread, it takes 0.65–0.78× of Accelerate's time, but
-  conversion and transfers cost more than that margin: `gpu` mode is 5–21%
-  slower ([release check](../benchmarks/results/2026-10-15-c5a1fa6-qe-si64-opt/)). The device-buffer API converts on every call in
-  the same way (it has not been benchmarked separately).
+  1.5.0's staged path converts on the GPU and has not been calibrated yet.
+  Quantum ESPRESSO forced onto it takes 1.01–1.06× its time on Accelerate,
+  against 1.06–1.43× for 1.4.0 on the same QE build
+  ([release check](../benchmarks/results/2026-10-28-415cb5d-qe-si64-release-check/),
+  [staged-path fix](../benchmarks/results/2026-10-29-351d56c-staged-refusals/)).
+  The device-buffer API converts on the CPU on every call, as 1.4.0's BLAS
+  ABI did (it has not been benchmarked separately).
 - Anything beyond the GEMM family: the rest of BLAS and LAPACK comes from
   your BLAS library.
 

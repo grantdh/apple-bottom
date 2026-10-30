@@ -134,18 +134,22 @@ differences under ~10% as noise):
 
 3. **Cache locality (hypothesis).** B (150 columns) fits in cache; A (18277 rows) does not, so tall shapes walk long strides.
 
-The tall-skinny kernel addresses (1) directly: at BN=16, N=150 yields ceil(150/16) = 10 threadgroups in N rather than 3, and boundary waste drops from ~22% to ~6%. (2) and (3) are upload/download and stride concerns inherent to the per-call API and are the motivation for a future device-resident path.
+The tall-skinny kernel addresses (1) directly: at BN=16, N=150 yields ceil(150/16) = 10 threadgroups in N rather than 3, and boundary waste drops from ~22% to ~6%. (2) and (3) are upload/download and stride concerns inherent to the per-call API. They motivated the device-buffer API (`apple_bottom_device.h`) and 1.5.0's staged BLAS-ABI path, which keeps its GPU buffers between calls and can read registered host memory in place.
 
 **What this means for Quantum ESPRESSO.**
 
 The numbers above are for the native `ABMatrix` API with one call per
 upload. Through the BLAS ABI (`dgemm_`/`zgemm_`, which is what QE
 calls) every operand is also converted FP64 → DD and back on each
-call, and every QE si64 Davidson and PAW shape measured by
-`make calibrate` is slower on the GPU than on Accelerate (0.09–0.76×,
-[`benchmarks/results/2026-10-14-52f1880-calibrate/`](../../benchmarks/results/2026-10-14-52f1880-calibrate/)).
-`AB_MODE=auto` therefore keeps those calls on Accelerate. The
-tall-skinny kernel still matters for `AB_MODE=gpu` and for callers
+call. On 1.4.0's host path, which did that on the CPU, every QE si64
+Davidson and PAW shape measured by `make calibrate` was slower on the GPU
+than on Accelerate (0.09–0.76×,
+[`benchmarks/results/2026-10-14-52f1880-calibrate/`](../../benchmarks/results/2026-10-14-52f1880-calibrate/)),
+and `AB_MODE=auto` keeps those calls on Accelerate. 1.5.0's staged path
+converts on the GPU and has not been calibrated yet; QE forced onto it
+takes 1.01–1.06× its time on Accelerate
+([`benchmarks/results/2026-10-29-351d56c-staged-refusals/`](../../benchmarks/results/2026-10-29-351d56c-staged-refusals/)).
+The tall-skinny kernel still matters for `AB_MODE=gpu` and for callers
 that keep matrices resident on the GPU.
 
 ---

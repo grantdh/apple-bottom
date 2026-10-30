@@ -211,10 +211,11 @@ ab.print_stats()
 There are two regimes (measurements on an M2 Max in the main
 [README](../README.md#performance)):
 
-- **`ab.dgemm`, `ab.zgemm`, `ab.dsyrk`** allocate, convert FP64 to DD,
-  transfer and convert back on every call. That is the cost structure of
-  the BLAS ABI, where Accelerate (and so numpy linked to it) is faster for
-  nearly every shape; do not expect these calls to beat `A @ B`.
+- **`ab.dgemm`, `ab.zgemm`, `ab.dsyrk`** allocate, convert FP64 to DD on
+  the CPU, transfer and convert back on every call. That is the cost
+  structure of 1.4.0's BLAS ABI, where Accelerate (and so numpy linked to
+  it) was faster for nearly every shape; do not expect these calls to beat
+  `A @ B`.
 - **Matrices uploaded once and multiplied repeatedly** in a `Session` stay
   on the GPU. There the GPU overtakes Accelerate from about N = 1,500
   (DGEMM) and N = 1,000 (ZGEMM).
