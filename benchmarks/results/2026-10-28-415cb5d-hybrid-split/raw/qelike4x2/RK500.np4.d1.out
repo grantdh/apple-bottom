@@ -1,0 +1,50 @@
+apple-bottom 1.4.0 (415cb5d4d888) | VECLIB_MAXIMUM_THREADS=2 AB_MODE=gpu AB_MIN_GPU_DIM=0 AB_STAGING_MB=8192 AB_TRACE=on | 4 procs
+start: Now drawing from 'AC Power'  -InternalBattery-0 (id=37552227)	100%; charged; 0:00 remaining present: true | load { 8.52 6.84 9.83 }
+AB_REPORT[74748] apple-bottom 1.4.0 (415cb5d4d888) AB_MODE=gpu
+AB_REPORT[74750] apple-bottom 1.4.0 (415cb5d4d888) AB_MODE=gpu
+AB_REPORT[74748] zgemm calls=93 gpu_calls=93 cpu_calls=0 gpu_calls%=100.0 total_ms=10728.384 gpu_ms=10728.384 cpu_ms=0.000 gpu_time%=100.0 fallbacks=0
+AB_REPORT[74749] apple-bottom 1.4.0 (415cb5d4d888) AB_MODE=gpu
+AB_REPORT[74749] zgemm calls=93 gpu_calls=93 cpu_calls=0 gpu_calls%=100.0 total_ms=10398.232 gpu_ms=10398.232 cpu_ms=0.000 gpu_time%=100.0 fallbacks=0
+AB_REPORT[74748] zgemm gpu_stages_ms init=0.356 alloc=3.949 pack=191.066 upload=129.642 kernel=10205.873 download=9.758 epilogue=7.538 other=180.201
+AB_REPORT[74750] zgemm calls=93 gpu_calls=93 cpu_calls=0 gpu_calls%=100.0 total_ms=10782.431 gpu_ms=10782.431 cpu_ms=0.000 gpu_time%=100.0 fallbacks=0
+AB_REPORT[74749] zgemm gpu_stages_ms init=0.347 alloc=3.829 pack=166.720 upload=144.819 kernel=9854.545 download=6.251 epilogue=9.489 other=212.233
+AB_REPORT[74751] apple-bottom 1.4.0 (415cb5d4d888) AB_MODE=gpu
+AB_REPORT[74751] zgemm calls=93 gpu_calls=93 cpu_calls=0 gpu_calls%=100.0 total_ms=10620.150 gpu_ms=10620.150 cpu_ms=0.000 gpu_time%=100.0 fallbacks=0
+AB_REPORT[74751] zgemm gpu_stages_ms init=0.373 alloc=6.460 pack=170.000 upload=131.914 kernel=10085.562 download=7.842 epilogue=9.758 other=208.241
+AB_REPORT[74750] zgemm gpu_stages_ms init=0.339 alloc=3.587 pack=208.044 upload=149.452 kernel=10193.699 download=7.875 epilogue=8.621 other=210.813
+AB_REPORT[74743] apple-bottom 1.4.0 (415cb5d4d888) AB_MODE=gpu
+AB_REPORT[74743] no BLAS-ABI calls recorded
+case RK500: ZGEMM 'C','N' M=500 N=500 K=18277 lda=18336 ldb=18336 ldc=500 beta=0, split axis K (align 64), 36.55 GF per call x 4 procs, data QE-like (rows decay 9 decades)
+registration ok (of 4 arrays), per proc: 4 4 4 4
+-- sweep: lockstep medians over 3 interleaved rounds x 2 reps (ms); L = slowest proc, A = mean over procs
+   config      f |      L ms      A ms |    /ACC    /GPU |   cpu ms   gpu ms    join   wake
+   ACC     0.000 |    243.55    220.29 |   1.000   1.162 |   220.29     0.00    0.00   0.00
+   GPU     1.000 |    209.68    189.22 |   0.861   1.000 |     0.00   189.22    0.00   0.00
+   S4544   0.249 |    190.79    176.20 |   0.783   0.910 |   175.73   103.47    0.00   0.02
+   S5504   0.301 |    178.24    167.35 |   0.732   0.850 |   166.98   113.16    0.00   0.01
+   S6400   0.350 |    157.64    142.91 |   0.647   0.752 |   142.68    68.43    0.00   0.01
+   S7296   0.399 |    146.59    131.93 |   0.602   0.699 |   131.52    80.38    0.00   0.01
+   S8256   0.452 |    135.36    122.24 |   0.556   0.646 |   121.73    83.36    0.00   0.01
+   S9152   0.501 |    126.31    115.11 |   0.519   0.602 |   114.11    87.41    0.00   0.01
+   S10048  0.550 |    117.64    109.67 |   0.483   0.561 |   103.53   103.94    5.52   0.01  <- best
+   S10944  0.599 |    123.82    109.69 |   0.508   0.591 |    90.43   108.44   19.14   0.01
+   S11904  0.651 |    137.76    122.93 |   0.566   0.657 |    78.42   122.53   43.26   0.01
+-- fixed block at g=10048 (f=0.550), 3 interleaved rounds; medians of lockstep times (ms) [per-round medians]
+   ACC    n= 9  L    235.52  A    214.96    620.8 GF/s  [236.67 234.23 235.88]
+   GPU    n= 9  L    207.65  A    188.57    704.1 GF/s  [207.72 207.18 210.28]
+   S10048 n=12  L    114.82  A    109.86   1273.5 GF/s  [114.60 115.79 115.02]
+   split parts (mean over procs, medians): cpu slice 101.31 ms, gpu slice 101.84 ms, join wait 7.99 ms, gpu wake 0.015 ms, K-add 0.519 ms
+   speedup of the split: vs Accelerate 2.051x, vs GPU 1.809x, vs the faster engine (GPU) 1.809x
+-- bits: split repeats differing from the first 0/48 (max 0 elements), forced completion orders differing 0 elements, cross-proc hashes equal: split yes gpu yes acc yes
+   single engines: GPU repeats differing 0/36, Accelerate repeats differing 0/36
+   whole split C vs Accelerate alone 249950/250000, vs GPU alone 250000/250000 elements differ
+   GPU-routed calls whose C was not computed on the GPU (ab_get_last_dispatch_path): 0 of 372
+-- error vs Dot2 on 16 sampled columns, max |C-R|/(|op(A)||op(B)|+|beta C0|) in u^2 = 2^-48 (u = 2^-24; bound 8 u^2): split 0.237 | GPU alone 10.091 | Accelerate alone 0.4581
+-- power, fixed block, mean over the timed calls (20 Hz SMC): idle 52.4 W | ACC 87.3 W (36 samples), GPU 81.2 W (35), split 82.6 W (24); GPU rails ACC 33.3 GPU 28.9 split 29.1 W
+   energy per call above idle (J): ACC 8.22, GPU 5.99, split 3.47 (np procs together)
+   proc 0: setup 2.0 s, total 18.5 s
+   proc 1: setup 2.0 s, total 18.5 s
+   proc 2: setup 2.0 s, total 18.5 s
+   proc 3: setup 2.0 s, total 18.5 s
+SUMMARY case=RK500 np=4 data=1 acc_ms=235.516 gpu_ms=207.650 split_ms=114.816 g=10048 f=0.550 sp_acc=2.051 sp_gpu=1.809 sp_best=1.809 acc_gfs=620.8 gpu_gfs=704.1 split_gfs=1273.5 bits_repeat=yes split_reps=48 gpu_rep_diff=0 acc_rep_diff=0 err_u2=0.237 err_gpu_u2=10.091 err_acc_u2=0.4581 notgpu=0 pdtr_acc=87.3 pdtr_gpu=81.2 pdtr_split=82.6 idle=52.4 n=9/9/12
+end: Now drawing from 'AC Power'  -InternalBattery-0 (id=37552227)	100%; charged; 0:00 remaining present: true | load { 8.73 7.01 9.82 } | wall 18.6 s

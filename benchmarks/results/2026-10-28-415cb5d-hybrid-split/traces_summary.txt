@@ -1,0 +1,422 @@
+# Every GPU-routed BLAS-ABI call in the AB_TRACE files (traces.tar.xz), by the path that computed C:
+# benchmarks/split/classify_trace.py <suite dir>; staged = GPU-side conversion and epilogue (epilogue_ns 0).
+
+## smoke
+D2048.np1.d0: 123 GPU-routed calls
+  full  dgemm N M=2048 N=2048 K=2048: n=19 staged=19 | wall 26.42 pack 0.013 upload 0.000 kernel 25.66 download 0.000 epilogue 0.000 other 0.749
+  slice dgemm N M=2048 N=1440 K=2048: n=10 staged=10 | wall 19.26 pack 0.011 upload 0.000 kernel 18.43 download 0.000 epilogue 0.000 other 0.787
+  slice dgemm N M=2048 N=1344 K=2048: n=10 staged=10 | wall 17.47 pack 0.011 upload 0.000 kernel 16.67 download 0.000 epilogue 0.000 other 0.796
+  slice dgemm N M=2048 N=1216 K=2048: n=24 staged=24 | wall 15.64 pack 0.010 upload 0.000 kernel 14.87 download 0.000 epilogue 0.000 other 0.770
+  slice dgemm N M=2048 N=1120 K=2048: n=10 staged=10 | wall 15.66 pack 0.010 upload 0.000 kernel 14.88 download 0.000 epilogue 0.000 other 0.774
+  slice dgemm N M=2048 N=1024 K=2048: n=10 staged=10 | wall 14.75 pack 0.010 upload 0.000 kernel 13.97 download 0.000 epilogue 0.000 other 0.772
+  slice dgemm N M=2048 N=928 K=2048: n=10 staged=10 | wall 13.89 pack 0.010 upload 0.000 kernel 13.09 download 0.000 epilogue 0.000 other 0.787
+  slice dgemm N M=2048 N=832 K=2048: n=10 staged=10 | wall 12.08 pack 0.010 upload 0.000 kernel 11.29 download 0.000 epilogue 0.000 other 0.779
+  slice dgemm N M=2048 N=704 K=2048: n=10 staged=10 | wall 10.32 pack 0.010 upload 0.000 kernel 9.53 download 0.000 epilogue 0.000 other 0.778
+  slice dgemm N M=2048 N=608 K=2048: n=10 staged=10 | wall 9.43 pack 0.009 upload 0.000 kernel 8.60 download 0.000 epilogue 0.000 other 0.786
+  TOTAL staged=123
+RK160.np4.d0: 492 GPU-routed calls
+  full  zgemm C M=160 N=160 K=18432: n=76 staged=76 | wall 28.93 pack 0.002 upload 0.000 kernel 26.83 download 0.000 epilogue 0.000 other 0.301
+  slice zgemm C M=160 N=160 K=11968: n=40 staged=40 | wall 17.80 pack 0.002 upload 0.000 kernel 17.04 download 0.000 epilogue 0.000 other 0.325
+  slice zgemm C M=160 N=160 K=11072: n=40 staged=40 | wall 15.63 pack 0.002 upload 0.000 kernel 14.84 download 0.000 epilogue 0.000 other 0.370
+  slice zgemm C M=160 N=160 K=10112: n=40 staged=40 | wall 14.77 pack 0.002 upload 0.000 kernel 14.11 download 0.000 epilogue 0.000 other 0.345
+  slice zgemm C M=160 N=160 K=9216: n=96 staged=96 | wall 13.45 pack 0.002 upload 0.000 kernel 12.96 download 0.000 epilogue 0.000 other 0.695
+  slice zgemm C M=160 N=160 K=8320: n=40 staged=40 | wall 11.81 pack 0.002 upload 0.000 kernel 11.06 download 0.000 epilogue 0.000 other 0.791
+  slice zgemm C M=160 N=160 K=7360: n=40 staged=40 | wall 10.64 pack 0.002 upload 0.000 kernel 9.18 download 0.000 epilogue 0.000 other 0.810
+  slice zgemm C M=160 N=160 K=6464: n=40 staged=40 | wall 9.82 pack 0.002 upload 0.000 kernel 8.92 download 0.000 epilogue 0.000 other 0.811
+  slice zgemm C M=160 N=160 K=5504: n=40 staged=40 | wall 8.56 pack 0.002 upload 0.000 kernel 7.37 download 0.000 epilogue 0.000 other 0.819
+  slice zgemm C M=160 N=160 K=4608: n=40 staged=40 | wall 7.49 pack 0.002 upload 0.000 kernel 6.50 download 0.000 epilogue 0.000 other 0.824
+  TOTAL staged=492
+UM160.np4.d0: 492 GPU-routed calls
+  full  zgemm N M=18277 N=160 K=160: n=76 staged=76 | wall 25.75 pack 0.057 upload 1.323 kernel 22.63 download 0.740 epilogue 0.000 other 0.808
+  slice zgemm N M=11872 N=160 K=160: n=40 staged=40 | wall 16.48 pack 0.042 upload 1.138 kernel 13.34 download 0.762 epilogue 0.000 other 0.954
+  slice zgemm N M=10976 N=160 K=160: n=40 staged=40 | wall 13.84 pack 0.036 upload 0.911 kernel 11.43 download 0.453 epilogue 0.000 other 0.794
+  slice zgemm N M=10048 N=160 K=160: n=40 staged=40 | wall 12.27 pack 0.035 upload 0.828 kernel 9.10 download 0.418 epilogue 0.000 other 0.817
+  slice zgemm N M=9152 N=160 K=160: n=96 staged=96 | wall 11.93 pack 0.032 upload 0.631 kernel 9.34 download 0.482 epilogue 0.000 other 0.805
+  slice zgemm N M=8224 N=160 K=160: n=40 staged=40 | wall 10.63 pack 0.030 upload 0.631 kernel 8.28 download 0.414 epilogue 0.000 other 0.843
+  slice zgemm N M=7296 N=160 K=160: n=40 staged=40 | wall 9.34 pack 0.026 upload 0.616 kernel 6.92 download 0.478 epilogue 0.000 other 0.791
+  slice zgemm N M=6400 N=160 K=160: n=40 staged=40 | wall 8.83 pack 0.023 upload 0.541 kernel 6.43 download 0.425 epilogue 0.000 other 0.704
+  slice zgemm N M=5472 N=160 K=160: n=40 staged=40 | wall 6.51 pack 0.020 upload 0.500 kernel 4.63 download 0.356 epilogue 0.000 other 0.634
+  slice zgemm N M=4576 N=160 K=160: n=40 staged=40 | wall 6.13 pack 0.018 upload 0.468 kernel 4.29 download 0.332 epilogue 0.000 other 0.861
+  TOTAL staged=492
+Z2048.np1.d0: 123 GPU-routed calls
+  full  zgemm N M=2048 N=2048 K=2048: n=19 staged=19 | wall 74.93 pack 0.017 upload 0.000 kernel 74.01 download 0.000 epilogue 0.000 other 0.795
+  slice zgemm N M=2048 N=1440 K=2048: n=10 staged=10 | wall 54.80 pack 0.013 upload 0.000 kernel 53.94 download 0.000 epilogue 0.000 other 0.748
+  slice zgemm N M=2048 N=1344 K=2048: n=10 staged=10 | wall 50.38 pack 0.013 upload 0.000 kernel 49.52 download 0.000 epilogue 0.000 other 0.784
+  slice zgemm N M=2048 N=1216 K=2048: n=24 staged=24 | wall 44.96 pack 0.012 upload 0.000 kernel 44.11 download 0.000 epilogue 0.000 other 0.803
+  slice zgemm N M=2048 N=1120 K=2048: n=10 staged=10 | wall 44.16 pack 0.013 upload 0.000 kernel 43.37 download 0.000 epilogue 0.000 other 0.779
+  slice zgemm N M=2048 N=1024 K=2048: n=10 staged=10 | wall 38.48 pack 0.013 upload 0.000 kernel 37.64 download 0.000 epilogue 0.000 other 0.794
+  slice zgemm N M=2048 N=928 K=2048: n=10 staged=10 | wall 36.53 pack 0.012 upload 0.000 kernel 35.75 download 0.000 epilogue 0.000 other 0.777
+  slice zgemm N M=2048 N=832 K=2048: n=10 staged=10 | wall 31.48 pack 0.012 upload 0.000 kernel 30.65 download 0.000 epilogue 0.000 other 0.790
+  slice zgemm N M=2048 N=704 K=2048: n=10 staged=10 | wall 30.14 pack 0.012 upload 0.000 kernel 29.27 download 0.000 epilogue 0.000 other 0.803
+  slice zgemm N M=2048 N=608 K=2048: n=10 staged=10 | wall 31.18 pack 0.011 upload 0.000 kernel 30.32 download 0.000 epilogue 0.000 other 0.794
+  TOTAL staged=123
+
+## sq1x8
+D2048.np1.d0: 123 GPU-routed calls
+  full  dgemm N M=2048 N=2048 K=2048: n=19 staged=19 | wall 26.46 pack 0.013 upload 0.000 kernel 25.69 download 0.000 epilogue 0.000 other 0.776
+  slice dgemm N M=2048 N=1440 K=2048: n=10 staged=10 | wall 19.26 pack 0.010 upload 0.000 kernel 18.47 download 0.000 epilogue 0.000 other 0.790
+  slice dgemm N M=2048 N=1344 K=2048: n=10 staged=10 | wall 17.49 pack 0.011 upload 0.000 kernel 16.67 download 0.000 epilogue 0.000 other 0.800
+  slice dgemm N M=2048 N=1216 K=2048: n=24 staged=24 | wall 15.66 pack 0.010 upload 0.000 kernel 14.88 download 0.000 epilogue 0.000 other 0.755
+  slice dgemm N M=2048 N=1120 K=2048: n=10 staged=10 | wall 15.69 pack 0.011 upload 0.000 kernel 14.86 download 0.000 epilogue 0.000 other 0.793
+  slice dgemm N M=2048 N=1024 K=2048: n=10 staged=10 | wall 14.75 pack 0.011 upload 0.000 kernel 13.96 download 0.000 epilogue 0.000 other 0.765
+  slice dgemm N M=2048 N=928 K=2048: n=10 staged=10 | wall 13.88 pack 0.011 upload 0.000 kernel 13.09 download 0.000 epilogue 0.000 other 0.774
+  slice dgemm N M=2048 N=832 K=2048: n=10 staged=10 | wall 12.09 pack 0.010 upload 0.000 kernel 11.30 download 0.000 epilogue 0.000 other 0.779
+  slice dgemm N M=2048 N=704 K=2048: n=10 staged=10 | wall 10.34 pack 0.010 upload 0.000 kernel 9.54 download 0.000 epilogue 0.000 other 0.788
+  slice dgemm N M=2048 N=608 K=2048: n=10 staged=10 | wall 9.43 pack 0.010 upload 0.000 kernel 8.61 download 0.000 epilogue 0.000 other 0.787
+  TOTAL staged=123
+D4096.np1.d0: 93 GPU-routed calls
+  full  dgemm N M=4096 N=4096 K=4096: n=16 staged=16 | wall 196.65 pack 0.023 upload 0.000 kernel 195.78 download 0.000 epilogue 0.000 other 0.821
+  slice dgemm N M=4096 N=2880 K=4096: n=7 staged=7 | wall 142.58 pack 0.020 upload 0.000 kernel 141.75 download 0.000 epilogue 0.000 other 0.823
+  slice dgemm N M=4096 N=2656 K=4096: n=7 staged=7 | wall 131.04 pack 0.018 upload 0.000 kernel 130.22 download 0.000 epilogue 0.000 other 0.754
+  slice dgemm N M=4096 N=2464 K=4096: n=7 staged=7 | wall 120.57 pack 0.017 upload 0.000 kernel 119.74 download 0.000 epilogue 0.000 other 0.772
+  slice dgemm N M=4096 N=2240 K=4096: n=21 staged=21 | wall 109.86 pack 0.018 upload 0.000 kernel 108.99 download 0.000 epilogue 0.000 other 0.817
+  slice dgemm N M=4096 N=2048 K=4096: n=7 staged=7 | wall 101.13 pack 0.019 upload 0.000 kernel 100.35 download 0.000 epilogue 0.000 other 0.812
+  slice dgemm N M=4096 N=1856 K=4096: n=7 staged=7 | wall 90.48 pack 0.019 upload 0.000 kernel 89.58 download 0.000 epilogue 0.000 other 0.807
+  slice dgemm N M=4096 N=1632 K=4096: n=7 staged=7 | wall 86.40 pack 0.019 upload 0.000 kernel 85.61 download 0.000 epilogue 0.000 other 0.800
+  slice dgemm N M=4096 N=1440 K=4096: n=7 staged=7 | wall 78.90 pack 0.018 upload 0.000 kernel 78.09 download 0.000 epilogue 0.000 other 0.789
+  slice dgemm N M=4096 N=1216 K=4096: n=7 staged=7 | wall 64.53 pack 0.017 upload 0.000 kernel 63.72 download 0.000 epilogue 0.000 other 0.798
+  TOTAL staged=93
+D8192.np1.d0: 52 GPU-routed calls
+  full  dgemm N M=8192 N=8192 K=8192: n=10 staged=10 | wall 1591.63 pack 0.051 upload 0.000 kernel 1566.20 download 0.000 epilogue 0.000 other 16.707
+  slice dgemm N M=8192 N=5728 K=8192: n=4 staged=4 | wall 1163.61 pack 0.043 upload 0.000 kernel 1150.28 download 0.000 epilogue 0.000 other 0.844
+  slice dgemm N M=8192 N=5312 K=8192: n=3 staged=3 | wall 1104.01 pack 0.039 upload 0.000 kernel 1103.16 download 0.000 epilogue 0.000 other 0.798
+  slice dgemm N M=8192 N=4928 K=8192: n=3 staged=3 | wall 1021.45 pack 0.042 upload 0.000 kernel 1020.47 download 0.000 epilogue 0.000 other 0.841
+  slice dgemm N M=8192 N=4512 K=8192: n=17 staged=17 | wall 912.97 pack 0.035 upload 0.000 kernel 907.26 download 0.000 epilogue 0.000 other 0.841
+  slice dgemm N M=8192 N=4096 K=8192: n=3 staged=3 | wall 789.98 pack 0.040 upload 0.000 kernel 789.15 download 0.000 epilogue 0.000 other 0.812
+  slice dgemm N M=8192 N=3680 K=8192: n=3 staged=3 | wall 702.74 pack 0.038 upload 0.000 kernel 701.87 download 0.000 epilogue 0.000 other 0.823
+  slice dgemm N M=8192 N=3264 K=8192: n=3 staged=3 | wall 624.59 pack 0.033 upload 0.000 kernel 623.66 download 0.000 epilogue 0.000 other 0.881
+  slice dgemm N M=8192 N=2880 K=8192: n=3 staged=3 | wall 547.85 pack 0.033 upload 0.000 kernel 546.97 download 0.000 epilogue 0.000 other 0.833
+  slice dgemm N M=8192 N=2464 K=8192: n=3 staged=3 | wall 480.01 pack 0.031 upload 0.000 kernel 479.15 download 0.000 epilogue 0.000 other 0.821
+  TOTAL staged=52
+Z2048.np1.d0: 123 GPU-routed calls
+  full  zgemm N M=2048 N=2048 K=2048: n=19 staged=19 | wall 75.19 pack 0.017 upload 0.000 kernel 74.38 download 0.000 epilogue 0.000 other 0.792
+  slice zgemm N M=2048 N=1440 K=2048: n=10 staged=10 | wall 54.93 pack 0.014 upload 0.000 kernel 54.16 download 0.000 epilogue 0.000 other 0.752
+  slice zgemm N M=2048 N=1344 K=2048: n=10 staged=10 | wall 50.68 pack 0.014 upload 0.000 kernel 49.90 download 0.000 epilogue 0.000 other 0.763
+  slice zgemm N M=2048 N=1216 K=2048: n=24 staged=24 | wall 45.16 pack 0.014 upload 0.000 kernel 44.35 download 0.000 epilogue 0.000 other 0.793
+  slice zgemm N M=2048 N=1120 K=2048: n=10 staged=10 | wall 44.17 pack 0.013 upload 0.000 kernel 43.38 download 0.000 epilogue 0.000 other 0.777
+  slice zgemm N M=2048 N=1024 K=2048: n=10 staged=10 | wall 38.70 pack 0.013 upload 0.000 kernel 37.89 download 0.000 epilogue 0.000 other 0.791
+  slice zgemm N M=2048 N=928 K=2048: n=10 staged=10 | wall 36.90 pack 0.013 upload 0.000 kernel 36.10 download 0.000 epilogue 0.000 other 0.789
+  slice zgemm N M=2048 N=832 K=2048: n=10 staged=10 | wall 31.57 pack 0.013 upload 0.000 kernel 30.76 download 0.000 epilogue 0.000 other 0.783
+  slice zgemm N M=2048 N=704 K=2048: n=10 staged=10 | wall 32.19 pack 0.012 upload 0.000 kernel 31.39 download 0.000 epilogue 0.000 other 0.791
+  slice zgemm N M=2048 N=608 K=2048: n=10 staged=10 | wall 28.83 pack 0.012 upload 0.000 kernel 28.01 download 0.000 epilogue 0.000 other 0.817
+  TOTAL staged=123
+Z4096.np1.d0: 93 GPU-routed calls
+  full  zgemm N M=4096 N=4096 K=4096: n=16 staged=16 | wall 582.35 pack 0.033 upload 0.000 kernel 580.23 download 0.000 epilogue 0.000 other 0.867
+  slice zgemm N M=4096 N=2880 K=4096: n=7 staged=7 | wall 432.42 pack 0.030 upload 0.000 kernel 430.18 download 0.000 epilogue 0.000 other 0.819
+  slice zgemm N M=4096 N=2656 K=4096: n=7 staged=7 | wall 383.25 pack 0.025 upload 0.000 kernel 382.43 download 0.000 epilogue 0.000 other 0.869
+  slice zgemm N M=4096 N=2464 K=4096: n=21 staged=21 | wall 359.08 pack 0.024 upload 0.000 kernel 358.23 download 0.000 epilogue 0.000 other 0.840
+  slice zgemm N M=4096 N=2240 K=4096: n=7 staged=7 | wall 325.46 pack 0.025 upload 0.000 kernel 324.60 download 0.000 epilogue 0.000 other 0.848
+  slice zgemm N M=4096 N=2048 K=4096: n=7 staged=7 | wall 297.49 pack 0.024 upload 0.000 kernel 296.64 download 0.000 epilogue 0.000 other 0.813
+  slice zgemm N M=4096 N=1856 K=4096: n=7 staged=7 | wall 270.76 pack 0.024 upload 0.000 kernel 269.93 download 0.000 epilogue 0.000 other 0.804
+  slice zgemm N M=4096 N=1632 K=4096: n=7 staged=7 | wall 242.67 pack 0.023 upload 0.000 kernel 241.77 download 0.000 epilogue 0.000 other 0.840
+  slice zgemm N M=4096 N=1440 K=4096: n=7 staged=7 | wall 216.15 pack 0.022 upload 0.000 kernel 215.27 download 0.000 epilogue 0.000 other 0.829
+  slice zgemm N M=4096 N=1216 K=4096: n=7 staged=7 | wall 180.03 pack 0.022 upload 0.000 kernel 179.09 download 0.000 epilogue 0.000 other 0.848
+  TOTAL staged=93
+Z8192.np1.d0: 52 GPU-routed calls
+  full  zgemm N M=8192 N=8192 K=8192: n=10 staged=10 | wall 4679.82 pack 0.051 upload 0.000 kernel 4614.97 download 0.000 epilogue 0.000 other 53.458
+  slice zgemm N M=8192 N=5728 K=8192: n=4 staged=4 | wall 3452.26 pack 0.047 upload 0.000 kernel 3422.78 download 0.000 epilogue 0.000 other 15.101
+  slice zgemm N M=8192 N=5312 K=8192: n=3 staged=3 | wall 3305.66 pack 0.053 upload 0.000 kernel 3304.71 download 0.000 epilogue 0.000 other 0.889
+  slice zgemm N M=8192 N=4928 K=8192: n=17 staged=17 | wall 2976.06 pack 0.045 upload 0.000 kernel 2975.16 download 0.000 epilogue 0.000 other 0.874
+  slice zgemm N M=8192 N=4512 K=8192: n=3 staged=3 | wall 2695.23 pack 0.044 upload 0.000 kernel 2644.16 download 0.000 epilogue 0.000 other 49.171
+  slice zgemm N M=8192 N=4096 K=8192: n=3 staged=3 | wall 2418.13 pack 0.046 upload 0.000 kernel 2355.77 download 0.000 epilogue 0.000 other 62.295
+  slice zgemm N M=8192 N=3680 K=8192: n=3 staged=3 | wall 2177.52 pack 0.046 upload 0.000 kernel 2112.79 download 0.000 epilogue 0.000 other 60.978
+  slice zgemm N M=8192 N=3264 K=8192: n=3 staged=3 | wall 1908.08 pack 0.048 upload 0.000 kernel 1843.16 download 0.000 epilogue 0.000 other 60.295
+  slice zgemm N M=8192 N=2880 K=8192: n=3 staged=3 | wall 1695.23 pack 0.047 upload 0.000 kernel 1629.52 download 0.000 epilogue 0.000 other 64.422
+  slice zgemm N M=8192 N=2464 K=8192: n=3 staged=3 | wall 1469.03 pack 0.044 upload 0.000 kernel 1414.00 download 0.000 epilogue 0.000 other 0.877
+  TOTAL staged=52
+
+## qe4x2
+RK160.np4.d0: 492 GPU-routed calls
+  full  zgemm C M=160 N=160 K=18432: n=76 staged=76 | wall 27.26 pack 0.002 upload 0.000 kernel 26.06 download 0.000 epilogue 0.000 other 0.341
+  slice zgemm C M=160 N=160 K=11968: n=40 staged=40 | wall 18.57 pack 0.002 upload 0.000 kernel 18.11 download 0.000 epilogue 0.000 other 0.363
+  slice zgemm C M=160 N=160 K=11072: n=40 staged=40 | wall 16.42 pack 0.002 upload 0.000 kernel 15.93 download 0.000 epilogue 0.000 other 0.378
+  slice zgemm C M=160 N=160 K=10112: n=96 staged=96 | wall 14.49 pack 0.002 upload 0.000 kernel 13.43 download 0.000 epilogue 0.000 other 0.371
+  slice zgemm C M=160 N=160 K=9216: n=40 staged=40 | wall 13.72 pack 0.002 upload 0.000 kernel 12.21 download 0.000 epilogue 0.000 other 0.768
+  slice zgemm C M=160 N=160 K=8320: n=40 staged=40 | wall 12.37 pack 0.002 upload 0.000 kernel 11.21 download 0.000 epilogue 0.000 other 0.792
+  slice zgemm C M=160 N=160 K=7360: n=40 staged=40 | wall 11.16 pack 0.002 upload 0.000 kernel 10.09 download 0.000 epilogue 0.000 other 0.808
+  slice zgemm C M=160 N=160 K=6464: n=40 staged=40 | wall 10.65 pack 0.002 upload 0.000 kernel 9.01 download 0.000 epilogue 0.000 other 0.803
+  slice zgemm C M=160 N=160 K=5504: n=40 staged=40 | wall 8.91 pack 0.002 upload 0.000 kernel 7.79 download 0.000 epilogue 0.000 other 0.822
+  slice zgemm C M=160 N=160 K=4608: n=40 staged=40 | wall 7.19 pack 0.002 upload 0.000 kernel 6.42 download 0.000 epilogue 0.000 other 0.824
+  TOTAL staged=492
+RK500.np4.d0: 372 GPU-routed calls
+  full  zgemm C M=500 N=500 K=18277: n=64 staged=64 | wall 196.24 pack 0.004 upload 0.000 kernel 192.28 download 0.000 epilogue 0.000 other 0.634
+  slice zgemm C M=500 N=500 K=11904: n=28 staged=28 | wall 125.50 pack 0.004 upload 0.000 kernel 124.90 download 0.000 epilogue 0.000 other 0.733
+  slice zgemm C M=500 N=500 K=10944: n=28 staged=28 | wall 112.94 pack 0.005 upload 0.000 kernel 112.55 download 0.000 epilogue 0.000 other 0.482
+  slice zgemm C M=500 N=500 K=10048: n=84 staged=84 | wall 105.98 pack 0.005 upload 0.000 kernel 105.02 download 0.000 epilogue 0.000 other 0.689
+  slice zgemm C M=500 N=500 K=9152: n=28 staged=28 | wall 94.43 pack 0.005 upload 0.000 kernel 92.93 download 0.000 epilogue 0.000 other 0.832
+  slice zgemm C M=500 N=500 K=8256: n=28 staged=28 | wall 86.59 pack 0.005 upload 0.000 kernel 85.63 download 0.000 epilogue 0.000 other 0.846
+  slice zgemm C M=500 N=500 K=7296: n=28 staged=28 | wall 81.15 pack 0.005 upload 0.000 kernel 80.51 download 0.000 epilogue 0.000 other 0.817
+  slice zgemm C M=500 N=500 K=6400: n=28 staged=28 | wall 71.83 pack 0.005 upload 0.000 kernel 69.83 download 0.000 epilogue 0.000 other 0.800
+  slice zgemm C M=500 N=500 K=5504: n=28 staged=28 | wall 64.93 pack 0.005 upload 0.000 kernel 64.28 download 0.000 epilogue 0.000 other 0.766
+  slice zgemm C M=500 N=500 K=4544: n=28 staged=28 | wall 48.86 pack 0.005 upload 0.000 kernel 48.01 download 0.000 epilogue 0.000 other 0.794
+  TOTAL staged=372
+UM1000.np4.d0: 372 GPU-routed calls
+  full  zgemm N M=18277 N=160 K=1000: n=64 staged=64 | wall 129.10 pack 0.060 upload 1.139 kernel 124.91 download 0.595 epilogue 0.000 other 0.827
+  slice zgemm N M=11872 N=160 K=1000: n=28 staged=28 | wall 83.91 pack 0.038 upload 1.302 kernel 80.96 download 0.459 epilogue 0.000 other 0.839
+  slice zgemm N M=10976 N=160 K=1000: n=28 staged=28 | wall 77.24 pack 0.035 upload 1.239 kernel 73.94 download 0.470 epilogue 0.000 other 0.830
+  slice zgemm N M=10048 N=160 K=1000: n=28 staged=28 | wall 71.03 pack 0.034 upload 1.193 kernel 68.11 download 0.428 epilogue 0.000 other 0.869
+  slice zgemm N M=9152 N=160 K=1000: n=84 staged=84 | wall 64.71 pack 0.033 upload 0.856 kernel 60.23 download 0.441 epilogue 0.000 other 0.882
+  slice zgemm N M=8224 N=160 K=1000: n=28 staged=28 | wall 55.81 pack 0.030 upload 0.881 kernel 53.27 download 0.435 epilogue 0.000 other 0.924
+  slice zgemm N M=7296 N=160 K=1000: n=28 staged=28 | wall 51.82 pack 0.027 upload 0.768 kernel 47.59 download 0.451 epilogue 0.000 other 0.917
+  slice zgemm N M=6400 N=160 K=1000: n=28 staged=28 | wall 45.53 pack 0.023 upload 0.683 kernel 42.82 download 0.366 epilogue 0.000 other 0.987
+  slice zgemm N M=5472 N=160 K=1000: n=28 staged=28 | wall 40.48 pack 0.021 upload 0.471 kernel 37.99 download 0.338 epilogue 0.000 other 0.908
+  slice zgemm N M=4576 N=160 K=1000: n=28 staged=28 | wall 34.37 pack 0.018 upload 0.488 kernel 31.83 download 0.297 epilogue 0.000 other 0.683
+  TOTAL staged=372
+UM160.np4.d0: 492 GPU-routed calls
+  full  zgemm N M=18277 N=160 K=160: n=76 staged=76 | wall 25.27 pack 0.059 upload 1.200 kernel 20.83 download 0.704 epilogue 0.000 other 0.874
+  slice zgemm N M=11872 N=160 K=160: n=40 staged=40 | wall 16.24 pack 0.042 upload 1.649 kernel 11.89 download 0.908 epilogue 0.000 other 0.963
+  slice zgemm N M=10976 N=160 K=160: n=40 staged=40 | wall 14.47 pack 0.036 upload 0.997 kernel 11.60 download 0.465 epilogue 0.000 other 0.760
+  slice zgemm N M=10048 N=160 K=160: n=40 staged=40 | wall 12.72 pack 0.034 upload 0.831 kernel 9.88 download 0.449 epilogue 0.000 other 0.765
+  slice zgemm N M=9152 N=160 K=160: n=96 staged=96 | wall 11.79 pack 0.032 upload 0.758 kernel 9.67 download 0.451 epilogue 0.000 other 0.797
+  slice zgemm N M=8224 N=160 K=160: n=40 staged=40 | wall 10.15 pack 0.030 upload 0.718 kernel 7.07 download 0.471 epilogue 0.000 other 0.872
+  slice zgemm N M=7296 N=160 K=160: n=40 staged=40 | wall 8.82 pack 0.026 upload 0.687 kernel 5.93 download 0.427 epilogue 0.000 other 0.892
+  slice zgemm N M=6400 N=160 K=160: n=40 staged=40 | wall 8.25 pack 0.024 upload 0.548 kernel 5.57 download 0.414 epilogue 0.000 other 0.897
+  slice zgemm N M=5472 N=160 K=160: n=40 staged=40 | wall 6.89 pack 0.020 upload 0.492 kernel 4.36 download 0.333 epilogue 0.000 other 0.782
+  slice zgemm N M=4576 N=160 K=160: n=40 staged=40 | wall 5.99 pack 0.018 upload 0.441 kernel 4.51 download 0.320 epilogue 0.000 other 0.850
+  TOTAL staged=492
+UM320.np4.d0: 492 GPU-routed calls
+  full  zgemm N M=18277 N=160 K=320: n=76 staged=76 | wall 44.59 pack 0.062 upload 1.238 kernel 41.00 download 0.736 epilogue 0.000 other 0.728
+  slice zgemm N M=11872 N=160 K=320: n=40 staged=40 | wall 28.04 pack 0.039 upload 0.891 kernel 24.90 download 0.475 epilogue 0.000 other 0.853
+  slice zgemm N M=10976 N=160 K=320: n=40 staged=40 | wall 25.47 pack 0.036 upload 0.967 kernel 22.75 download 0.447 epilogue 0.000 other 0.770
+  slice zgemm N M=10048 N=160 K=320: n=40 staged=40 | wall 23.21 pack 0.033 upload 1.047 kernel 20.87 download 0.418 epilogue 0.000 other 0.726
+  slice zgemm N M=9152 N=160 K=320: n=96 staged=96 | wall 21.36 pack 0.032 upload 0.766 kernel 18.19 download 0.471 epilogue 0.000 other 0.821
+  slice zgemm N M=8224 N=160 K=320: n=40 staged=40 | wall 19.06 pack 0.029 upload 0.861 kernel 16.85 download 0.423 epilogue 0.000 other 0.834
+  slice zgemm N M=7296 N=160 K=320: n=40 staged=40 | wall 17.21 pack 0.026 upload 0.667 kernel 14.21 download 0.491 epilogue 0.000 other 0.894
+  slice zgemm N M=6400 N=160 K=320: n=40 staged=40 | wall 15.19 pack 0.023 upload 0.587 kernel 13.23 download 0.366 epilogue 0.000 other 0.826
+  slice zgemm N M=5472 N=160 K=320: n=40 staged=40 | wall 12.62 pack 0.020 upload 0.597 kernel 10.46 download 0.318 epilogue 0.000 other 0.628
+  slice zgemm N M=4576 N=160 K=320: n=40 staged=40 | wall 10.91 pack 0.018 upload 0.484 kernel 8.78 download 0.299 epilogue 0.000 other 0.916
+  TOTAL staged=492
+UN1000.np4.d0: 344 GPU-routed calls
+  full  zgemm N M=18277 N=500 K=1000: n=64 staged=64 | wall 390.57 pack 0.059 upload 3.790 kernel 371.80 download 1.945 epilogue 0.000 other 0.911
+  slice zgemm N M=18277 N=352 K=1000: n=28 staged=28 | wall 267.91 pack 0.060 upload 3.039 kernel 259.35 download 1.380 epilogue 0.000 other 0.849
+  slice zgemm N M=18277 N=320 K=1000: n=28 staged=28 | wall 243.50 pack 0.058 upload 3.002 kernel 231.45 download 1.293 epilogue 0.000 other 0.895
+  slice zgemm N M=18277 N=288 K=1000: n=28 staged=28 | wall 202.20 pack 0.059 upload 2.647 kernel 196.48 download 1.084 epilogue 0.000 other 0.887
+  slice zgemm N M=18277 N=256 K=1000: n=84 staged=84 | wall 196.24 pack 0.063 upload 2.441 kernel 186.12 download 1.157 epilogue 0.000 other 0.947
+  slice zgemm N M=18277 N=224 K=1000: n=28 staged=28 | wall 180.40 pack 0.064 upload 1.844 kernel 173.53 download 1.351 epilogue 0.000 other 1.194
+  slice zgemm N M=18277 N=192 K=1000: n=28 staged=28 | wall 153.72 pack 0.063 upload 1.670 kernel 147.35 download 1.282 epilogue 0.000 other 0.953
+  slice zgemm N M=18277 N=160 K=1000: n=28 staged=28 | wall 130.28 pack 0.062 upload 1.269 kernel 122.91 download 0.937 epilogue 0.000 other 0.943
+  slice zgemm N M=18277 N=128 K=1000: n=28 staged=28 | wall 105.97 pack 0.062 upload 1.167 kernel 101.74 download 0.815 epilogue 0.000 other 0.970
+  TOTAL staged=344
+UN512.np4.d0: 344 GPU-routed calls
+  full  zgemm N M=18277 N=500 K=512: n=64 staged=64 | wall 206.26 pack 0.059 upload 4.400 kernel 197.41 download 1.986 epilogue 0.000 other 0.857
+  slice zgemm N M=18277 N=352 K=512: n=28 staged=28 | wall 134.84 pack 0.057 upload 2.993 kernel 128.85 download 1.111 epilogue 0.000 other 0.910
+  slice zgemm N M=18277 N=320 K=512: n=28 staged=28 | wall 126.72 pack 0.059 upload 2.357 kernel 119.61 download 1.262 epilogue 0.000 other 0.919
+  slice zgemm N M=18277 N=288 K=512: n=28 staged=28 | wall 111.25 pack 0.059 upload 2.306 kernel 103.27 download 1.184 epilogue 0.000 other 0.971
+  slice zgemm N M=18277 N=256 K=512: n=84 staged=84 | wall 100.82 pack 0.061 upload 1.955 kernel 90.99 download 1.300 epilogue 0.000 other 0.972
+  slice zgemm N M=18277 N=224 K=512: n=28 staged=28 | wall 90.86 pack 0.064 upload 1.662 kernel 87.29 download 1.117 epilogue 0.000 other 0.978
+  slice zgemm N M=18277 N=192 K=512: n=28 staged=28 | wall 75.36 pack 0.064 upload 1.449 kernel 60.09 download 1.266 epilogue 0.000 other 1.104
+  slice zgemm N M=18277 N=160 K=512: n=28 staged=28 | wall 69.06 pack 0.063 upload 1.314 kernel 63.73 download 1.046 epilogue 0.000 other 0.935
+  slice zgemm N M=18277 N=128 K=512: n=28 staged=28 | wall 57.30 pack 0.062 upload 1.075 kernel 53.73 download 0.856 epilogue 0.000 other 0.987
+  TOTAL staged=344
+
+## qe1x8
+RK160.np1.d0: 123 GPU-routed calls
+  full  zgemm C M=160 N=160 K=18432: n=19 staged=19 | wall 8.46 pack 0.002 upload 0.000 kernel 8.17 download 0.000 epilogue 0.000 other 0.289
+  slice zgemm C M=160 N=160 K=11968: n=10 staged=10 | wall 5.58 pack 0.002 upload 0.000 kernel 5.31 download 0.000 epilogue 0.000 other 0.263
+  slice zgemm C M=160 N=160 K=11072: n=10 staged=10 | wall 5.19 pack 0.002 upload 0.000 kernel 4.92 download 0.000 epilogue 0.000 other 0.267
+  slice zgemm C M=160 N=160 K=10112: n=24 staged=24 | wall 4.78 pack 0.002 upload 0.000 kernel 4.49 download 0.000 epilogue 0.000 other 0.281
+  slice zgemm C M=160 N=160 K=9216: n=10 staged=10 | wall 4.60 pack 0.002 upload 0.000 kernel 4.10 download 0.000 epilogue 0.000 other 0.484
+  slice zgemm C M=160 N=160 K=8320: n=10 staged=10 | wall 4.38 pack 0.002 upload 0.000 kernel 3.71 download 0.000 epilogue 0.000 other 0.662
+  slice zgemm C M=160 N=160 K=7360: n=10 staged=10 | wall 3.95 pack 0.002 upload 0.000 kernel 3.29 download 0.000 epilogue 0.000 other 0.654
+  slice zgemm C M=160 N=160 K=6464: n=10 staged=10 | wall 3.56 pack 0.002 upload 0.000 kernel 2.89 download 0.000 epilogue 0.000 other 0.662
+  slice zgemm C M=160 N=160 K=5504: n=10 staged=10 | wall 3.14 pack 0.002 upload 0.000 kernel 2.47 download 0.000 epilogue 0.000 other 0.660
+  slice zgemm C M=160 N=160 K=4608: n=10 staged=10 | wall 2.76 pack 0.002 upload 0.000 kernel 2.08 download 0.000 epilogue 0.000 other 0.668
+  TOTAL staged=123
+RK500.np1.d0: 93 GPU-routed calls
+  full  zgemm C M=500 N=500 K=18277: n=16 staged=16 | wall 53.32 pack 0.005 upload 0.000 kernel 52.91 download 0.000 epilogue 0.000 other 0.357
+  slice zgemm C M=500 N=500 K=11904: n=7 staged=7 | wall 35.06 pack 0.005 upload 0.000 kernel 34.32 download 0.000 epilogue 0.000 other 0.754
+  slice zgemm C M=500 N=500 K=10944: n=7 staged=7 | wall 32.30 pack 0.005 upload 0.000 kernel 31.54 download 0.000 epilogue 0.000 other 0.767
+  slice zgemm C M=500 N=500 K=10048: n=21 staged=21 | wall 29.67 pack 0.004 upload 0.000 kernel 28.92 download 0.000 epilogue 0.000 other 0.761
+  slice zgemm C M=500 N=500 K=9152: n=7 staged=7 | wall 27.06 pack 0.005 upload 0.000 kernel 26.29 download 0.000 epilogue 0.000 other 0.748
+  slice zgemm C M=500 N=500 K=8256: n=7 staged=7 | wall 24.54 pack 0.005 upload 0.000 kernel 23.77 download 0.000 epilogue 0.000 other 0.775
+  slice zgemm C M=500 N=500 K=7296: n=7 staged=7 | wall 21.74 pack 0.005 upload 0.000 kernel 20.95 download 0.000 epilogue 0.000 other 0.791
+  slice zgemm C M=500 N=500 K=6400: n=7 staged=7 | wall 19.20 pack 0.005 upload 0.000 kernel 18.40 download 0.000 epilogue 0.000 other 0.786
+  slice zgemm C M=500 N=500 K=5504: n=7 staged=7 | wall 16.59 pack 0.005 upload 0.000 kernel 15.77 download 0.000 epilogue 0.000 other 0.800
+  slice zgemm C M=500 N=500 K=4544: n=7 staged=7 | wall 13.80 pack 0.005 upload 0.000 kernel 13.02 download 0.000 epilogue 0.000 other 0.769
+  TOTAL staged=93
+UM1000.np1.d0: 93 GPU-routed calls
+  full  zgemm N M=18277 N=160 K=1000: n=16 staged=16 | wall 34.89 pack 0.058 upload 0.847 kernel 32.39 download 0.790 epilogue 0.000 other 0.764
+  slice zgemm N M=11872 N=160 K=1000: n=7 staged=7 | wall 23.28 pack 0.039 upload 0.665 kernel 21.03 download 0.820 epilogue 0.000 other 0.738
+  slice zgemm N M=10976 N=160 K=1000: n=7 staged=7 | wall 21.71 pack 0.034 upload 0.664 kernel 19.55 download 0.773 epilogue 0.000 other 0.760
+  slice zgemm N M=10048 N=160 K=1000: n=21 staged=21 | wall 19.82 pack 0.034 upload 0.533 kernel 17.89 download 0.550 epilogue 0.000 other 0.760
+  slice zgemm N M=9152 N=160 K=1000: n=7 staged=7 | wall 18.24 pack 0.035 upload 0.531 kernel 16.42 download 0.545 epilogue 0.000 other 0.753
+  slice zgemm N M=8224 N=160 K=1000: n=7 staged=7 | wall 16.57 pack 0.032 upload 0.490 kernel 14.77 download 0.533 epilogue 0.000 other 0.742
+  slice zgemm N M=7296 N=160 K=1000: n=7 staged=7 | wall 14.79 pack 0.029 upload 0.443 kernel 13.10 download 0.474 epilogue 0.000 other 0.744
+  slice zgemm N M=6400 N=160 K=1000: n=7 staged=7 | wall 12.89 pack 0.026 upload 0.390 kernel 11.30 download 0.427 epilogue 0.000 other 0.768
+  slice zgemm N M=5472 N=160 K=1000: n=7 staged=7 | wall 11.44 pack 0.022 upload 0.354 kernel 9.90 download 0.379 epilogue 0.000 other 0.772
+  slice zgemm N M=4576 N=160 K=1000: n=7 staged=7 | wall 9.89 pack 0.019 upload 0.306 kernel 8.48 download 0.338 epilogue 0.000 other 0.746
+  TOTAL staged=93
+UM160.np1.d0: 123 GPU-routed calls
+  full  zgemm N M=18277 N=160 K=160: n=19 staged=19 | wall 11.09 pack 0.058 upload 0.853 kernel 8.24 download 0.792 epilogue 0.000 other 0.692
+  slice zgemm N M=11872 N=160 K=160: n=10 staged=10 | wall 8.90 pack 0.038 upload 0.704 kernel 6.79 download 0.704 epilogue 0.000 other 0.665
+  slice zgemm N M=10976 N=160 K=160: n=10 staged=10 | wall 7.99 pack 0.036 upload 0.614 kernel 6.00 download 0.616 epilogue 0.000 other 0.668
+  slice zgemm N M=10048 N=160 K=160: n=10 staged=10 | wall 7.28 pack 0.032 upload 0.614 kernel 5.17 download 0.730 epilogue 0.000 other 0.664
+  slice zgemm N M=9152 N=160 K=160: n=10 staged=10 | wall 6.21 pack 0.031 upload 0.591 kernel 4.25 download 0.606 epilogue 0.000 other 0.665
+  slice zgemm N M=8224 N=160 K=160: n=10 staged=10 | wall 5.48 pack 0.027 upload 0.476 kernel 3.80 download 0.513 epilogue 0.000 other 0.658
+  slice zgemm N M=7296 N=160 K=160: n=24 staged=24 | wall 5.04 pack 0.026 upload 0.483 kernel 3.39 download 0.463 epilogue 0.000 other 0.686
+  slice zgemm N M=6400 N=160 K=160: n=10 staged=10 | wall 4.27 pack 0.025 upload 0.415 kernel 2.78 download 0.431 epilogue 0.000 other 0.658
+  slice zgemm N M=5472 N=160 K=160: n=10 staged=10 | wall 3.89 pack 0.022 upload 0.373 kernel 2.44 download 0.375 epilogue 0.000 other 0.666
+  slice zgemm N M=4576 N=160 K=160: n=10 staged=10 | wall 3.54 pack 0.019 upload 0.309 kernel 2.22 download 0.335 epilogue 0.000 other 0.658
+  TOTAL staged=123
+UM320.np1.d0: 123 GPU-routed calls
+  full  zgemm N M=18277 N=160 K=320: n=19 staged=19 | wall 13.52 pack 0.059 upload 0.858 kernel 10.94 download 0.796 epilogue 0.000 other 0.767
+  slice zgemm N M=11872 N=160 K=320: n=10 staged=10 | wall 9.06 pack 0.037 upload 0.541 kernel 7.12 download 0.473 epilogue 0.000 other 0.716
+  slice zgemm N M=10976 N=160 K=320: n=10 staged=10 | wall 8.47 pack 0.035 upload 0.481 kernel 6.68 download 0.474 epilogue 0.000 other 0.681
+  slice zgemm N M=10048 N=160 K=320: n=10 staged=10 | wall 8.00 pack 0.034 upload 0.459 kernel 6.20 download 0.555 epilogue 0.000 other 0.704
+  slice zgemm N M=9152 N=160 K=320: n=24 staged=24 | wall 7.40 pack 0.032 upload 0.528 kernel 5.56 download 0.523 epilogue 0.000 other 0.706
+  slice zgemm N M=8224 N=160 K=320: n=10 staged=10 | wall 6.71 pack 0.032 upload 0.415 kernel 5.18 download 0.385 epilogue 0.000 other 0.695
+  slice zgemm N M=7296 N=160 K=320: n=10 staged=10 | wall 6.07 pack 0.028 upload 0.416 kernel 4.47 download 0.375 epilogue 0.000 other 0.688
+  slice zgemm N M=6400 N=160 K=320: n=10 staged=10 | wall 5.46 pack 0.025 upload 0.386 kernel 3.87 download 0.402 epilogue 0.000 other 0.703
+  slice zgemm N M=5472 N=160 K=320: n=10 staged=10 | wall 4.83 pack 0.023 upload 0.289 kernel 3.39 download 0.277 epilogue 0.000 other 0.706
+  slice zgemm N M=4576 N=160 K=320: n=10 staged=10 | wall 4.26 pack 0.018 upload 0.271 kernel 2.91 download 0.281 epilogue 0.000 other 0.686
+  TOTAL staged=123
+UN1000.np1.d0: 86 GPU-routed calls
+  full  zgemm N M=18277 N=500 K=1000: n=16 staged=16 | wall 101.60 pack 0.065 upload 1.601 kernel 96.93 download 1.883 epilogue 0.000 other 0.799
+  slice zgemm N M=18277 N=352 K=1000: n=7 staged=7 | wall 71.39 pack 0.066 upload 1.191 kernel 67.72 download 1.431 epilogue 0.000 other 0.803
+  slice zgemm N M=18277 N=320 K=1000: n=7 staged=7 | wall 65.16 pack 0.066 upload 1.098 kernel 61.97 download 0.980 epilogue 0.000 other 0.765
+  slice zgemm N M=18277 N=288 K=1000: n=21 staged=21 | wall 59.16 pack 0.055 upload 1.159 kernel 56.09 download 1.125 epilogue 0.000 other 0.777
+  slice zgemm N M=18277 N=256 K=1000: n=7 staged=7 | wall 52.88 pack 0.056 upload 1.015 kernel 50.28 download 0.833 epilogue 0.000 other 0.761
+  slice zgemm N M=18277 N=224 K=1000: n=7 staged=7 | wall 46.76 pack 0.055 upload 0.889 kernel 44.30 download 0.748 epilogue 0.000 other 0.775
+  slice zgemm N M=18277 N=192 K=1000: n=7 staged=7 | wall 40.98 pack 0.056 upload 0.845 kernel 38.29 download 0.662 epilogue 0.000 other 0.776
+  slice zgemm N M=18277 N=160 K=1000: n=7 staged=7 | wall 35.17 pack 0.057 upload 0.732 kernel 32.57 download 0.604 epilogue 0.000 other 0.797
+  slice zgemm N M=18277 N=128 K=1000: n=7 staged=7 | wall 32.75 pack 0.056 upload 0.655 kernel 30.74 download 0.525 epilogue 0.000 other 0.766
+  TOTAL staged=86
+UN512.np1.d0: 86 GPU-routed calls
+  full  zgemm N M=18277 N=500 K=512: n=16 staged=16 | wall 55.69 pack 0.075 upload 1.842 kernel 51.00 download 1.707 epilogue 0.000 other 0.793
+  slice zgemm N M=18277 N=352 K=512: n=7 staged=7 | wall 38.92 pack 0.066 upload 1.157 kernel 35.55 download 1.387 epilogue 0.000 other 0.793
+  slice zgemm N M=18277 N=320 K=512: n=7 staged=7 | wall 35.21 pack 0.065 upload 1.062 kernel 32.25 download 0.968 epilogue 0.000 other 0.763
+  slice zgemm N M=18277 N=288 K=512: n=7 staged=7 | wall 32.26 pack 0.054 upload 0.963 kernel 29.27 download 1.112 epilogue 0.000 other 0.766
+  slice zgemm N M=18277 N=256 K=512: n=21 staged=21 | wall 28.98 pack 0.056 upload 0.956 kernel 26.27 download 0.855 epilogue 0.000 other 0.754
+  slice zgemm N M=18277 N=224 K=512: n=7 staged=7 | wall 25.61 pack 0.056 upload 0.866 kernel 23.13 download 0.749 epilogue 0.000 other 0.756
+  slice zgemm N M=18277 N=192 K=512: n=7 staged=7 | wall 22.19 pack 0.055 upload 0.767 kernel 19.94 download 0.657 epilogue 0.000 other 0.767
+  slice zgemm N M=18277 N=160 K=512: n=7 staged=7 | wall 18.99 pack 0.054 upload 0.719 kernel 16.85 download 0.585 epilogue 0.000 other 0.775
+  slice zgemm N M=18277 N=128 K=512: n=7 staged=7 | wall 15.70 pack 0.056 upload 0.632 kernel 13.72 download 0.509 epilogue 0.000 other 0.787
+  TOTAL staged=86
+
+## qelike4x2
+RK500.np4.d1: 372 GPU-routed calls
+  full  zgemm C M=500 N=500 K=18277: n=64 host=1 staged=63 | wall 194.86 pack 0.005 upload 0.000 kernel 192.03 download 0.000 epilogue 0.000 other 0.688
+  slice zgemm C M=500 N=500 K=11904: n=28 staged=28 | wall 126.02 pack 0.005 upload 0.000 kernel 125.47 download 0.000 epilogue 0.000 other 0.447
+  slice zgemm C M=500 N=500 K=10944: n=28 staged=28 | wall 111.35 pack 0.005 upload 0.000 kernel 110.96 download 0.000 epilogue 0.000 other 0.520
+  slice zgemm C M=500 N=500 K=10048: n=84 staged=84 | wall 104.51 pack 0.005 upload 0.000 kernel 103.44 download 0.000 epilogue 0.000 other 0.748
+  slice zgemm C M=500 N=500 K=9152: n=28 staged=28 | wall 92.47 pack 0.005 upload 0.000 kernel 91.74 download 0.000 epilogue 0.000 other 0.759
+  slice zgemm C M=500 N=500 K=8256: n=28 staged=28 | wall 87.87 pack 0.005 upload 0.000 kernel 87.06 download 0.000 epilogue 0.000 other 0.810
+  slice zgemm C M=500 N=500 K=7296: n=28 staged=28 | wall 80.73 pack 0.005 upload 0.000 kernel 79.99 download 0.000 epilogue 0.000 other 0.822
+  slice zgemm C M=500 N=500 K=6400: n=28 staged=28 | wall 70.60 pack 0.005 upload 0.000 kernel 69.72 download 0.000 epilogue 0.000 other 0.792
+  slice zgemm C M=500 N=500 K=5504: n=28 host=28 | wall 126.30 pack 13.066 upload 10.455 kernel 93.58 download 0.423 epilogue 0.531 other 6.294
+  slice zgemm C M=500 N=500 K=4544: n=28 host=28 | wall 106.36 pack 10.211 upload 8.464 kernel 77.69 download 0.458 epilogue 0.534 other 4.520
+  TOTAL host=57 staged=315
+UN1000.np4.d1: 344 GPU-routed calls
+  full  zgemm N M=18277 N=500 K=1000: n=64 host=64 | wall 764.29 pack 48.816 upload 24.962 kernel 595.55 download 4.762 epilogue 35.135 other 34.880
+  slice zgemm N M=18277 N=352 K=1000: n=28 host=28 | wall 558.24 pack 49.068 upload 24.665 kernel 396.93 download 3.693 epilogue 25.790 other 16.985
+  slice zgemm N M=18277 N=320 K=1000: n=28 host=28 | wall 468.40 pack 48.938 upload 23.511 kernel 344.55 download 3.124 epilogue 28.195 other 13.040
+  slice zgemm N M=18277 N=288 K=1000: n=28 host=28 | wall 424.88 pack 52.990 upload 24.402 kernel 299.91 download 3.008 epilogue 20.156 other 12.028
+  slice zgemm N M=18277 N=256 K=1000: n=28 host=28 | wall 431.79 pack 58.089 upload 25.899 kernel 304.42 download 2.767 epilogue 27.063 other 10.501
+  slice zgemm N M=18277 N=224 K=1000: n=28 host=28 | wall 392.39 pack 61.769 upload 26.481 kernel 265.28 download 2.498 epilogue 18.080 other 12.144
+  slice zgemm N M=18277 N=192 K=1000: n=28 host=28 | wall 374.43 pack 76.141 upload 28.738 kernel 221.81 download 2.283 epilogue 16.578 other 15.889
+  slice zgemm N M=18277 N=160 K=1000: n=84 host=84 | wall 322.86 pack 80.716 upload 28.449 kernel 171.32 download 1.974 epilogue 14.862 other 12.081
+  slice zgemm N M=18277 N=128 K=1000: n=28 host=28 | wall 297.02 pack 82.479 upload 30.805 kernel 146.69 download 1.894 epilogue 17.808 other 10.980
+  TOTAL host=344
+UN512.np4.d1: 344 GPU-routed calls
+  full  zgemm N M=18277 N=500 K=512: n=64 host=64 | wall 459.29 pack 81.657 upload 16.376 kernel 311.03 download 5.585 epilogue 35.921 other 9.746
+  slice zgemm N M=18277 N=352 K=512: n=28 host=28 | wall 337.80 pack 78.124 upload 14.756 kernel 200.54 download 3.990 epilogue 26.566 other 6.961
+  slice zgemm N M=18277 N=320 K=512: n=28 host=28 | wall 307.16 pack 78.502 upload 13.996 kernel 174.12 download 3.680 epilogue 24.974 other 7.156
+  slice zgemm N M=18277 N=288 K=512: n=28 host=28 | wall 303.33 pack 79.372 upload 13.946 kernel 169.56 download 3.038 epilogue 22.241 other 7.235
+  slice zgemm N M=18277 N=256 K=512: n=28 host=28 | wall 292.92 pack 80.671 upload 14.063 kernel 152.47 download 2.949 epilogue 29.498 other 6.065
+  slice zgemm N M=18277 N=224 K=512: n=28 host=28 | wall 266.20 pack 89.324 upload 13.581 kernel 126.50 download 2.553 epilogue 18.373 other 7.226
+  slice zgemm N M=18277 N=192 K=512: n=28 host=28 | wall 252.83 pack 94.083 upload 13.479 kernel 110.06 download 2.167 epilogue 17.327 other 7.453
+  slice zgemm N M=18277 N=160 K=512: n=28 host=28 | wall 239.32 pack 109.131 upload 13.523 kernel 89.05 download 1.845 epilogue 11.488 other 7.758
+  slice zgemm N M=18277 N=128 K=512: n=84 host=84 | wall 228.22 pack 115.073 upload 14.020 kernel 72.39 download 1.681 epilogue 15.073 other 7.536
+  TOTAL host=344
+
+## qelike4x2-low
+UN1000L.np4.d1: 260 GPU-routed calls
+  full  zgemm N M=18277 N=500 K=1000: n=64 host=64 | wall 840.66 pack 51.802 upload 27.358 kernel 666.70 download 4.984 epilogue 37.064 other 25.846
+  slice zgemm N M=18277 N=160 K=1000: n=84 host=84 | wall 357.73 pack 95.416 upload 34.806 kernel 175.39 download 2.578 epilogue 17.966 other 14.900
+  slice zgemm N M=18277 N=128 K=1000: n=28 host=28 | wall 292.65 pack 85.861 upload 29.265 kernel 126.91 download 2.109 epilogue 18.849 other 11.620
+  slice zgemm N M=18277 N=96 K=1000: n=28 host=28 | wall 250.38 pack 86.395 upload 27.665 kernel 98.62 download 2.192 epilogue 15.013 other 12.768
+  slice zgemm N M=18277 N=64 K=1000: n=28 host=28 | wall 235.25 pack 100.937 upload 33.279 kernel 69.52 download 1.736 epilogue 12.898 other 12.148
+  slice zgemm N M=18277 N=32 K=1000: n=28 host=28 | wall 191.97 pack 97.266 upload 29.892 kernel 34.70 download 1.528 epilogue 5.099 other 11.114
+  TOTAL host=260
+UN512L.np4.d1: 260 GPU-routed calls
+  full  zgemm N M=18277 N=500 K=512: n=64 host=64 | wall 459.76 pack 79.309 upload 16.397 kernel 303.66 download 5.650 epilogue 37.157 other 8.981
+  slice zgemm N M=18277 N=160 K=512: n=28 host=28 | wall 238.17 pack 107.556 upload 14.009 kernel 93.49 download 1.915 epilogue 12.084 other 6.032
+  slice zgemm N M=18277 N=128 K=512: n=28 host=28 | wall 230.25 pack 120.551 upload 13.530 kernel 71.73 download 1.432 epilogue 12.780 other 6.214
+  slice zgemm N M=18277 N=96 K=512: n=84 host=84 | wall 218.27 pack 131.896 upload 14.936 kernel 47.08 download 1.446 epilogue 9.595 other 6.996
+  slice zgemm N M=18277 N=64 K=512: n=28 host=28 | wall 199.30 pack 131.939 upload 14.489 kernel 28.26 download 1.620 epilogue 10.484 other 7.781
+  slice zgemm N M=18277 N=32 K=512: n=28 host=28 | wall 186.50 pack 134.003 upload 14.797 kernel 17.75 download 1.077 epilogue 4.491 other 6.927
+  TOTAL host=260
+
+## noreg4x2
+RK500.np4.d0: 372 GPU-routed calls
+  full  zgemm C M=500 N=500 K=18277: n=64 staged=64 | wall 202.69 pack 0.005 upload 10.693 kernel 188.27 download 0.118 epilogue 0.000 other 0.752
+  slice zgemm C M=500 N=500 K=11904: n=28 staged=28 | wall 129.04 pack 0.004 upload 9.155 kernel 115.53 download 0.117 epilogue 0.000 other 1.075
+  slice zgemm C M=500 N=500 K=10944: n=28 staged=28 | wall 118.35 pack 0.004 upload 8.213 kernel 109.07 download 0.117 epilogue 0.000 other 0.872
+  slice zgemm C M=500 N=500 K=10048: n=84 staged=84 | wall 110.61 pack 0.004 upload 7.988 kernel 99.49 download 0.126 epilogue 0.000 other 0.856
+  slice zgemm C M=500 N=500 K=9152: n=28 staged=28 | wall 102.66 pack 0.005 upload 8.110 kernel 92.01 download 0.137 epilogue 0.000 other 0.849
+  slice zgemm C M=500 N=500 K=8256: n=28 staged=28 | wall 92.29 pack 0.005 upload 6.798 kernel 84.80 download 0.137 epilogue 0.000 other 0.887
+  slice zgemm C M=500 N=500 K=7296: n=28 staged=28 | wall 84.09 pack 0.005 upload 5.898 kernel 77.97 download 0.141 epilogue 0.000 other 0.645
+  slice zgemm C M=500 N=500 K=6400: n=28 staged=28 | wall 77.43 pack 0.005 upload 5.160 kernel 71.19 download 0.138 epilogue 0.000 other 0.827
+  slice zgemm C M=500 N=500 K=5504: n=28 staged=28 | wall 66.46 pack 0.005 upload 4.859 kernel 60.27 download 0.142 epilogue 0.000 other 0.834
+  slice zgemm C M=500 N=500 K=4544: n=28 staged=28 | wall 56.00 pack 0.005 upload 4.248 kernel 50.49 download 0.143 epilogue 0.000 other 0.849
+  TOTAL staged=372
+UM160.np4.d0: 492 GPU-routed calls
+  full  zgemm N M=18277 N=160 K=160: n=76 staged=76 | wall 26.34 pack 0.058 upload 2.763 kernel 20.98 download 0.714 epilogue 0.000 other 0.858
+  slice zgemm N M=11872 N=160 K=160: n=40 staged=40 | wall 17.25 pack 0.043 upload 3.169 kernel 11.32 download 1.148 epilogue 0.000 other 0.880
+  slice zgemm N M=10976 N=160 K=160: n=40 staged=40 | wall 14.24 pack 0.037 upload 1.842 kernel 10.35 download 0.456 epilogue 0.000 other 0.864
+  slice zgemm N M=10048 N=160 K=160: n=40 staged=40 | wall 13.38 pack 0.033 upload 1.908 kernel 9.33 download 0.437 epilogue 0.000 other 0.839
+  slice zgemm N M=9152 N=160 K=160: n=96 staged=96 | wall 12.48 pack 0.032 upload 1.703 kernel 8.80 download 0.470 epilogue 0.000 other 0.860
+  slice zgemm N M=8224 N=160 K=160: n=40 staged=40 | wall 11.07 pack 0.031 upload 1.750 kernel 6.72 download 0.394 epilogue 0.000 other 1.030
+  slice zgemm N M=7296 N=160 K=160: n=40 staged=40 | wall 9.61 pack 0.027 upload 1.299 kernel 5.21 download 0.452 epilogue 0.000 other 0.972
+  slice zgemm N M=6400 N=160 K=160: n=40 staged=40 | wall 8.40 pack 0.024 upload 1.190 kernel 5.94 download 0.400 epilogue 0.000 other 0.828
+  slice zgemm N M=5472 N=160 K=160: n=40 staged=40 | wall 8.00 pack 0.020 upload 1.003 kernel 4.94 download 0.403 epilogue 0.000 other 0.841
+  slice zgemm N M=4576 N=160 K=160: n=40 staged=40 | wall 5.95 pack 0.017 upload 0.820 kernel 3.64 download 0.344 epilogue 0.000 other 0.866
+  TOTAL staged=492
+UN1000.np4.d0: 344 GPU-routed calls
+  full  zgemm N M=18277 N=500 K=1000: n=64 staged=64 | wall 402.61 pack 0.060 upload 14.332 kernel 378.62 download 1.833 epilogue 0.000 other 0.889
+  slice zgemm N M=18277 N=352 K=1000: n=28 staged=28 | wall 284.65 pack 0.060 upload 14.319 kernel 265.81 download 1.356 epilogue 0.000 other 0.942
+  slice zgemm N M=18277 N=320 K=1000: n=28 staged=28 | wall 269.15 pack 0.058 upload 15.406 kernel 240.14 download 1.267 epilogue 0.000 other 1.604
+  slice zgemm N M=18277 N=288 K=1000: n=28 staged=28 | wall 244.60 pack 0.064 upload 15.774 kernel 219.53 download 1.122 epilogue 0.000 other 1.169
+  slice zgemm N M=18277 N=256 K=1000: n=84 staged=84 | wall 203.65 pack 0.061 upload 13.258 kernel 183.47 download 1.139 epilogue 0.000 other 1.434
+  slice zgemm N M=18277 N=224 K=1000: n=28 staged=28 | wall 183.06 pack 0.063 upload 15.285 kernel 163.80 download 1.286 epilogue 0.000 other 1.662
+  slice zgemm N M=18277 N=192 K=1000: n=28 staged=28 | wall 156.77 pack 0.064 upload 12.200 kernel 140.28 download 1.160 epilogue 0.000 other 1.713
+  slice zgemm N M=18277 N=160 K=1000: n=28 staged=28 | wall 132.39 pack 0.068 upload 13.006 kernel 111.90 download 1.122 epilogue 0.000 other 1.618
+  slice zgemm N M=18277 N=128 K=1000: n=28 staged=28 | wall 112.87 pack 0.066 upload 13.447 kernel 93.93 download 0.947 epilogue 0.000 other 1.767
+  TOTAL staged=344
+
+## power4x2
+RK500.np4.d0: 1356 GPU-routed calls
+  full  zgemm C M=500 N=500 K=18277: n=412 staged=412 | wall 194.37 pack 0.004 upload 0.000 kernel 193.03 download 0.000 epilogue 0.000 other 0.291
+  slice zgemm C M=500 N=500 K=11904: n=28 staged=28 | wall 126.28 pack 0.005 upload 0.000 kernel 125.57 download 0.000 epilogue 0.000 other 0.643
+  slice zgemm C M=500 N=500 K=10944: n=28 staged=28 | wall 116.43 pack 0.005 upload 0.000 kernel 115.81 download 0.000 epilogue 0.000 other 0.399
+  slice zgemm C M=500 N=500 K=10048: n=720 staged=720 | wall 107.01 pack 0.005 upload 0.000 kernel 106.02 download 0.000 epilogue 0.000 other 0.479
+  slice zgemm C M=500 N=500 K=9152: n=28 staged=28 | wall 95.02 pack 0.005 upload 0.000 kernel 94.53 download 0.000 epilogue 0.000 other 0.705
+  slice zgemm C M=500 N=500 K=8256: n=28 staged=28 | wall 87.68 pack 0.005 upload 0.000 kernel 86.09 download 0.000 epilogue 0.000 other 0.799
+  slice zgemm C M=500 N=500 K=7296: n=28 staged=28 | wall 82.17 pack 0.005 upload 0.000 kernel 80.88 download 0.000 epilogue 0.000 other 0.730
+  slice zgemm C M=500 N=500 K=6400: n=28 staged=28 | wall 71.05 pack 0.005 upload 0.000 kernel 69.38 download 0.000 epilogue 0.000 other 0.784
+  slice zgemm C M=500 N=500 K=5504: n=28 staged=28 | wall 64.17 pack 0.005 upload 0.000 kernel 63.27 download 0.000 epilogue 0.000 other 0.749
+  slice zgemm C M=500 N=500 K=4544: n=28 staged=28 | wall 49.65 pack 0.005 upload 0.000 kernel 48.93 download 0.000 epilogue 0.000 other 0.769
+  TOTAL staged=1356
+UN1000.np4.d0: 872 GPU-routed calls
+  full  zgemm N M=18277 N=500 K=1000: n=244 staged=244 | wall 381.99 pack 0.061 upload 5.247 kernel 374.75 download 1.912 epilogue 0.000 other 0.795
+  slice zgemm N M=18277 N=352 K=1000: n=28 staged=28 | wall 263.41 pack 0.059 upload 2.963 kernel 252.22 download 1.359 epilogue 0.000 other 0.904
+  slice zgemm N M=18277 N=320 K=1000: n=28 staged=28 | wall 237.82 pack 0.058 upload 2.146 kernel 228.27 download 1.318 epilogue 0.000 other 0.859
+  slice zgemm N M=18277 N=288 K=1000: n=28 staged=28 | wall 203.59 pack 0.058 upload 1.954 kernel 193.63 download 1.169 epilogue 0.000 other 0.881
+  slice zgemm N M=18277 N=256 K=1000: n=432 staged=432 | wall 206.09 pack 0.059 upload 2.898 kernel 200.20 download 1.099 epilogue 0.000 other 0.861
+  slice zgemm N M=18277 N=224 K=1000: n=28 staged=28 | wall 171.37 pack 0.061 upload 1.571 kernel 162.07 download 1.072 epilogue 0.000 other 0.902
+  slice zgemm N M=18277 N=192 K=1000: n=28 staged=28 | wall 151.27 pack 0.062 upload 1.377 kernel 144.92 download 0.958 epilogue 0.000 other 0.881
+  slice zgemm N M=18277 N=160 K=1000: n=28 staged=28 | wall 130.33 pack 0.061 upload 1.165 kernel 118.29 download 0.847 epilogue 0.000 other 0.908
+  slice zgemm N M=18277 N=128 K=1000: n=28 staged=28 | wall 105.62 pack 0.062 upload 1.070 kernel 100.15 download 0.709 epilogue 0.000 other 0.916
+  TOTAL staged=872
+
+## sustain
+D8192.sustain: 224 GPU-routed calls
+  full  dgemm N M=8192 N=8192 K=8192: n=53 staged=53 | wall 1574.00 pack 0.051 upload 0.000 kernel 1571.75 download 0.000 epilogue 0.000 other 0.387
+  slice dgemm N M=8192 N=4512 K=8192: n=86 staged=86 | wall 944.66 pack 0.047 upload 0.000 kernel 944.00 download 0.000 epilogue 0.000 other 0.429
+  slice dgemm N M=8192 N=4256 K=8192: n=85 staged=85 | wall 957.92 pack 0.038 upload 0.000 kernel 957.43 download 0.000 epilogue 0.000 other 0.680
+  TOTAL staged=224
+Z8192.sustain: 69 GPU-routed calls
+  full  zgemm N M=8192 N=8192 K=8192: n=18 staged=18 | wall 4850.07 pack 0.054 upload 0.000 kernel 4849.58 download 0.000 epilogue 0.000 other 0.427
+  slice zgemm N M=8192 N=4928 K=8192: n=26 staged=26 | wall 3282.81 pack 0.044 upload 0.000 kernel 3282.32 download 0.000 epilogue 0.000 other 0.485
+  slice zgemm N M=8192 N=4704 K=8192: n=25 staged=25 | wall 3243.95 pack 0.051 upload 0.000 kernel 3243.00 download 0.000 epilogue 0.000 other 0.856
+  TOTAL staged=69

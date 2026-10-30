@@ -1,0 +1,12 @@
+2026-10-28 04:25:43 before D2048 np=1 veclib=8 data=0: Now drawing from 'AC Power' | load { 8.24 10.67 14.02 }
+2026-10-28 04:25:47 after D2048 rc=0: Now drawing from 'AC Power' | load { 8.22 10.63 13.98 }
+2026-10-28 04:25:47 before D4096 np=1 veclib=8 data=0: Now drawing from 'AC Power' | load { 8.22 10.63 13.98 }
+2026-10-28 04:26:06 after D4096 rc=0: Now drawing from 'AC Power' | load { 7.30 10.26 13.78 }
+2026-10-28 04:26:06 before D8192 np=1 veclib=8 data=0: Now drawing from 'AC Power' | load { 7.30 10.26 13.78 }
+2026-10-28 04:27:29 after D8192 rc=0: Now drawing from 'AC Power' | load { 5.42 8.95 12.96 }
+2026-10-28 04:27:29 before Z2048 np=1 veclib=8 data=0: Now drawing from 'AC Power' | load { 5.42 8.95 12.96 }
+2026-10-28 04:27:41 after Z2048 rc=0: Now drawing from 'AC Power' | load { 5.08 8.71 12.80 }
+2026-10-28 04:27:41 before Z4096 np=1 veclib=8 data=0: Now drawing from 'AC Power' | load { 5.08 8.71 12.80 }
+2026-10-28 04:28:43 after Z4096 rc=0: Now drawing from 'AC Power' | load { 3.99 7.77 12.17 }
+2026-10-28 04:28:43 before Z8192 np=1 veclib=8 data=0: Now drawing from 'AC Power' | load { 3.99 7.77 12.17 }
+2026-10-28 04:33:24 after Z8192 rc=0: Now drawing from 'AC Power' | load { 4.64 5.79 10.00 }

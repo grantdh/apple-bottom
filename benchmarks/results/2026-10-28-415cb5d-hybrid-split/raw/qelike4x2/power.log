@@ -1,0 +1,6 @@
+2026-10-28 04:33:59 before UN1000 np=4 veclib=2 data=1: Now drawing from 'AC Power' | load { 4.50 5.63 9.77 }
+2026-10-28 04:34:53 after UN1000 rc=0: Now drawing from 'AC Power' | load { 8.54 6.63 9.89 }
+2026-10-28 04:34:53 before UN512 np=4 veclib=2 data=1: Now drawing from 'AC Power' | load { 8.54 6.63 9.89 }
+2026-10-28 04:35:27 after UN512 rc=0: Now drawing from 'AC Power' | load { 8.52 6.84 9.83 }
+2026-10-28 04:35:27 before RK500 np=4 veclib=2 data=1: Now drawing from 'AC Power' | load { 8.52 6.84 9.83 }
+2026-10-28 04:35:47 after RK500 rc=0: Now drawing from 'AC Power' | load { 8.73 7.01 9.82 }

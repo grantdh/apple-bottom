@@ -1,0 +1,27 @@
+# GPU-routed calls in the verification runs' AB_TRACE files (benchmarks/split/classify_trace.py); the trace files themselves are not included.
+
+## smoke
+D2048.np1.d0: 123 GPU-routed calls
+  TOTAL staged=123
+RK160.np4.d0: 492 GPU-routed calls
+  TOTAL staged=492
+UM160.np4.d0: 492 GPU-routed calls
+  TOTAL staged=492
+Z2048.np1.d0: 123 GPU-routed calls
+  TOTAL staged=123
+
+## rk
+RK500.np4.d0: 372 GPU-routed calls
+  TOTAL staged=372
+
+## research
+D2048.np1.d0: 123 GPU-routed calls
+  TOTAL staged=123
+Z2048.np1.d0: 123 GPU-routed calls
+  TOTAL staged=123
+
+## same-g
+D2048.np1.d0: 43 GPU-routed calls
+  TOTAL staged=43
+Z2048.np1.d0: 43 GPU-routed calls
+  TOTAL staged=43

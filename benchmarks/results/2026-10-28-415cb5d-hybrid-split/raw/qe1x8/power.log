@@ -1,0 +1,14 @@
+2026-10-28 04:33:24 before UN1000 np=1 veclib=8 data=0: Now drawing from 'AC Power' | load { 4.64 5.79 10.00 }
+2026-10-28 04:33:34 after UN1000 rc=0: Now drawing from 'AC Power' | load { 4.54 5.73 9.93 }
+2026-10-28 04:33:34 before UN512 np=1 veclib=8 data=0: Now drawing from 'AC Power' | load { 4.54 5.73 9.93 }
+2026-10-28 04:33:41 after UN512 rc=0: Now drawing from 'AC Power' | load { 4.53 5.69 9.87 }
+2026-10-28 04:33:41 before UM160 np=1 veclib=8 data=0: Now drawing from 'AC Power' | load { 4.53 5.69 9.87 }
+2026-10-28 04:33:43 after UM160 rc=0: Now drawing from 'AC Power' | load { 4.53 5.69 9.87 }
+2026-10-28 04:33:43 before UM320 np=1 veclib=8 data=0: Now drawing from 'AC Power' | load { 4.53 5.69 9.87 }
+2026-10-28 04:33:46 after UM320 rc=0: Now drawing from 'AC Power' | load { 4.48 5.66 9.83 }
+2026-10-28 04:33:46 before UM1000 np=1 veclib=8 data=0: Now drawing from 'AC Power' | load { 4.48 5.66 9.83 }
+2026-10-28 04:33:51 after UM1000 rc=0: Now drawing from 'AC Power' | load { 4.36 5.62 9.79 }
+2026-10-28 04:33:51 before RK500 np=1 veclib=8 data=0: Now drawing from 'AC Power' | load { 4.36 5.62 9.79 }
+2026-10-28 04:33:57 after RK500 rc=0: Now drawing from 'AC Power' | load { 4.50 5.63 9.77 }
+2026-10-28 04:33:57 before RK160 np=1 veclib=8 data=0: Now drawing from 'AC Power' | load { 4.50 5.63 9.77 }
+2026-10-28 04:33:59 after RK160 rc=0: Now drawing from 'AC Power' | load { 4.50 5.63 9.77 }
