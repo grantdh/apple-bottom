@@ -217,3 +217,5 @@ from it only by the split benchmark's Makefile rule. It was checked again on
 | `plans/`, `tools/` | The plans and scripts (paths under `~`), and the experiment-only patches on top of the measured commits, never for release: `serial-3m.patch` (415cb5d), `verify-staged.patch` (351d56c), `verify-staged-8ebe73c.patch` (8ebe73c) and `verify_more.py` (applied to both). |
 
 Local paths in `plans/`, `tools/` and `step2-log.txt` are shortened: `<runs>` is this campaign's directory, `<ab-frozen>` the frozen libraries' (as in the release check's `results.csv`), `<qe>` the QE develop tree, `<worktree>` this branch's worktree (`<worktree>-diag`, `-serial3m` and `-verify` are its experiment-only siblings) and `~` the home directory.
+
+The scripts call three local helpers that are not included: `machlock.py bench` holds a machine-wide lock that keeps other benchmarks and builds off the machine, `acgate.sh` waits for AC power before a step queues for that lock, and `inlock.sh` gives the lock back when the machine is on battery as it is granted, so the step waits for AC power and queues again.
