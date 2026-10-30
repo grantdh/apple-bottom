@@ -1,0 +1,2 @@
+# label input np omp reps modes args
+verify5-351d56c B_si64_160b_k222 8 1 1 gpu -nk 4 AB_VERIFY_STAGED=1

@@ -1,0 +1,61 @@
+== 2026-10-29 21:05:41 step5 (re)start; AC Power; 99%; finishing charge; 0:17 remaining present: true 
+== 2026-10-29 21:05:41 stage v5-A8-new1; AC Power; 99%; finishing charge; 0:17 remaining present: true 
+== 21:05:41 verify5-8ebe73c A_si64_500b_k222 np=8 omp=1 mode=gpu rep=1 args=[-nk 4 AB_VERIFY_STAGED=1] (power=AC Power load=3.13)
+== done 21:08:37
+== 2026-10-29 21:08:37 stage v5-A8-old1; AC Power; 99%; finishing charge; (no estimate) present: true 
+== 21:08:37 verify5-351d56c A_si64_500b_k222 np=8 omp=1 mode=gpu rep=1 args=[-nk 4 AB_VERIFY_STAGED=1] (power=AC Power load=8.06)
+== done 21:11:41
+== 2026-10-29 21:11:41 stage v5-A8-new2; AC Power; 99%; finishing charge; 0:17 remaining present: true 
+== 21:11:41 verify5-8ebe73c A_si64_500b_k222 np=8 omp=1 mode=gpu rep=1 args=[-nk 4 AB_VERIFY_STAGED=1] (power=AC Power load=6.92)
+== done 21:14:49
+== 2026-10-29 21:14:49 stage v5-A8-old2; AC Power; 99%; finishing charge; 0:11 remaining present: true 
+== 21:14:49 verify5-351d56c A_si64_500b_k222 np=8 omp=1 mode=gpu rep=1 args=[-nk 4 AB_VERIFY_STAGED=1] (power=AC Power load=8.65)
+== done 21:17:50
+== 2026-10-29 21:17:50 stage v5-B8-new1; AC Power; 99%; finishing charge; 0:10 remaining present: true 
+== 21:17:50 verify5-8ebe73c B_si64_160b_k222 np=8 omp=1 mode=gpu rep=1 args=[-nk 4 AB_VERIFY_STAGED=1] (power=AC Power load=7.28)
+== done 21:19:21
+== 2026-10-29 21:19:21 stage v5-B8-old1; AC Power; 99%; finishing charge; 0:10 remaining present: true 
+== 21:19:21 verify5-351d56c B_si64_160b_k222 np=8 omp=1 mode=gpu rep=1 args=[-nk 4 AB_VERIFY_STAGED=1] (power=AC Power load=8.19)
+== done 21:20:52
+== 2026-10-29 21:20:53 verify5-351d56c A_si64_500b_k222 gpu_r1: dgemm ranks=8 kept=96 differ_calls=0; zgemm ranks=8 kept=1785 differ_calls=4;  cmdbuf_errors=9 scale_mismatches=0
+     AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9138: 499999 elements differ (re 499721, im 499820); host redo on cpu; vs FP64 staged 1.068e-13 host 0.000e+00; staged_record=1
+     AB_VERIFY_STAGED zgemm CN M=500 N=500 K=9176: 250000 elements differ (re 249873, im 249928); host redo on cpu; vs FP64 staged 1.194e-13 host 0.000e+00; staged_record=1
+     AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9176: 500000 elements differ (re 499720, im 499843); host redo on cpu; vs FP64 staged 1.232e-13 host 0.000e+00; staged_record=1
+     AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9116: 499999 elements differ (re 499717, im 499806); host redo on cpu; vs FP64 staged 1.202e-13 host 0.000e+00; staged_record=1
+        1 AB_CMDBUF_ERROR pid=59257 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+        3 AB_CMDBUF_ERROR pid=59258 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+        1 AB_CMDBUF_ERROR pid=59259 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+        1 AB_CMDBUF_ERROR pid=59260 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+        1 AB_CMDBUF_ERROR pid=59262 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+        2 AB_CMDBUF_ERROR pid=59264 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+== 2026-10-29 21:20:53 verify5-351d56c A_si64_500b_k222 gpu_r1_1: dgemm ranks=8 kept=96 differ_calls=0; zgemm ranks=8 kept=1787 differ_calls=6;  cmdbuf_errors=9 scale_mismatches=0
+     AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9144: 500000 elements differ (re 499715, im 499816); host redo on cpu; vs FP64 staged 1.233e-13 host 0.000e+00; staged_record=1
+     AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9139: 500000 elements differ (re 499743, im 499807); host redo on cpu; vs FP64 staged 1.352e-13 host 0.000e+00; staged_record=1
+     AB_VERIFY_STAGED zgemm CN M=479 N=979 K=9160: 468940 elements differ (re 468664, im 468762); host redo on cpu; vs FP64 staged 1.193e-13 host 4.145e-15; staged_record=1
+     AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9116: 500000 elements differ (re 499710, im 499806); host redo on cpu; vs FP64 staged 1.073e-13 host 0.000e+00; staged_record=1
+     AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9112: 500000 elements differ (re 499703, im 499815); host redo on cpu; vs FP64 staged 1.171e-13 host 0.000e+00; staged_record=1
+     AB_VERIFY_STAGED zgemm CN M=500 N=500 K=9138: 250000 elements differ (re 249835, im 249843); host redo on cpu; vs FP64 staged 7.263e-14 host 0.000e+00; staged_record=2
+        2 AB_CMDBUF_ERROR pid=59878 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+        2 AB_CMDBUF_ERROR pid=59879 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+        1 AB_CMDBUF_ERROR pid=59881 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+        1 AB_CMDBUF_ERROR pid=59882 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+        2 AB_CMDBUF_ERROR pid=59883 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+        1 AB_CMDBUF_ERROR pid=59884 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+== 2026-10-29 21:20:53 verify5-351d56c B_si64_160b_k222 gpu_r1: dgemm ranks=8 kept=80 differ_calls=0; zgemm ranks=8 kept=2177 differ_calls=0;  cmdbuf_errors=0 scale_mismatches=0
+== 2026-10-29 21:20:53 verify5-8ebe73c A_si64_500b_k222 gpu_r1: dgemm ranks=8 kept=96 differ_calls=0; zgemm ranks=8 kept=1789 differ_calls=2;  cmdbuf_errors=3 scale_mismatches=0
+     AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9132: 500000 elements differ (re 499709, im 499828); host redo on cpu; vs FP64 staged 1.106e-13 host 0.000e+00; staged_record=0
+     AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9144: 500000 elements differ (re 499718, im 499801); host redo on cpu; vs FP64 staged 1.210e-13 host 0.000e+00; staged_record=0
+        1 AB_CMDBUF_ERROR pid=58588 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+        1 AB_CMDBUF_ERROR pid=58589 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+        1 AB_CMDBUF_ERROR pid=58591 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+== 2026-10-29 21:20:53 verify5-8ebe73c A_si64_500b_k222 gpu_r1_1: dgemm ranks=8 kept=96 differ_calls=0; zgemm ranks=8 kept=1784 differ_calls=2;  cmdbuf_errors=8 scale_mismatches=0
+     AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9160: 500000 elements differ (re 499731, im 499814); host redo on cpu; vs FP64 staged 1.141e-13 host 0.000e+00; staged_record=0
+     AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9132: 499999 elements differ (re 499699, im 499821); host redo on cpu; vs FP64 staged 1.137e-13 host 0.000e+00; staged_record=0
+        1 AB_CMDBUF_ERROR pid=59674 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+        3 AB_CMDBUF_ERROR pid=59675 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+        1 AB_CMDBUF_ERROR pid=59676 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+        1 AB_CMDBUF_ERROR pid=59678 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+        1 AB_CMDBUF_ERROR pid=59679 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+        1 AB_CMDBUF_ERROR pid=59680 code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+== 2026-10-29 21:20:53 verify5-8ebe73c B_si64_160b_k222 gpu_r1: dgemm ranks=8 kept=80 differ_calls=0; zgemm ranks=8 kept=2177 differ_calls=0;  cmdbuf_errors=0 scale_mismatches=0
+== 2026-10-29 21:20:53 step5 done; AC Power; 99%; finishing charge; 0:06 remaining present: true 

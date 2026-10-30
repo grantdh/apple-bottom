@@ -15,7 +15,7 @@ def report(d):
     return z
 groups = collections.defaultdict(list)
 for r in csv.DictReader(open(out / "results.csv")):
-    if r["label"].startswith(("time-", "cause-")):
+    if r["label"].startswith(("time-", "cause-", "t6-")):
         groups[(r["input"][0], r["np"], r["label"], r["mode"])].append(r)
 print("| input | ranks | run | mode | n | wall s | BLAS s | GPU calls | kernel s | host stages s | staged: kept / kept_4m / other | energy Ry, iterations |")
 print("|---|---|---|---|---|---|---|---|---|---|---|---|")

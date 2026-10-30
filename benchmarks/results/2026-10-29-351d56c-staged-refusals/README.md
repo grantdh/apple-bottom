@@ -13,7 +13,7 @@ call the guard does not certify goes straight to Accelerate.
 |---|---|
 | Machine | MacBook Pro (Mac14,6), M2 Max, 38-core GPU, 64 GB, macOS 27.0.1 (26A434). AC power from the block's first run to its last: 152 samples of `pmset -g batt`, every 20 s ([`power.txt`](power.txt)). |
 | QE | The release check's build: develop 86c214974, every Fortran object `-O3 -fopenmp`, Open MPI 5.0.9, `-lfftw3_omp`, one OpenMP thread per rank. Every `pw.x` here is a copy of the release check's 1.5.0 binary with its first `LC_RPATH` rewritten to the library's frozen directory (`tools/freeze.sh`): the same machine code, only the library it loads differs. |
-| Libraries | **1.5.0** = 415cb5d, the release check's frozen copy (`apple-bottom 1.4.0 (415cb5d4d888)`; `<1.5.0>` in `results.csv`). **counter** = 2da6a89, 1.5.0 plus the commit that adds the `staged` counts (`<counter>`). **fix** = 351d56c, `release/v1.5.0` 882d2d8 plus the counter and the fix (`<fix>`, `apple-bottom 1.4.0 (351d56ced974)`); its later rebase onto 6985543 changes no source file. **serial3m** = an experiment-only build of 415cb5d whose Gauss-3M products run in a serial encoder (`<serial3m>`, `415cb5d4d888-dirty`), never for release. |
+| Libraries | **1.5.0** = 415cb5d, the release check's frozen copy (`apple-bottom 1.4.0 (415cb5d4d888)`; `<1.5.0>` in `results.csv`). **counter** = 2da6a89, 1.5.0 plus the commit that adds the `staged` counts (`<counter>`). **fix** = 351d56c, `release/v1.5.0` 882d2d8 plus the counter and the fix (`<fix>`, `apple-bottom 1.4.0 (351d56ced974)`); its later rebases onto 6985543 and 2ea4077 change no library source file. **serial3m** = an experiment-only build of 415cb5d whose Gauss-3M products run in a serial encoder (`<serial3m>`, `415cb5d4d888-dirty`), never for release. **refactor** = 8ebe73c, the branch's last code commit, made after these measurements and checked in [the last section](#after-the-measurements-the-refactor-8ebe73c) (`<refactor>`); rebased onto 2ea4077 as 935e74d, whose library sources and tests are 8ebe73c's. |
 | Inputs, layouts | `B_si64_160b_k222` and `A_si64_500b_k222` from [`benchmarks/qe/`](../../qe/), at 1 × 1 and at 8 × 1 with `-nk 4`, as in the release check. |
 | Plan | [`tools/step2.sh`](tools/step2.sh), one exclusive machine lock taken on AC power (`acgate.sh`, `inlock.sh`), 2026-10-29 00:18–01:10 EDT ([`step2-log.txt`](step2-log.txt)): the counter's tests and one traced `gpu` run of B 1 × 1; the fix's `make test`; one traced `gpu` run of B 1 × 1 with the fix (and with 1.5.0); then per input and layout, 1.5.0 and the fix alternating in `gpu` mode twice each and one `cpu` run; then four `gpu` runs of A 8 × 1 for the cause of its kernel time. `run_campaign.sh` sets `AB_REPORT=1 AB_PROFILE=1` in every run. |
 
@@ -31,11 +31,13 @@ The others, by the first reason the staged path met:
 | `scaled` | 10 | Accelerate (`range`) | DGEMM 171 × 64 × 287,330 (`C`,`N`), a PAW augmentation product |
 
 No other reason occurred (floating-point control, scalars, buffers, failures, Inf
-or NaN). Each refused call had already run the staged path's whole command
-buffer, conversion and Gauss-3M product included, before the host path ran it
-again: in the release check's per-call lines the refused ZGEMMs took 1.8–2.2×
-1.4.0's GPU kernel time for the same shapes at B 1 × 1, and 2.5–3.2× at A 8 × 1,
-where the kept ones took 0.84–0.92× (B 1 × 1).
+or NaN). `four_m` and `scaled` are the counter build's reasons on 1.5.0; with the
+fix the staged path keeps those calls (`kept_4m` counts the ZGEMMs it keeps by
+4M), so neither is a reason any more. Each refused call had already run the
+staged path's whole command buffer, conversion and Gauss-3M product included,
+before the host path ran it again: in the release check's per-call lines the
+refused ZGEMMs took 1.8–2.2× 1.4.0's GPU kernel time for the same shapes at
+B 1 × 1, and 2.5–3.2× at A 8 × 1, where the kept ones took 0.84–0.92× (B 1 × 1).
 
 ## The fix
 
@@ -131,19 +133,85 @@ pairs differ by 3.3% and 0.9% between their two runs):
   numerics, 1.5.0 and the counter: its op(A) hashes the same, its op(B) does not
   ([`compare-traces-counter-1.5.0.txt`](compare-traces-counter-1.5.0.txt),
   [`compare-traces-counter-fix.txt`](compare-traces-counter-fix.txt)).
-- **On QE's data, call by call:** _pending_ — an experiment-only build of the
-  fix with `AB_VERIFY_STAGED=1` redoes every call the staged path kept on the
-  host path from the same C and compares C bit for bit ([`tools/step3v.sh`](tools/step3v.sh)).
+- **On QE's data, call by call, the staged path gives the host path's bits.**
+  An experiment-only build of the fix (never for release) with
+  `AB_VERIFY_STAGED=1` redid every call the staged path kept on the host path,
+  from the same C, and compared C bit for bit ([`verify.txt`](verify.txt),
+  [`tools/step3v.sh`](tools/step3v.sh); 2026-10-29 10:46–10:55, AC power): B 1 × 1,
+  A 8 × 1 and B 8 × 1 in `gpu` mode, 5,241 calls (5,055 ZGEMMs, 2,005 of them by
+  4M, and 186 DGEMMs), no element differs. Their energies equal the timing runs'.
+- **`make ci-local`** passed on the committed tree (91accc0): 177 tests, BLAS ABI
+  1069/1069.
+
+## After the measurements: the refactor 8ebe73c
+
+The branch's last code commit, 8ebe73c, came after these measurements. It records
+one staged outcome per call and encodes the staging passes by operand, and changes
+no result by design. After the rebase onto 2ea4077 it is 935e74d, which differs
+from it only by the split benchmark's Makefile rule. It was checked again on
+2026-10-29 between 20:33 and 21:20, on AC power: [`step4-log.txt`](step4-log.txt),
+[`step5-log.txt`](step5-log.txt), [`verify-8ebe73c.txt`](verify-8ebe73c.txt).
+
+- **`make test` and `make ci-local` pass on 8ebe73c.** Golden bits are 32/32
+  equal to 1.4.0, `test_staging` is 127/127, and `ci-local` passes all 177 tests,
+  with the BLAS ABI cases at 1069/1069.
+- **On QE's data the staged path still gives the host path's bits** wherever the
+  check can see them. With `AB_VERIFY_STAGED=1`, every kept call whose host-path
+  redo ran on the GPU matched bit for bit:
+  - 9,373 calls of 8ebe73c: B 1 × 1, B 8 × 1 twice, and the two instrumented
+    A 8 × 1 runs;
+  - 6,011 calls of 351d56c, run alternately with it.
+- **16 kept ZGEMMs differed in (nearly) every element, all at A 8 × 1:** 6 of 8ebe73c
+  and 10 of 351d56c, 13 of them the `C`,`N` overlap 500 × 1000 × npw.
+  - **The instrumented builds recorded 14 of them** ([`tools/verify_more.py`](tools/verify_more.py)).
+    In each, macOS had stopped the GPU work of the host-path redo
+    (`kIOGPUCommandBufferCallbackErrorImpactingInteractivity`: GPU work that macOS
+    judges to hold up the display). The redo then ran on Accelerate, so the check
+    compared FP64 against double-float. The earlier runs, at night and in the
+    morning, met no such stop.
+  - **The staged results of those calls are accurate:** their normwise error against
+    the FP64 result is 0.7–1.4 × 10⁻¹³, as expected of double-float products of
+    length K ≈ 9,100.
+  - **The other 2 are the uninstrumented first A 8 × 1 run of 8ebe73c,** with the
+    same signature: same shape, every element, and a stopped staged command buffer
+    in the same run.
+- **The staged path met the same stops on its own command buffers:** 1–6 per
+  A 8 × 1 run, none at B. It counts each as `gpu_failed` and gives the call to the
+  host path, which made it on the GPU. No call ended on Accelerate, and every energy
+  equals the timing runs'. No run of the timing block (steps 2 and 3) counted a
+  `gpu_failed`.
+- **8ebe73c times as the fix did.** Both libraries ran in one lock on AC power,
+  alternating, twice each (2026-10-29 22:39–23:03, [`step6-log.txt`](step6-log.txt),
+  runs `t6-*` in [`summary.md`](summary.md)):
+
+  | Input × layout | 8ebe73c wall, s | 351d56c wall, s |
+  |---|---|---|
+  | B 1 × 1 | 192.57, 194.41 | 194.88, 194.11 |
+  | A 8 × 1 | 108.84, 107.62 | 106.86, 106.66 |
+  | B 8 × 1 | 58.46, 61.32 | 59.67, 63.57 |
+
+  - **At one rank the GPU work is the same.** Kernel and host stages are 26.5 and
+    5.6 s against 26.3 and 5.7 s. Each shape's per-call kernel time lies within the
+    spread of the fix's own runs: the median of the 3M `vkb^H psi` is 38.3–44.1 ms
+    over the fix's four runs (night and evening) and 38.8–44.2 ms over 8ebe73c's two.
+  - **At eight ranks the differences point both ways:** A +1.4%, B −2.8%.
+  - **That evening every run took 2–13% longer than the night block's,** the fix's
+    included. None counted a `gpu_failed`.
+  - **The library's build string says `-dirty`** only because this README was
+    modified when it was built. No source file was.
 
 ## Files
 
 | File | Contents |
 |---|---|
-| `results.csv` | Every run, as `run_campaign.sh` writes it; frozen libraries as `<1.5.0>`, `<counter>`, `<fix>`, `<serial3m>`. |
+| `results.csv` | Every run, as `run_campaign.sh` writes it; frozen libraries as `<1.5.0>`, `<counter>`, `<fix>`, `<serial3m>`, `<refactor>` (8ebe73c). The timing runs and the `t6-*` runs are copied with `tools/collect.py`. |
 | `reports/` | Each run's header (run, library, power, energy) and `AB_REPORT` lines. |
 | `summary.md` | The per-configuration table above, from `tools/summary.py`. |
 | `breakdown.txt` | The counter run's staged outcomes by reason and shape, and the stages the calls paid (`tools/breakdown.py`). |
 | `kernel_ratio.txt` | GPU kernel time against Accelerate's for the same calls, per run (`tools/kernel_ratio.py`). |
 | `compare-traces-*.txt` | The traced runs compared call by call (`tools/compare_traces.py`). |
+| `verify.txt` | The `AB_VERIFY_STAGED=1` runs: calls kept and compared, per routine. |
+| `verify-8ebe73c.txt` | The same after the refactor, with the redo's path, each differing call and the failed command buffers (`tools/verify_summary.py`). |
 | `power.txt`, `step2-log.txt` | Power during the block; the block's log. |
-| `plans/`, `tools/` | The plans and scripts (paths under `~`). |
+| `step4-log.txt`, `step5-log.txt`, `step6-log.txt` | The logs of the refactor's checks and timings (`tools/step4.sh`, `tools/step5.sh`, `tools/step6.sh` behind `tools/step-driver.sh`). |
+| `plans/`, `tools/` | The plans and scripts (paths under `~`), and the experiment-only patches on top of the measured commits, never for release: `serial-3m.patch` (415cb5d), `verify-staged.patch` (351d56c), `verify-staged-8ebe73c.patch` (8ebe73c) and `verify_more.py` (applied to both). |

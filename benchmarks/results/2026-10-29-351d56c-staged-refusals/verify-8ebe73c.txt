@@ -1,0 +1,61 @@
+# AB_VERIFY_STAGED=1 after the refactor 8ebe73c (tools/verify_summary.py). Experiment-only builds, never for release:
+#   verify-8ebe73c  = 8ebe73c + tools/verify-staged-8ebe73c.patch (frozen d34c064c0e21), step 4, 2026-10-29 20:33-20:43
+#   verify5-8ebe73c = the same + tools/verify_more.py (frozen e397e91002ad); verify5-351d56c = the measured fix 351d56c
+#                     + tools/verify-staged.patch + tools/verify_more.py (frozen 67511d46c83c); step 5, alternating, 21:05-21:20
+# verify_more.py adds: which path the host-path redo took (cpu = its GPU command buffer failed and it ran on
+# Accelerate), both results' normwise error against cblas (FP64) from C on entry, and every failed command buffer.
+
+runs/verify-8ebe73c/A_si64_500b_k222/gpu_r1: E=-2990.44276150 Ry (7 iterations), AC Power
+  dgemm: ranks=8 kept_calls=96 differ_calls=0
+  zgemm: ranks=8 kept_calls=1789 differ_calls=2
+  staged gpu_failed=1, fallbacks gpu_failed=0
+runs/verify-8ebe73c/B_si64_160b_k222/gpu_r1: E=-2990.44093535 Ry (9 iterations), AC Power
+  dgemm: ranks=1 kept_calls=10 differ_calls=0
+  zgemm: ranks=1 kept_calls=1088 differ_calls=0
+  staged gpu_failed=0, fallbacks gpu_failed=0
+runs/verify-8ebe73c/B_si64_160b_k222/gpu_r1_1: E=-2990.44093534 Ry (9 iterations), AC Power
+  dgemm: ranks=8 kept_calls=80 differ_calls=0
+  zgemm: ranks=8 kept_calls=2177 differ_calls=0
+  staged gpu_failed=0, fallbacks gpu_failed=0
+runs/verify5-8ebe73c/A_si64_500b_k222/gpu_r1: E=-2990.44276150 Ry (7 iterations), AC Power
+  dgemm: ranks=8 kept_calls=96 differ_calls=0
+  zgemm: ranks=8 kept_calls=1789 differ_calls=2
+    AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9132: 500000 elements differ (re 499709, im 499828); host redo on cpu; vs FP64 staged 1.106e-13 host 0.000e+00; staged_record=0
+    AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9144: 500000 elements differ (re 499718, im 499801); host redo on cpu; vs FP64 staged 1.210e-13 host 0.000e+00; staged_record=0
+    3 failed command buffers: code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+  staged gpu_failed=1, fallbacks gpu_failed=0
+runs/verify5-8ebe73c/A_si64_500b_k222/gpu_r1_1: E=-2990.44276150 Ry (7 iterations), AC Power
+  dgemm: ranks=8 kept_calls=96 differ_calls=0
+  zgemm: ranks=8 kept_calls=1784 differ_calls=2
+    AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9160: 500000 elements differ (re 499731, im 499814); host redo on cpu; vs FP64 staged 1.141e-13 host 0.000e+00; staged_record=0
+    AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9132: 499999 elements differ (re 499699, im 499821); host redo on cpu; vs FP64 staged 1.137e-13 host 0.000e+00; staged_record=0
+    8 failed command buffers: code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+  staged gpu_failed=6, fallbacks gpu_failed=0
+runs/verify5-8ebe73c/B_si64_160b_k222/gpu_r1: E=-2990.44093534 Ry (9 iterations), AC Power
+  dgemm: ranks=8 kept_calls=80 differ_calls=0
+  zgemm: ranks=8 kept_calls=2177 differ_calls=0
+  staged gpu_failed=0, fallbacks gpu_failed=0
+runs/verify5-351d56c/A_si64_500b_k222/gpu_r1: E=-2990.44276150 Ry (7 iterations), AC Power
+  dgemm: ranks=8 kept_calls=96 differ_calls=0
+  zgemm: ranks=8 kept_calls=1785 differ_calls=4
+    AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9138: 499999 elements differ (re 499721, im 499820); host redo on cpu; vs FP64 staged 1.068e-13 host 0.000e+00; staged_record=1
+    AB_VERIFY_STAGED zgemm CN M=500 N=500 K=9176: 250000 elements differ (re 249873, im 249928); host redo on cpu; vs FP64 staged 1.194e-13 host 0.000e+00; staged_record=1
+    AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9176: 500000 elements differ (re 499720, im 499843); host redo on cpu; vs FP64 staged 1.232e-13 host 0.000e+00; staged_record=1
+    AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9116: 499999 elements differ (re 499717, im 499806); host redo on cpu; vs FP64 staged 1.202e-13 host 0.000e+00; staged_record=1
+    9 failed command buffers: code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+  staged gpu_failed=5, fallbacks gpu_failed=0
+runs/verify5-351d56c/A_si64_500b_k222/gpu_r1_1: E=-2990.44276150 Ry (7 iterations), AC Power
+  dgemm: ranks=8 kept_calls=96 differ_calls=0
+  zgemm: ranks=8 kept_calls=1787 differ_calls=6
+    AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9144: 500000 elements differ (re 499715, im 499816); host redo on cpu; vs FP64 staged 1.233e-13 host 0.000e+00; staged_record=1
+    AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9139: 500000 elements differ (re 499743, im 499807); host redo on cpu; vs FP64 staged 1.352e-13 host 0.000e+00; staged_record=1
+    AB_VERIFY_STAGED zgemm CN M=479 N=979 K=9160: 468940 elements differ (re 468664, im 468762); host redo on cpu; vs FP64 staged 1.193e-13 host 4.145e-15; staged_record=1
+    AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9116: 500000 elements differ (re 499710, im 499806); host redo on cpu; vs FP64 staged 1.073e-13 host 0.000e+00; staged_record=1
+    AB_VERIFY_STAGED zgemm CN M=500 N=1000 K=9112: 500000 elements differ (re 499703, im 499815); host redo on cpu; vs FP64 staged 1.171e-13 host 0.000e+00; staged_record=1
+    AB_VERIFY_STAGED zgemm CN M=500 N=500 K=9138: 250000 elements differ (re 249835, im 249843); host redo on cpu; vs FP64 staged 7.263e-14 host 0.000e+00; staged_record=2
+    9 failed command buffers: code=1 Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+  staged gpu_failed=3, fallbacks gpu_failed=0
+runs/verify5-351d56c/B_si64_160b_k222/gpu_r1: E=-2990.44093534 Ry (9 iterations), AC Power
+  dgemm: ranks=8 kept_calls=80 differ_calls=0
+  zgemm: ranks=8 kept_calls=2177 differ_calls=0
+  staged gpu_failed=0, fallbacks gpu_failed=0
