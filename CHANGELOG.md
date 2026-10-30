@@ -53,12 +53,11 @@ All notable changes to this project will be documented in this file.
   stand exactly where the host path computes the call unscaled on the GPU.
 - **Why a call left the staged path**: `AB_REPORT` adds a line
   `<routine> staged kept=… kept_4m=… host_pack=… fpcr=… scalar=… alloc=…
-  gpu_failed=… nonfinite=… scaled=… range=…` that counts each GPU-routed
-  call once, by whether it kept the staged result (`kept_4m`: by 4M) or
-  else the first reason it went to the host path; `AB_PROFILE` adds the
-  same as a table and `staged=<outcome>` to each GPU call's line, and
-  `AB_TRACE` adds `staged=<outcome>` (reasons joined by `+`) to each call
-  that reached the staged path. See "Reading a run report" in
+  gpu_failed=… nonfinite=… range=…` that counts each GPU-routed call once,
+  by whether it kept the staged result (`kept_4m`: by 4M) or else the
+  first reason it went to the host path; `AB_PROFILE` adds the same as a
+  table and `staged=<outcome>` to each GPU call's line, and `AB_TRACE`
+  adds `staged=<outcome>` to each call that reached the staged path. See "Reading a run report" in
   `docs/INTEGRATION.md`. On Quantum ESPRESSO si64 (input B, one rank) it
   showed that 512 of the 1,110 calls that reached the staged path left it:
   492 ZGEMMs whose parts call for 4M and 20 DGEMMs with scaled lines, which

@@ -15,6 +15,8 @@ COUNTS = ("calls", "gpu_calls", "cpu_calls", "total_ms", "gpu_ms", "cpu_ms", "fa
 # Searched, not matched: in merged multi-rank stderr another rank's partial line can precede one.
 AB_LINE = re.compile(r"AB_REPORT\[(\d+)\] (\w+) (calls=.*|gpu_stages_ms .*|fallbacks .*|staged .*)")
 AB_HEADER = re.compile(r"AB_REPORT\[(\d+)\] apple-bottom ")
+# The key prefix of each AB_REPORT line's fields, by the line's first word.
+FIELD_PREFIX = {"gpu_stages_ms": "st_", "fallbacks": "fb_", "staged": "sp_"}
 
 
 def report(run_dir):
@@ -37,7 +39,7 @@ def report(run_dir):
         if not m:
             continue
         pid, name, rest = m[1], m[2], m[3]
-        prefix = {"gpu_stages_ms": "st_", "fallbacks": "fb_", "staged": "sp_"}.get(rest.split(" ", 1)[0], "")
+        prefix = FIELD_PREFIX.get(rest.split(" ", 1)[0], "")
         for k, v in re.findall(r"(\w+%?)=([-0-9.]+)", rest):
             if not k.endswith("%"):
                 per_pid[(pid, name)][prefix + k] = float(v)
