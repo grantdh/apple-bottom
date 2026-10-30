@@ -1,0 +1,54 @@
+--- a/benchmarks/bench_split.c
++++ b/benchmarks/bench_split.c
+@@ -43,6 +43,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/mman.h>
++#include <sys/resource.h>
+ #include <sys/wait.h>
+ #include <unistd.h>
+ #ifndef ACCELERATE_NEW_LAPACK
+@@ -230,8 +231,11 @@
+     for (int j = 0; j < c->N; j++) for (int i = 0; i < c->M; i++) C[(size_t)j * c->ldc + i] += P[(size_t)j * c->M + i];
+ }
+ // one timed call of config cfg; C is reset from C0 first (untimed)
++static double cpu_now(void) { struct rusage u; getrusage(RUSAGE_SELF, &u); return u.ru_utime.tv_sec + u.ru_utime.tv_usec * 1e-6 + u.ru_stime.tv_sec + u.ru_stime.tv_usec * 1e-6; }
++static double g_cpu, g_wall;
+ static void one_call(Ctx *x, int cfg, double *v) {
+     if (!g_noreset) memcpy(x->C, x->C0, x->nC * x->es);
++    double c0 = cpu_now();
+     double t0 = now(), tc0 = t0, tc1, tj, tk;
+     memset(v, 0, sizeof(double) * NV);
+     if (cfg == CF_ACC) { acc_full(x); tc1 = tj = tk = now(); v[V_CPU] = tc1 - t0; }
+@@ -248,6 +252,7 @@
+         v[V_CPU] = tc1 - tc0; v[V_GPU] = g_tg1 - g_tg0; v[V_JOIN] = tj - tc1; v[V_WAKE] = g_tg0 - t0; v[V_KADD] = tk - tj;
+     }
+     v[V_TOTAL] = tk - t0; v[V_T0] = t0; v[V_T1] = tk;
++    g_cpu = cpu_now() - c0; g_wall = tk - t0;
+ }
+ static int cfg_g(const Case *c, int cfg) { return cfg >= CF_SPLIT0 ? shm->g[cfg] : cfg == CF_GPU ? axis_len(c) : 0; }
+ static void set_cfg(Ctx *x, int cfg) {
+@@ -414,12 +419,13 @@
+     // ---- fixed block at the best share: Accelerate, GPU and split interleaved, 3 rounds
+     int fcfg[3] = {CF_ACC, CF_GPU, bk}, freps[3] = {c->fx_acc, c->fx_gpu, c->fx_split};
+     int sreps = 0, sdiff = 0, greps = 0, gdiff = 0, areps = 0, adiff = 0; long smax = 0;
++    double cpu_s[3] = {0}, wall_s[3] = {0};
+     for (int r = 0; r < 3; r++) {
+         order_of(r, 3, ord);
+         for (int i = 0; i < 3; i++) {
+             int k = fcfg[ord[i]], nrep = freps[ord[i]]; set_cfg(x, k);
+             for (int rep = 0; rep < nrep; rep++) {
+-                barrier(); one_call(x, k, v); record(PH_FIXED, r, k, rep, v);
++                barrier(); one_call(x, k, v); cpu_s[ord[i]] += g_cpu; wall_s[ord[i]] += g_wall; record(PH_FIXED, r, k, rep, v);
+                 void *ref = k == CF_ACC ? Ca0 : k == CF_GPU ? Cg0 : Cs0;
+                 int *nr = k == CF_ACC ? &areps : k == CF_GPU ? &greps : &sreps, *nd = k == CF_ACC ? &adiff : k == CF_GPU ? &gdiff : &sdiff;
+                 if (*nr == 0) memcpy(ref, x->C, x->nC * es);
+@@ -431,6 +437,8 @@
+             }
+         }
+     }
++    fprintf(stderr, "CORES id=%d g=%d acc %.4f/%.4f=%.2f gpu %.4f/%.4f=%.2f split %.4f/%.4f=%.2f\n", id, shm->g[bk],
++            cpu_s[0], wall_s[0], cpu_s[0] / wall_s[0], cpu_s[1], wall_s[1], cpu_s[1] / wall_s[1], cpu_s[2], wall_s[2], cpu_s[2] / wall_s[2]);
+     // ---- completion order: GPU slice starts after the CPU slice, then the reverse
+     set_cfg(x, bk);
+     for (int o = 1; o <= 2; o++) {
