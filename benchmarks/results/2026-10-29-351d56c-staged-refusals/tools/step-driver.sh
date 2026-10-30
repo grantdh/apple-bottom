@@ -4,7 +4,7 @@
 # and $SCRIPT itself exits 75 when the power drops between stages; each 75 queues again.
 set -uo pipefail
 SCRIPT=${1:?usage: step-driver.sh <script>}
-OUT=~/qe-test/xp/runs.noindex/v150-staged-refusals-2026-10-27
+OUT=<runs>
 T=~/qe-test/xp/runs.noindex/v150-qe-release-check/tools
 ML=~/qe-test/xp/tools/machlock.py
 export ACGATE_LOG=$OUT/logs/acgate.log

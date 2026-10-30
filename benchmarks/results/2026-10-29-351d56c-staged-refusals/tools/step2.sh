@@ -14,12 +14,12 @@
 # power is checked: on battery the script exits 75, the driver releases the lock, waits for AC
 # power and queues again.
 set -uo pipefail
-OUT=~/qe-test/xp/runs.noindex/v150-staged-refusals-2026-10-27
-DIAG=~/Dev/Claude/apple-bottom/.claude/worktrees/staged-refusals-diag
-FIXWT=~/Dev/Claude/apple-bottom/.claude/worktrees/staged-refusals
-SER=~/Dev/Claude/apple-bottom/.claude/worktrees/staged-refusals-serial3m
+OUT=<runs>
+DIAG=<worktree>-diag
+FIXWT=<worktree>
+SER=<worktree>-serial3m
 RUN=$FIXWT/benchmarks/qe/run_campaign.sh
-BASE=~/qe-test/ab-frozen/755a46613bf2/pw.x
+BASE=<ab-frozen>/755a46613bf2/pw.x
 export PSEUDO_DIR=~/qe-test/val1-o3-2026-10-14/pseudo
 ST=$OUT/state; mkdir -p "$ST" "$OUT/traces"
 log() { echo "== $(date '+%F %T') $*"; }

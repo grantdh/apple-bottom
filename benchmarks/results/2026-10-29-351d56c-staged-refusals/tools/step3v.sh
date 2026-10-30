@@ -7,9 +7,9 @@
 #   ci       make ci-local on the fix's worktree (351d56c).
 # Resumable as step2.sh: state/<stage>.done, exit 75 on battery between stages.
 set -uo pipefail
-OUT=~/qe-test/xp/runs.noindex/v150-staged-refusals-2026-10-27
-VER=~/Dev/Claude/apple-bottom/.claude/worktrees/staged-refusals-verify
-FIXWT=~/Dev/Claude/apple-bottom/.claude/worktrees/staged-refusals
+OUT=<runs>
+VER=<worktree>-verify
+FIXWT=<worktree>
 RUN=$FIXWT/benchmarks/qe/run_campaign.sh
 export PSEUDO_DIR=~/qe-test/val1-o3-2026-10-14/pseudo
 ST=$OUT/state; mkdir -p "$ST"

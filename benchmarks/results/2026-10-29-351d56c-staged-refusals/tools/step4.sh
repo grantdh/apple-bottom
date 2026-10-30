@@ -8,11 +8,11 @@
 #                 in gpu mode, as step3v.sh did for 351d56c.
 # Resumable as step3v.sh: state/<stage>.done.
 set -uo pipefail
-OUT=/Users/grantheileman/qe-test/xp/runs.noindex/v150-staged-refusals-2026-10-27
-FIXWT=/Users/grantheileman/Dev/Claude/apple-bottom/.claude/worktrees/staged-refusals
+OUT=<runs>
+FIXWT=<worktree>
 RUN=$FIXWT/benchmarks/qe/run_campaign.sh
-VPW=/Users/grantheileman/qe-test/ab-frozen/d34c064c0e21/pw.x
-export PSEUDO_DIR=/Users/grantheileman/qe-test/val1-o3-2026-10-14/pseudo
+VPW=<ab-frozen>/d34c064c0e21/pw.x
+export PSEUDO_DIR=~/qe-test/val1-o3-2026-10-14/pseudo
 ST=$OUT/state; mkdir -p "$ST"
 power() { pmset -g batt | head -2 | tr '\n' ' ' | sed -E "s/Now drawing from '([^']*)'.*InternalBattery-0 \(id=[0-9]+\)[[:space:]]*/\1; /"; }
 log() { echo "== $(date '+%F %T') $*"; }

@@ -5,12 +5,12 @@
 # gpu mode, twice each, as step2.sh's timings did. Resumable: state/<stage>.done; exit 75 on battery
 # before a stage.
 set -uo pipefail
-OUT=/Users/grantheileman/qe-test/xp/runs.noindex/v150-staged-refusals-2026-10-27
-FIXWT=/Users/grantheileman/Dev/Claude/apple-bottom/.claude/worktrees/staged-refusals
+OUT=<runs>
+FIXWT=<worktree>
 RUN=$FIXWT/benchmarks/qe/run_campaign.sh
-NEW=/Users/grantheileman/qe-test/ab-frozen/3ead2d56bc84/pw.x
-OLD=/Users/grantheileman/qe-test/ab-frozen/edd6aa2db786/pw.x
-export PSEUDO_DIR=/Users/grantheileman/qe-test/val1-o3-2026-10-14/pseudo
+NEW=<ab-frozen>/3ead2d56bc84/pw.x
+OLD=<ab-frozen>/edd6aa2db786/pw.x
+export PSEUDO_DIR=~/qe-test/val1-o3-2026-10-14/pseudo
 ST=$OUT/state; mkdir -p "$ST"
 log() { echo "== $(date '+%F %T') $*"; }
 plan() { printf '%s\n' "# label input np omp reps modes args" "$2" > "$OUT/plans/$1.txt"; echo "$OUT/plans/$1.txt"; }

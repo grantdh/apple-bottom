@@ -1,2 +1,2 @@
 # label input np omp reps modes args
-base-755a B_si64_160b_k222 1 1 1 gpu AB_TRACE=~/qe-test/xp/runs.noindex/v150-staged-refusals-2026-10-27/traces/base-755a/trace AB_TRACE_HASH=1
+base-755a B_si64_160b_k222 1 1 1 gpu AB_TRACE=<runs>/traces/base-755a/trace AB_TRACE_HASH=1

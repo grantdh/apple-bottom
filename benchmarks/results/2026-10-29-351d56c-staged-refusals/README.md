@@ -215,3 +215,5 @@ from it only by the split benchmark's Makefile rule. It was checked again on
 | `power.txt`, `step2-log.txt` | Power during the block; the block's log. |
 | `step4-log.txt`, `step5-log.txt`, `step6-log.txt` | The logs of the refactor's checks and timings (`tools/step4.sh`, `tools/step5.sh`, `tools/step6.sh` behind `tools/step-driver.sh`). |
 | `plans/`, `tools/` | The plans and scripts (paths under `~`), and the experiment-only patches on top of the measured commits, never for release: `serial-3m.patch` (415cb5d), `verify-staged.patch` (351d56c), `verify-staged-8ebe73c.patch` (8ebe73c) and `verify_more.py` (applied to both). |
+
+Local paths in `plans/`, `tools/` and `step2-log.txt` are shortened: `<runs>` is this campaign's directory, `<ab-frozen>` the frozen libraries' (as in the release check's `results.csv`), `<qe>` the QE develop tree, `<worktree>` this branch's worktree (`<worktree>-diag`, `-serial3m` and `-verify` are its experiment-only siblings) and `~` the home directory.

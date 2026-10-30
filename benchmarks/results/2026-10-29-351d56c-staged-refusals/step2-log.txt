@@ -7,20 +7,20 @@
 == 2026-10-29 00:18:44 diag test_blas_abi test_exit_reports test_exponent_range test_zgemm_imbalance test_profile_path rc=0: Results: 50 passed, 0 xfailed, 0 failed, 0 xpassed, 0 stale XFAIL entries
 == 2026-10-29 00:18:47 diag test_staging rc=0: Results: 127 passed, 0 failed
 == 2026-10-29 00:18:47 diag test_qe_golden rc=0: Results: 32 passed, 0 failed, 0 stale golden entries
-== 2026-10-29 00:18:48 diag frozen ~/qe-test/ab-frozen/78eb74ff7cb4
+== 2026-10-29 00:18:48 diag frozen <ab-frozen>/78eb74ff7cb4
 == 2026-10-29 00:18:48 stage diag-run
-== 00:18:48 diag-2da6a89 B_si64_160b_k222 np=1 omp=1 mode=gpu rep=1 args=[AB_TRACE=~/qe-test/xp/runs.noindex/v150-staged-refusals-2026-10-27/traces/diag-2da6a89/trace AB_TRACE_HASH=1] (power=AC Power load=4.47)
+== 00:18:48 diag-2da6a89 B_si64_160b_k222 np=1 omp=1 mode=gpu rep=1 args=[AB_TRACE=<runs>/traces/diag-2da6a89/trace AB_TRACE_HASH=1] (power=AC Power load=4.47)
 == done 00:23:24
 == 2026-10-29 00:23:24 stage fix-test
 == 2026-10-29 00:23:24 fix make test at 351d56c, 0 modified
-== 2026-10-29 00:23:45 fix make test passed; frozen ~/qe-test/ab-frozen/edd6aa2db786
+== 2026-10-29 00:23:45 fix make test passed; frozen <ab-frozen>/edd6aa2db786
 == 2026-10-29 00:23:45 stage fix-run
-== 00:23:45 fix-351d56c B_si64_160b_k222 np=1 omp=1 mode=gpu rep=1 args=[AB_TRACE=~/qe-test/xp/runs.noindex/v150-staged-refusals-2026-10-27/traces/fix-351d56c/trace AB_TRACE_HASH=1] (power=AC Power load=5.86)
+== 00:23:45 fix-351d56c B_si64_160b_k222 np=1 omp=1 mode=gpu rep=1 args=[AB_TRACE=<runs>/traces/fix-351d56c/trace AB_TRACE_HASH=1] (power=AC Power load=5.86)
 == done 00:27:52
 == 2026-10-29 00:27:52 stage compare
 == 2026-10-29 00:27:52 fix vs diag DIFFER: 31628 calls vs 31628 first difference at call 1:   {'routine': 'dgemm', 'ta': 'C', 'tb': 'N', 'M': '171', 'N': '64', 'K': '287330', 'lda': '287330', 'ldb': '287330', 'ldc': '171', 'alpha': '0x1p+0', 'beta': '0x0p+0', 'hash_a': '8abb5e5f92392239', 'hash_b': '256ff963367f6f45', 'hash_c': '-'} 
 == 2026-10-29 00:27:52 stage base-run
-== 00:27:52 base-755a B_si64_160b_k222 np=1 omp=1 mode=gpu rep=1 args=[AB_TRACE=~/qe-test/xp/runs.noindex/v150-staged-refusals-2026-10-27/traces/base-755a/trace AB_TRACE_HASH=1] (power=AC Power load=2.48)
+== 00:27:52 base-755a B_si64_160b_k222 np=1 omp=1 mode=gpu rep=1 args=[AB_TRACE=<runs>/traces/base-755a/trace AB_TRACE_HASH=1] (power=AC Power load=2.48)
 == done 00:32:22
 == 2026-10-29 00:32:23 diag vs 1.5.0:   {'routine': 'dgemm', 'ta': 'C', 'tb': 'N', 'M': '171', 'N': '64', 'K': '287330', 'lda': '287330', 'ldb': '287330', 'ldc': '171', 'alpha': '0x1p+0', 'beta': '0x0p+0', 'hash_a': '8abb5e5f92392239', 'hash_b': 'b56df8cf00114e9c', 'hash_c': '-'}
 == 2026-10-29 00:32:23 stage B1-base-1
@@ -69,7 +69,7 @@
 == 01:01:49 time-351d56c-np8 B_si64_160b_k222 np=8 omp=1 mode=cpu rep=1 args=[-nk 4] (power=AC Power load=6.09)
 == done 01:02:44
 == 2026-10-29 01:02:44 stage ser-build
-== 2026-10-29 01:02:45 serial3m frozen ~/qe-test/ab-frozen/95a90d9c9134
+== 2026-10-29 01:02:45 serial3m frozen <ab-frozen>/95a90d9c9134
 == 2026-10-29 01:02:45 stage cause-host
 == 01:02:45 cause-755a-hostpack A_si64_500b_k222 np=8 omp=1 mode=gpu rep=1 args=[-nk 4 AB_HOST_PACK=1] (power=AC Power load=8.16)
 == done 01:04:29
