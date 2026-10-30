@@ -18,7 +18,7 @@ Program and how to run it: [`benchmarks/split/`](../../split/README.md) (`bench_
 | Settings | `AB_MODE=gpu AB_MIN_GPU_DIM=0 AB_STAGING_MB=8192 AB_REPORT=1`, an `AB_TRACE` file per process, `VECLIB_MAXIMUM_THREADS` 8 (1 process) or 2 (4 processes). Operands registered with `ab_register_host_memory` unless marked "copied". |
 | Power | Every case started and ended on AC power (`pmset` in each report and in `power.log`). 2026-10-28: battery 100%, charged. 2026-10-29: battery held at 80%, "AC attached; not charging". The battery rail read +1.5 to +3.1 W throughout. |
 | Machine state | Each batch held an exclusive lock that kept every other benchmark job off the machine. Load averages before and after each case are in `power.log`. |
-| Data | [`raw/`](raw), one folder per `run.sh` suite; [`traces.tar.xz`](traces.tar.xz) (93 `AB_TRACE` files, 5.0 MB unpacked); [`traces_summary.txt`](traces_summary.txt); [`tables.md`](tables.md), every table below with every case, from `table.py raw`; [`verification/`](verification), the committed program's check (the last section). |
+| Data | [`raw/`](raw), one folder per `run.sh` suite; [`traces.tar.xz`](traces.tar.xz) (93 `AB_TRACE` files, 5.0 MB unpacked); [`traces_summary.txt`](traces_summary.txt); [`tables.md`](tables.md), every table below with every case, from `table.py raw`; [`verification/`](verification), the committed program's check (the last section); [`cpu-use/`](cpu-use/README.md), CPU cores in use per mode. |
 
 ## Method in brief
 
@@ -185,6 +185,13 @@ With `SPLIT_NOREG=1` the staged path copies the operands instead of reading them
 - **Bits:** the R-K results (split, GPU alone and Accelerate alone) are the same with and without
   registration.
 - **Ranges:** in `tables.md`.
+
+## CPU cores in use
+
+A separate run on 2026-10-29 added `getrusage` around each timed call ([`cpu-use/`](cpu-use/README.md)).
+Per process, Accelerate alone kept 1.87–1.98 cores busy, although `VECLIB_MAXIMUM_THREADS=8` allowed
+eight. The GPU alone kept at most 0.01 busy, and the split 1.69–1.85. The split adds the GPU to the CPU
+that Accelerate alone already uses; it does not use more CPU cores.
 
 ## What this does not show
 

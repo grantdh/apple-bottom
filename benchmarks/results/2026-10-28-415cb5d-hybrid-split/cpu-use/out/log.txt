@@ -1,0 +1,5 @@
+start 2026-10-29 21:23:08 Now drawing from 'AC Power' load { 4.27 6.60 6.14 }
+D2048 np=1 threads=8 rc=0 load { 3.93 6.49 6.10 }
+Z2048 np=1 threads=8 rc=0 load { 3.56 6.32 6.05 }
+RK500 np=4 threads=2 rc=0 load { 4.38 6.33 6.06 }
+end 2026-10-29 21:23:44 Now drawing from 'AC Power'
