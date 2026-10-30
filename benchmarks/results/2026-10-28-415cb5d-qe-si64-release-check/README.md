@@ -6,6 +6,15 @@ inputs A and B at 1 rank and at 8 ranks on a fresh QE develop build, in
 objects relinked to 1.4.0 are the control, so the two libraries are compared on
 one QE build. Inputs and scripts: [`benchmarks/qe/`](../../qe/).
 
+**Since this check.** #11 (66c99a2, the device-buffer API's per-row and
+per-column choice between Gauss-3M and 4M) merged after it. In the BLAS ABI
+it moved the 3M/4M rule and the conversion's chunking into shared helpers
+without changing them, and the golden bits held (`test_qe_golden`), so it
+does not change these results. The calls this check found leaving the staged
+path for the host path (about half of the GPU-routed calls) were fixed afterwards:
+[`2026-10-29-351d56c-staged-refusals`](../2026-10-29-351d56c-staged-refusals/)
+measures the fix on this QE build.
+
 | | |
 |---|---|
 | Machine | MacBook Pro (Mac14,6), M2 Max, 38-core GPU, 64 GB, macOS 27.0.1 (26A434). Every reported run was on AC power from start to end ([`power.txt`](power.txt)). |

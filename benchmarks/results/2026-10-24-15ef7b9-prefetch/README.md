@@ -13,7 +13,7 @@ rule, `use_prefetch` in `src/apple_bottom.m`, picks it. This directory holds:
 | Machine | MacBook Pro (Mac14,6), Apple M2 Max, 38-core GPU, 64 GB, macOS 27.0.1 (26A434) |
 | Library | 15ef7b9 on release/v1.5.0 e3f09ca. `ab_build_info()`: `1.4.0 (15ef7b91d00f)`, a clean tree. Baseline: e3f09ca built from `git archive`, reporting `1.4.0 (e3f09ca-base)`. |
 | Kernel timings | [`pfprobe.m`](pfprobe.m), described below. |
-| Power, lock | Every run held machlock's exclusive bench lock. See the next paragraph for which runs were on AC and which on battery. |
+| Power, lock | Every run held an exclusive machine lock, so no other benchmark job ran. See the next paragraph for which runs were on AC and which on battery. |
 
 **Kernel timings.** [`pfprobe.m`](pfprobe.m) extracts the MSL from
 `src/apple_bottom.m` and compiles it with `MTLMathModeSafe`, as the library
@@ -71,10 +71,10 @@ the plain kernels and share their inner loop, so each output gets the same
   kernel through the public API, with `AB_PREFETCH=1` (every dispatch
   prefetches) against `AB_PREFETCH=0`. It requires bitwise-equal results and
   one prefetch dispatch per product.
-- **The 510-case harness of the v1.5 kernel work:** every GPU GEMM entry
-  point (ABMatrix, batched, batch, async, DSYRK, ZHERK, DTRSM, MPIR, BLAS
-  ABI, device API), with the same mix of data, hashing raw DD buffers and
-  FP64 results.
+- **The 510-case harness of the v1.5 kernel work** (a local harness, not
+  published in this repository): every GPU GEMM entry point (ABMatrix,
+  batched, batch, async, DSYRK, ZHERK, DTRSM, MPIR, BLAS ABI, device API),
+  with the same mix of data, hashing raw DD buffers and FP64 results.
   - Its hashes for this build equal e3f09ca's with `AB_PREFETCH` unset, `0`
     and `1`.
   - The one case it flags in every run, base included, is the guards'
@@ -169,16 +169,22 @@ alternating, on battery. The kernel stage is the command buffer's GPU time.
 end-to-end wall time per call):
 - **Stages:** each round runs three, the order rotating: the e3f09ca build,
   this branch with `AB_PREFETCH=0`, and this branch as routed.
-- **Prefetch off ÷ on (paired rounds):**
-  - `dgemm_` 160 × 160 × 18432: 1.10 [1.03–1.13].
-  - `dgemm_` 150 × 150 × 18277: 1.10 [0.85–1.15].
-  - `dgemm_` 512 × 512 × 18432: 1.04.
-  - `zgemm_` 160 × 160 × 18432: 1.04 [1.01–1.06].
-  - `zgemm_` 150 × 150 × 18277: 1.02.
-  - Every other shape: 0.99–1.04, within the rounds' spread. That
-    includes the shapes whose kernels did not change.
-- **Baseline ÷ prefetch off:** 0.96–1.04. Both run the plain kernels, so
-  this spread is the noise of these battery runs.
+- **Prefetch off ÷ on**, as the ratio of the median wall times per call,
+  with the median [min–max] of the paired per-round ratios, which
+  `e2e_summary.txt` also prints, after it:
+  - `dgemm_` 160 × 160 × 18432: 1.03 (34.84 → 33.77 ms); paired 1.10
+    [1.03–1.13].
+  - `dgemm_` 150 × 150 × 18277: 1.11 (15.56 → 14.05 ms); paired 1.10
+    [0.85–1.15].
+  - `dgemm_` 512 × 512 × 18432: 1.04; paired 1.04.
+  - `zgemm_` 160 × 160 × 18432: 1.03; paired 1.04 [1.01–1.06].
+  - `zgemm_` 150 × 150 × 18277: 1.03; paired 1.02.
+  - Every other shape: 0.98–1.03 (paired 0.99–1.04), within the rounds'
+    spread. That includes the shapes whose kernels did not change.
+  - The two measures disagree most at 160 × 160 × 18432, where the times
+    spread widely from round to round; quote the ratio of medians.
+- **Baseline ÷ prefetch off** (paired): 0.96–1.04. Both run the plain
+  kernels, so this spread is the noise of these battery runs.
 
 ## When the GPU clock is low
 
@@ -206,7 +212,7 @@ clock falls accordingly: 1395–1398 MHz at 0 ms, 704–1378 MHz at 5 ms,
 
 | file | |
 |---|---|
-| `pfprobe.m` | The probe. Build and run lines are in its header; `-DPFPROBE_CLOCK` with an `ior.h` adds the MHz column. |
+| `pfprobe.m` | The probe. Build and run lines are in its header; `-DPFPROBE_CLOCK` with an `ior.h` adds the MHz column. `ior.h` is an IOReport wrapper that is not in this repository; without it the column reads `nan`. |
 | `shapes/*.txt` | The probe's shape lists (`qe_e2e.txt` is the rect benchmarks' config). |
 | `kernel_sq_1x.txt`, `kernel_sq_3x.txt` | 64×64 and narrow, squares 256–1088 step 32, K = 18432 / 4608 / 1024 (halved where a command buffer would exceed 32 GF). |
 | `kernel_rect.txt` | 64×64 and narrow, non-square grids of 60–128 threadgroups. |

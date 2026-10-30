@@ -4,6 +4,9 @@
 GPU path, and times the split against each engine alone. Results from an M2 Max are in
 [`benchmarks/results/2026-10-28-415cb5d-hybrid-split`](../results/2026-10-28-415cb5d-hybrid-split/README.md).
 
+The split is made here, in user code: `dgemm_` and `zgemm_` do not split a call in 1.5.0. A split
+inside the library is planned for 1.6.0.
+
 ## What it does
 
 - **CPU slice:** `cblas_dgemm`/`cblas_zgemm` from Accelerate on its part of the call, on the calling

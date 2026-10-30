@@ -22,7 +22,7 @@ process's CPU time over each timed call and divided it by the call's wall time:
 | | |
 |---|---|
 | Machine | MacBook Pro (Mac14,6), Apple M2 Max, 38-core GPU, 64 GB, macOS 27.0.1 (26A434) |
-| Library | Built with `make lib build/bench_split` from `bench/split-demo` at c30a298, whose library source is release/v1.5.0 at 882d2d8: the build of the [verification](../README.md#verification-of-the-committed-program) section. `ab_build_info()`: `1.4.0 (c30a298c1795)`, the version string not yet bumped. |
+| Library | Built with `make lib build/bench_split` from `bench/split-demo` at c30a298, the pre-amend version of b56327e, with the same source; its library source is release/v1.5.0 at 882d2d8: the build of the [verification](../README.md#verification-of-the-committed-program) section. `ab_build_info()`: `1.4.0 (c30a298c1795)`, the version string not yet bumped. |
 | Program | `benchmarks/bench_split.c` with [`bench_split_cores.patch`](bench_split_cores.patch) applied. The patch records `getrusage(RUSAGE_SELF)` (user + system time of every thread of the process) at the start and end of each timed call, sums both over every call of the fixed block for each mode, and prints one `CORES` line per process. The timed loops are unchanged. |
 | Settings | `AB_MODE=gpu AB_MIN_GPU_DIM=0 AB_STAGING_MB=8192 AB_REPORT=1`, `VECLIB_MAXIMUM_THREADS` 8 (1 process) or 2 (4 processes), operands registered, data uniform in [−1, 1). The runner is [`cores.sh`](cores.sh). |
 | Date and power | 2026-10-29, 21:23:08–21:23:44 EDT, on AC power from start to end ([`out/log.txt`](out/log.txt)). |
@@ -49,7 +49,7 @@ The run's own speedups are close to the published ones (it is not used in any ot
 
 ## Reproducing it
 
-From a checkout of this branch:
+From a checkout of release/v1.5.0:
 
 ```bash
 git apply benchmarks/results/2026-10-28-415cb5d-hybrid-split/cpu-use/bench_split_cores.patch

@@ -42,12 +42,12 @@ of the integration guide. Then, on AC power with nothing else on the GPU:
 ```bash
 cat > plan.txt <<'EOF'
 # label  input              np omp reps modes
-1.4.0    A_si64_500b_k222    1  8   3   cpu,auto,gpu
+1.5.0    A_si64_500b_k222    1  8   3   cpu,auto,gpu
 EOF
 PW_X=/path/to/pw.x caffeinate -is benchmarks/qe/run_campaign.sh plan.txt /path/to/out
 python3 benchmarks/qe/analyze.py /path/to/out
 python3 benchmarks/qe/compare.py /path/to/out
-python3 benchmarks/qe/tables.py /path/to/out 1.4.0
+python3 benchmarks/qe/tables.py /path/to/out 1.5.0
 ```
 
 A plan line may end with extra pw.x arguments, e.g. `-nk 4` for k-point
@@ -70,10 +70,11 @@ see the 2026-10-15 results.
 
 ## QE builds
 
-The campaigns here (VAL-1 and the results below) used QE develop
+VAL-1 and the 2026-10-14 and 2026-10-15 results below used QE develop
 5b7f8e1bc with `cegterg.f90` and `regterg.f90` calling `ab_zgemm` and
-`ab_dgemm` in place of `ZGEMM` and `DGEMM` (12 calls each). Those patches
-are not needed: linking apple-bottom already sends the calls to it
+`ab_dgemm` in place of `ZGEMM` and `DGEMM` (12 calls each). The 1.5.0
+release check and the staged-refusals runs used a fresh QE develop checkout
+(86c214974) with no source change. Those patches are not needed: linking apple-bottom already sends the calls to it
 ([integration guide](../../docs/INTEGRATION.md#quantum-espresso-integration)).
 A control on 2026-10-18 built one fresh QE develop checkout (4a626b7ce)
 three ways: upstream with OpenBLAS, the same objects relinked with
