@@ -86,21 +86,10 @@ inputs in [-1, 1), against a double-double reference DFT (`tests/fft_ref.h`):
 double-float-rounded input (the transform alone) the GPU's error is the same
 to two digits: rounding the input to ~48 bits costs nothing measurable.
 
-**Energy** (`energy_72.txt`, `energy_120.txt`): the no-sudo probe of
-apple-bottom-research `experiments/m2-kernel-probes-2026-10-15/energy/`
-(SMC `PDTR` wall input sampled at 20 Hz, IOReport GPU energy), with FFT phases
-(`fft_phases.m` there): 15 s per method after a 3 s warm-up, FFTW (NEON) with
-`FFTW_MEASURE` plans. Energy is the wall power above idle (30–35 W) divided by
-the rate:
-
-| Grid, batch | GPU zero copy | GPU staged | FFTW 8 × 1 thread | FFTW 8 threads |
-|---|---:|---:|---:|---:|
-| 72³ × 64 | 0.0138 J (0.174 ms, +80 W) | 0.0190 J (0.200 ms, +95 W) | 0.0164 J (0.287 ms, +57 W) | 0.0196 J (0.351 ms, +56 W) |
-| 120³ × 16 | 0.0667 J (0.824 ms, +81 W) | 0.0947 J (0.975 ms, +97 W) | 0.0836 J (1.484 ms, +56 W) | 0.0929 J (1.542 ms, +60 W) |
-
-The GPU's own energy (IOReport) is 0.0061 J per 72³ transform and 0.030 J per
-120³; the rest of the zero-copy increment is the system around it. Staging
-adds ~16 W of host copying.
+An energy comparison made in the same session was withdrawn on 2026-10-29:
+it measured FFTW as the NEON build with `FFTW_MEASURE` plans, not the
+Homebrew build with `FFTW_PATIENT` plans that the times above compare
+against.
 
 | File | |
 |---|---|
@@ -108,4 +97,3 @@ adds ~16 W of host copying.
 | `accuracy.txt`, `accuracy.csv` | the accuracy run |
 | `speed_fftw_neon.txt`, `.csv` | GPU, NEON FFTW and vDSP; the text file also has each GPU plan (`ab_fft_describe`) and per-call GPU and copy times |
 | `speed_fftw_homebrew.txt`, `.csv` | Homebrew FFTW |
-| `energy_72.txt`, `energy_120.txt` | the energy runs |

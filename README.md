@@ -230,9 +230,6 @@ than a NEON build of FFTW. "8 cores" is the faster of one 8-thread plan and
   staged and 1.8–3.2× faster with zero copy on every grid. One transform at
   a time it takes 96³ or more with zero copy (1.5–2.4×) and 120³ or more
   staged (1.0–1.5×); below that FFTW's eight threads win.
-- **Energy** per transform (wall power above idle, 72³ and 120³): zero copy
-  needs 16–20% less than FFTW on eight single-thread workers, staged 13–16%
-  more, spent on the copies.
 
 ## How it works
 

@@ -1,7 +1,0 @@
-72^3, batch 64, FFTW fftw-3.3.10-neon; Now drawing from 'AC Power'
-  idle                   PDTR   34.9 W  GPU  0.00 W
-  GPU zero copy            5759.7 transforms/s    0.174 ms each | PDTR  114.5 W (+ 79.6) ->  0.0138 J per transform above idle | GPU  35.0 W (+ 35.0, 1398 MHz, busy 100%) ->  0.0061 J GPU
-  GPU staged               4990.0 transforms/s    0.200 ms each | PDTR  129.5 W (+ 94.6) ->  0.0190 J per transform above idle | GPU  31.9 W (+ 31.9, 1398 MHz, busy 100%) ->  0.0064 J GPU
-  FFTW 8 x 1 thread        3480.3 transforms/s    0.287 ms each | PDTR   92.1 W (+ 57.2) ->  0.0164 J per transform above idle | GPU   0.0 W (+  0.0,  495 MHz, busy   2%) ->  0.0000 J GPU
-  FFTW 8 threads           2853.0 transforms/s    0.351 ms each | PDTR   90.9 W (+ 56.0) ->  0.0196 J per transform above idle | GPU   0.0 W (+  0.0,  454 MHz, busy   3%) ->  0.0000 J GPU
-  idle (again)           PDTR   32.6 W  GPU  0.00 W
