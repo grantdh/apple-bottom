@@ -42,6 +42,8 @@ It depends on where the matrices live.
   Linking apple-bottom is safe but, on this hardware, not a speed-up yet.
 
 The measurements are below, each with the data it came from.
+[docs/COMPARISON.md](docs/COMPARISON.md) compares apple-bottom with the
+other ways to multiply FP64 matrices on a Mac.
 
 ## Quick start
 
@@ -303,21 +305,6 @@ benchmarks/                     benchmarks, calibration and their results
 docs/                           integration guide, V&V package, design notes
 python/                         experimental ctypes bindings
 ```
-
-## Related projects
-
-By the same author:
-[Quantum-Espressivo](https://github.com/grantdh/Quantum-Espressivo) (Quantum ESPRESSO on Apple Silicon),
-[YAMBOrghini](https://github.com/grantdh/YAMBOrghini) (Yambo GW/BSE on Apple Silicon),
-[MEEPhistopheles](https://github.com/grantdh/MEEPhistopheles) (Metal FDTD kernels for MEEP, FP32) and
-[rainbow-connection](https://github.com/grantdh/rainbow-connection) (QE → Yambo → MEEP pipelines).
-
-Prior art: [metal-float64](https://github.com/philipturner/metal-float64)
-set out to emulate IEEE FP64 in software on Metal (unfinished, archived);
-apple-bottom gives up exact IEEE semantics to run on the FP32 units
-directly.
-[MLX](https://github.com/ml-explore/mlx) runs FP64 on the CPU only.
-[docs/COMPARISON.md](docs/COMPARISON.md) has more.
 
 ## Contributing
 
