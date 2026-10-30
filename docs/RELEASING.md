@@ -23,7 +23,7 @@ make ci-local
 ```
 
 This will:
-- Run every test (precision, correctness, chaos, device-API, routing, BLAS-ABI, trace; `tests/README.md`, Coverage status, gives the counts and the counting rule) plus the golden-bits, ghost-detection, symbol and Fortran checks
+- Run every test (precision, correctness, chaos, device-API, routing, BLAS-ABI, trace, staged path; `tests/README.md`, Coverage status, gives the counts and the counting rule) plus the golden-bits, ghost-detection, symbol and Fortran checks
 - Run convergence study (V-2)
 - Generate `build/CI_REPORT.txt` with test results and convergence data hash
 
@@ -37,11 +37,13 @@ This will:
 ✓ test_blas_abi: PASS
 ✓ test_trace: PASS
 ✓ test_qe_golden: PASS
+✓ test_staging: PASS
 ✓ test_convergence: PASS
 
 GIT_SHA: <current-commit-sha>
 AB_BUILD_SHA: <12-digit commit; a release build must not end in -dirty>
 TEST_QE_GOLDEN: PASS (<n> cases bitwise equal to <the golden file's library>)
+TEST_STAGING: PASS (<n> cases, the staged path against the host path)
 TEST_TOTAL: <the total in tests/README.md>
 TEST_PASSED: <the same>
 TEST_FAILED: 0
@@ -91,14 +93,14 @@ The version lives in `include/apple_bottom.h` (`APPLE_BOTTOM_VERSION_MAJOR`,
 dylib and the pkg-config file. Set it, then bring the other copies in line:
 
 - [ ] `python/apple_bottom/__init__.py` (`__version__`) and `python/setup.py`
-- [ ] `CITATION.cff` (`version`, and add `date-released: YYYY-MM-DD`)
+- [ ] `CITATION.cff` (`version` and `date-released: YYYY-MM-DD`)
 - [ ] The citation block at the end of `README.md`
-- [ ] `CHANGELOG.md` — rename the top `[X.Y.Z] - Unreleased` entry to the release date
+- [ ] `CHANGELOG.md` — rename the top `## [Unreleased]` section to `## [X.Y.Z] - YYYY-MM-DD`
 - [ ] `make version-check` passes (it is also the first step of `make ci-local` and of CI)
 
 Example CHANGELOG update:
 ```markdown
-## [1.0.3] - 2026-04-01
+## [X.Y.Z] - YYYY-MM-DD
 
 ### Added
 - New feature X
@@ -113,7 +115,7 @@ Commit the CI report as proof of validation:
 
 ```bash
 git add build/CI_REPORT.txt
-git commit -m "ci: local validation for v1.0.3"
+git commit -m "ci: local validation for vX.Y.Z"
 git push origin main
 ```
 
@@ -129,21 +131,21 @@ Once the pre-release checklist is complete:
 
 ```bash
 # Tag the release
-git tag -a v1.0.3 -m "Release 1.0.3
+git tag -a vX.Y.Z -m "Release X.Y.Z
 
 - Summary of changes
 - Key fixes or features
 - Performance improvements"
 
 # Push tag to GitHub
-git push origin v1.0.3
+git push origin vX.Y.Z
 ```
 
 ### 2. Create GitHub Release
 
 1. Go to https://github.com/grantdh/apple-bottom/releases/new
-2. Select the tag you just created (`v1.0.3`)
-3. Release title: `v1.0.3`
+2. Select the tag you just created (`vX.Y.Z`)
+3. Release title: `vX.Y.Z`
 4. Description: Copy relevant section from `CHANGELOG.md`
 5. Attach artifacts (optional):
    - `build/libapplebottom.a` — Pre-built library
@@ -165,7 +167,7 @@ For critical bug fixes that need immediate release:
 
 1. Create a hotfix branch from the release tag:
    ```bash
-   git checkout -b hotfix-1.0.4 v1.0.3
+   git checkout -b hotfix-X.Y.W vX.Y.Z    # W = Z + 1
    ```
 
 2. Make the fix, commit, and run validation:
@@ -180,11 +182,11 @@ For critical bug fixes that need immediate release:
 3. Merge hotfix to main:
    ```bash
    git checkout main
-   git merge hotfix-1.0.4
+   git merge hotfix-X.Y.W
    git push origin main
    ```
 
-4. Follow normal release process above to tag `v1.0.4`
+4. Follow normal release process above to tag `vX.Y.W`
 
 ---
 
@@ -233,11 +235,11 @@ If a release has critical issues:
 1. **Immediate:** Delete the GitHub release (does not delete the tag)
 2. **Revert tag** (if needed):
    ```bash
-   git tag -d v1.0.3              # Delete local tag
-   git push origin :refs/tags/v1.0.3  # Delete remote tag
+   git tag -d vX.Y.Z              # Delete local tag
+   git push origin :refs/tags/vX.Y.Z  # Delete remote tag
    ```
 3. **Fix the issue** on main
-4. **Create new release** with incremented version (e.g., `v1.0.4`)
+4. **Create new release** with incremented version (e.g., `vX.Y.W`)
 
 ---
 
