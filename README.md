@@ -139,9 +139,9 @@ ab_dev_free(hA);   // before A is freed
 
 M2 Max, y = A x for square A of side 4096 / 8192 / 16384: GB/s of A read
 (ZHEMV: of one triangle) per call, median wall time with the GPU warmed up;
-GEMV: the median of five runs at 4096 and 8192 and two at 16384
-([data](benchmarks/results/2026-10-19-ba345df-gemv/), ZHEMV
-[data](benchmarks/results/2026-10-19-1bc503a-zhemv/), `make bench-gemv`):
+GEMV: the median of five runs at 4096 and 8192 and two at 16384, ZHEMV: of
+five runs ([data](benchmarks/results/2026-10-19-ba345df-gemv/), ZHEMV
+[data](benchmarks/results/2026-10-29-c37db7c-zhemv/), `make bench-gemv`):
 
 | y = A x | GPU, A resident | GPU, A mapped per call (`dgemv_`) | Accelerate | plain C, best of 4/8/12 threads |
 |---|---:|---:|---:|---:|
@@ -149,17 +149,17 @@ GEMV: the median of five runs at 4096 and 8192 and two at 16384
 | DGEMV `'T'` | 229 / 320 / 354 | 60–72 | 51–60 | 115 / 116 / 114 |
 | ZGEMV `'N'` | 274 / 316 / 320 | 42–64 | 37–39 | 77 / 77 / 86 |
 | ZGEMV `'T'`, `'C'` | 276–277 / 334–336 / 358–359 | 43–66 | 108–120 | 123–124 / 112–123 / 117–119 |
-| ZHEMV `'U'`, `'L'` | 156–162 / 264–274 / 305–316 | 29–38 | 8.2–8.8 | 66–70 / 76–89 / 87–97 |
+| ZHEMV `'U'`, `'L'` | 159–161 / 261–273 / 305–312 | 35–39 | 8.3–9.1 | 59–71 / 86–92 / 100–102 |
 
 - **Resident:** 3.8–16× Accelerate's speed for DGEMV, 2.4–8.6× for ZGEMV
-  and 18–36× for ZHEMV, and 2.0–4.4× the best threaded C loop. At 16384²
+  and 17–36× for ZHEMV, and 2.0–4.4× the best threaded C loop. At 16384²
   GEMV reads A at 317–359 GB/s of the M2 Max's 400. ZHEMV reads its stored
   triangle once, adding each element into its row's sum and, conjugated,
   into its column's: twice GEMV's arithmetic per byte, which holds it to
-  305–316 GB/s.
+  305–312 GB/s.
 - **Per call** there are about 0.2 ms of submit and wait on top, so 4096²
   (0.59–0.98 ms per call) runs at 223–277 GB/s, ZHEMV's triangle
-  (0.83–0.86 ms) at 156–162 GB/s, and smaller matrices lose more. A cold
+  (0.84–0.85 ms) at 159–161 GB/s, and smaller matrices lose more. A cold
   GPU runs about the first 0.3 s of calls at half speed while its clocks
   rise.
 - **Accuracy:** 2.5×10⁻¹⁶ to 1×10⁻¹⁵ relative to |A||x| on these matrices,
@@ -173,7 +173,7 @@ GEMV: the median of five runs at 4096 and 8192 and two at 16384
   GPU only where that was measured at least 1.10× faster than Accelerate in
   two runs: DGEMV `'N'` from 2048² to 16384² elements (3.0–3.2× in the
   table), ZGEMV `'N'` from 3072² to 12288², and ZHEMV from 2048 to 16384
-  (3.2–4.6×). DGEMV `'T'` (0.94–1.40×, too close to call) and ZGEMV `'T'`
+  (3.8–4.7×). DGEMV `'T'` (0.94–1.40×, too close to call) and ZGEMV `'T'`
   and `'C'` (0.4–0.6×) stay on Accelerate, as do smaller and larger calls;
   most one-shot calls in a real program are small. These are one-process
   numbers: MPI ranks sharing the GPU should expect less

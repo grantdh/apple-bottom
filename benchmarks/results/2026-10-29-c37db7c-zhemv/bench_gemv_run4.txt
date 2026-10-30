@@ -1,0 +1,37 @@
+apple-bottom BLAS-2 benchmark: apple-bottom 1.4.0 (c37db7c23314), Apple M2 Max
+
+zhemv 'U' 4096 x 4096 (lda 4096), A referenced 0.13 GB
+  resident gpu       0.825 ms    162.8 GB/s  err 3.1e-16
+  staged   gpu       3.880 ms     34.6 GB/s  err 3.1e-16
+  accel    cpu      15.179 ms      8.8 GB/s  err 1.3e-16
+  cloop8   cpu      2.165 ms     62.0 GB/s  err 6.1e-17
+
+zhemv 'L' 4096 x 4096 (lda 4096), A referenced 0.13 GB
+  resident gpu       0.888 ms    151.1 GB/s  err 2.8e-16
+  staged   gpu       3.888 ms     34.5 GB/s  err 2.8e-16
+  accel    cpu      14.643 ms      9.2 GB/s  err 4.6e-17
+  cloop8   cpu      2.363 ms     56.8 GB/s  err 5.9e-17
+
+zhemv 'U' 8192 x 8192 (lda 8192), A referenced 0.54 GB
+  resident gpu       1.969 ms    272.7 GB/s  err 2.5e-16
+  staged   gpu      13.808 ms     38.9 GB/s  err 2.5e-16
+  accel    cpu      64.921 ms      8.3 GB/s  err 1.3e-16
+  cloop12  cpu     6.023 ms     89.2 GB/s  err 5.1e-17
+
+zhemv 'L' 8192 x 8192 (lda 8192), A referenced 0.54 GB
+  resident gpu       2.081 ms    258.1 GB/s  err 2.5e-16
+  staged   gpu      13.886 ms     38.7 GB/s  err 2.5e-16
+  accel    cpu      64.469 ms      8.3 GB/s  err 8.5e-17
+  cloop8   cpu      5.864 ms     91.6 GB/s  err 9.2e-17
+
+zhemv 'U' 16384 x 16384 (lda 16384), A referenced 2.15 GB
+  resident gpu       6.863 ms    312.9 GB/s  err 2.6e-16
+  staged   gpu      56.347 ms     38.1 GB/s  err 2.6e-16
+  accel    cpu     247.448 ms      8.7 GB/s  err 1.1e-16
+  cloop12  cpu    20.277 ms    105.9 GB/s  err 8.4e-17
+
+zhemv 'L' 16384 x 16384 (lda 16384), A referenced 2.15 GB
+  resident gpu       7.087 ms    303.0 GB/s  err 3.2e-16
+  staged   gpu      56.518 ms     38.0 GB/s  err 3.2e-16
+  accel    cpu     245.313 ms      8.8 GB/s  err 8.7e-17
+  cloop8   cpu     21.221 ms    101.2 GB/s  err 8.4e-17
