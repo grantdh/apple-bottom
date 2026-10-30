@@ -3,7 +3,7 @@ message: "If you use this software, please cite it as below."
 authors:
   - family-names: "Heileman"
     given-names: "Grant David"
-title: "apple-bottom: FP64-class BLAS for Apple Silicon GPU"
+title: "apple-bottom: FP64-class BLAS for Apple Silicon GPUs"
 version: 1.4.0
 date-released: 2026-10-19
 url: "https://github.com/grantdh/apple-bottom"
