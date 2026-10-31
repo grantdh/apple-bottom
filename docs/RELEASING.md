@@ -69,7 +69,7 @@ STATUS: PASS
 
 Check that CI passed on the latest commit:
 
-- [ ] GitHub Actions: the `CI` workflow passed on macos-14 and macos-15
+- [ ] GitHub Actions: the `CI` workflow passed on macos-15 and macos-26
 
 **Check at:** `https://github.com/grantdh/apple-bottom/actions`
 

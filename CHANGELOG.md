@@ -233,6 +233,11 @@ All notable changes to this project will be documented in this file.
   record of that version, with its production approvals withdrawn.
   `docs/vv/PRECISION_ENVELOPE.md` gives `dd_mul` below 5u² and the fused
   `dd_fma` within 8u². `SECURITY.md` supports 1.5.x.
+- **CI runs on the macos-15 and macos-26 images.** GitHub retires its
+  macos-14 runner image on November 2, 2026. That image's job was the only
+  one that built against the macOS 14 SDK, which has no `MTLMathModeSafe`
+  (the shaders get `fastMathEnabled = NO` there); no CI job builds against
+  that SDK now.
 
 ### Removed
 - `docs/blog/fp64-on-apple-silicon.md`, an April 2026 post whose claims

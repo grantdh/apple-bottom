@@ -4,9 +4,11 @@ name: CI
 # every check that needs no GPU: version consistency, a compile of every
 # source file, both libraries, their exported BLAS symbols and the routing
 # unit tests. The GPU suites run locally with `make ci-local` before a release
-# (docs/RELEASING.md). The two images can carry different SDKs, which select
-# different shader compile options (MTLMathModeSafe needs the macOS 15 SDK); the
-# Toolchain step prints which one each job used.
+# (docs/RELEASING.md). The two images carry different Xcode versions and SDKs;
+# the Toolchain step prints which one each job used. GitHub retires the
+# macos-14 image on November 2, 2026. Its job was the only one that built
+# against the macOS 14 SDK, which has no MTLMathModeSafe (the shaders get
+# fastMathEnabled = NO there); no job builds against that SDK now.
 
 on:
   push:
@@ -25,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ macos-14, macos-15 ]
+        os: [ macos-15, macos-26 ]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
 
