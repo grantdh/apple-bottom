@@ -75,9 +75,9 @@ extern "C" {
 #endif
 
 #define APPLE_BOTTOM_VERSION_MAJOR 1
-#define APPLE_BOTTOM_VERSION_MINOR 4
+#define APPLE_BOTTOM_VERSION_MINOR 5
 #define APPLE_BOTTOM_VERSION_PATCH 0
-#define APPLE_BOTTOM_VERSION_STRING "1.4.0"
+#define APPLE_BOTTOM_VERSION_STRING "1.5.0"
 
 typedef struct ABMatrix_s* ABMatrix;
 typedef struct ABSession_s* ABSession;

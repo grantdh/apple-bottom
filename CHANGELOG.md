@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.5.0] - Unreleased
 
 ### Highlights
 - **The BLAS ABI's work moves to the GPU.** A `dgemm_`/`zgemm_` call routed
