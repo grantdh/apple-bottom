@@ -144,8 +144,10 @@ Operation counts (DWTimesDW3 vs DWTimesDW2 delta):
 fused `dd_fma`. Compared to ~~DWTimesDW2's `< 5u²`~~ the default's proven
 6.000001u² (2026-10-30), the gap is ~~20%~~ 33% at the per-operation level,
 although the observed worst cases differ by about 17% (4.33u² against 3.6u²). At
-accumulation length `K`, worst-case Higham bound improves from `O(5K·u²)` to
-`O(4K·u²)`; probabilistic `√K·u²` bound improves by the same ratio.
+accumulation length `K`, ~~worst-case Higham bound improves from `O(5K·u²)` to
+`O(4K·u²)`; probabilistic `√K·u²` bound improves by the same ratio~~ the
+default's proven GEMM bound is `(3K+13)u²|A||B|` (`PRECISION_ENVELOPE.md`
+§1.2); no GEMM bound is proven for this variant's `dd_fma`.
 
 ---
 

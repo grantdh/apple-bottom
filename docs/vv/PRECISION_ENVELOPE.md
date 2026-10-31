@@ -4,7 +4,7 @@
 **Validation Baseline**: Git tag `v1.0.2-bugfix` (SHA: f3e2fc1)
 **Test System**: Apple M2 Max, macOS 14.7, Metal 3
 
-> **Status (Revision 1.3, 2026-10-30).** Written for v1.0.2 and kept as its
+> **Status (Revision 1.4, 2026-10-30).** Written for v1.0.2 and kept as its
 > record, with corrections: the per-operation bounds of §1.2 (Revision 1.4:
 > `dd_mul` ≤ 6.000001u², the fused `dd_fma` ≤ 13u²|ab| + 3u²|c|, both proven;
 > GEMM ≤ (3K+13)u²|A||B| componentwise, §1.3), the
@@ -162,11 +162,11 @@ The effective DD unit roundoff is `u² = 2⁻⁴⁸ ≈ 3.55 × 10⁻¹⁵`.
 
 For DGEMM with inner dimension K, two regimes apply:
 
-**Worst-case (adversarial inputs)**: The Higham bound gives `O(K · u²)`. For K=4096, this yields `~1.5 × 10⁻¹¹` — a hard ceiling that holds for any input, including all-positive or maximally-correlated matrices.
+**Worst-case (adversarial inputs)**: The Higham bound gives `O(K · u²)`. ~~For K=4096, this yields `~1.5 × 10⁻¹¹` — a hard ceiling that holds for any input, including all-positive or maximally-correlated matrices.~~ The proven componentwise bound (§1.2) is `(3K+13) · u²` of `(|A||B|)_ij`, about `4.4 × 10⁻¹¹` at K=4096.
 
 **Probabilistic (random inputs)**: When rounding errors are uncorrelated (the typical case for random or well-conditioned scientific matrices), the Wilkinson random walk model applies. Errors accumulate as a random walk rather than coherently, giving `O(√K · u²)`. For K=4096: `√4096 · 3.55 × 10⁻¹⁵ ≈ 2.3 × 10⁻¹³`.
 
-This explains the empirically observed `√N` scaling in Section 2.1 (slope = 0.493 ≈ 0.5). The measured Frobenius errors of `~10⁻¹⁵` to `~10⁻¹⁴` across N=64 to N=4096 fall between the probabilistic `√K · u²` and the worst-case `K · u²` bounds, exactly where theory predicts for Uniform(-1,1) random matrices with stochastic cancellation.
+This explains the empirically observed `√N` scaling in Section 2.1 (slope = 0.493 ≈ 0.5). The measured Frobenius errors of `~10⁻¹⁵` to `~10⁻¹⁴` across N=64 to N=4096 fall between the probabilistic `√K · u²` and the worst-case ~~`K · u²`~~ `(3K+13) · u²` bounds, exactly where theory predicts for Uniform(-1,1) random matrices with stochastic cancellation.
 
 **The stated guarantee uses the conservative `O(N · 2⁻⁴⁸)` bound.** The `√N` scaling is a property of the input distribution, not of the algorithm, and should not be assumed for production error budgets.
 
@@ -480,8 +480,8 @@ If precision is insufficient:
 | 1.0 | 2026-03-31 | Initial validated precision envelope | Grant Heileman |
 | 1.1 | 2026-04-04 | Add theoretical precision bounds, FMA optimization reference | Grant Heileman |
 | 1.2 | 2026-04-16 | Correct DWTimesDW2 error bound to Muller-Rideau 2022 Thm 2.7 (`< 5u²/(1+u)² < 5u²`); fix EFT table (twoSum/twoProduct are error-free, `dd_fma` at DD level) | Grant Heileman |
-| 1.4 | 2026-10-30 | §1.2: the default product is not JMP Algorithm 11, so Theorem 2.7 does not apply. Proven bounds for `dd_mul` (≤ 6.000001u²) and `dd_fma` ((13+43u)u²|ab| + (3+5u)u²|c|), the final `Fast2Sum` shown to be exact, and the GEMM bound (3K+13)u²|A||B|. They replace the unproven 5u² and 8u² figures. New `make test-dd-bound`. §1.3: slope note | Grant Heileman |
 | 1.3 | 2026-10-14 to 2026-10-30 | Correction notice (§2.4 replaced by VAL-1 revision 2, §5.1 by the 1.4.0 measurements); exponent range and complex products for 1.5.0 (§3.2, §3.3, §4.2, §4.3); per-operation bounds corrected (§1.2: `dd_mul` < 5u², `dd_fma` ≲ 8u²); guarantee restated; notes on the max-element measure (§2.3) and threads (§4.4); §5.1 points at 1.5.0 | Grant Heileman |
+| 1.4 | 2026-10-30 | §1.2: the default product is not JMP Algorithm 11, so Theorem 2.7 does not apply. Proven bounds for `dd_mul` (≤ 6.000001u²) and `dd_fma` ((13+43u)u²|ab| + (3+5u)u²|c|), the final `Fast2Sum` shown to be exact, and the GEMM bound (3K+13)u²|A||B|. They replace the unproven 5u² and 8u² figures. New `make test-dd-bound`. §1.3: slope note | Grant Heileman |
 
 ---
 
