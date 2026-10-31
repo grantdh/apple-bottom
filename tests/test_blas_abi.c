@@ -456,11 +456,13 @@ static AbiCase *add_kind(const Suite *s, Kind kind, Op op, char ta, char tb, int
 // tall-skinny kernels compute each output the same way. The error is max_ij |C - R|_ij / (|op(A)||op(B)|)_ij
 // (moduli for complex), printed in units of u² = 2⁻⁴⁸ and of √K·u².
 //
-// Bound: per term, converting both inputs to DD costs ≤ 2u² and the DD
-// product (DWTimesDW2) < 5u², at most 7u² of (|A||B|)_ij in all whatever K.
-// The K DD additions each round a partial sum of size ~√k by ≤ c·u² of it;
-// with random signs these add up like u²·(Σk)^½ ~ u²·K, while (|A||B|)_ij
-// grows like K, so they too stay O(u²) as K grows. Measured on 1.4.0 (M2 Max):
+// Bound: the proven componentwise bound is (3K+13)u² of (|A||B|)_ij
+// (docs/vv/PRECISION_ENVELOPE.md §1.2): each dd_fma step costs ≤ 13u² of its
+// term and ≤ 3u² of the running partial sum. LONG_K_BOUND below is not that
+// bound but a statistical criterion for random signs: the per-step errors on a
+// partial sum of size ~√k add up like u²·(Σk)^½ ~ u²·K, while (|A||B|)_ij
+// grows like K, so they stay O(u²) as K grows. Data whose partial sums
+// saturate (QE-like operands) can exceed it. Measured on 1.4.0 (M2 Max):
 // 1.6-2.9 u² for every K and kernel (zgemm_ 1.7-2.0 u²). LONG_K_BOUND = 8 u²
 // is 2.8x the largest. The BLAS-ABI tolerance TOL = 1e-11 is ~2800 u², and one
 // FP32 rounding in the sum would cost ~u = 2²⁴ u².
