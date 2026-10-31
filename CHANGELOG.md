@@ -2,7 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.5.0] - Unreleased
+
+### Highlights
+- **The BLAS ABI's work moves to the GPU.** A `dgemm_`/`zgemm_` call routed
+  to the GPU is now converted to double-float, scaled, multiplied and
+  converted back on the GPU (the staged path), from GPU buffers the
+  library reuses or from memory registered with `ab_register_host_memory`.
+  Its results are bit for bit those of the CPU-side path, which
+  `AB_HOST_PACK=1` keeps.
+- **No silent errors outside FP32's exponent range.** Rows and columns far
+  from 1 are scaled by powers of two, and what the range guard cannot
+  certify runs on Accelerate.
+- **ZGEMM keeps its imaginary part's accuracy** when real and imaginary
+  parts are imbalanced, by taking four real products instead of Gauss's
+  three, decided per row and column in the BLAS ABI and the device-buffer
+  API.
+- **Faster kernels with unchanged bits**: float4 tile loads, 32 × 32 tiles
+  for small outputs, register prefetch on small grids, concurrent Gauss-3M
+  products and pooled ZGEMM temporaries.
+- **Per-call tracing** (`AB_TRACE`), the reasons calls leave the staged
+  path (`AB_REPORT`), and a replay of traced Quantum ESPRESSO runs.
+- **Measured on an M2 Max:**
+  - Quantum ESPRESSO (64-atom Si, PAW) forced onto the GPU takes 1.01–1.06×
+    its time on Accelerate, against 1.06–1.43× for 1.4.0 on the same QE
+    build, with the same energies in every run. The routing table is still
+    1.4.0's, so `AB_MODE=auto` keeps these calls on Accelerate.
+  - One GEMM split between Accelerate and the GPU, in user code
+    (`benchmarks/bench_split.c`), finished 1.5–1.9× sooner than the faster
+    engine alone in all 20 well-scaled cases.
+  - Data, in `benchmarks/results/`: `2026-10-28-415cb5d-qe-si64-release-check/`,
+    `2026-10-29-351d56c-staged-refusals/`, `2026-10-28-415cb5d-hybrid-split/`
+    (with `cpu-use/`) and `2026-10-24-15ef7b9-prefetch/`.
 
 ### Added
 - **The staged path of the BLAS ABI**: a GPU-routed `dgemm_`/`zgemm_` copies
@@ -118,6 +149,16 @@ All notable changes to this project will be documented in this file.
   determinism of repeated calls, 8 threads on distinct and on identical
   shapes, memory growth over 2000 GPU calls, and a `fork()`ed child that
   ends with `exit()`. The test counts are kept in `tests/README.md` only.
+- **`benchmarks/bench_split.c`** (`make build/bench_split`) splits one DGEMM
+  or ZGEMM between Accelerate, on the calling thread, and the BLAS ABI's
+  staged path, on a second thread: by columns or rows of C, or by K with
+  the GPU's partial sum added afterwards. It sweeps the GPU's share, times
+  Accelerate alone, the GPU alone and the split in interleaved rounds at
+  the best share, checks that the split's bits repeat, and measures errors
+  against a compensated reference; with `np` processes, every repeat runs
+  in lockstep. `benchmarks/split/` holds the runner, power sampling and
+  table scripts. Results:
+  `benchmarks/results/2026-10-28-415cb5d-hybrid-split/`.
 
 ### Changed
 - `make version-check` skips an `[Unreleased]` section at the top of
@@ -161,7 +202,8 @@ All notable changes to this project will be documented in this file.
   1.01-1.11× on the 32×32 tiles (1.11× at 384×384×18432), unchanged on
   64×64 ones. Through the BLAS ABI's host path, where packing and
   conversion take most of these calls, the gain is the GPU's share:
-  `dgemm_` 150×150×18277 and 160×160×18432 run 1.09-1.10× end to end.
+  `dgemm_` 150×150×18277 runs 1.11× faster end to end and 160×160×18432
+  1.03× (ratios of the median wall times per call, on battery).
   When a host-bound caller leaves the GPU's clock low, mid-size grids gain
   little (within ±6% of the kernel time). For timing comparisons,
   `AB_PREFETCH=0` keeps the plain kernels and `AB_PREFETCH=1` prefetches
@@ -184,6 +226,18 @@ All notable changes to this project will be documented in this file.
   transposed copies of A and B, the copies that bring real and imaginary
   parts to one scale, and the operands that the host path of the BLAS ABI
   (`AB_HOST_PACK=1`) and `ab_dev_zgemm` copy in are still made every call.
+- **The documentation describes 1.5.0.** The README's performance section
+  names the build behind each table and adds the staged path, the Quantum
+  ESPRESSO results and the split benchmark; `docs/INTEGRATION.md`, the API
+  header and `docs/ROADMAP.md` follow. The v1.0.2 V&V report is kept as a
+  record of that version, with its production approvals withdrawn.
+  `docs/vv/PRECISION_ENVELOPE.md` gives `dd_mul` below 5u² and the fused
+  `dd_fma` within 8u². `SECURITY.md` supports 1.5.x.
+
+### Removed
+- `docs/blog/fp64-on-apple-silicon.md`, an April 2026 post whose claims
+  1.4.0 corrected (see "Corrected claims" under 1.4.0).
+- The README's "Related projects" section.
 
 ### Fixed
 - **Data outside FP32's exponent range no longer gives silently wrong GPU
@@ -239,6 +293,20 @@ All notable changes to this project will be documented in this file.
     `test_device_api test_zgemm_imbalance` (13 cases) and
     `test_correctness test_imbalance_zgemm_paths`. Limits:
     `docs/vv/LIMITATIONS.md`, "Complex products".
+
+### Known issues
+- **The staged path is not calibrated.** `AB_MODE=auto` routes by 1.4.0's
+  table, measured on the host path; `make calibrate` measures the staged
+  path on your machine and writes a table for it.
+- **Forcing the GPU in Quantum ESPRESSO is not yet faster than
+  Accelerate** on an M2 Max (1.01–1.06× Accelerate's time, above).
+- **macOS can stop a long GPU command buffer** while the display needs the
+  GPU (`kIOGPUCommandBufferCallbackErrorImpactingInteractivity`). The
+  staged path counts the call as `gpu_failed` and makes it on the host
+  path, and a stopped host-path call runs on Accelerate; the result is
+  correct either way. Quantum ESPRESSO's input A at 8 ranks met 1–6 such
+  stops per run while the Mac was in interactive use, and none in the
+  timing runs.
 
 ## [1.4.0] - 2026-10-19
 

@@ -15,7 +15,8 @@ Brief description of changes.
 
 - [ ] Ran `make clean && make` — builds without warnings
 - [ ] Ran `make test` — all tests pass
-- [ ] Ran `make bench` — performance within 5% of baseline
+- [ ] Kernels, conversion or routing changed: ran `make ci-local`
+- [ ] Performance-related: ran `make bench-baseline` on `main`, then `make bench-regression` on this branch (see CONTRIBUTING.md)
 
 ### Test Output
 
@@ -31,11 +32,14 @@ Brief description of changes.
 
 ## Performance Baseline (M2 Max)
 
-| Size | Expected GFLOP/s |
-|------|------------------|
-| 2048 | 620-640 |
-| 3072 | 630-650 |
-| 4096 | 640-660 |
+DGEMM on matrices resident on the GPU (`make bench-paper`), median of three
+runs at 3253a22 (`benchmarks/results/2026-10-14-3253a22-bench-paper/`):
+
+| Size | GFLOP/s |
+|------|---------|
+| 2048 | 664 |
+| 3072 | 683 |
+| 4096 | 699 |
 
 ## Additional Notes
 

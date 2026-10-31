@@ -4,8 +4,8 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.1.x   | :white_check_mark: |
-| 1.0.x   | :white_check_mark: |
+| 1.5.x   | :white_check_mark: |
+| < 1.5   | :x:                |
 
 ## Scope
 
@@ -19,7 +19,10 @@ apple-bottom is a numerical computing library. Security considerations include:
 This library does NOT handle:
 - Network communication
 - User authentication
-- File system access (beyond loading Metal shaders)
+- File system access, except where a diagnostic variable asks for it:
+  `AB_TRACE` and `AB_PROFILE_JSON` write files at the paths they name, and
+  `AB_DISPATCH_TABLE` reads one. The Metal shaders are compiled from source
+  built into the library.
 - Cryptographic operations
 
 ## Reporting a Vulnerability
@@ -85,6 +88,6 @@ if (status != AB_OK) {
 
 ## Known Limitations
 
-1. **Single-threaded initialization**: `ab_init()` should only be called from one thread
-2. **No concurrent GPU access**: Operations are serialized per command queue
+1. **Threads**: `ab_init()` and `ab_shutdown()` are safe to call from any thread, and calls on different matrices may come from different threads; one matrix, pool or session must not be used by two threads at once
+2. **One command queue**: all GPU work shares one Metal command queue
 3. **Unified memory**: Large matrices compete with system RAM

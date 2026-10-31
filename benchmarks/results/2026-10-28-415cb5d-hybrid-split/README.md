@@ -7,7 +7,13 @@ than on either engine alone? With well-scaled operands, it did in all 20 cases m
 - **80 s of back-to-back work:** the power limit slows the GPU, and DGEMM 8192² keeps 1.63× and ZGEMM
   8192² 1.47× over the GPU alone.
 - **QE-like operands:** where the library's exponent-range guard sends the GPU slice to the host path,
-  the gain shrinks to 1.23–1.28× or disappears.
+  the gain shrinks to 1.23–1.28× or disappears. These runs predate the staged-refusals fix
+  ([`2026-10-29-351d56c-staged-refusals`](../2026-10-29-351d56c-staged-refusals/)), after which the
+  staged path keeps calls whose lines the guard scales; they were not repeated with it.
+
+**The split is made in user code, by `bench_split`.** `dgemm_` and `zgemm_` do not split a call in
+1.5.0, and `AB_MODE=auto` would run every call measured here on Accelerate alone. A split inside the
+library is planned for 1.6.0.
 
 Program and how to run it: [`benchmarks/split/`](../../split/README.md) (`bench_split.c`).
 
@@ -142,6 +148,10 @@ Steady-state wall power (SMC PDTR, the DC input) times seconds per GEMM:
 
 ## Where the split does not win: QE-like operands
 
+*Measured at 415cb5d, before the staged-refusals fix. Since the fix the staged path keeps calls whose
+lines the guard scales, so the host-path redoes that the scaling causes below do not happen in 1.5.0;
+these cases were not repeated.*
+
 The data is synthetic: rows of the plane-wave arrays (A, and C₀ or B) scaled by 10^(−9·i/npwx). It
 stresses the exponent-range guard and is not data from Quantum ESPRESSO. All runs are 4×2.
 
@@ -235,9 +245,10 @@ stdout line-buffered. Verification below.
 ## Verification of the committed program
 
 Run on 2026-10-29, 20:24–20:44, on AC power (battery 87–94%, charging).
-- **Committed build:** `make lib build/bench_split` on this branch built the program as committed against
-  the branch's own library, release/v1.5.0 882d2d8 plus this branch's two commits. `ab_build_info()` reported
-  `1.4.0 (c30a298c1795)`, a clean tree: this branch before the section you are reading was added.
+- **Committed build:** `make lib build/bench_split` on `bench/split-demo`, the branch merged as #14,
+  built the program as committed against that branch's own library, release/v1.5.0 882d2d8 plus the
+  branch's two commits. `ab_build_info()` reported `1.4.0 (c30a298c1795)`, a clean tree: c30a298, the
+  pre-amend version of b56327e, with the same source.
   It ran `run.sh`'s smoke suite and R-K 500×500×18277 at 4×2.
 - **Measurement build:** the third revision against the 415cb5d library. It ran D2048 and Z2048 in the
   same session.

@@ -1,12 +1,22 @@
 # Verification & Validation Report
 ## apple-bottom v1.0.2 — FP64-Class BLAS for Apple Silicon GPU
 
-**Report Version**: 1.1
+> **Status (Revision 1.3, 2026-10-30).** This report documents v1.0.2
+> (March 2026) and is kept as a record of it; the library is now at 1.5.0.
+> Its production approvals are withdrawn, and its statements on rectangular
+> shapes, thread safety and the max-element error are corrected inline,
+> with the old text struck through. For the current library see
+> [LIMITATIONS.md](LIMITATIONS.md), [PRECISION_ENVELOPE.md](PRECISION_ENVELOPE.md),
+> [`tests/README.md`](../../tests/README.md) and the Quantum ESPRESSO results
+> in the [README](../../README.md#performance).
+
+**Report Version**: 1.3
 **Date**: 2026-04-23
 **Status**: Verification (V-2, unit suites) current; validation: VAL-1 revision 2 passes for accuracy on Quantum ESPRESSO Si64 (see Revision 1.2)
 **Validated Baseline**: Git tag `v1.0.2-bugfix` (SHA: f3e2fc1)
 **Revision 1.1**: Added §10 Clock-pin and Utilization Methodology; §10 Conclusions renumbered to §11, §11 References renumbered to §12.
 **Revision 1.2 (2026-10-14)**: Correction of VAL-1; see the notice below.
+**Revision 1.3 (2026-10-30)**: Kept as a record of v1.0.2; production approvals withdrawn; rectangular shapes, thread safety, the max-element measure, the Fortran example and the test system corrected.
 **Test System**: Apple M2 Max, macOS 14.7, Metal 3
 **Validation Standard**: NASA-STD-7009A, ASME V&V 10-2006
 
@@ -57,9 +67,9 @@
 
 ### 1.1 Purpose and Scope
 
-**apple-bottom** is a double-float (DD) precision BLAS library for Apple Silicon GPUs, targeting scientific computing applications that require FP64-class accuracy but lack native hardware FP64 support. This report documents the verification and validation (V&V) evidence supporting production deployment.
+**apple-bottom** is a double-float (DD) precision BLAS library for Apple Silicon GPUs, targeting scientific computing applications that require FP64-class accuracy but lack native hardware FP64 support. This report documents the verification and validation (V&V) evidence ~~supporting production deployment~~ of v1.0.2.
 
-**Target Applications**:
+**Target Applications** (candidates; Quantum ESPRESSO is the only application run with apple-bottom, Revision 1.3):
 - Density functional theory (DFT): Quantum ESPRESSO, VASP, CP2K
 - Molecular dynamics (MD): LAMMPS, GROMACS, NAMD
 - Finite element analysis (FEA): iterative solvers (CG, GMRES)
@@ -67,7 +77,9 @@
 
 ### 1.2 Validation Status
 
-✅ **VALIDATED for production use** in applications requiring:
+*Revision 1.3: this report makes no production approval. The lists below are the envelope v1.0.2 was tested in.*
+
+~~✅ **VALIDATED for production use**~~ Tested in applications requiring:
 - Frobenius relative error `< 10⁻¹³`
 - Iterative algorithms with norm-averaged convergence criteria
 - Square or moderately rectangular matrices (`aspect_ratio ≤ 2:1`)
@@ -75,8 +87,8 @@
 - Well-conditioned systems (`κ < 10⁶`)
 
 ❌ **NOT VALIDATED for**:
-- Algorithms requiring element-wise accuracy `< 10⁻⁶` (pivoting, eigensolvers)
-- Rectangular matrices with `aspect_ratio > 10:1`
+- Algorithms requiring element-wise accuracy `< 10⁻⁶` (pivoting, eigensolvers; see the note in §3.2.3)
+- ~~Rectangular matrices with `aspect_ratio > 10:1`~~ (Revision 1.3: every aspect ratio computes correctly since v1.2.0, [PRECISION_ENVELOPE.md §4.1](PRECISION_ENVELOPE.md#41-matrix-shapes))
 - Ill-conditioned systems (`κ > 10¹²`)
 - Small matrices (`N < 64`)
 
@@ -94,7 +106,8 @@
 
 ### 1.4 Recommendation
 
-**APPROVED for production deployment** in scientific computing workflows on Apple Silicon, subject to:
+~~**APPROVED for production deployment** in scientific computing workflows on Apple Silicon, subject to:~~
+*Withdrawn in Revision 1.3: this report approves no deployment. Its checks remain good practice:*
 1. Application fits validated envelope (Section 5)
 2. Cross-verification performed on 10% of production cases (Section 7.3)
 3. Max element error tolerance meets application requirements (Section 3.2.3)
@@ -105,7 +118,7 @@
 
 ### 2.1 Architecture Overview
 
-**Implementation**: 1,435-line Objective-C++ file (`src/apple_bottom.m`)
+**Implementation**: Objective-C++ (`src/apple_bottom.m`, 1,435 lines at v1.0.2)
 **API**: C-compatible header (`include/apple_bottom.h`)
 **GPU Backend**: Metal compute shaders (inline MSL)
 **Precision Model**: Double-float (DD) arithmetic (FP32×2)
@@ -152,10 +165,10 @@ In practice, random matrices exhibit `~√N` scaling due to statistical cancella
 
 ### 2.4 Integration Patterns
 
-**Fortran Bridge** (for QE, VASP, etc.):
+**Fortran Bridge** (for Quantum ESPRESSO and other Fortran BLAS hosts; corrected in Revision 1.3: the call takes the reference-BLAS arguments):
 ```fortran
 EXTERNAL ab_dgemm, ab_zgemm
-CALL ab_dgemm(M, N, K, A, LDA, B, LDB, C, LDC)
+CALL ab_dgemm('N', 'N', M, N, K, ALPHA, A, LDA, B, LDB, BETA, C, LDC)
 ```
 
 **Hybrid CPU/GPU Routing**: *withdrawn in Revision 1.2.* The FLOP-threshold
@@ -241,6 +254,8 @@ R² = 1.0000
 
 **Max element slope**: 2.494 (approximately `N^2.5` scaling)
 
+*Note (Revision 1.3).* This column is max |ΔC_ij| / |C_ij| over the entries with |C_ij| > 10⁻¹⁵ (`tests/verification/test_convergence.c`). With random data some entries of C come close to zero by cancellation, and dividing by them makes this measure grow with the number of entries, for any finite-precision GEMM. Errors relative to (|A||B|)_ij, the componentwise measure of [LIMITATIONS.md](LIMITATIONS.md) and of the tests, do not grow this way. The warning below rests on this column; whether pivoting or eigensolvers need more than double-float gives has not been tested either way.
+
 **⚠ CRITICAL WARNING**: Max element error grows **faster than Frobenius error**. Applications requiring element-wise accuracy `< 10⁻⁶` (e.g., pivoting, eigenvalue extraction) should verify compatibility or use CPU FP64.
 
 **Data**: `build/convergence_data.csv`
@@ -296,7 +311,7 @@ apple-bottom correctly implements DGEMM/ZGEMM to within DD precision bounds:
 - Correctness: 48/48 tests passing
 - Critical bugs: Fixed and regression-tested
 
-**Limitations**: Rectangular matrices with `aspect_ratio > 10:1` fail correctness tests.
+**Limitations**: ~~Rectangular matrices with `aspect_ratio > 10:1` fail correctness tests.~~ Corrected in Revision 1.3: they pass since v1.2.0 (`test_skinny_matrix`, `tests/test_rectangular.c`).
 
 ---
 
@@ -358,22 +373,24 @@ Single ZGEMM: ~N · 10⁻¹⁵ ≈ 400 · 10⁻¹⁵ = 4×10⁻¹³
 
 ~~✅ **VAL-1 PASSED**~~ — withdrawn in Revision 1.2; see `tests/validation/VAL001_QE_Si64.md` for the repeated validation.
 
-apple-bottom demonstrates:
-1. **Numerical equivalence** to CPU FP64 for production DFT
-2. **Performance improvement** (1.22× speedup, 47% CPU reduction)
-3. **Deterministic convergence** (iteration-by-iteration agreement)
-4. **Sufficient precision** for `10⁻¹⁰ Ry` convergence criteria
+~~apple-bottom demonstrates:~~ *(withdrawn with VAL-1's March runs, which did not use the GPU)*
+1. ~~**Numerical equivalence** to CPU FP64 for production DFT~~
+2. ~~**Performance improvement** (1.22× speedup, 47% CPU reduction)~~
+3. ~~**Deterministic convergence** (iteration-by-iteration agreement)~~
+4. ~~**Sufficient precision** for `10⁻¹⁰ Ry` convergence criteria~~
 
-**Generalization**: This validates apple-bottom for **any iterative solver** with norm-averaged convergence (CG, GMRES, Davidson, Lanczos) requiring `10⁻¹⁴` to `10⁻¹⁰` precision.
+~~**Generalization**: This validates apple-bottom for **any iterative solver** with norm-averaged convergence (CG, GMRES, Davidson, Lanczos) requiring `10⁻¹⁴` to `10⁻¹⁰` precision.~~
 
 ### 4.3 Validation Conclusion
 
-✅ **VALIDATION COMPLETE**
+*Revision 1.3: withdrawn. The March runs did not use the GPU (Revision 1.2). With the GPU path exercised, Quantum ESPRESSO Si64 gives the CPU run's energies (VAL-1 revision 2 and the 1.5.0 release check); no other application has been run.*
 
-apple-bottom is suitable for production use in:
-- Density functional theory (QE, VASP, CP2K, ABINIT)
-- Molecular dynamics (LAMMPS, GROMACS)
-- Finite element analysis (iterative solvers)
+~~✅ **VALIDATION COMPLETE**~~
+
+~~apple-bottom is suitable for production use in:~~
+- ~~Density functional theory (QE, VASP, CP2K, ABINIT)~~
+- ~~Molecular dynamics (LAMMPS, GROMACS)~~
+- ~~Finite element analysis (iterative solvers)~~
 
 **Application Domain**: Norm-averaged quantities (energies, forces, residuals), not element-sensitive operations (pivoting, eigenvalues).
 
@@ -385,11 +402,11 @@ apple-bottom is suitable for production use in:
 
 | Condition | Status | Workaround |
 |-----------|--------|------------|
-| **Rectangular aspect_ratio > 10:1** | ❌ Fails correctness | Use CPU BLAS (`cblas_dgemm`) |
+| **Rectangular aspect_ratio > 10:1** | ~~❌ Fails correctness~~ ✓ Correct since v1.2.0 (Revision 1.3) | ~~Use CPU BLAS (`cblas_dgemm`)~~ None needed |
 | **N < 64** | ⚠ Slower than CPU | Use CPU BLAS |
-| **N > 4096** | ⚠ Untested | Validate before production use |
+| **N > 4096** | ~~⚠ Untested~~ Checked since: against cblas up to 6144 (`make calibrate`), against a compensated reference at 8192 (split benchmark; Revision 1.3) | Validate before production use |
 
-**Example failure**: `10000×100 × 100×10000` produces incorrect results.
+~~**Example failure**: `10000×100 × 100×10000` produces incorrect results.~~ (Revision 1.3: such outer-product shapes compute correctly since v1.2.0; `test_skinny_matrix`, 1000×10 · 10×1000, passes in `make test`.)
 
 ### 5.2 Numerical Conditions
 
@@ -404,16 +421,18 @@ apple-bottom is suitable for production use in:
 
 | Algorithm Type | Status | Reason |
 |----------------|--------|--------|
-| **Gaussian elimination with pivoting** | ❌ Not recommended | Max element error `~10⁻⁶` at N=4096 |
+| **Gaussian elimination with pivoting** | ❌ Not recommended | Max element error `~10⁻⁶` at N=4096 (see the note in §3.2.3) |
 | **Eigenvalue/eigenvector solvers** | ❌ Not validated | Element-sensitive |
 | **Matrix inversions** | ❌ Not validated | Ill-conditioning amplification |
-| **Iterative solvers (CG, GMRES)** | ✅ Validated | Norm-averaged residuals |
+| **Iterative solvers (CG, GMRES)** | ~~✅ Validated~~ Not validated (Revision 1.3: the VAL-1 runs this rested on are withdrawn) | Norm-averaged residuals |
 
 ### 5.4 Concurrency
 
-**Thread Safety**: apple-bottom is **NOT thread-safe**
-- Metal command queue serializes operations
-- **Workaround**: One `ab_init()` per thread, or external locking
+~~**Thread Safety**: apple-bottom is **NOT thread-safe**~~
+- ~~Metal command queue serializes operations~~
+- ~~**Workaround**: One `ab_init()` per thread, or external locking~~
+
+*Corrected in Revision 1.3* (`include/apple_bottom.h`, Thread Safety): `ab_init` and `ab_shutdown` are safe to call from any thread. Calls on different matrices may come from different threads; one matrix, pool or session must not be used by two threads at once. All work shares one Metal command queue.
 
 ### 5.5 Applicability Summary
 
@@ -426,7 +445,7 @@ apple-bottom is suitable for production use in:
 **✗ DO NOT USE for**:
 - Element-sensitive algorithms (pivoting, eigensolvers)
 - Ill-conditioned systems (`κ > 10¹²`)
-- Rectangular matrices with `aspect_ratio > 10:1`
+- ~~Rectangular matrices with `aspect_ratio > 10:1`~~ (correct since v1.2.0)
 - Small matrices (`N < 64`)
 
 ---
@@ -442,7 +461,7 @@ apple-bottom is suitable for production use in:
 | **Tag Date** | 2026-03-31 |
 | **Repository** | https://github.com/grantdh/apple-bottom |
 
-**CRITICAL**: Do not modify validated code without re-running V&V tests. All changes to `src/apple_bottom.m` require regression testing.
+**CRITICAL**: Do not modify validated code without re-running V&V tests. All changes to `src/apple_bottom.m` require regression testing. *(v1.0.2's rule. The code has changed in every release since, and `make ci-local` reruns the verification suites before each release.)*
 
 ### 6.2 Build Configuration
 
@@ -452,13 +471,13 @@ apple-bottom is suitable for production use in:
 | **Metal SDK** | macOS 14+ | `MTLMathModeSafe` |
 | **Accelerate** | macOS 14.7 | `ACCELERATE_NEW_LAPACK` |
 
-**Reproducibility**: Source code + build flags + Git SHA → deterministic binary (checksum validation TBD).
+**Reproducibility**: Source code + build flags + Git SHA → deterministic binary (checksum validation: not done).
 
 ### 6.3 Test System
 
 | Component | Specification |
 |-----------|---------------|
-| **Hardware** | Mac Studio M2 Max |
+| **Hardware** | ~~Mac Studio M2 Max~~ MacBook Pro (Mac14,6), M2 Max (corrected in Revision 1.3) |
 | **CPU** | 12 cores @ 3.68 GHz |
 | **GPU** | 38 cores (Metal 3) |
 | **RAM** | 64 GB unified memory |
@@ -482,7 +501,7 @@ apple-bottom is suitable for production use in:
 
 ### 7.1 When to Use apple-bottom
 
-**Ideal Use Cases**:
+**Ideal Use Cases** (candidates; Quantum ESPRESSO is the only one run with apple-bottom, Revision 1.3):
 1. **Iterative linear solvers** on Apple Silicon (CG, GMRES, Davidson)
 2. **DFT codes** (Quantum ESPRESSO, VASP, CP2K) with `10⁻¹⁰` convergence
 3. **Molecular dynamics** (LAMMPS, GROMACS) with force thresholds `~10⁻⁸`
@@ -500,7 +519,7 @@ apple-bottom is suitable for production use in:
 2. **Eigenvalue problems** (element-wise accuracy critical)
 3. **Small and medium problems**, and any GEMM issued one call at a time from host memory (§7.4)
 4. **Ill-conditioned systems** (`κ > 10¹²`)
-5. **High aspect ratio** rectangular matrices (`> 10:1`)
+5. ~~**High aspect ratio** rectangular matrices (`> 10:1`)~~ (correct since v1.2.0)
 
 ### 7.3 Cross-Verification Protocol (Mission-Critical Applications)
 
@@ -576,10 +595,12 @@ on the same M2 Max class, against Accelerate:
 
 | Req ID | Requirement | Test | Result | Documented In |
 |--------|-------------|------|--------|---------------|
-| **R-15** | Rectangular `aspect_ratio > 10:1` | test_skinny_matrix (10000×10) | ✗ FAIL | Known limitation |
+| **R-15** | Rectangular `aspect_ratio > 10:1` | test_skinny_matrix | ~~✗ FAIL~~ ✓ PASS since v1.2.0 (Revision 1.3) | ~~Known limitation~~ `PRECISION_ENVELOPE.md` Section 4.1 |
 | **R-16** | ZHERK performance | bench_zherk | ⚠ WARN (0.06–0.67×, 1.4.0) | `PRECISION_ENVELOPE.md` Section 3.3 |
 
 ### 8.3 Test → Source Code Mapping
+
+The line ranges are those of v1.0.2.
 
 | Test File | Tests | Source File | Lines Tested |
 |-----------|-------|-------------|--------------|
@@ -689,7 +710,7 @@ boost-clock volatility directly.
 
 ### 11.1 Validation Conclusions
 
-✅ **apple-bottom v1.0.2-bugfix is VALIDATED for production use** in scientific computing applications requiring:
+~~✅ **apple-bottom v1.0.2-bugfix is VALIDATED for production use**~~ *(withdrawn, Revision 1.3)* v1.0.2-bugfix was tested in scientific computing applications requiring:
 - Frobenius relative error `< 10⁻¹³`
 - Iterative algorithms with norm-averaged convergence
 - Square or moderately rectangular matrices (`aspect_ratio ≤ 2:1`)
@@ -703,22 +724,24 @@ boost-clock volatility directly.
 
 ### 11.2 Production Deployment Recommendations
 
-**APPROVED for**:
-- Density functional theory (Quantum ESPRESSO, VASP, CP2K)
-- Molecular dynamics (LAMMPS, GROMACS)
-- Finite element analysis (iterative solvers)
-- Quantum chemistry (configuration interaction, coupled cluster)
+*Withdrawn in Revision 1.3: this report approves no deployment.*
 
-**CONDITIONAL APPROVAL** (with cross-verification):
-- Mission-critical calculations (aerospace, drug discovery)
-- Long-running simulations (>1000 iterations)
-- Novel application domains (not DFT/MD/FEM)
+~~**APPROVED for**:~~
+- ~~Density functional theory (Quantum ESPRESSO, VASP, CP2K)~~
+- ~~Molecular dynamics (LAMMPS, GROMACS)~~
+- ~~Finite element analysis (iterative solvers)~~
+- ~~Quantum chemistry (configuration interaction, coupled cluster)~~
+
+~~**CONDITIONAL APPROVAL** (with cross-verification):~~
+- ~~Mission-critical calculations (aerospace, drug discovery)~~
+- ~~Long-running simulations (>1000 iterations)~~
+- ~~Novel application domains (not DFT/MD/FEM)~~
 
 **NOT APPROVED for**:
-- Algorithms requiring element-wise accuracy `< 10⁻⁶`
+- Algorithms requiring element-wise accuracy `< 10⁻⁶` (see the note in §3.2.3)
 - Direct methods with pivoting (LU, QR, SVD)
 - Ill-conditioned systems (`κ > 10¹²`)
-- Rectangular matrices (`aspect_ratio > 10:1`)
+- ~~Rectangular matrices (`aspect_ratio > 10:1`)~~ (correct since v1.2.0)
 
 ### 11.3 Future Work
 
@@ -732,7 +755,7 @@ boost-clock volatility directly.
 7. **Portability**: Validation on M1, M3, M4 hardware
 
 **Known issues requiring resolution**:
-1. Rectangular matrices (`aspect_ratio > 10:1`) correctness failures
+1. ~~Rectangular matrices (`aspect_ratio > 10:1`) correctness failures~~ (resolved in v1.2.0)
 2. ZHERK performance (0.06–0.67× Accelerate's speed, 1.4.0)
 
 ### 11.4 Approval for Production Use
@@ -745,8 +768,9 @@ boost-clock volatility directly.
 5. ⏳ Final approval (project stakeholders)
 
 **Validation Lead Signature**: Grant Heileman, 2026-03-31
-**Production Reviewer**: (TBD)
-**Approval Date**: (Pending integration testing)
+~~**Production Reviewer**: (TBD)~~
+~~**Approval Date**: (Pending integration testing)~~
+*Revision 1.3: this report seeks no production approval.*
 
 ---
 
@@ -779,15 +803,18 @@ boost-clock volatility directly.
 
 **Classification**: Engineering Validation
 **Distribution**: Public
-**Version**: 1.0
-**Date**: 2026-03-31
-**Next Review**: Upon v1.1.0 release or code modifications to DGEMM kernel
+**Version**: 1.3
+**Date**: 2026-03-31 (revised 2026-04-23, 2026-10-14 and 2026-10-30)
+**Next Review**: ~~Upon v1.1.0 release or code modifications to DGEMM kernel~~ None: kept as a record of v1.0.2 (Revision 1.3)
 
 **Revision History**:
 
 | Version | Date | Changes | Author |
 |---------|------|---------|--------|
 | 1.0 | 2026-03-31 | Initial V&V report | Grant Heileman |
+| 1.1 | 2026-04-23 | §10 Clock-pin and Utilization Methodology | Grant Heileman |
+| 1.2 | 2026-10-14 | VAL-1 withdrawn (the GPU was not exercised); performance expectations replaced by the 1.4.0 measurements | Grant Heileman |
+| 1.3 | 2026-10-30 | Kept as a record of v1.0.2; production approvals withdrawn; rectangular shapes, thread safety, the max-element measure, the Fortran example and the test system corrected | Grant Heileman |
 
 ---
 

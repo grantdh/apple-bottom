@@ -6,6 +6,15 @@ inputs A and B at 1 rank and at 8 ranks on a fresh QE develop build, in
 objects relinked to 1.4.0 are the control, so the two libraries are compared on
 one QE build. Inputs and scripts: [`benchmarks/qe/`](../../qe/).
 
+**Since this check.** #11 (66c99a2, the device-buffer API's per-row and
+per-column choice between Gauss-3M and 4M) merged after it. In the BLAS ABI
+it moved the 3M/4M rule and the conversion's chunking into shared helpers
+without changing them, and the golden bits held (`test_qe_golden`), so it
+does not change these results. The calls this check found leaving the staged
+path for the host path (about half of the GPU-routed calls) were fixed afterwards:
+[`2026-10-29-351d56c-staged-refusals`](../2026-10-29-351d56c-staged-refusals/)
+measures the fix on this QE build.
+
 | | |
 |---|---|
 | Machine | MacBook Pro (Mac14,6), M2 Max, 38-core GPU, 64 GB, macOS 27.0.1 (26A434). Every reported run was on AC power from start to end ([`power.txt`](power.txt)). |
@@ -270,7 +279,7 @@ The last four are part 2's battery block. All the others are part 1.
 | File | |
 |---|---|
 | `results.csv` | One row per reported run, as `run_campaign.sh` writes it. Home and frozen-library paths are shortened. The block's lock was taken before `run_campaign.sh` started, so `start`/`end` bracket the run itself. In `supporting/results.csv`, part 1's `start`/`end` also include the waits for AC power and for the lock. |
-| `outputs/` | Each run's `pw.x` output. |
+| `outputs/` | Each run's `pw.x` output, with its local paths shortened as in `results.csv`: the run directory to `runs/…`, relative to the campaign's directory, and the pseudopotential directory to `<pseudo>`. |
 | `reports/` | Each run's stderr, keeping apple-bottom's lines (`AB_REPORT`, the `AB_PROFILE` tables, fallback lines) and gfortran's IEEE note. Dyld output and per-call `AB_PROFILE` lines are dropped. With 8 ranks, the table lines of different ranks can interleave; the `AB_REPORT` lines stay whole. |
 | `analyze.txt`, `compare.txt`, `tables.md` | Output of `benchmarks/qe/analyze.py`, `compare.py` and `tables.py` (one section per label). |
 | `comparison.md` | The tables above in full: run time, GPU share by time, stages per routine and library, energies. |
