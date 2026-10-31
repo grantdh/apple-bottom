@@ -13,7 +13,7 @@ if readme_file.exists():
 
 setup(
     name="apple-bottom",
-    version="1.5.0",
+    version="1.5.1",
     description="FP64-class BLAS library for Apple Silicon GPUs — Python wrapper",
     long_description=long_description,
     long_description_content_type="text/markdown",
