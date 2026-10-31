@@ -40,6 +40,16 @@ It depends on where the matrices live.
   shape, and keeps those calls on Accelerate. Forced onto the GPU, Quantum
   ESPRESSO takes 1.01–1.06× its time on Accelerate (1.4.0: 1.06–1.43×).
   Linking apple-bottom is safe but, on this hardware, not a speed-up yet.
+- **Accelerate and the GPU together** (in user code for now): splitting one
+  GEMM between them finished 1.5–1.9× sooner than the faster engine alone
+  in all 20 well-scaled cases of the
+  [split benchmark](benchmarks/results/2026-10-28-415cb5d-hybrid-split/),
+  with bit-for-bit repeatable results, and 1.47–1.63× sooner at 8192² over
+  80 s of back-to-back work, where the power limit slows the GPU. The split
+  keeps no more CPU cores busy than Accelerate alone
+  ([CPU use](benchmarks/results/2026-10-28-415cb5d-hybrid-split/cpu-use/)).
+  `dgemm_` and `zgemm_` do not split calls in 1.5.0; a split inside the
+  library is planned for 1.6.0.
 
 The measurements are below, each with the data it came from.
 [docs/COMPARISON.md](docs/COMPARISON.md) compares apple-bottom with the
@@ -203,9 +213,10 @@ The [Integration Guide](docs/INTEGRATION.md) covers C, Fortran, Python
 Each value is stored as an unevaluated sum `hi + lo` of two FP32 numbers,
 normalized so that `|lo|` is at most half an ulp of `hi`; the pair holds
 about 48 significant bits of the FP64 value. Arithmetic keeps that form
-with Dekker/Knuth error-free transformations (TwoSum, FMA-based TwoProd). Products use the DWTimesDW2 algorithm of Joldes,
-Muller and Popescu (2017), with relative error below 5u² for u = 2⁻²⁴; the
-fused multiply-add of the GEMM inner loop has a conservative 8u² envelope
+with Dekker/Knuth error-free transformations (TwoSum, FMA-based TwoProd).
+Products use the DWTimesDW2 algorithm of Joldes, Muller and Popescu
+(2017), with relative error below 5u² for u = 2⁻²⁴; the fused
+multiply-add of the GEMM inner loop has a conservative 8u² envelope
 ([derivation and scope](docs/vv/PRECISION_ENVELOPE.md)).
 
 - The shaders are compiled without fast math (`MTLMathModeSafe`, or
