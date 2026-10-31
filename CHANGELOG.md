@@ -159,6 +159,11 @@ All notable changes to this project will be documented in this file.
   in lockstep. `benchmarks/split/` holds the runner, power sampling and
   table scripts. Results:
   `benchmarks/results/2026-10-28-415cb5d-hybrid-split/`.
+- **`make test-dd-bound`**: checks the shader's `dd_fma` against MPFR. The
+  `DD` primitives are cut out of `src/apple_bottom.m` and compiled on the CPU
+  without contraction. It runs 5×10⁶ adversarial and cancelling triples and
+  needs MPFR (SKIP without it). It is not part of `make test`, so the test
+  counts are unchanged.
 
 ### Changed
 - `make version-check` skips an `[Unreleased]` section at the top of
@@ -298,6 +303,17 @@ All notable changes to this project will be documented in this file.
     `test_device_api test_zgemm_imbalance` (13 cases) and
     `test_correctness test_imbalance_zgemm_paths`. Limits:
     `docs/vv/LIMITATIONS.md`, "Complex products".
+- **Documented error bounds of `dd_mul` and `dd_fma`.** The default product
+  is a two-FMA variant of DWTimesDW2 (JMP 2017 Algorithm 11), not the
+  algorithm itself. The `5u²` of Muller–Rideau 2022 Theorem 2.7, quoted for it
+  since 1.2, therefore did not apply. Neither did the unproven `8u²` envelope
+  of `dd_fma`. `docs/vv/PRECISION_ENVELOPE.md` §1.2 now proves:
+  - `dd_mul` ≤ 6.000001u²;
+  - `dd_fma` ≤ (13+43u)u²|ab| + (3+5u)u²|c|, with its final `fastTwoSum`
+    always exact;
+  - GEMM ≤ (3K+13)u²|A||B| componentwise.
+
+  The code is unchanged; only comments and documentation change.
 
 ### Known issues
 - **The staged path is not calibrated.** `AB_MODE=auto` routes by 1.4.0's

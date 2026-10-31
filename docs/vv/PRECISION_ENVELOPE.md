@@ -5,8 +5,9 @@
 **Test System**: Apple M2 Max, macOS 14.7, Metal 3
 
 > **Status (Revision 1.3, 2026-10-30).** Written for v1.0.2 and kept as its
-> record, with corrections: the per-operation bounds of §1.2 (`dd_mul`
-> below 5u², the fused `dd_fma` within a conservative 8u² envelope), the
+> record, with corrections: the per-operation bounds of §1.2 (Revision 1.4:
+> `dd_mul` ≤ 6.000001u², the fused `dd_fma` ≤ 13u²|ab| + 3u²|c|, both proven;
+> GEMM ≤ (3K+13)u²|A||B| componentwise, §1.3), the
 > summary's guarantee restated as the target the measurements meet, notes
 > on the max-element measure (§2.3) and on threads (§4.4), and §5.1 pointed
 > at 1.5.0. The exponent-range text (§3.2, §4.2, §4.3) describes 1.5.0.
@@ -65,7 +66,7 @@ where:
 
 **Effective precision**: ~48 bits of mantissa (vs. 53 bits for true FP64)
 
-**Error bound**: ~~Single DD operation introduces `≤ 2⁻⁴⁸` relative error~~ a DD product (`dd_mul`) has relative error below 5u² = 5·2⁻⁴⁸, and the fused multiply-add (`dd_fma`) stays within a conservative 8u² envelope (§1.2; corrected in Revision 1.3)
+**Error bound**: ~~Single DD operation introduces `≤ 2⁻⁴⁸` relative error~~ a DD product (`dd_mul`) has relative error at most 6.000001u² (u² = 2⁻⁴⁸), and the fused multiply-add (`dd_fma`) has absolute error at most (13+43u)u²|a·b| + (3+5u)u²|c| (§1.2; corrected in Revision 1.3, and again in Revision 1.4: the 5u² and 8u² figures were not proven for this code)
 
 ### 1.2 Error-Free Transformations
 
@@ -75,14 +76,61 @@ DD operations use Dekker/Knuth algorithms:
 |-----------|-----------|-------|-------------|
 | FP32 addition (error-free transform) | `twoSum` | 6 | `0` (exact: `s + e = a + b`) |
 | FP32 multiplication (error-free transform) | `twoProduct` (FMA) | 2 | `0` (exact: `p + e = a × b`) |
-| DD multiplication | `dd_mul` | — | `< 5u²` (Muller–Rideau 2022, Theorem 2.7) |
-| DD fused multiply-add | `dd_fma` | ~10 | `≲ 8u²` envelope; no published bound (scope qualifier below; Revision 1.3 corrected `< 5u²`) |
+| DD multiplication | `dd_mul` | — | `≤ 6.000001u²` relative (proven below; ≤ 4.33u² observed). Under `DWTIMESDW3=1`: `< 4u²` (Muller–Rideau 2022, Theorem 2.8) |
+| DD fused multiply-add | `dd_fma` | 18 | `≤ (13+43u)u²·|a·b| + (3+5u)u²·|c|` absolute (proven below; Revision 1.4 replaced the unproven `≲ 8u²` envelope) |
 
-where `u = 2⁻²⁴` is the FP32 unit roundoff (so `ε_mach = 2⁻²³` under the ulp convention used by IEEE 754; `u²  = 2⁻⁴⁸` is the effective DD unit roundoff). The `twoSum` and `twoProduct` algorithms are *error-free transforms*: their outputs represent the exact FP32 operation result as an unevaluated sum with no rounding error, under the standard no-overflow / no-subnormal-input assumptions. ~~The `dd_fma` bound is the per-operation DD-level bound from §1.2 and applies to both `dd_mul` and the compound multiply-add.~~ The `< 5u²` bound below is `dd_mul`'s; the fused `dd_fma` has the conservative `≲ 8u²` envelope of the scope qualifier below (corrected in Revision 1.3).
+where `u = 2⁻²⁴` is the FP32 unit roundoff (so `ε_mach = 2⁻²³` under the ulp convention used by IEEE 754; `u²  = 2⁻⁴⁸` is the effective DD unit roundoff). The `twoSum` and `twoProduct` algorithms are *error-free transforms*: their outputs represent the exact FP32 operation result as an unevaluated sum with no rounding error, under the standard no-overflow / no-subnormal-input assumptions. ~~The `dd_fma` bound is the per-operation DD-level bound from §1.2 and applies to both `dd_mul` and the compound multiply-add.~~ `dd_mul` and `dd_fma` have the separate bounds proven below (Revision 1.4).
 
-Cross-term products in `dd_mul` and `dd_fma` use nested FMA chains (JMP 2017 Algorithm 11, "DWTimesDW2") to reduce rounding from 4 truncations to 2 per operation. The relative error of `dd_mul` is bounded by `5u² / (1 + u)² < 5u²` where `u = 2⁻²⁴`, per Muller-Rideau 2022 Theorem 2.7 (tightened from JMP 2017's original `< 6u²` bound via formal Coq proof).
+~~Cross-term products in `dd_mul` and `dd_fma` use nested FMA chains (JMP 2017 Algorithm 11, "DWTimesDW2") to reduce rounding from 4 truncations to 2 per operation. The relative error of `dd_mul` is bounded by `5u² / (1 + u)² < 5u²` where `u = 2⁻²⁴`, per Muller-Rideau 2022 Theorem 2.7 (tightened from JMP 2017's original `< 6u²` bound via formal Coq proof).~~
 
-**Scope qualifier for the fused `dd_fma`.** The `< 5u²/(1+u)²` bound above (Muller–Rideau 2022, Theorem 2.7) applies specifically to the DWTimesDW2 primitive (Joldes–Muller–Popescu 2017, Algorithm 11), which concludes with its own `fastTwoSum` renormalization. apple-bottom's fused `dd_fma(a, b, c) = a·b + c` elides this intermediate renormalization and is not covered by this theorem, and to our knowledge no published analysis rigorously bounds the fused double-word FMA as implemented here. A conservative upper envelope of `≲ 8u² · max(|a·b|, |c|)` follows by triangle inequality over the non-fused composition and is consistent with empirical validation at `N ∈ {1024, 2048, 3072}` in the `N·u²` accumulation regime expected for DGEMM/ZGEMM over `K` products at `u ≈ 6×10⁻⁸` (FP32). The fusion elides one renormalization per FMA — a measurable fraction of per-kernel cost at SIMD widths where renormalization dominates — and empirical validation confirms the envelope holds within the precision requirements of DFT workloads targeted by this library. The tight bound for the fused form is an open theoretical question; the library documents the conservative envelope it can defend.
+**The default product is not Algorithm 11 (Revision 1.4).** Revisions 1.2 and 1.3 credited `dd_mul` with the `5u²/(1+u)²` bound of Muller–Rideau 2022, Theorem 2.7. That theorem is for DWTimesDW2 (Joldes–Muller–Popescu 2017, Algorithm 11), which rounds the low part three times:
+
+```
+(ch, cl1) = 2Prod(xh, yh);  tl = RN(xh·yl);  cl2 = RN(tl + xl·yh);  cl3 = RN(cl1 + cl2)
+```
+
+apple-bottom's default rounds it twice, feeding `cl1` into the first FMA:
+
+```
+(p, e) = 2Prod(xh, yh);  t = RN(xl·yh + e);  f = RN(xh·yl + t)
+```
+
+This is a different rounding sequence, so the theorem does not cover it. The opt-in `DWTIMESDW3=1` product is Algorithm 12 line for line, so Theorem 2.8 (`(4u² + u³/2)/(1+u)² < 4u²`) does apply to it. The library makes no claim for `dd_fma` under that option.
+
+**Proven bounds for the default build.** Assume no underflow or overflow (§3.2, §4.2) and round-to-nearest as written. Write the fused step `dd_fma(a, b, c)` as
+
+```
+(p, e) = 2Prod(ah, bh);  t = RN(al·bh + e);  f = RN(ah·bl + t)      product P = p + f
+(s, g) = 2Sum(p, ch);    v = RN(f + cl);      w = RN(g + v)
+(rh, rl) = Fast2Sum(s, w)
+```
+
+`dd_mul` is the first line followed by `Fast2Sum(p, f)`. Let `A = |ah·bh|` and `C = |ch|`. Use `|RN(z) − z| ≤ u|z|` and `|xl| ≤ u|xh|`.
+
+1. **Product.** `|e| ≤ uA`. The rounding of `t` costs at most `2u²A`, and `|t| ≤ 2u(1+u)A`. The rounding of `f` costs at most `(3u² + 2u³)A`, and `|f| ≤ (1+u)(3u+2u²)A`. The dropped `al·bl` is at most `u²A`. So `|P − ab| ≤ (6u² + 2u³)A ≤ 6.000001u²|a||b|`. `|f|` is far below `|p|`, so the `Fast2Sum` that ends `dd_mul` is exact, and `dd_mul`'s relative error is at most 6.000001u².
+2. **Sum.** `|g| ≤ u((1+u)A + C)`. With `L = (1+u)(3u+2u²)A + uC ≥ |f + cl|`, rounding `v` costs at most `uL` and rounding `w` at most `u(|g| + (1+u)L)`. If the final `Fast2Sum` is exact, `rh + rl − (ab + c) = (P − ab) + δv + δw`. Then `A ≤ |a||b|/(1−u)²` and `C ≤ |c|/(1−u)` give
+
+   ```
+   |rh + rl − (ab + c)| ≤ (13 + 43u)·u²·|a||b| + (3 + 5u)·u²·|c|
+   ```
+
+   The constants were evaluated in exact rational arithmetic and rounded up. To first order they come from: the product (6), rounding `v` (3 + 1), and rounding `w` (4 + 2).
+3. **The final `Fast2Sum` is always exact.** Dekker's condition is that `s = Ms·2^es` and `w = Mw·2^ew` with `|Ms|, |Mw| ≤ 2²⁴ − 1` and `es ≥ ew`. It holds whenever `|s| ≥ |w|`. Suppose instead `|s| < |w|`, and let `M = max(|p|, C)`.
+   - The bounds above give `|w| ≤ 6.000002uM < 2⁻²¹M`, so `|p + ch| < 2⁻²¹M/(1−u)`.
+   - Then `p` and `ch` have opposite signs and `min(|p|, C) > M/2`, so their exponents differ by at most one.
+   - Let `μ = min(ulp(p), ulp(ch))`. Then `μ > 2⁻²⁵M`, and `p`, `ch`, `p + ch` and `s` are all multiples of `μ`.
+   - But `ulp(w) ≤ 2u|w| < 2⁻⁴⁴M < μ`. So `s` is a multiple of `ulp(w)` with `|s|/ulp(w) < |w|/ulp(w) < 2²⁴`, and the condition holds with `es = ew`.
+
+**GEMM.** Every kernel accumulates each output as `ŝ₀ = 0`, `ŝₖ = dd_fma(aₖ, bₖ, ŝₖ₋₁)`. Its interleaved renormalizations are `Fast2Sum`s of normalized pairs, so they are exact. By induction, `|ŝ_K − s_K| ≤ (α + β(K−1))(1 + βu²)^(K−1)·u²·Σ|aₖ||bₖ|`, which is at most `(3K + 11)u²(|A||B|)ᵢⱼ` for `K ≤ 2²⁰`. Through the FP64 interface the input conversion `hi = fl₃₂(x)`, `lo = fl₃₂(x − hi)` perturbs each element by at most `u²|x|`, and the result is rounded to FP64 once. The bound then becomes `|Ĉ − C| ≤ (3K + 13)u²|A||B| + 2⁻⁵³|Ĉ|`.
+
+**What the tests show.** `make test-dd-bound` cuts the shader primitives out of `src/apple_bottom.m`, compiles them on the CPU without contraction, and compares 5×10⁶ triples with MPFR at 400 bits. Half are adversarial and half are cancelling. Over 5×10⁷ triples:
+- `Fast2Sum` was exact in every case.
+- The product error reached 4.33u² (Algorithm 11 reached 4.20u² on the same inputs).
+- The step error reached 0.93 of the bound.
+- With `|c| ≈ 94|ab|`, the step error reached 2.92u²|c|, so `β = 3` is nearly sharp.
+- The worst step error relative to `max(|ab|, |c|)` was 6.80u², so the old 8u² envelope held in these tests even though it had no proof.
+
+`β` multiplies the partial sum, so it sets the slope in K. Saturating sums (VAL-1, QE-like operands: 10.1u² at K = 18,277) are the regime where it matters. The proof is on paper, not checked in a proof assistant like the Muller–Rideau bounds.
 
 References:
 - Joldes, Muller, Popescu (2017). "Tight and Rigorous Error Bounds for Basic Building Blocks of Double-Word Arithmetic." *ACM TOMS* 44(2), Article 15. DOI: 10.1145/3121432
@@ -99,6 +147,8 @@ For `C = A × B` with dimensions `M × N` and `K`:
 ```
 
 where `γ_K = K · ε / (1 - K · ε) ≈ K · ε` for `K · ε ≪ 1`, and `ε = 2⁻⁴⁸` for DD.
+
+> *Revision 1.4: double-float does not satisfy the standard model with ε = u². The proven componentwise bound is `(3K + 13)u²|A||B|` (§1.2), three times this estimate's slope. The figures below are kept as written.*
 
 **For normalized matrices** (`‖A‖_F = ‖B‖_F = √N`):
 
@@ -430,6 +480,7 @@ If precision is insufficient:
 | 1.0 | 2026-03-31 | Initial validated precision envelope | Grant Heileman |
 | 1.1 | 2026-04-04 | Add theoretical precision bounds, FMA optimization reference | Grant Heileman |
 | 1.2 | 2026-04-16 | Correct DWTimesDW2 error bound to Muller-Rideau 2022 Thm 2.7 (`< 5u²/(1+u)² < 5u²`); fix EFT table (twoSum/twoProduct are error-free, `dd_fma` at DD level) | Grant Heileman |
+| 1.4 | 2026-10-30 | §1.2: the default product is not JMP Algorithm 11, so Theorem 2.7 does not apply. Proven bounds for `dd_mul` (≤ 6.000001u²) and `dd_fma` ((13+43u)u²|ab| + (3+5u)u²|c|), the final `Fast2Sum` shown to be exact, and the GEMM bound (3K+13)u²|A||B|. They replace the unproven 5u² and 8u² figures. New `make test-dd-bound`. §1.3: slope note | Grant Heileman |
 | 1.3 | 2026-10-14 to 2026-10-30 | Correction notice (§2.4 replaced by VAL-1 revision 2, §5.1 by the 1.4.0 measurements); exponent range and complex products for 1.5.0 (§3.2, §3.3, §4.2, §4.3); per-operation bounds corrected (§1.2: `dd_mul` < 5u², `dd_fma` ≲ 8u²); guarantee restated; notes on the max-element measure (§2.3) and threads (§4.4); §5.1 points at 1.5.0 | Grant Heileman |
 
 ---

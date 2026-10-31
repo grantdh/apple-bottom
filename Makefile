@@ -18,7 +18,8 @@ OBJCFLAGS = -std=c++11 -Wall -Wextra -O3 -fobjc-arc -DACCELERATE_NEW_LAPACK
 LDFLAGS = -lc++ -framework Metal -framework Foundation -framework Accelerate
 
 # DD multiplication algorithm selector (v1.3 A/C investigation).
-#   Default: DWTimesDW2 (JMP 2017 Alg 11, MR 2022 Thm 2.7, error bound < 5u²).
+#   Default: two-FMA variant of DWTimesDW2 (JMP 2017 Alg 11), error bound
+#            < 6.000001u² (proven in docs/vv/PRECISION_ENVELOPE.md §1.2).
 #   Opt-in : DWTimesDW3 (JMP 2017 Alg 12, MR 2022 Thm 2.8, error bound < 4u²).
 # Invoke with `make clean && make lib DWTIMESDW3=1`. The flag is also propagated
 # into the MSL compile step via MTLCompileOptions.preprocessorMacros.
@@ -345,6 +346,32 @@ test-rectangular-diag: $(BUILD)/test_rectangular_diag
 	@echo "Running Rectangular Matrix Diagnostic Test"
 	@echo "═══════════════════════════════════════════════════════════════════"
 	./$(BUILD)/test_rectangular_diag
+
+# Exact-arithmetic check of dd_fma against its proven bound (PRECISION_ENVELOPE §1.2).
+# The shader primitives are cut out of src/apple_bottom.m and compiled on the CPU
+# without contraction. Not part of `make test`: it needs MPFR (brew install mpfr).
+MPFR_PREFIX := $(shell brew --prefix mpfr 2>/dev/null)
+GMP_PREFIX := $(shell brew --prefix gmp 2>/dev/null)
+DD_BOUND_N ?= 5000000
+
+$(BUILD)/dd_prims.inc: src/apple_bottom.m | $(BUILD)
+	awk '/kShaderSource = @\(R"\(/ {in_src=1} in_src && /^struct DD \{/ {on=1} \
+	     on && /^\/\/ DD scaling by single float/ {exit} on {print}' $< > $@
+	@grep -q 'inline DD dd_fma' $@ || { echo "dd_fma not found in $<"; rm -f $@; exit 1; }
+
+$(BUILD)/test_dd_fma_bound: tests/test_dd_fma_bound.cpp $(BUILD)/dd_prims.inc | $(BUILD)
+	clang++ -std=c++17 -O2 -Wall -ffp-contract=off -I$(BUILD) -I$(MPFR_PREFIX)/include -I$(GMP_PREFIX)/include \
+	    $< -o $@ -L$(MPFR_PREFIX)/lib -L$(GMP_PREFIX)/lib -lmpfr -lgmp
+	@echo "Built: $@"
+
+.PHONY: test-dd-bound
+ifeq ($(wildcard $(MPFR_PREFIX)/include/mpfr.h),)
+test-dd-bound:
+	@echo "SKIP test-dd-bound: MPFR not found (brew install mpfr)"
+else
+test-dd-bound: $(BUILD)/test_dd_fma_bound
+	./$(BUILD)/test_dd_fma_bound $(DD_BOUND_N)
+endif
 
 # Rectangular shapes up to 18277 x 150 x 18277 (correctness, then timings).
 # Not part of `make test`: it peaks at about 21 GB of memory (M2 Max: ~10 s).

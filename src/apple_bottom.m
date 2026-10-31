@@ -216,11 +216,17 @@ inline DD dd_sub(DD a, DD b) { return dd_add(a, {-b.hi, -b.lo}); }
 
 // DD multiplication and FMA.
 //
-// Default build: DWTimesDW2 (Joldes--Muller--Popescu 2017, Algorithm 11).
-//   Error bound: < 5u^2 / (1+u)^2 < 5u^2  (Muller--Rideau 2022, Theorem 2.7).
+// Default build: a two-FMA variant of DWTimesDW2 (Joldes--Muller--Popescu 2017,
+//   Algorithm 11). Algorithm 11 rounds the low part three times (xh*yl, + xl*yh,
+//   + cl1); this code feeds cl1 into the first FMA and rounds twice, so the
+//   Muller--Rideau 2022 Theorem 2.7 bound (5u^2) does not cover it. Proven for
+//   this code (docs/vv/PRECISION_ENVELOPE.md section 1.2; `make test-dd-bound`):
+//   dd_mul <= 6.000001u^2 relative; dd_fma <= (13+43u)u^2|ab| + (3+5u)u^2|c|,
+//   and its final fastTwoSum is always exact.
 //
 // Opt-in build (-DAPPLEBOTTOM_USE_DWTIMESDW3): DWTimesDW3 (JMP 2017, Algorithm 12).
-//   Error bound: < 4u^2  (Muller--Rideau 2022, Theorem 2.8).
+//   dd_mul is Algorithm 12 verbatim; error bound < 4u^2 (Muller--Rideau 2022,
+//   Theorem 2.8). No bound is stated for this build's dd_fma.
 //   Adds one multiplication (al*bl) and one add vs Alg 11; FMA count
 //   unchanged. The tighter bound comes from including the a.lo*b.lo
 //   cross-term that Alg 11 drops, which is what costs the extra mul+add.
@@ -1744,8 +1750,9 @@ static void ab_atfork_child(void) { g_forked_child = true; }
 
         // Propagate the host-side DD-algorithm selector into the Metal compiler so
         // the MSL `#ifdef APPLEBOTTOM_USE_DWTIMESDW3` branch sees the same define.
-        // Default build: DWTimesDW2 (JMP 2017 Alg 11 / MR 2022 Thm 2.7, < 5u²).
-        // Opt-in build: DWTimesDW3 (JMP 2017 Alg 12 / MR 2022 Thm 2.8, < 4u²).
+        // Default build: two-FMA variant of DWTimesDW2 (< 6.000001u², proven in
+        // PRECISION_ENVELOPE.md §1.2). Opt-in: DWTimesDW3 (JMP 2017 Alg 12 /
+        // MR 2022 Thm 2.8, < 4u²).
 #ifdef APPLEBOTTOM_USE_DWTIMESDW3
         opts.preprocessorMacros = @{@"APPLEBOTTOM_USE_DWTIMESDW3": @1};
         NSLog(@"apple-bottom: MSL compiled with DWTimesDW3 (JMP 2017 Alg 12)");

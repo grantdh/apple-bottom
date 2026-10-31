@@ -2,9 +2,14 @@
 
 > **Status (2026-10-30).** Written during 1.3.0 development and kept as
 > written, with corrections marked. DWTimesDW2 stayed the default
-> ([LIMITATIONS.md](LIMITATIONS.md)), so the question of §3 is settled. The
-> bounds quoted in §1 are those of `dd_mul`; the fused `dd_fma` is not
-> covered by them (see §1.1).
+> ([LIMITATIONS.md](LIMITATIONS.md)), so the question of §3 is settled.
+> Correction (2026-10-30, second pass): the default product is not Algorithm 11
+> of Joldes–Muller–Popescu 2017. f5dd2d3 folds the error of `a.hi*b.hi` into the
+> first FMA, so Theorem 2.7 of Muller–Rideau covers neither `dd_mul` nor
+> `dd_fma`. Bounds proven for the code as written are in
+> `PRECISION_ENVELOPE.md` §1.2: `dd_mul` ≤ 6.000001u², `dd_fma` ≤ (13+43u)u²|ab|
+> + (3+5u)u²|c|. They are checked by `make test-dd-bound`. The opt-in DWTimesDW3
+> is Algorithm 12 verbatim, so Theorem 2.8 does hold for its `dd_mul`.
 
 **Purpose.** Document the current `dd_mul` / `dd_fma` implementations so future
 work on the DD multiplication algorithm has a precise, version-stamped baseline
@@ -25,7 +30,7 @@ string `kShaderSource`, gated by the preprocessor macro
 compile step sees the same macro as the ObjC++ side. Default build is
 DWTimesDW2.
 
-### 1.1 Default: DWTimesDW2 (Alg 11 / Thm 2.7)
+### 1.1 Default: DWTimesDW2 ~~(Alg 11 / Thm 2.7)~~ (a two-FMA variant of Alg 11; see the correction below)
 
 Source: `dd_mul` / `dd_fma` in the `#else  // DWTimesDW2 (default)` branch of `src/apple_bottom.m`.
 
@@ -64,13 +69,25 @@ This form replaced the earlier additive-accumulation sequence in commit
 which is what drove the effective rounding-event count per cross-term from 4
 down to 2.
 
-**Error bound.** `< 5u² / (1+u)² < 5u²` where `u = 2⁻²⁴` is the FP32 unit
+**Error bound.** ~~`< 5u² / (1+u)² < 5u²` where `u = 2⁻²⁴` is the FP32 unit
 roundoff — Muller–Rideau 2022 Theorem 2.7, tightened from JMP 2017's original
 `< 6u²` bound via a formal Coq proof. This is `dd_mul`'s bound. The fused
 `dd_fma` skips the product's own renormalization, so the theorem does not
 cover it; `PRECISION_ENVELOPE.md` §1.2 gives it a conservative `≲ 8u²`
 envelope (corrected 2026-10-30: this section first gave `dd_fma` the same
-bound).
+bound).~~
+
+*Corrected 2026-10-30 (second pass).* Theorem 2.7 is for JMP Algorithm 11. That
+algorithm computes `tl = RN(xh·yl)`, `cl2 = RN(tl + xl·yh)` and
+`cl3 = RN(cl1 + cl2)`, which is three roundings. The code above makes two,
+`fma(a.hi, b.lo, fma(a.lo, b.hi, e1))`. That is a different algorithm, and no
+published theorem covers it. Proven for the code as written
+(`PRECISION_ENVELOPE.md` §1.2):
+
+- `dd_mul`: relative error ≤ (6u² + 2u³)/(1−u)² ≤ 6.000001u². The worst
+  observed is 4.33u², against 4.20u² for Algorithm 11 on the same inputs.
+- `dd_fma`: absolute error ≤ (13+43u)u²|ab| + (3+5u)u²|c|. Its final
+  `fastTwoSum` is always exact.
 
 ### 1.2 Opt-in: DWTimesDW3 (Alg 12 / Thm 2.8)
 
@@ -123,8 +140,10 @@ Operation counts (DWTimesDW3 vs DWTimesDW2 delta):
 > block of `src/apple_bottom.m` now gives one multiplication and one add.*
 
 **Error bound.** `< 4u²` — Muller–Rideau 2022 Theorem 2.8, again for
-`dd_mul`; no published bound covers the fused `dd_fma`. Compared to
-DWTimesDW2's `< 5u²`, the gap is 20% at the per-operation level. At
+`dd_mul` (this variant is Algorithm 12 verbatim); no bound is stated for its
+fused `dd_fma`. Compared to ~~DWTimesDW2's `< 5u²`~~ the default's proven
+6.000001u² (2026-10-30), the gap is ~~20%~~ 33% at the per-operation level,
+although the observed worst cases differ by about 17% (4.33u² against 3.6u²). At
 accumulation length `K`, worst-case Higham bound improves from `O(5K·u²)` to
 `O(4K·u²)`; probabilistic `√K·u²` bound improves by the same ratio.
 
@@ -137,8 +156,10 @@ additive accumulation with nested `fma()` calls, moving from ~5-13u² down to
 ≤2u² for the cross-term step") has already landed:
 
 - `f5dd2d3` (April 2026) introduced nested FMA cross-terms in the default
-  path. That is what made the default `< 5u²` instead of the pre-f5dd2d3
-  `< ~6-13u²` bound.
+  path. ~~That is what made the default `< 5u²` instead of the pre-f5dd2d3
+  `< ~6-13u²` bound.~~ It also made the default differ from Algorithm 11, so
+  its bound is the 6.000001u² proven in `PRECISION_ENVELOPE.md` §1.2
+  (corrected 2026-10-30).
 - `8c18ef3` (April 2026) added DWTimesDW3 as a compile-time opt-in, pushing
   the bound to `< 4u²` at the cost of +1 mul +1 add per primitive.
 

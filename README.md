@@ -214,10 +214,13 @@ Each value is stored as an unevaluated sum `hi + lo` of two FP32 numbers,
 normalized so that `|lo|` is at most half an ulp of `hi`; the pair holds
 about 48 significant bits of the FP64 value. Arithmetic keeps that form
 with Dekker/Knuth error-free transformations (TwoSum, FMA-based TwoProd).
-Products use the DWTimesDW2 algorithm of Joldes, Muller and Popescu
-(2017), with relative error below 5u² for u = 2⁻²⁴; the fused
-multiply-add of the GEMM inner loop has a conservative 8u² envelope
-([derivation and scope](docs/vv/PRECISION_ENVELOPE.md)).
+Products use a two-FMA variant of the DWTimesDW2 algorithm of Joldes,
+Muller and Popescu (2017). Its relative error is proven below 6.000001u²
+for u = 2⁻²⁴. The fused multiply-add of the GEMM inner loop has absolute
+error at most 13u²|ab| + 3u²|c|, so a GEMM with inner dimension K is within
+(3K+13)u²|A||B| componentwise
+([proof and scope](docs/vv/PRECISION_ENVELOPE.md); checked by
+`make test-dd-bound`).
 
 - The shaders are compiled without fast math (`MTLMathModeSafe`, or
   `fastMathEnabled = NO` before macOS 15). Fast math lets the compiler
