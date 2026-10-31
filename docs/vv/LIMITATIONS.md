@@ -8,7 +8,12 @@ Throughout the V&V package we scope claims to what we measure rather than to wha
 
 Specific instances of this stance, linked to the sections where each is developed:
 
-- **Fused double-word FMA envelope.** The `dd_fma(a, b, c) = a·b + c` primitive elides the mul-side `fastTwoSum` renormalization of Joldes–Muller–Popescu 2017 Algorithm 11 (DWTimesDW2). The Muller–Rideau 2022 Theorem 2.7 bound on DWTimesDW2 therefore does not apply by inheritance to the fused form. We state a conservative `≲ 8u² · max(|a·b|, |c|)` envelope from triangle inequality over the non-fused composition and validate it empirically at `N ∈ {1024, 2048, 3072}` in the `N·u²` accumulation regime. The tight bound for the fused form is an open theoretical question. See `PRECISION_ENVELOPE.md §1.2`.
+- **Fused double-word FMA bound.** `dd_fma(a, b, c) = a·b + c` and the default `dd_mul` use a two-FMA variant of Joldes–Muller–Popescu 2017 Algorithm 11 (DWTimesDW2), not the algorithm itself. The formally verified Muller–Rideau 2022 bounds therefore do not apply. `PRECISION_ENVELOPE.md §1.2` proves bounds for the code as written:
+  - `dd_mul` ≤ 6.000001u²;
+  - `dd_fma` ≤ (13+43u)u²|ab| + (3+5u)u²|c|, with its final `fastTwoSum` always exact;
+  - GEMM ≤ (3K+13)u²|A||B| componentwise.
+
+  These replace the earlier `≲ 8u²` envelope, which had no proof. The proofs are on paper, not machine-checked. They assume no underflow, which the library enforces only through the exponent-range guard. `make test-dd-bound` checks them against MPFR on the extracted shader code.
 
 - **Hardware scoping to Apple M2 Max.** All measurements in the V&V package are taken on a single Apple M2 Max (Apple8 GPU family) under `mathMode = .safe`. The Metal Shading Language specification commits to per-operation ULP tolerances but does not document cross-GPU-family bit-identity across the Apple7/Apple8/Apple9 families. The reported numerical envelope is an M2 Max measurement, not a platform guarantee; cross-family revalidation on M1, M3, and M4 is future work. See `PRECISION_ENVELOPE.md §2`.
 

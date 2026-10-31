@@ -1,8 +1,8 @@
 # Verification & Validation Report
 ## apple-bottom v1.0.2 — FP64-Class BLAS for Apple Silicon GPU
 
-> **Status (Revision 1.3, 2026-10-30).** This report documents v1.0.2
-> (March 2026) and is kept as a record of it; the library is now at 1.5.0.
+> **Status (Revision 1.4, 2026-10-31).** This report documents v1.0.2
+> (March 2026) and is kept as a record of it.
 > Its production approvals are withdrawn, and its statements on rectangular
 > shapes, thread safety and the max-element error are corrected inline,
 > with the old text struck through. For the current library see
@@ -10,13 +10,14 @@
 > [`tests/README.md`](../../tests/README.md) and the Quantum ESPRESSO results
 > in the [README](../../README.md#performance).
 
-**Report Version**: 1.3
+**Report Version**: 1.4
 **Date**: 2026-04-23
 **Status**: Verification (V-2, unit suites) current; validation: VAL-1 revision 2 passes for accuracy on Quantum ESPRESSO Si64 (see Revision 1.2)
 **Validated Baseline**: Git tag `v1.0.2-bugfix` (SHA: f3e2fc1)
 **Revision 1.1**: Added §10 Clock-pin and Utilization Methodology; §10 Conclusions renumbered to §11, §11 References renumbered to §12.
 **Revision 1.2 (2026-10-14)**: Correction of VAL-1; see the notice below.
 **Revision 1.3 (2026-10-30)**: Kept as a record of v1.0.2; production approvals withdrawn; rectangular shapes, thread safety, the max-element measure, the Fortran example and the test system corrected.
+**Revision 1.4 (2026-10-31)**: Agreement row and agreement bullet of §4.2.2 and measured error and conclusion of §4.2.3 struck through (withdrawn in Revision 1.2).
 **Test System**: Apple M2 Max, macOS 14.7, Metal 3
 **Validation Standard**: NASA-STD-7009A, ASME V&V 10-2006
 
@@ -350,14 +351,14 @@ apple-bottom correctly implements DGEMM/ZGEMM to within DD precision bounds:
 |---------------|-------------------|-----------|-----------|
 | **Reference** (OpenBLAS 6 threads) | -2990.44276157 | 2m28s | ~600% |
 | **Test** (apple-bottom hybrid) | -2990.44276157 | 2m01s | ~320% |
-| **Agreement** | **11 decimal places** | **1.22× speedup** | **47% reduction** |
+| ~~**Agreement**~~ | ~~**11 decimal places**~~ | ~~**1.22× speedup**~~ | ~~**47% reduction**~~ |
 
 **Iteration-by-Iteration**:
 - SCF iteration 1: -2989.75482361 Ry (both)
 - SCF iteration 14 (final): -2990.44276157 Ry (both)
-- **Bit-for-bit agreement throughout convergence**
+- ~~**Bit-for-bit agreement throughout convergence**~~
 
-#### 4.2.3 Error Analysis
+#### 4.2.3 Error Analysis (withdrawn in Revision 1.2: these runs did not use the GPU)
 
 **Expected DD error budget**:
 ```
@@ -365,9 +366,9 @@ Single ZGEMM: ~N · 10⁻¹⁵ ≈ 400 · 10⁻¹⁵ = 4×10⁻¹³
 14 SCF iterations: √14 · 4×10⁻¹³ ≈ 1.5×10⁻¹²
 ```
 
-**Measured error**: `< 10⁻¹¹` (11 decimal places)
+~~**Measured error**: `< 10⁻¹¹` (11 decimal places)~~
 
-**Conclusion**: DD precision provides **10× safety margin** beyond worst-case theory.
+~~**Conclusion**: DD precision provides **10× safety margin** beyond worst-case theory.~~
 
 #### 4.2.4 Validation Statement
 
@@ -803,8 +804,8 @@ boost-clock volatility directly.
 
 **Classification**: Engineering Validation
 **Distribution**: Public
-**Version**: 1.3
-**Date**: 2026-03-31 (revised 2026-04-23, 2026-10-14 and 2026-10-30)
+**Version**: 1.4
+**Date**: 2026-03-31 (revised 2026-04-23, 2026-10-14, 2026-10-30 and 2026-10-31)
 **Next Review**: ~~Upon v1.1.0 release or code modifications to DGEMM kernel~~ None: kept as a record of v1.0.2 (Revision 1.3)
 
 **Revision History**:
@@ -815,6 +816,7 @@ boost-clock volatility directly.
 | 1.1 | 2026-04-23 | §10 Clock-pin and Utilization Methodology | Grant Heileman |
 | 1.2 | 2026-10-14 | VAL-1 withdrawn (the GPU was not exercised); performance expectations replaced by the 1.4.0 measurements | Grant Heileman |
 | 1.3 | 2026-10-30 | Kept as a record of v1.0.2; production approvals withdrawn; rectangular shapes, thread safety, the max-element measure, the Fortran example and the test system corrected | Grant Heileman |
+| 1.4 | 2026-10-31 | Agreement row and agreement bullet of §4.2.2 and measured error and conclusion of §4.2.3 struck through (withdrawn in Revision 1.2) | Grant Heileman |
 
 ---
 

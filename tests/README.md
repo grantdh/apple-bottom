@@ -90,6 +90,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 | `make test-verification` | the V-2 convergence study alone |
 | `make test-rectangular` | `test_rectangular.c`: tall, wide, thin-K and conjugate-transposed shapes up to 18277 × 150 × 18277, componentwise against cblas, then timings (peaks at ~21 GB) |
 | `make test-rectangular-diag` | eight rectangular patterns against cblas |
+| `make test-dd-bound` | `test_dd_fma_bound.cpp`: cuts the shader's `DD` primitives out of `src/apple_bottom.m`, compiles them on the CPU without contraction, and checks `dd_fma` on 5×10⁶ adversarial and cancelling triples against MPFR and the bound of `docs/vv/PRECISION_ENVELOPE.md` §1.2 (`DD_BOUND_N=` to change the count; needs `brew install mpfr`, else SKIP; ~5 s) |
 | `make test-python` | the Python bindings (`tests/python/`) |
 | `make test-replay` | `tests/test_replay.py`: the QE call-mix replay (`benchmarks/replay.c`) on a synthetic 2-rank trace, in every mode, with the trace header's `AB_MIN_GPU_DIM`, a killed and a hung worker, and `benchmarks/replay_summary.py` |
 | `make test-asan`, `make test-ubsan` | the library and `test_correctness` under AddressSanitizer / UndefinedBehaviorSanitizer, in `build/asan`, `build/ubsan`. On macOS 27.0.1 with Apple clang 17.0.0 the AddressSanitizer runtime hangs in its own initialization, before `main()`, even for an empty program; `test-ubsan` runs |
