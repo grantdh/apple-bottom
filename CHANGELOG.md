@@ -30,6 +30,10 @@ those of 1.5.0.
 ### Fixed
 - `docs/vv/VV_REPORT.md` §4.2.2–4.2.3: the VAL-1 figures withdrawn in 1.4.0
   (see [1.4.0] Corrected claims) are now struck through (Revision 1.4).
+- The 1.5.0 release check (`benchmarks/results/2026-10-28-415cb5d-qe-si64-release-check/`)
+  and `2026-10-29-351d56c-staged-refusals/` now say that the build they label
+  "1.5.0" is release candidate 415cb5d, from before the staged-path fix; the
+  tagged 1.5.0 includes that fix.
 
 ## [1.5.0] - 2026-10-31
 

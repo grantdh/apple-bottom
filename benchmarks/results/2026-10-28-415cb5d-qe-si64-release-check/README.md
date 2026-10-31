@@ -13,7 +13,8 @@ without changing them, and the golden bits held (`test_qe_golden`), so it
 does not change these results. The calls this check found leaving the staged
 path for the host path (about half of the GPU-routed calls) were fixed afterwards:
 [`2026-10-29-351d56c-staged-refusals`](../2026-10-29-351d56c-staged-refusals/)
-measures the fix on this QE build.
+measures the fix on this QE build. The tagged v1.5.0 (4530fd6) carries that fix,
+so "1.5.0" in this folder is the release candidate before it, not the release.
 
 | | |
 |---|---|

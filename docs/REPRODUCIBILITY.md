@@ -11,7 +11,7 @@ library build they came from:
 | Quantum ESPRESSO validation (VAL-1) | `benchmarks/qe/run_campaign.sh` (see `benchmarks/qe/README.md`) | `benchmarks/results/2026-10-14-1dbdb52-qe-si64/` |
 | Quantum ESPRESSO, 1.4.0 release check (QE compiled `-O3`, 1 and 8 ranks) | `benchmarks/qe/run_campaign.sh` | `benchmarks/results/2026-10-15-c5a1fa6-qe-si64-opt/` |
 | Register prefetch: kernel GPU times, bit checks, BLAS-ABI timings | the folder's `pfprobe.m` (build and run lines in its header); `bench_rect_dgemm` / `bench_rect_zgemm` over its `shapes/qe_e2e.txt` | `benchmarks/results/2026-10-24-15ef7b9-prefetch/` |
-| Quantum ESPRESSO, 1.5.0 release check (1.5.0 and 1.4.0 on one QE build) | `benchmarks/qe/run_campaign.sh` with the folder's `plans/` | `benchmarks/results/2026-10-28-415cb5d-qe-si64-release-check/` |
+| Quantum ESPRESSO, 1.5.0 release check (the 1.5.0 candidate before the staged-path fix, and 1.4.0, on one QE build) | `benchmarks/qe/run_campaign.sh` with the folder's `plans/` | `benchmarks/results/2026-10-28-415cb5d-qe-si64-release-check/` |
 | One GEMM split between Accelerate and the GPU | `make build/bench_split`, then `benchmarks/split/run.sh <out>` (about 35 minutes; see `benchmarks/split/README.md`) | `benchmarks/results/2026-10-28-415cb5d-hybrid-split/` |
 | Quantum ESPRESSO, why GPU calls left the staged path and the fix | `benchmarks/qe/run_campaign.sh` with the folder's `plans/` and `tools/` | `benchmarks/results/2026-10-29-351d56c-staged-refusals/` |
 
