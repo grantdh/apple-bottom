@@ -297,6 +297,10 @@ static void collect_meta(Meta *m, const char *out, int gpu_cores, int warmup, in
     strftime(m->date, sizeof m->date, "%Y-%m-%dT%H:%M:%SZ", gmtime(&t));
     sysctl_str("machdep.cpu.brand_string", cpu, sizeof cpu);
     snprintf(m->chip, sizeof m->chip, "%s", cpu);
+    if (gpu_cores <= 0) {                   // no --gpu-cores: the IORegistry count, as the library reads it
+        char host[AB_DISPATCH_CHIP_LEN];
+        ab_dispatch_host_chip(host, sizeof host, &gpu_cores);
+    }
     m->gpu_cores = gpu_cores > 0 ? gpu_cores : 0;
     m->cpu_matrix = sysctl_ll("hw.optional.arm.FEAT_SME") ? "SME" : "AMX";
     if (gpu_cores > 0) snprintf(cores, sizeof cores, "%d-core ", gpu_cores);

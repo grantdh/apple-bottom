@@ -40,7 +40,9 @@
 // TRANS is a class: 'N', or 'T' for both 'T' and 'C' ('C' is accepted as
 // 'T'). A file without rows keeps every auto call on Accelerate. A file that
 // cannot be read or parsed is reported on stderr and the built-in table used.
-// Three comment lines carry the calibration's identity and are read back:
+// Three comment lines carry the calibration's identity; the loader reads
+// back chip and gpu_cores (cpu_matrix is recorded for the filed table and
+// the generated header by scripts/ingest_calibration.py):
 //   # chip: Apple M2 Max
 //   # gpu_cores: 38
 //   # cpu_matrix: AMX

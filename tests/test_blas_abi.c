@@ -354,8 +354,9 @@ static void gen_blas(const Suite *s) {
     add_std(s, 'N', 'N', OLD_MAX_DIM + 1, 48, 48, 0, SC_GEN);       // past the v1.3 limit
 }
 
-// AB_MODE=auto with the built-in table (dispatch_table.h, from `make
-// calibrate`). Through every BLAS-ABI entry point, calls the GPU path was
+// AB_MODE=auto with this chip's built-in table (dispatch_table.h, generated
+// from benchmarks/calibration/; none on an uncalibrated chip, where the shapes
+// stay on Accelerate either way). Through every BLAS-ABI entry point, calls the GPU path was
 // measured slower on stay on Accelerate: the QE cegterg-like call of the
 // gen_blas suites, which v1.3's FLOP thresholds sent to the GPU, and QE si64
 // PAW DGEMMs and Davidson ZGEMMs (calibrate_summary.csv; test_dispatch

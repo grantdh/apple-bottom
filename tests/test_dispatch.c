@@ -365,6 +365,20 @@ static void test_host_chip_and_slug(void) {
     if (sysctlbyname("machdep.cpu.brand_string", brand, &n, NULL, 0) != 0) brand[0] = '\0';
     expect(!strcmp(chip, brand), "host chip '%s' is not machdep.cpu.brand_string '%s'", chip, brand);
     expect(cores >= 0, "host core count %d", cores);
+    // The IOKit count must be what `ioreg -rc AGXAccelerator -d1` lists (the Makefile's
+    // GPU_CORES); a host without an AGXAccelerator (a CI runner) lists nothing.
+    int ioreg_cores = -1;
+    FILE *io = popen("/usr/sbin/ioreg -rc AGXAccelerator -d1 2>/dev/null", "r");
+    if (io) {
+        char line[4096];
+        while (fgets(line, sizeof line, io)) {
+            const char *p = strstr(line, "\"gpu-core-count\"");
+            if (p && (p = strchr(p, '=')) && ioreg_cores < 0) ioreg_cores = atoi(p + 1);
+        }
+        pclose(io);
+    }
+    expect(ioreg_cores < 0 ? cores == 0 : cores == ioreg_cores,
+           "IOKit reports %d GPU cores, ioreg lists %d", cores, ioreg_cores);
     // Whatever this host is, the default configuration is its table or none.
     ab_dispatch_config_t c = builtin_auto();
     const ab_dispatch_table_t *t = ab_dispatch_builtin_table(chip, cores);
@@ -397,10 +411,12 @@ static void test_uncalibrated_chip(void) {
     setenv("AB_CROSSOVER_FLOPS", "1000", 1);
     ab_dispatch_config_from_env(&c);
     EXPECT_ROUTES(&c, true, "uncalibrated chip, AB_CROSSOVER_FLOPS", "zgemm N N 64 64 64");
-    clear_env();
+    ab_dispatch_config_t host = builtin_auto();
     setenv("AB_CHIP", "", 1);                      // empty: as unset
+    setenv("AB_GPU_CORES", "", 1);
     ab_dispatch_config_from_env(&c);
-    expect(c.chip[0] != '\0' || !strcmp(c.table, "none:unknown-chip"), "AB_CHIP= reads the host chip");
+    expect(!strcmp(c.chip, host.chip) && c.gpu_cores == host.gpu_cores && !strcmp(c.table, host.table),
+           "AB_CHIP= must read the host chip '%s' (%s), got '%s' (%s)", host.chip, host.table, c.chip, c.table);
     clear_env();
     finish();
 }

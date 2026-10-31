@@ -7,7 +7,7 @@ library build they came from:
 | What | Command | Results |
 |---|---|---|
 | Native-API GEMM throughput | `make build/bench_paper && ./build/bench_paper --csv` (three runs) | `benchmarks/results/2026-10-14-3253a22-bench-paper/` |
-| BLAS-ABI GPU vs Accelerate, and the `AB_MODE=auto` table | `make calibrate` (about 15 minutes) | `benchmarks/results/2026-10-14-52f1880-calibrate/` |
+| BLAS-ABI GPU vs Accelerate, and the `AB_MODE=auto` table | `make calibrate` (about 15 minutes) | `benchmarks/results/2026-10-14-52f1880-calibrate/`, filed as `benchmarks/calibration/M2-Max-38c/` |
 | Quantum ESPRESSO validation (VAL-1) | `benchmarks/qe/run_campaign.sh` (see `benchmarks/qe/README.md`) | `benchmarks/results/2026-10-14-1dbdb52-qe-si64/` |
 
 Environment of those runs: MacBook Pro (Mac14,6), Apple M2 Max, 38-core

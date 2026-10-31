@@ -242,6 +242,13 @@ void ab_dispatch_host_chip(char *chip, size_t len, int *gpu_cores) {
 // Process configuration
 // =============================================================================
 
+// "38 GPU cores", or "an unstated GPU core count" for 0, for the notes below.
+static const char *cores_text(int n, char *buf, size_t len) {
+    if (n > 0) snprintf(buf, len, "%d GPU cores", n);
+    else snprintf(buf, len, "an unstated GPU core count");
+    return buf;
+}
+
 static uint64_t env_flops(const char *name) {
     const char *s = getenv(name);
     return s && *s ? strtoull(s, NULL, 10) : 0;
@@ -280,16 +287,18 @@ void ab_dispatch_config_from_env(ab_dispatch_config_t *c) {
     char err[160];
     if (table && *table) {
         if (!ab_dispatch_load_table(c, table, err, sizeof err)) {
-            fprintf(stderr, "apple-bottom: AB_DISPATCH_TABLE=%s: %s; using the built-in table\n",
-                    table, err);
+            fprintf(stderr, "apple-bottom: AB_DISPATCH_TABLE=%s: %s; keeping %s\n", table, err, c->table);
         } else {
             snprintf(c->table, sizeof c->table, "file:%s", table);
             bool other_chip = c->table_chip[0] && c->chip[0] && strcasecmp(c->table_chip, c->chip);
             bool other_cores = c->table_gpu_cores && c->gpu_cores && c->table_gpu_cores != c->gpu_cores;
-            if (other_chip || other_cores)
-                fprintf(stderr, "apple-bottom: AB_DISPATCH_TABLE=%s was calibrated on %s with %d GPU "
-                                "cores; this machine is %s with %d; using it anyway\n",
-                        table, c->table_chip, c->table_gpu_cores, c->chip, c->gpu_cores);
+            if (other_chip || other_cores) {
+                char tc[40], hc[40];
+                fprintf(stderr, "apple-bottom: AB_DISPATCH_TABLE=%s was calibrated on %s with %s; this machine "
+                                "is %s with %s; using it anyway\n",
+                        table, c->table_chip, cores_text(c->table_gpu_cores, tc, sizeof tc),
+                        c->chip[0] ? c->chip : "an unknown chip", cores_text(c->gpu_cores, hc, sizeof hc));
+            }
         }
     }
 }

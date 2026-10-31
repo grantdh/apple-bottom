@@ -71,7 +71,7 @@ Check that CI passed on the latest commit:
 
 **Check at:** `https://github.com/grantdh/apple-bottom/actions`
 
-**Note:** GitHub-hosted runners don't give jobs a usable Metal GPU, so CI runs only the checks that need none: `make version-check`, `make build-check`, `make lib`, `make test-symbols` and the routing unit tests (`build/test_dispatch`). The GPU suites and the convergence study run locally via `make ci-local` (step 2 above).
+**Note:** GitHub-hosted runners don't give jobs a usable Metal GPU, so CI runs only the checks that need none: `make version-check`, `make build-check`, `make lib`, `make test-symbols`, the routing unit tests (`build/test_dispatch`) and `make dispatch-table-check` (the built-in routing tables against `benchmarks/calibration/`). The GPU suites and the convergence study run locally via `make ci-local` (step 2 above).
 
 ### 4. Documentation Review
 

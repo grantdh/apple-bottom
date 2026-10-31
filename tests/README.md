@@ -81,7 +81,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 
 | Target | What it runs |
 |---|---|
-| `make ci-local` | `make version-check`, every suite of `make test`, the chaos tests and the V-2 convergence study (the DGEMM error-versus-N study of `docs/vv/VV_REPORT.md`, `tests/verification/test_convergence.c`); writes `build/CI_REPORT.txt` |
+| `make ci-local` | `make version-check`, `make dispatch-table-check` (the built-in routing tables against `benchmarks/calibration/`), every suite of `make test`, the chaos tests and the V-2 convergence study (the DGEMM error-versus-N study of `docs/vv/VV_REPORT.md`, `tests/verification/test_convergence.c`); writes `build/CI_REPORT.txt` |
 | `make test-chaos` | pathological inputs, IEEE edge cases, concurrent threads |
 | `make test-verification` | the V-2 convergence study alone |
 | `make test-rectangular` | `test_rectangular.c`: tall, wide, thin-K and conjugate-transposed shapes up to 18277 × 150 × 18277, componentwise against cblas, then timings (peaks at ~21 GB) |
@@ -110,7 +110,8 @@ DGEMM shapes that the old 46340-per-dimension limit kept on cblas (see
 `zgemm_` without `ab_init()`; each must run on the GPU. It checks
 robustness only: those DGEMMs are faster on Accelerate (the GPU ran them
 at 0.09–0.15× in `make calibrate`).
-`test_auto_mode` runs `AB_MODE=auto` with the built-in calibrated table:
+`test_auto_mode` runs `AB_MODE=auto` with this chip's built-in table (none
+on an uncalibrated chip, where the shapes stay on Accelerate either way):
 the QE cegterg-like call and QE si64 PAW and Davidson shapes, which the GPU
 path was measured slower on, must stay on Accelerate through every entry
 point. `test_profile_path` runs `auto` with a test `AB_DISPATCH_TABLE`

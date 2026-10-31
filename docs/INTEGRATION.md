@@ -43,7 +43,7 @@ Complete guide for integrating apple-bottom into scientific computing codes.
 ### Building your program
 
 With the library built in place (`make`), the shared library carries its
-Metal, Foundation and C++ dependencies:
+Metal, Foundation, IOKit and C++ dependencies:
 
 ```bash
 clang -I/path/to/apple-bottom/include my_prog.c -o my_prog \
@@ -55,7 +55,7 @@ Linking the static archive instead needs those dependencies spelled out:
 ```bash
 clang -I/path/to/apple-bottom/include my_prog.c -o my_prog \
       /path/to/apple-bottom/build/libapplebottom.a \
-      -lc++ -framework Metal -framework Foundation -framework Accelerate
+      -lc++ -framework Metal -framework Foundation -framework Accelerate -framework IOKit
 ```
 
 After `make install PREFIX=$HOME/.local` (default `/usr/local`), pkg-config
@@ -338,14 +338,16 @@ Static archive:
 
 ```makefile
 LIBS = /path/to/apple-bottom/build/libapplebottom.a \
-       -lc++ -framework Metal -framework Foundation -framework Accelerate
+       -lc++ -framework Metal -framework Foundation -framework Accelerate -framework IOKit
 ```
 
 Keep apple-bottom first. The linker binds `dgemm_`/`zgemm_` to the first
 library on the command line that exports them, and in a flat namespace
 (`-Wl,-flat_namespace`, which Homebrew's Open MPI wrappers add) the first
 loaded library wins at run time. Without `-lc++`, a static link fails with
-an undefined `___gxx_personality_v0`.
+an undefined `___gxx_personality_v0`; without `-framework IOKit`, with an
+undefined `_IOServiceGetMatchingServices` (the routing reads the GPU core
+count from the IORegistry).
 
 ### Check that the calls arrive
 
@@ -448,9 +450,9 @@ to every API.
 |----------|---------|--------|
 | `AB_MODE` | `auto` | `cpu`: every call on Accelerate. `gpu`: on the GPU unless a dimension is ≤ `AB_MIN_GPU_DIM`. `auto` (or any other value): by the calibrated dispatch table, or by a FLOP threshold if one is set (see [Routing](#routing-ab_modeauto)). |
 | `AB_MIN_GPU_DIM` | `32` | Calls with M, N or K ≤ this run on Accelerate in every mode. |
-| `AB_DISPATCH_TABLE` | unset | `auto`: read the dispatch table from this file (the `dispatch_table.txt` that `make calibrate` writes) instead of the built-in table for this chip. A file that cannot be read or parsed is reported on stderr and the built-in table is used; a file calibrated on another chip or core count (its `# chip:` and `# gpu_cores:` header keys) is used with a note on stderr. |
-| `AB_CHIP` | unset | `auto`: the chip whose built-in table to use, in place of this machine's `machdep.cpu.brand_string` (e.g. `Apple M2 Max`). For tests, and to borrow a sibling's table on purpose. |
-| `AB_GPU_CORES` | unset | `auto`: the GPU core count that picks among a chip's tables, in place of the IORegistry's `gpu-core-count`. |
+| `AB_DISPATCH_TABLE` | unset | `auto`: read the dispatch table from this file (the `dispatch_table.txt` that `make calibrate` writes) instead of the built-in table for this chip. A file that cannot be read or parsed is reported on stderr and the built-in table for this chip is kept (none on an uncalibrated chip); a file calibrated on another chip or core count (its `# chip:` and `# gpu_cores:` header keys) is used with a note on stderr. |
+| `AB_CHIP` | unset | `auto`: the chip whose built-in table to use, in place of this machine's `machdep.cpu.brand_string` (e.g. `Apple M2 Max`). For tests, and to borrow another chip's table deliberately (with `AB_GPU_CORES` matching that table's count when it has one). |
+| `AB_GPU_CORES` | unset | `auto`: the GPU core count that picks among a chip's tables, in place of the IORegistry's `gpu-core-count`; also how a sibling borrows another variant's table on purpose (`AB_GPU_CORES=38` on a 30-core M2 Max). |
 | `AB_CROSSOVER_FLOPS` | unset | `auto`: replaces the table by a FLOP threshold. Calls with at least this many FLOPs (2·M·N·K real, 8·M·N·K complex) go to the GPU: ZGEMM, and DGEMM unless `AB_CROSSOVER_FLOPS_REAL` is set. |
 | `AB_CROSSOVER_FLOPS_REAL` | unset | `auto`: the same for DGEMM only. |
 | `AB_PREFETCH` | unset | Which GPU GEMM kernels load the next K-tile into registers while they compute the current one (register prefetch). Unset or any other value: where the GPU holds few threadgroups, by `use_prefetch` in `src/apple_bottom.m` (on an M2 Max up to 1.43× faster there). `0`: never. `1`: on every grid. The results are bitwise the same in all three; `0` and `1` are for timing comparisons. |
@@ -532,7 +534,8 @@ count and the matrix unit Accelerate ran on (`# chip:`, `# gpu_cores:`,
 `# cpu_matrix: AMX` or `SME`): the Accelerate side of the comparison is AMX on
 the M1 to M3 and SME from the M4, so a table is only ever applied to the chip it
 was measured on. The `AB_REPORT` and `AB_TRACE` headers name the table a run
-used (`table=builtin:M2-Max-38c`, `file:<path>` or `none:uncalibrated-chip`).
+used (`table=builtin:M2-Max-38c`, `file:<path>`, `none:uncalibrated-chip`, or
+`none:unknown-chip` when the chip's brand string cannot be read).
 
 ### Zero-copy operands
 
@@ -578,7 +581,8 @@ AB_REPORT[<pid>] <routine> fallbacks no_device=… too_large=… gpu_failed=… 
   checkout. Keep it with any timing you quote. The `AB_PROFILE` table starts
   with the same string. The line goes on with this machine's chip and GPU
   core count and the routing table `auto` used: `table=builtin:M2-Max-38c`,
-  `file:<path>` for an `AB_DISPATCH_TABLE`, or `none:uncalibrated-chip` when
+  `file:<path>` for an `AB_DISPATCH_TABLE`, `none:unknown-chip` when the brand
+  string could not be read (the line then says `chip="unknown"`), or `none:uncalibrated-chip` when
   the chip has no built-in table (every `auto` call then ran on Accelerate).
 - **`gpu_calls%` is a share of calls, `gpu_time%` a share of time**: the
   routine's BLAS wall time spent in calls that ran on the GPU. They can
@@ -630,8 +634,9 @@ with other processes'. Each process appends to its own file,
 `<path>.<pid>`: a `fork()`ed child, or an MPI rank, gets a file of its own.
 A file starts with `#` lines naming the build (`ab_build_info()`), the pid,
 `AB_MODE`, `AB_MIN_GPU_DIM` as the routing resolved it, the chip and the
-routing table the run used (`table=builtin:<chip>`, `file:<path>` or
-`none:uncalibrated-chip`; a replay routes by its own machine's table), the MPI rank and size
+routing table the run used (`table=builtin:<chip slug>`, `file:<path>`,
+`none:uncalibrated-chip` or `none:unknown-chip`; a replay routes by its own
+machine's table), the MPI rank and size
 the launcher exported (`OMPI_COMM_WORLD_RANK`/`_SIZE`, else
 `PMI_RANK`/`PMI_SIZE`; `mpi_rank=-1 mpi_size=-1` outside MPI) and the field
 legend. Each call then adds one line of `key=value` fields when it returns,

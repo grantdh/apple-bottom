@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Files a `make calibrate` result as a chip's built-in routing table and regenerates src/dispatch_table.h.
 
-    scripts/ingest_calibration.py DIR [DIR ...] [--force] [--allow-partial]
+    scripts/ingest_calibration.py DIR [DIR ...] [--force] [--allow-partial] [--any-cores]
     scripts/ingest_calibration.py --regenerate [--check]
 
 DIR is a calibration results directory: the dispatch_table.txt and calibrate_summary.csv (and
@@ -13,7 +13,8 @@ covered by a row, auto_route agrees with the rows, and the whole grid was measur
 from --only, is refused: it cannot stand for the chip). It is then filed under
 benchmarks/calibration/<slug>/, the slug being the chip without "Apple " plus the GPU core count
 (M2-Max-38c), with the identity keys (# chip:, # gpu_cores:, # cpu_matrix:) added to the table's
-header when an older calibrate.c left them out, and src/dispatch_table.h is regenerated from every
+header when an older calibrate.c left them out (a table with no GPU core count is refused unless
+--any-cores says it should stand for every variant of the chip), and src/dispatch_table.h is regenerated from every
 filed directory, in slug order, one table each. Commit both.
 
 --regenerate rebuilds the header from the filed directories alone; with --check it rebuilds in memory
@@ -270,14 +271,22 @@ def regenerate(check):
         print(f"{os.path.relpath(HEADER, REPO)} is up to date ({len(tables)} table{'s' if len(tables) != 1 else ''})")
 
 
-def ingest(directory, force, allow_partial):
+def ingest(directory, force, allow_partial, any_cores=False):
     t = Table(directory)
     t.validate(allow_partial)
+    if t.gpu_cores == 0 and not any_cores:
+        raise Ingest(f"{t.txt}: no GPU core count in the header (calibrate.c reads it from the IORegistry; pass "
+                     f"--gpu-cores to it on a machine where that fails). A table without one would apply to every "
+                     f"core-count variant of {t.chip}; pass --any-cores if that is what you mean")
     dest = os.path.join(CALIBRATION, t.slug)
+    if os.path.realpath(directory) == os.path.realpath(dest):
+        raise Ingest(f"{os.path.relpath(dest, REPO)} is the filed directory itself; use --regenerate")
     if os.path.isdir(dest) and not force:
         raise Ingest(f"{os.path.relpath(dest, REPO)} exists (an earlier calibration of this chip); --force replaces it")
-    if os.path.isdir(dest):
-        shutil.rmtree(dest)
+    # Build the replacement beside the old directory, then swap: a failure leaves the old one.
+    final = dest
+    dest = dest + ".new"
+    shutil.rmtree(dest, ignore_errors=True)
     os.makedirs(dest)
     try:
         source = os.path.relpath(os.path.abspath(directory), REPO)
@@ -291,6 +300,10 @@ def ingest(directory, force, allow_partial):
     raw = os.path.join(directory, "calibrate_raw.csv")
     if os.path.isfile(raw):
         shutil.copy(raw, os.path.join(dest, "calibrate_raw.csv"))
+    if os.path.isdir(final):
+        shutil.rmtree(final)
+    os.rename(dest, final)
+    dest = final
     wins = sum(1 for s in t.shapes if s["win"] == "1")
     print(f"filed {os.path.relpath(dest, REPO)}: {t.chip}, {t.gpu_cores or 'any'} GPU cores, Accelerate on "
           f"{t.cpu_matrix}{' (inferred)' if t.inferred else ''}; {len(t.shapes)} shapes, {wins} wins, "
@@ -302,14 +315,18 @@ def main():
     ap.add_argument("dirs", nargs="*", help="calibration results directories to file")
     ap.add_argument("--force", action="store_true", help="replace a chip's earlier filed calibration")
     ap.add_argument("--allow-partial", action="store_true", help="file a table measured on part of the grid")
+    ap.add_argument("--any-cores", action="store_true",
+                    help="file a table with no GPU core count as the chip's table for every core count")
     ap.add_argument("--regenerate", action="store_true", help="only rebuild src/dispatch_table.h from benchmarks/calibration/")
     ap.add_argument("--check", action="store_true", help="with --regenerate: exit 1 if the header is stale, change nothing")
     args = ap.parse_args()
     if args.regenerate == bool(args.dirs):
         ap.error("give directories to file, or --regenerate")
+    if args.check and not args.regenerate:
+        ap.error("--check goes with --regenerate (it changes nothing)")
     try:
         for d in args.dirs:
-            ingest(d, args.force, args.allow_partial)
+            ingest(d, args.force, args.allow_partial, args.any_cores)
         regenerate(args.check and args.regenerate)
     except Ingest as e:
         sys.exit(f"ingest_calibration: {e}")

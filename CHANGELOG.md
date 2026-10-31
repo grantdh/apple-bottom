@@ -22,11 +22,12 @@ All notable changes to this project will be documented in this file.
   from part of the grid, and `make dispatch-table-check` (in `ci-local` and
   CI) verifies the header matches the filed tables. `dispatch_table.txt`
   carries `# chip:`, `# gpu_cores:` and `# cpu_matrix:` (`AMX` or `SME`)
-  header keys, which the loader reads back: an `AB_DISPATCH_TABLE` from
+  header keys, of which the loader reads back the chip and core count: an `AB_DISPATCH_TABLE` from
   another chip is used with a note on stderr. `AB_REPORT`'s first line and
   the `AB_TRACE` header name the chip and the table a run used
   (`table=builtin:M2-Max-38c`, `file:<path>` or `none:uncalibrated-chip`).
-  The library and `test_dispatch` now link IOKit; `test_dispatch` checks
+  The library and `test_dispatch` now link IOKit (a static link adds
+  `-framework IOKit`; pkg-config carries it); `test_dispatch` checks
   every built-in table against its own measurements (13 tests, were 9).
 - **The staged path of the BLAS ABI**: a GPU-routed `dgemm_`/`zgemm_` copies
   each operand (`memcpy`, column by column unless it is dense) into GPU
