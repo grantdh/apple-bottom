@@ -268,8 +268,8 @@ typedef enum {
 } ab_zgemm_method_t;
 
 // The method of a BLAS-ABI or device-API ZGEMM: 4M where ab_lines_rho
-// exceeds AB_GAUSS3M_MAX_RHO, else Gauss-3M. The BLAS ABI's staged path
-// keeps a result only where it is 3M.
+// exceeds AB_GAUSS3M_MAX_RHO, else Gauss-3M. The BLAS ABI's staged path runs
+// Gauss-3M first and redoes the imaginary part by 4M where this says so.
 static inline ab_zgemm_method_t ab_lines_method(const ab_line_stats_t* sa,
                                                 const ab_line_stats_t* sb) {
     return ab_lines_rho(sa, sb) > AB_GAUSS3M_MAX_RHO ? AB_ZGEMM_4M : AB_ZGEMM_3M;

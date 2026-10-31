@@ -1,0 +1,2 @@
+# label input np omp reps modes args
+cause-serial3m-hostpack-pf0 A_si64_500b_k222 8 1 1 gpu -nk 4 AB_HOST_PACK=1 AB_PREFETCH=0

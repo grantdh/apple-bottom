@@ -1,0 +1,40 @@
+== 2026-10-29 22:20:31 waiting for AC power and the machine lock
+== 2026-10-29 22:39:02 step6 (re)start; Now drawing from 'AC Power'  -InternalBattery-0 (id=39649379)	91%; AC attached; not charging present: true 
+== 2026-10-29 22:39:02 stage t6-B1-new-1
+== 22:39:02 t6-8ebe73c-np1 B_si64_160b_k222 np=1 omp=1 mode=gpu rep=1 (power=AC Power load=4.62)
+== done 22:42:16
+== 2026-10-29 22:42:16 stage t6-B1-old-1
+== 22:42:16 t6-351d56c-np1 B_si64_160b_k222 np=1 omp=1 mode=gpu rep=1 (power=AC Power load=3.38)
+== done 22:45:31
+== 2026-10-29 22:45:31 stage t6-B1-new-2
+== 22:45:31 t6-8ebe73c-np1 B_si64_160b_k222 np=1 omp=1 mode=gpu rep=1 (power=AC Power load=2.69)
+== done 22:48:46
+== 2026-10-29 22:48:46 stage t6-B1-old-2
+== 22:48:46 t6-351d56c-np1 B_si64_160b_k222 np=1 omp=1 mode=gpu rep=1 (power=AC Power load=2.76)
+== done 22:52:00
+== 2026-10-29 22:52:00 stage t6-A8-new-1
+== 22:52:00 t6-8ebe73c-np8 A_si64_500b_k222 np=8 omp=1 mode=gpu rep=1 args=[-nk 4] (power=AC Power load=2.78)
+== done 22:53:50
+== 2026-10-29 22:53:50 stage t6-A8-old-1
+== 22:53:50 t6-351d56c-np8 A_si64_500b_k222 np=8 omp=1 mode=gpu rep=1 args=[-nk 4] (power=AC Power load=6.03)
+== done 22:55:37
+== 2026-10-29 22:55:37 stage t6-A8-new-2
+== 22:55:37 t6-8ebe73c-np8 A_si64_500b_k222 np=8 omp=1 mode=gpu rep=1 args=[-nk 4] (power=AC Power load=7.13)
+== done 22:57:25
+== 2026-10-29 22:57:25 stage t6-A8-old-2
+== 22:57:25 t6-351d56c-np8 A_si64_500b_k222 np=8 omp=1 mode=gpu rep=1 args=[-nk 4] (power=AC Power load=6.90)
+== done 22:59:12
+== 2026-10-29 22:59:12 stage t6-B8-new-1
+== 22:59:12 t6-8ebe73c-np8 B_si64_160b_k222 np=8 omp=1 mode=gpu rep=1 args=[-nk 4] (power=AC Power load=6.54)
+== done 23:00:11
+== 2026-10-29 23:00:11 stage t6-B8-old-1
+== 23:00:11 t6-351d56c-np8 B_si64_160b_k222 np=8 omp=1 mode=gpu rep=1 args=[-nk 4] (power=AC Power load=8.94)
+== done 23:01:12
+== 2026-10-29 23:01:12 stage t6-B8-new-2
+== 23:01:12 t6-8ebe73c-np8 B_si64_160b_k222 np=8 omp=1 mode=gpu rep=1 args=[-nk 4] (power=AC Power load=8.94)
+== done 23:02:14
+== 2026-10-29 23:02:14 stage t6-B8-old-2
+== 23:02:14 t6-351d56c-np8 B_si64_160b_k222 np=8 omp=1 mode=gpu rep=1 args=[-nk 4] (power=AC Power load=7.77)
+== done 23:03:18
+== 2026-10-29 23:03:18 step6 done; Now drawing from 'AC Power'
+== 2026-10-29 23:03:18 step6.sh ended rc=0

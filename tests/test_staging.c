@@ -17,13 +17,13 @@
 // For each case A and B must be unchanged, and the two calls a child makes
 // in a row (the second on the buffers the first left) must give the same C.
 // The staged result must stand (ab_internal_last_staged()) in the three
-// staged children exactly where expected_staged() says, with its operands in
-// place in the registered child unless misaligned; every other call is made
-// on the host path. The GPU must compute C in every child and the whole C
-// array (padding included) hash the same in all four, except where the host
-// path's guard sends the call to Accelerate: there every child must, and
-// their bits are not compared. The registered child also checks
-// ab_register_host_memory()'s refusals.
+// staged children exactly where expected_staged() says (scaled lines and
+// 4M included), with its operands in place in the registered child unless
+// misaligned; every other call is made on the host path. The GPU must
+// compute C in every child and the whole C array (padding included) hash the
+// same in all four, except where the host path's guard sends the call to
+// Accelerate: there every child must, and their bits are not compared. The
+// registered child also checks ab_register_host_memory()'s refusals.
 //
 // The native ZGEMMs take their Gauss-3M or 4M temporaries from the same
 // pool, so after the run it must hold buffers in the host child (whose
@@ -99,13 +99,13 @@ static const char *const DATA_TAG[D_COUNT] = {
 };
 
 // What each kind of data is for: the staged result must stand in at least
-// one of a routine's cases of that kind, or (false) in none of them, which
-// the host path must make (scaled, by 4M or on Accelerate). The test fails
-// if the guard's rules ever leave a kind short of its purpose.
+// one of a routine's cases of that kind (scaled lines and 4M included), or
+// (false) in none of them, which go to Accelerate. The test fails if the
+// guard's rules ever leave a kind short of its purpose.
 static const bool STAGES[D_COUNT] = {
-    [D_UNIFORM] = true, [D_MIXED] = true, [D_BITS] = true, [D_SIGNED_ZERO] = true,
-    [D_TINY_C] = true, [D_CANCEL] = true, [D_NAN_C] = true, [D_HUGE_C] = true,
-    [D_STAGE2] = true,
+    [D_UNIFORM] = true, [D_MIXED] = true, [D_WIDE] = true, [D_BITS] = true,
+    [D_SIGNED_ZERO] = true, [D_TINY_C] = true, [D_CANCEL] = true, [D_NAN_C] = true,
+    [D_HUGE] = true, [D_HUGE_C] = true, [D_STAGE2] = true, [D_IMBAL] = true,
 };
 
 typedef struct {
@@ -174,7 +174,7 @@ static void make_cases(void) {
         add(rt, 'N', 'N', 75, 53, 47, 3, S_AXB0, D_NAN_C);
         add(rt, 'N', 'T', 300, 200, 1, 0, S_AXBX, D_BITS);
     }
-    // Complex parts imbalanced enough for 4M on the host path
+    // Complex parts imbalanced enough for 4M
     add('z', 'T', 'N', 96, 80, 72, 3, S_A1B0, D_IMBAL);
     add('z', 'N', 'C', 96, 80, 72, 3, S_A1B1, D_IMBAL);
     add('z', 'C', 'T', 96, 80, 72, 3, S_AXBX, D_IMBAL);
@@ -388,14 +388,14 @@ static void call_gemm(Problem *P) {
     }
 }
 
-// Whether the staged path keeps its result for case P: where the host path
-// computes it on the GPU unscaled, a ZGEMM by Gauss-3M. A DGEMM's alpha and
-// beta lie in their window, and the exponent-range guard (ab_internal.h)
-// scales no line, finds a ZGEMM's parts balanced enough for 3M, and certifies
-// the product (and a DGEMM's C, when read). Then no Inf or NaN may reach the
-// GPU epilogue: a ZGEMM's C with beta = 1 must be finite. The host path makes
-// every other call: on the GPU, scaled, by 4M or with C's Inf or NaN, or on
-// Accelerate.
+// Whether the staged path keeps its result for case P: wherever the host
+// path computes it on the GPU, scaled or not, a ZGEMM by Gauss-3M or 4M, but
+// a DGEMM only with alpha and beta in their window. There the
+// exponent-range guard (ab_internal.h) certifies the product of the lines
+// as scaled (and a DGEMM's C, when read, as uploaded: scaled by its row's
+// and column's scales). Then no Inf or NaN may reach the GPU epilogue: a
+// ZGEMM's C with beta = 1 must be finite. The host path makes every other
+// call: on the GPU with such scalars or C's Inf or NaN, or on Accelerate.
 static bool expected_staged(const Problem *P) {
     const Case *c = P->c;
     bool z = c->routine == 'z';
@@ -410,15 +410,17 @@ static bool expected_staged(const Problem *P) {
     if (ok) {
         ab_line_stats_scan(&va, true, &sa);
         ab_line_stats_scan(&vb, false, &sb);
-        ok = !ab_line_scales(&sa) && !ab_line_scales(&sb) &&
-             !(z && ab_lines_rho(&sa, &sb) > AB_GAUSS3M_MAX_RHO) &&
-             ab_range_guard(c->K, &sa, &sb, z ? 0 : ilogb(creal(al)), &va, &vb);
+        ab_line_scales(&sa);
+        ab_line_scales(&sb);
+        ok = ab_range_guard(c->K, &sa, &sb, z ? 0 : ilogb(creal(al)), &va, &vb);
     }
     ab_range_t r = AB_RANGE_EMPTY;
     for (int j = 0; j < c->N; j++)
         for (int i = 0; i < c->M; i++)
-            for (int p = 0; p < w; p++)
-                AB_RANGE_ADD(P->C0[((size_t)j * P->lc.ld + i) * w + p], r.max, r.min);
+            for (int p = 0; p < w; p++) {
+                double v = P->C0[((size_t)j * P->lc.ld + i) * w + p];
+                AB_RANGE_ADD(ok && !z ? ab_scale2(v, -(sa.e[i] + sb.e[j])) : v, r.max, r.min);
+            }
     if (ok && case_c_in(c))
         ok = z ? !ab_range_nonfinite(r)
                : ab_range_guard_c(&sa, &sb, r, ilogb(creal(be)), P->C0, P->lc.ld, 0);

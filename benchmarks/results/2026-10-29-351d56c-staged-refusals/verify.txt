@@ -1,0 +1,7 @@
+# AB_VERIFY_STAGED=1 (experiment-only build of 351d56c, frozen f25e16dca5b5): each call the staged path kept, redone on the host path from the same C and compared bit for bit; per run, summed over ranks
+A_si64_500b_k222/gpu_r1 dgemm: ranks=8 kept_calls=96 differ_calls=0 differ_elems=0
+A_si64_500b_k222/gpu_r1 zgemm: ranks=8 kept_calls=1790 differ_calls=0 differ_elems=0
+B_si64_160b_k222/gpu_r1 dgemm: ranks=1 kept_calls=10 differ_calls=0 differ_elems=0
+B_si64_160b_k222/gpu_r1 zgemm: ranks=1 kept_calls=1088 differ_calls=0 differ_elems=0
+B_si64_160b_k222/gpu_r1_1 dgemm: ranks=8 kept_calls=80 differ_calls=0 differ_elems=0
+B_si64_160b_k222/gpu_r1_1 zgemm: ranks=8 kept_calls=2177 differ_calls=0 differ_elems=0

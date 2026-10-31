@@ -1,0 +1,68 @@
+# runs/t6-351d56c-np8/B_si64_160b_k222/gpu_r1_1: t6-351d56c-np8 B_si64_160b_k222 np=8 mode=gpu wall=63.57 s power=AC Power E=-2990.44093534 iters=9 build=351d56ced974 lib=<fix>/libapplebottom.dylib
+AB_REPORT[69247] apple-bottom 1.4.0 (351d56ced974) AB_MODE=gpu
+AB_REPORT[69247] zgemm calls=5978 gpu_calls=261 cpu_calls=5717 gpu_calls%=4.4 total_ms=24707.345 gpu_ms=23106.309 cpu_ms=1601.036 gpu_time%=93.5 fallbacks=1
+AB_REPORT[69247] zgemm gpu_stages_ms init=0.953 alloc=1.219 pack=461.778 upload=666.743 kernel=20458.400 download=93.156 epilogue=0.000 other=1424.059
+AB_REPORT[69247] zgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=1
+AB_REPORT[69247] zgemm staged kept=82 kept_4m=179 host_pack=0 fpcr=0 scalar=0 alloc=0 gpu_failed=0 nonfinite=0 scaled=0 range=1
+AB_REPORT[69247] dgemm calls=660 gpu_calls=10 cpu_calls=650 gpu_calls%=1.5 total_ms=1064.810 gpu_ms=283.628 cpu_ms=781.182 gpu_time%=26.6 fallbacks=10
+AB_REPORT[69247] dgemm gpu_stages_ms init=0.040 alloc=0.044 pack=131.561 upload=8.302 kernel=123.539 download=11.573 epilogue=0.000 other=8.569
+AB_REPORT[69247] dgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=10
+AB_REPORT[69247] dgemm staged kept=10 kept_4m=0 host_pack=0 fpcr=0 scalar=0 alloc=0 gpu_failed=0 nonfinite=0 scaled=0 range=10
+AB_REPORT[69251] apple-bottom 1.4.0 (351d56ced974) AB_MODE=gpu
+AB_REPORT[69251] zgemm calls=10159 gpu_calls=291 cpu_calls=9868 gpu_calls%=2.9 total_ms=25180.005 gpu_ms=22654.266 cpu_ms=2525.739 gpu_time%=90.0 fallbacks=0
+AB_REPORT[69251] zgemm gpu_stages_ms init=0.963 alloc=3.959 pack=346.511 upload=725.993 kernel=20107.248 download=85.553 epilogue=0.000 other=1384.040
+AB_REPORT[69251] zgemm staged kept=178 kept_4m=113 host_pack=0 fpcr=0 scalar=0 alloc=0 gpu_failed=0 nonfinite=0 scaled=0 range=0
+AB_REPORT[69251] dgemm calls=660 gpu_calls=10 cpu_calls=650 gpu_calls%=1.5 total_ms=1070.720 gpu_ms=281.856 cpu_ms=788.864 gpu_time%=26.3 fallbacks=10
+AB_REPORT[69251] dgemm gpu_stages_ms init=0.041 alloc=0.047 pack=122.951 upload=8.364 kernel=119.855 download=14.190 epilogue=0.000 other=16.408
+AB_REPORT[69251] dgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=10
+AB_REPORT[69251] dgemm staged kept=10 kept_4m=0 host_pack=0 fpcr=0 scalar=0 alloc=0 gpu_failed=0 nonfinite=0 scaled=0 range=10
+AB_REPORT[69254] apple-bottom 1.4.0 (351d56ced974) AB_MODE=gpu
+AB_REPORT[69254] zgemm calls=6116 gpu_calls=265 cpu_calls=5851 gpu_calls%=4.3 total_ms=22585.007 gpu_ms=21319.540 cpu_ms=1265.468 gpu_time%=94.4 fallbacks=0
+AB_REPORT[69254] zgemm gpu_stages_ms init=0.886 alloc=1.375 pack=188.919 upload=658.225 kernel=19022.823 download=80.660 epilogue=0.000 other=1366.650
+AB_REPORT[69254] zgemm staged kept=213 kept_4m=52 host_pack=0 fpcr=0 scalar=0 alloc=0 gpu_failed=0 nonfinite=0 scaled=0 range=0
+AB_REPORT[69254] dgemm calls=660 gpu_calls=10 cpu_calls=650 gpu_calls%=1.5 total_ms=1081.993 gpu_ms=291.252 cpu_ms=790.741 gpu_time%=26.9 fallbacks=10
+AB_REPORT[69254] dgemm gpu_stages_ms init=0.038 alloc=0.043 pack=133.658 upload=10.947 kernel=122.590 download=14.029 epilogue=0.000 other=9.946
+AB_REPORT[69254] dgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=10
+AB_REPORT[69254] dgemm staged kept=10 kept_4m=0 host_pack=0 fpcr=0 scalar=0 alloc=0 gpu_failed=0 nonfinite=0 scaled=0 range=10
+AB_REPORT[69253] apple-bottom 1.4.0 (351d56ced974) AB_MODE=gpu
+AB_REPORT[69253] zgemm calls=6116 gpu_calls=265 cpu_calls=5851 gpu_calls%=4.3 total_ms=22212.660 gpu_ms=20863.076 cpu_ms=1349.584 gpu_time%=93.9 fallbacks=0
+AB_REPORT[69253] zgemm gpu_stages_ms init=0.877 alloc=1.424 pack=248.803 upload=659.019 kernel=18540.275 download=75.437 epilogue=0.000 other=1337.241
+AB_REPORT[69253] zgemm staged kept=219 kept_4m=46 host_pack=0 fpcr=0 scalar=0 alloc=0 gpu_failed=0 nonfinite=0 scaled=0 range=0
+AB_REPORT[69253] dgemm calls=660 gpu_calls=10 cpu_calls=650 gpu_calls%=1.5 total_ms=987.596 gpu_ms=296.551 cpu_ms=691.045 gpu_time%=30.0 fallbacks=10
+AB_REPORT[69253] dgemm gpu_stages_ms init=0.040 alloc=0.042 pack=128.115 upload=10.634 kernel=124.791 download=19.711 epilogue=0.000 other=13.218
+AB_REPORT[69253] dgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=10
+AB_REPORT[69253] dgemm staged kept=10 kept_4m=0 host_pack=0 fpcr=0 scalar=0 alloc=0 gpu_failed=0 nonfinite=0 scaled=0 range=10
+AB_REPORT[69252] apple-bottom 1.4.0 (351d56ced974) AB_MODE=gpu
+AB_REPORT[69252] zgemm calls=10159 gpu_calls=291 cpu_calls=9868 gpu_calls%=2.9 total_ms=25741.904 gpu_ms=23154.528 cpu_ms=2587.376 gpu_time%=89.9 fallbacks=0
+AB_REPORT[69252] zgemm gpu_stages_ms init=1.055 alloc=1.545 pack=333.972 upload=707.001 kernel=20599.604 download=85.898 epilogue=0.000 other=1425.454
+AB_REPORT[69252] zgemm staged kept=172 kept_4m=119 host_pack=0 fpcr=0 scalar=0 alloc=0 gpu_failed=0 nonfinite=0 scaled=0 range=0
+AB_REPORT[69252] dgemm calls=660 gpu_calls=10 cpu_calls=650 gpu_calls%=1.5 total_ms=1046.197 gpu_ms=273.212 cpu_ms=772.985 gpu_time%=26.1 fallbacks=10
+AB_REPORT[69252] dgemm gpu_stages_ms init=0.042 alloc=0.041 pack=120.527 upload=10.327 kernel=115.507 download=13.814 epilogue=0.000 other=12.955
+AB_REPORT[69252] dgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=10
+AB_REPORT[69252] dgemm staged kept=10 kept_4m=0 host_pack=0 fpcr=0 scalar=0 alloc=0 gpu_failed=0 nonfinite=0 scaled=0 range=10
+AB_REPORT[69248] apple-bottom 1.4.0 (351d56ced974) AB_MODE=gpu
+AB_REPORT[69248] zgemm calls=5978 gpu_calls=261 cpu_calls=5717 gpu_calls%=4.4 total_ms=24536.899 gpu_ms=22956.374 cpu_ms=1580.525 gpu_time%=93.6 fallbacks=1
+AB_REPORT[69248] zgemm gpu_stages_ms init=0.864 alloc=1.233 pack=472.075 upload=662.774 kernel=20306.414 download=87.400 epilogue=0.000 other=1425.614
+AB_REPORT[69248] zgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=1
+AB_REPORT[69248] zgemm staged kept=100 kept_4m=161 host_pack=0 fpcr=0 scalar=0 alloc=0 gpu_failed=0 nonfinite=0 scaled=0 range=1
+AB_REPORT[69248] dgemm calls=660 gpu_calls=10 cpu_calls=650 gpu_calls%=1.5 total_ms=1102.665 gpu_ms=286.040 cpu_ms=816.625 gpu_time%=25.9 fallbacks=10
+AB_REPORT[69248] dgemm gpu_stages_ms init=0.059 alloc=0.039 pack=126.279 upload=8.154 kernel=117.489 download=16.560 epilogue=0.000 other=17.460
+AB_REPORT[69248] dgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=10
+AB_REPORT[69248] dgemm staged kept=10 kept_4m=0 host_pack=0 fpcr=0 scalar=0 alloc=0 gpu_failed=0 nonfinite=0 scaled=0 range=10
+AB_REPORT[69249] apple-bottom 1.4.0 (351d56ced974) AB_MODE=gpu
+AB_REPORT[69249] zgemm calls=7732 gpu_calls=272 cpu_calls=7460 gpu_calls%=3.5 total_ms=24866.134 gpu_ms=23040.609 cpu_ms=1825.525 gpu_time%=92.7 fallbacks=0
+AB_REPORT[69249] zgemm gpu_stages_ms init=0.863 alloc=1.382 pack=491.844 upload=690.613 kernel=20407.134 download=78.671 epilogue=0.000 other=1370.102
+AB_REPORT[69249] zgemm staged kept=144 kept_4m=128 host_pack=0 fpcr=0 scalar=0 alloc=0 gpu_failed=0 nonfinite=0 scaled=0 range=0
+AB_REPORT[69249] dgemm calls=660 gpu_calls=10 cpu_calls=650 gpu_calls%=1.5 total_ms=1068.528 gpu_ms=264.650 cpu_ms=803.878 gpu_time%=24.8 fallbacks=10
+AB_REPORT[69249] dgemm gpu_stages_ms init=0.033 alloc=0.039 pack=124.010 upload=10.327 kernel=105.560 download=13.222 epilogue=0.000 other=11.460
+AB_REPORT[69249] dgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=10
+AB_REPORT[69249] dgemm staged kept=10 kept_4m=0 host_pack=0 fpcr=0 scalar=0 alloc=0 gpu_failed=0 nonfinite=0 scaled=0 range=10
+AB_REPORT[69250] apple-bottom 1.4.0 (351d56ced974) AB_MODE=gpu
+AB_REPORT[69250] zgemm calls=7732 gpu_calls=271 cpu_calls=7461 gpu_calls%=3.5 total_ms=24459.071 gpu_ms=22216.779 cpu_ms=2242.291 gpu_time%=90.8 fallbacks=1
+AB_REPORT[69250] zgemm gpu_stages_ms init=0.911 alloc=2.211 pack=487.812 upload=673.000 kernel=19656.724 download=79.750 epilogue=0.000 other=1316.370
+AB_REPORT[69250] zgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=1
+AB_REPORT[69250] zgemm staged kept=150 kept_4m=121 host_pack=0 fpcr=0 scalar=0 alloc=0 gpu_failed=0 nonfinite=0 scaled=0 range=1
+AB_REPORT[69250] dgemm calls=660 gpu_calls=10 cpu_calls=650 gpu_calls%=1.5 total_ms=1057.801 gpu_ms=277.661 cpu_ms=780.139 gpu_time%=26.2 fallbacks=10
+AB_REPORT[69250] dgemm gpu_stages_ms init=0.042 alloc=0.046 pack=129.050 upload=10.771 kernel=111.567 download=15.305 epilogue=0.000 other=10.879
+AB_REPORT[69250] dgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=10
+AB_REPORT[69250] dgemm staged kept=10 kept_4m=0 host_pack=0 fpcr=0 scalar=0 alloc=0 gpu_failed=0 nonfinite=0 scaled=0 range=10

@@ -532,7 +532,8 @@ static void native_call(const Call *c, Resident *res, int rank) {
     memcpy(tc.beta, c->beta, sizeof tc.beta);
     uint64_t stage[AB_PROF_STAGE_COUNT] = {0};
     stage[AB_PROF_STAGE_KERNEL] = ab_prof_take_kernel_ns(elapsed, &tc.split);
-    if (ab_trace_enabled()) ab_trace_record(&tc, t0, elapsed, stage, AB_PROF_FB_NONE);
+    if (ab_trace_enabled())
+        ab_trace_record(&tc, t0, elapsed, stage, AB_PROF_FB_NONE, AB_PROF_STAGED_NONE);
 }
 
 static int worker_main(int fd, int rank) {

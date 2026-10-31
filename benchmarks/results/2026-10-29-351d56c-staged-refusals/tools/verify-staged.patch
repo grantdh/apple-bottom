@@ -1,0 +1,106 @@
+diff --git a/src/blas_wrapper.c b/src/blas_wrapper.c
+index 4fec7d3..20b16f5 100644
+--- a/src/blas_wrapper.c
++++ b/src/blas_wrapper.c
+@@ -723,9 +723,36 @@ bool ab_internal_last_staged(int *in_place) {
+ // control: round to nearest, no flush to zero, no default NaN (FPCR RMode,
+ // FZ, DN, and FIZ/AH where implemented, all clear). A caller that changed it
+ // keeps the host path, as does AB_HOST_PACK=1.
++// EXPERIMENT ONLY (never for commit): AB_VERIFY_STAGED=1 redoes every call
++// the staged path kept on the host path, from the same C, and compares C bit
++// for bit; the host path's C stays. Counts at exit.
++static __thread bool t_force_host;
++static unsigned long long g_ver_calls[2], g_ver_bad[2], g_ver_elems[2];
++static int verify_staged(void) {
++    static int v = -1;
++    if (v < 0) {
++        const char *e = getenv("AB_VERIFY_STAGED");
++        v = e && *e == '1';
++    }
++    return v;
++}
++__attribute__((destructor)) static void verify_report(void) {
++    if (!verify_staged()) return;
++    for (int z = 0; z < 2; z++)
++        fprintf(stderr, "AB_VERIFY_STAGED[%d] %s kept_calls=%llu differ_calls=%llu differ_elems=%llu\n",
++                (int)getpid(), z ? "zgemm" : "dgemm", g_ver_calls[z], g_ver_bad[z], g_ver_elems[z]);
++}
++// C's M x N block (elements of elem bytes, leading dimension ldC) to or from buf.
++static void verify_block(void *C, int ldC, int M, int N, size_t elem, void *buf, bool save) {
++    for (size_t j = 0; j < (size_t)N; j++) {
++        char *c = (char *)C + j * (size_t)ldC * elem, *b = (char *)buf + j * (size_t)M * elem;
++        if (save) memcpy(b, c, (size_t)M * elem); else memcpy(c, b, (size_t)M * elem);
++    }
++}
++
+ static bool staged_path(CallProf *p) {
+     ab_prof_staged_t why = AB_PROF_STAGED_KEPT;
+-    if (ab_host_pack()) why = AB_PROF_STAGED_HOST_PACK;
++    if (ab_host_pack() || t_force_host) why = AB_PROF_STAGED_HOST_PACK;
+ #if defined(__aarch64__)
+     uint64_t fpcr;
+     __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+@@ -1264,8 +1291,31 @@ void ab_dgemm_blas(char transA, char transB, int M, int N, int K,
+     if (p && p->trace)
+         trace_begin(p, "dgemm", transA, transB, M, N, K, (const double[2]){alpha, 0.0},
+                     A, ldA, B, ldB, (const double[2]){beta, 0.0}, C, ldC);
++    bool ver = verify_staged() && M > 0 && N > 0 && ldC >= M;
++    double *orig = ver ? malloc((size_t)M * N * sizeof *orig) : NULL;
++    if (orig) verify_block(C, ldC, M, N, sizeof *C, orig, true);
+     dgemm_blas(p, transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+     prof_end(p, "dgemm", M, N, K);
++    if (orig && ab_internal_last_staged(NULL)) {
++        double *st = malloc((size_t)M * N * sizeof *st);
++        verify_block(C, ldC, M, N, sizeof *C, st, true);
++        verify_block(C, ldC, M, N, sizeof *C, orig, false);
++        t_force_host = true;
++        dgemm_blas(NULL, transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
++        t_force_host = false;
++        verify_block(C, ldC, M, N, sizeof *C, orig, true);       // the host path's C
++        unsigned long long bad = 0;
++        for (size_t i = 0; i < (size_t)M * N; i++) bad += memcmp(&orig[i], &st[i], sizeof *st) != 0;
++        __atomic_fetch_add(&g_ver_calls[0], 1, __ATOMIC_RELAXED);
++        __atomic_fetch_add(&g_ver_elems[0], bad, __ATOMIC_RELAXED);
++        if (bad) {
++            __atomic_fetch_add(&g_ver_bad[0], 1, __ATOMIC_RELAXED);
++            fprintf(stderr, "AB_VERIFY_STAGED dgemm %c%c M=%d N=%d K=%d: %llu elements differ\n",
++                    transA, transB, M, N, K, bad);
++        }
++        free(st);
++    }
++    free(orig);
+ }
+ 
+ void ab_zgemm_blas(char transA, char transB, int M, int N, int K,
+@@ -1277,8 +1327,31 @@ void ab_zgemm_blas(char transA, char transB, int M, int N, int K,
+         trace_begin(p, "zgemm", transA, transB, M, N, K,
+                     (const double[2]){creal(alpha), cimag(alpha)}, A, ldA, B, ldB,
+                     (const double[2]){creal(beta), cimag(beta)}, C, ldC);
++    bool ver = verify_staged() && M > 0 && N > 0 && ldC >= M;
++    double complex *orig = ver ? malloc((size_t)M * N * sizeof *orig) : NULL;
++    if (orig) verify_block(C, ldC, M, N, sizeof *C, orig, true);
+     zgemm_blas(p, transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+     prof_end(p, "zgemm", M, N, K);
++    if (orig && ab_internal_last_staged(NULL)) {
++        double complex *st = malloc((size_t)M * N * sizeof *st);
++        verify_block(C, ldC, M, N, sizeof *C, st, true);
++        verify_block(C, ldC, M, N, sizeof *C, orig, false);
++        t_force_host = true;
++        zgemm_blas(NULL, transA, transB, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
++        t_force_host = false;
++        verify_block(C, ldC, M, N, sizeof *C, orig, true);       // the host path's C
++        unsigned long long bad = 0;
++        for (size_t i = 0; i < (size_t)M * N; i++) bad += memcmp(&orig[i], &st[i], sizeof *st) != 0;
++        __atomic_fetch_add(&g_ver_calls[1], 1, __ATOMIC_RELAXED);
++        __atomic_fetch_add(&g_ver_elems[1], bad, __ATOMIC_RELAXED);
++        if (bad) {
++            __atomic_fetch_add(&g_ver_bad[1], 1, __ATOMIC_RELAXED);
++            fprintf(stderr, "AB_VERIFY_STAGED zgemm %c%c M=%d N=%d K=%d: %llu elements differ\n",
++                    transA, transB, M, N, K, bad);
++        }
++        free(st);
++    }
++    free(orig);
+ }
+ 
+ // Fortran-callable wrappers (ab_zgemm_, ab_dgemm_) are in fortran_bridge.c

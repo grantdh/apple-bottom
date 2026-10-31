@@ -1,0 +1,15 @@
+diff --git a/src/apple_bottom.m b/src/apple_bottom.m
+index 7b4e8c1..8d709e6 100644
+--- a/src/apple_bottom.m
++++ b/src/apple_bottom.m
+@@ -2492,8 +2492,9 @@ static void encode_zgemm_3m_from_sums(id<MTLCommandBuffer> cmdBuf, ABContextImpl
+     ABMatrix T1 = T[0], T2 = T[1], T3 = T[2], T4 = T[3];
+     bool ci_is_input = Ci->buffer == Ar->buffer || Ci->buffer == Ai->buffer ||
+                        Ci->buffer == Br->buffer || Ci->buffer == Bi->buffer;
++    (void)ci_is_input;   // EXPERIMENT (not for commit): Gauss-3M's products serially
+     id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoderWithDispatchType:
+-        ci_is_input ? MTLDispatchTypeSerial : MTLDispatchTypeConcurrent];
++        MTLDispatchTypeSerial];
+     encode_dgemm_dispatch(enc, ctx, Ar, Br, T1);
+     encode_dgemm_dispatch(enc, ctx, Ai, Bi, T2);
+     encode_dgemm_dispatch(enc, ctx, T3, T4, Ci);

@@ -1,0 +1,18 @@
+== 2026-10-29 20:33:01 step4 (re)start at 8ebe73c, 1 modified; AC Power; 88%; charging; 0:41 remaining present: true 
+== 2026-10-29 20:33:01 stage r-test; AC Power; 88%; charging; 0:41 remaining present: true 
+== 2026-10-29 20:33:24 make test passed: Results: 5 passed, 0 failed Results: 32 passed, 0 failed, 0 stale golden entries Golden bits: PASS (32 cases bitwise equal to apple-bottom 1.4.0 (c5a1fa6a8166)) ./build/test_staging Results: 127 passed, 0 failed ✓ All tests passed! 
+== 2026-10-29 20:33:24 stage r-ci; AC Power; 88%; charging; 0:37 remaining present: true 
+== 2026-10-29 20:33:47 ci-local passed: TEST_PASSED: 177 BLAS_ABI_CASES: 1069 passed, 0 xfailed, 0 failed, 0 xpassed, 0 stale XFAIL entries STATUS: PASS 
+== 2026-10-29 20:33:47 stage ver2-B1; AC Power; 89%; charging; 0:37 remaining present: true 
+== 20:33:47 verify-8ebe73c B_si64_160b_k222 np=1 omp=1 mode=gpu rep=1 args=[AB_VERIFY_STAGED=1] (power=AC Power load=5.90)
+== done 20:38:32
+== 2026-10-29 20:38:32 stage ver2-A8; AC Power; 91%; charging; 0:39 remaining present: true 
+== 20:38:32 verify-8ebe73c A_si64_500b_k222 np=8 omp=1 mode=gpu rep=1 args=[-nk 4 AB_VERIFY_STAGED=1] (power=AC Power load=4.17)
+== done 20:41:31
+== 2026-10-29 20:41:31 stage ver2-B8; AC Power; 93%; charging; 0:37 remaining present: true 
+== 20:41:31 verify-8ebe73c B_si64_160b_k222 np=8 omp=1 mode=gpu rep=1 args=[-nk 4 AB_VERIFY_STAGED=1] (power=AC Power load=9.68)
+== done 20:43:15
+== 2026-10-29 20:43:15 verify A_si64_500b_k222 gpu_r1: dgemm ranks=8 kept=96 differ_calls=0 differ_elems=0; zgemm ranks=8 kept=1789 differ_calls=2 differ_elems=1000000;  differing-call lines: 2
+== 2026-10-29 20:43:15 verify B_si64_160b_k222 gpu_r1: dgemm ranks=1 kept=10 differ_calls=0 differ_elems=0; zgemm ranks=1 kept=1088 differ_calls=0 differ_elems=0;  differing-call lines: 0
+== 2026-10-29 20:43:15 verify B_si64_160b_k222 gpu_r1_1: dgemm ranks=8 kept=80 differ_calls=0 differ_elems=0; zgemm ranks=8 kept=2177 differ_calls=0 differ_elems=0;  differing-call lines: 0
+== 2026-10-29 20:43:15 step4 done; AC Power; 93%; charging; 0:36 remaining present: true 

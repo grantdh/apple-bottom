@@ -1,0 +1,10 @@
+# runs/t6-8ebe73c-np1/B_si64_160b_k222/gpu_r1_1: t6-8ebe73c-np1 B_si64_160b_k222 np=1 mode=gpu wall=194.41 s power=AC Power E=-2990.44093535 iters=9 build=8ebe73ccf822-dirty lib=<refactor>/libapplebottom.dylib
+AB_REPORT[67499] apple-bottom 1.4.0 (8ebe73ccf822-dirty) AB_MODE=gpu
+AB_REPORT[67499] zgemm calls=29048 gpu_calls=1088 cpu_calls=27960 gpu_calls%=3.7 total_ms=35618.469 gpu_ms=32017.507 cpu_ms=3600.961 gpu_time%=89.9 fallbacks=2
+AB_REPORT[67499] zgemm gpu_stages_ms init=2.112 alloc=3.237 pack=2184.864 upload=2268.764 kernel=26135.843 download=337.778 epilogue=0.000 other=1084.910
+AB_REPORT[67499] zgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=2
+AB_REPORT[67499] zgemm staged kept=597 kept_4m=491 host_pack=0 fpcr=0 scalar=0 alloc=0 gpu_failed=0 nonfinite=0 range=2
+AB_REPORT[67499] dgemm calls=2580 gpu_calls=10 cpu_calls=2570 gpu_calls%=0.4 total_ms=2563.175 gpu_ms=1030.545 cpu_ms=1532.630 gpu_time%=40.2 fallbacks=10
+AB_REPORT[67499] dgemm gpu_stages_ms init=0.024 alloc=0.031 pack=792.284 upload=16.597 kernel=153.030 download=60.669 epilogue=0.000 other=7.908
+AB_REPORT[67499] dgemm fallbacks no_device=0 too_large=0 gpu_failed=0 other=0 range=10
+AB_REPORT[67499] dgemm staged kept=10 kept_4m=0 host_pack=0 fpcr=0 scalar=0 alloc=0 gpu_failed=0 nonfinite=0 range=10
