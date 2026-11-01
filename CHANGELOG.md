@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.5.1] - Unreleased
+## [1.5.1] - 2026-11-01
 
 Documentation corrections and a new check (`make test-dd-bound`); results are
 those of 1.5.0.
