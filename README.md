@@ -335,7 +335,7 @@ pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
   title     = {apple-bottom: FP64-class BLAS for Apple Silicon GPUs},
   year      = {2026},
   url       = {https://github.com/grantdh/apple-bottom},
-  version   = {1.5.1}
+  version   = {1.6.0}
 }
 ```
 

@@ -4,7 +4,7 @@ authors:
   - family-names: "Heileman"
     given-names: "Grant David"
 title: "apple-bottom: FP64-class BLAS for Apple Silicon GPUs"
-version: 1.5.1
+version: 1.6.0
 url: "https://github.com/grantdh/apple-bottom"
 repository-code: "https://github.com/grantdh/apple-bottom"
 keywords:
