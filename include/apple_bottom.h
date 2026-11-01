@@ -190,6 +190,28 @@ ABStatus ab_zgemm_ex(
     ABMatrix Cr, ABMatrix Ci
 );
 
+// Strassen-Winograd, one level (docs/STRASSEN.md): each real product from 7
+// half-size DD GEMMs and 15 block additions instead of 8 GEMMs, any shape.
+// ab_dgemm_strassen computes what ab_dgemm_scaled does, ab_zgemm_strassen
+// what ab_zgemm does (Gauss-3M, or 4M for imbalanced parts), with every
+// real product by Strassen-Winograd; scales are kept as theirs are. Faster
+// only for large matrices, and less accurate: the error bound is normwise,
+// not componentwise, so rows or columns much smaller than the rest lose
+// relative accuracy. The workspace, 1.75 N^2 DD values for a square N,
+// comes from the pool the ZGEMM temporaries use (AB_STAGING_MB).
+//   AB_STRASSEN=1      ab_dgemm, ab_dgemm_scaled, ab_zgemm and ab_zgemm_ex,
+//                      and the BLAS-ABI and device-API GEMMs that run on the
+//                      GPU, take Strassen-Winograd products when M, N and K
+//                      are all >= AB_STRASSEN_MIN (default 4096). Not routed:
+//                      the batched, asynchronous and ABBatch GEMMs, ZHERK,
+//                      DTRSM and ab_dgesv_mpir, and BLAS-ABI calls with rows
+//                      or columns outside 2^±20 (scaled line by line, which
+//                      Strassen-Winograd's block sums would mix). Read once
+//                      per process; unset, results are bitwise unchanged.
+ABStatus ab_dgemm_strassen(double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C);
+ABStatus ab_zgemm_strassen(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
+                           ABMatrix Cr, ABMatrix Ci);
+
 ABStatus ab_dsyrk(ABMatrix A, ABMatrix C);
 
 // Triangular solve: solves op(A) * X = alpha * B  or  X * op(A) = alpha * B

@@ -3,7 +3,8 @@
 ## Adding a new test to a registry-based file
 
 The registry-based test runners (`test_correctness.c`, `test_chaos.c`,
-`test_device_api.c`, `test_dispatch.c`, `test_trace.c`, `test_blas2.c`, `test_fft.c`) dispatch via a
+`test_device_api.c`, `test_dispatch.c`, `test_trace.c`, `test_blas2.c`, `test_fft.c`,
+`test_strassen.c`) dispatch via a
 `TESTS[]` registry array of `{name, fn}` pairs declared just above
 `main()`. To add a test:
 
@@ -44,8 +45,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 198, every test but
-the chaos ones, and `make ci-local` all 216 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 209, every test but
+the chaos ones, and `make ci-local` all 227 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -78,6 +79,26 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
   - `tests/test_blas2.c` — 19 tests (957 cases) of DGEMV, ZGEMV and
     ZHEMV, see below
   - `tests/test_fft.c` — 14 tests of the double-float FFT, see below
+  - `tests/test_strassen.c` — 11 tests of the opt-in Strassen-Winograd
+    products (`ab_dgemm_strassen`, `ab_zgemm_strassen`, `AB_STRASSEN`):
+    error against a compensated Dot2 reference within the normwise bound of
+    `docs/STRASSEN.md` over odd, tiny and rectangular shapes, alpha and
+    beta, ZGEMM and badly scaled rows (whose componentwise errors it
+    prints); a ZGEMM with imaginary parts 2⁻²⁴ of the real ones within the
+    bound of its imaginary part's own size (4M); data far outside FP32's
+    range bit for bit the unscaled result times the scales (DGEMM with alpha
+    and beta rescaled, ZGEMM by Gauss-3M with aligned parts and by 4M with
+    rescaled products, the unscaled ZGEMMs within the bound); argument checks; bitwise determinism across
+    workspace reuse and `ab_shutdown()`; and, in child processes with their
+    own environment, that `AB_STRASSEN` unset or 0 leaves every GEMM
+    bitwise classical, that `AB_STRASSEN=1` routes calls with M, N, K ≥
+    `AB_STRASSEN_MIN` bitwise to Strassen (native; through `dgemm_` /
+    `zgemm_`, balanced and 4M, on the staged path and on the host path, each
+    checked to have taken it; through `ab_dev_dgemm` / `ab_dev_zgemm`),
+    that `dgemm_` / `zgemm_` with rows scaled line by line stay within the
+    classical componentwise bound on both paths, and that ZHERK, a
+    one-element ZGEMM batch, DTRSM and `ab_dgesv_mpir` give the same bits
+    with `AB_STRASSEN=1` and every size routed as without it
 
 - **Not yet registry-based (one `main`, no ghost guard):**
   - `tests/test_precision.c` — 17 tests (the last compares

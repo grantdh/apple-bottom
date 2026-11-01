@@ -126,6 +126,42 @@ All notable changes to this project will be documented in this file.
   `AB_PRECISION=fast` in fast mode, and `make calibrate` refuses it. The
   default kernels are compiled as before and keep the 1.4.0 bits
   (`test_qe_golden`).
+- **Opt-in Strassen-Winograd products** (`docs/STRASSEN.md`):
+  `ab_dgemm_strassen` and `ab_zgemm_strassen`, and `AB_STRASSEN=1`, under
+  which a GPU GEMM with M, N and K all at least `AB_STRASSEN_MIN` (default
+  4096) takes each real product by one level of Winograd's variant: 7
+  half-size products on the existing DD GEMM kernels and 15 block additions,
+  for any shape (odd dimensions are zero-padded).
+  - It takes the place of the product inside the GEMM, so the GEMM keeps
+    each matrix's power-of-two scale, its choice between Gauss-3M and 4M
+    and, in the BLAS ABI, the staged path. The native GEMMs, the BLAS ABI
+    (staged and host path) and the device API are routed. Not routed: the
+    batched, asynchronous and `ab_batch_*` GEMMs, the library's own uses of
+    its GEMMs (ZHERK, DTRSM, `ab_dgesv_mpir`), and BLAS-ABI calls with a row
+    of op(A) or column of op(B) outside 2^±20: the guard scales those line
+    by line, and Strassen-Winograd's block sums would add lines on scales up
+    to 2^50 apart.
+  - Its workspace (1.75 N² DD values for a square N) comes from the staging
+    pool, so calls on different threads run side by side; the staged path
+    reserves it with the call's other buffers.
+  - The error bound is normwise only: rows or columns much smaller than the
+    rest lose relative accuracy. With `AB_STRASSEN` unset every result is
+    bitwise unchanged.
+  - `make test` adds `test_strassen` (11 tests), among them scaled data bit
+    for bit the unscaled result times the scales (with alpha and beta
+    rescaled, Gauss-3M's alignment and 4M's rescaling), an imbalanced ZGEMM
+    that must run as 4M, BLAS-ABI calls with scaled lines within the
+    classical componentwise bound, the library's own GEMM uses bitwise
+    unchanged, and routing through every path above;
+    `benchmarks/bench_strassen.c` measures speed and accuracy.
+  - Measured on an M2 Max at 274e778, before this port and on 1.4.0's
+    kernels (`benchmarks/results/2026-10-20-274e778-strassen/`): resident
+    DGEMMs ran 1.08× faster at N = 4096, 1.12× at 8192 and 0.94× at 2048,
+    ZGEMMs 1.10–1.16×, with about 10% less energy per product. The normwise
+    error was 1.9× the classical GEMM's on mixed-sign data and half of it on
+    positive data; with rows of A and columns of B scaled by 2^±16 the
+    componentwise error (relative to |A||B|) rose from 1.5×10⁻¹⁴ to
+    2–7×10⁴. Not yet measured on 1.6.0.
 
 ### Changed
 - **32 × 32 tiles are chosen by grid size, not output size**

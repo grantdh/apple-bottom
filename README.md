@@ -261,7 +261,7 @@ A runnable version is in [`examples/01_basic_dgemm`](examples/01_basic_dgemm/mai
 
 | Category | Functions |
 |----------|-----------|
-| GEMM and friends | `ab_dgemm`, `ab_dgemm_scaled`, `ab_zgemm`, `ab_zgemm_ex`, `ab_dsyrk`, `ab_zherk`, `ab_dtrsm`, `ab_dgesv_mpir` |
+| GEMM and friends | `ab_dgemm`, `ab_dgemm_scaled`, `ab_zgemm`, `ab_zgemm_ex`, `ab_dsyrk`, `ab_zherk`, `ab_dtrsm`, `ab_dgesv_mpir`; opt-in Strassen-Winograd `ab_dgemm_strassen`, `ab_zgemm_strassen` ([docs](docs/STRASSEN.md)) |
 | Matrices | `ab_matrix_create`, `ab_matrix_upload`, `ab_matrix_download`, `ab_matrix_zero`, `ab_matrix_copy`, `ab_matrix_add`, `ab_matrix_sub`, `ab_matrix_scale` |
 | Batches and async | `ab_batch_*`, `ab_dgemm_batched`, `ab_zgemm_batched`, `ab_dgemm_async`, `ab_zgemm_async`, `ab_future_*` |
 | Pools and sessions | `ab_pool_*`, `ab_session_*` (fewer allocations in iterative codes) |
@@ -289,6 +289,7 @@ LIBS = -L/path/to/apple-bottom/build -Wl,-rpath,/path/to/apple-bottom/build -lap
 | `AB_HOST_PACK=1` | GPU calls pack and convert on the CPU, as in 1.4.0, instead of on the GPU; the same bits |
 | `AB_STAGING_MB=<n>` | GPU buffers kept between calls, at most n MB per process (default 2048) |
 | `AB_PRECISION=fast` | every GPU GEMM (all APIs) accumulates lazily: a few percent faster, about 1 bit less accurate, and outside the proven error bounds ([numbers](docs/INTEGRATION.md#environment-variables-and-run-reports)) |
+| `AB_STRASSEN=1` | GPU GEMMs of the native, BLAS-ABI and device APIs (not the batched or asynchronous ones) with M, N, K ≥ `AB_STRASSEN_MIN` (4096) take each real product by one level of Strassen-Winograd: 7 half-size products instead of 8, with a normwise error bound only ([docs](docs/STRASSEN.md)) |
 
 The [Integration Guide](docs/INTEGRATION.md) covers C, Fortran, Python
 (experimental bindings in [`python/`](python/)), a Quantum ESPRESSO
@@ -388,6 +389,11 @@ error at most 13u²|ab| + 3u²|c|, so a GEMM with inner dimension K is within
   BLAS ABI and the device-buffer API decide per row of op(A) and column of
   op(B), the native API per matrix
   ([details](docs/vv/LIMITATIONS.md#complex-products)).
+- Opt-in, one level of Strassen-Winograd replaces each large real product
+  by seven half-size ones and 15 block additions, an eighth fewer
+  multiplications, with a normwise rather than componentwise error bound;
+  the GEMM around it keeps its scales and its choice of 3M or 4M
+  ([docs/STRASSEN.md](docs/STRASSEN.md)).
 - Through the BLAS ABI, a call routed to the GPU copies its operands into
   GPU buffers the library keeps between calls (`AB_STAGING_MB`), or reads
   memory registered with `ab_register_host_memory` in place. The GPU then
@@ -471,6 +477,7 @@ without it the kernels give the bits of 1.4.0.
 ```
 include/apple_bottom.h          public API (and apple_bottom_device.h, apple_bottom_fft.h)
 src/apple_bottom.m              Metal context and DD kernels
+src/strassen.m                  opt-in Strassen-Winograd products on those kernels
 src/device_api.m                device-buffer API (apple_bottom_device.h)
 src/fft.m, src/fft/             double-float FFT: plans, staging, kernel source
 src/blas_wrapper.c              BLAS ABI: the staged path, the host path, fallbacks

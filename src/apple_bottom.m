@@ -32,6 +32,7 @@
 #include "ab_internal.h"
 #include "gpu_stage.h"
 #include "profiling/blas_profiler.h"
+#include "strassen.h"
 
 // =============================================================================
 // Double-Float Primitives (Host Side)
@@ -1868,7 +1869,7 @@ static void ab_atfork_child(void) { g_forked_child = true; }
 @end
 
 // =============================================================================
-// Internal Accessors for device_api.m (apple_bottom_internal.h)
+// Internal Accessors for the library's other sources
 // =============================================================================
 
 id<MTLCommandQueue> ab_internal_command_queue(void) {
@@ -3037,6 +3038,52 @@ static void encode_elemwise_dispatch(id<MTLComputeCommandEncoder> encoder,
              threadsPerThreadgroup:MTLSizeMake(MIN((size_t)256, threads), 1, 1)];
 }
 
+// =============================================================================
+// Strassen-Winograd Products (strassen.h, AB_STRASSEN)
+// =============================================================================
+// Opt-in: each real product of a call that AB_STRASSEN sends there (and of
+// ab_dgemm_strassen and ab_zgemm_strassen) runs as one level of
+// Strassen-Winograd instead of on one GEMM kernel. The call keeps its
+// scales, its choice between Gauss-3M and 4M and its epilogue.
+
+void ab_internal_encode_product(id ctx, id<MTLComputeCommandEncoder> enc, ABMatrix X, ABMatrix Y,
+                                ABMatrix P) {
+    encode_dgemm_dispatch(enc, (ABContextImpl*)ctx, X, Y, P);
+}
+
+id<MTLBuffer> ab_internal_matrix_buffer(ABMatrix m) { return m->buffer; }
+
+// P = alpha*X*Y + beta*P: dd_dgemm_ab's kernels in an encoder of their own,
+// or Strassen-Winograd on the workspace W (strassen.h) if there is one.
+static void encode_product_scaled(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx, double alpha,
+                                  ABMatrix X, ABMatrix Y, double beta, ABMatrix P,
+                                  const ABMatrix* W) {
+    if (W) {
+        ab_internal_encode_strassen(ctx, cmdBuf, alpha, X, Y, beta, P, W);
+        return;
+    }
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+    encode_dgemm_scaled_dispatch(enc, ctx, alpha, X, Y, beta, P);
+    [enc endEncoding];
+}
+
+// P[t] = X[t]*Y[t] for t < n, into distinct buffers: the classical products
+// in one encoder, concurrent unless serial; with Strassen-Winograd's
+// workspace W, one after another in that order, each in a serial encoder.
+static void encode_products(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx, int n,
+                            const ABMatrix X[], const ABMatrix Y[], const ABMatrix P[],
+                            bool serial, const ABMatrix* W) {
+    if (W) {
+        for (int t = 0; t < n; t++)
+            ab_internal_encode_strassen(ctx, cmdBuf, 1.0, X[t], Y[t], 0.0, P[t], W);
+        return;
+    }
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoderWithDispatchType:
+        serial ? MTLDispatchTypeSerial : MTLDispatchTypeConcurrent];
+    for (int t = 0; t < n; t++) encode_dgemm_dispatch(enc, ctx, X[t], Y[t], P[t]);
+    [enc endEncoding];
+}
+
 // C = A B by Gauss-3M, encoder boundaries ordering the steps:
 //   1: T3 = Ar + Ai, T4 = Br + Bi
 //   2: T1 = Ar*Br, T2 = Ai*Bi, Ci = T3*T4
@@ -3046,22 +3093,20 @@ static void encode_elemwise_dispatch(id<MTLComputeCommandEncoder> encoder,
 // scale, and B's (encode_align_zgemm). Step 2's products write distinct
 // buffers, so its encoder is concurrent and the products of a small C share
 // the GPU; if Ci shares a buffer with Ar, Ai, Br or Bi, writing it could race
-// T1's or T2's reads, so those stay serial. encode_zgemm_3m_from_sums makes
+// T1's or T2's reads, so those stay serial, Ci's last, as Strassen-Winograd's
+// products (workspace W, or NULL) always are. encode_zgemm_3m_from_sums makes
 // steps 2 to 4 on T3 and T4 already formed (the BLAS ABI's staged path forms
 // them in its pre-pass), encode_zgemm_3m all four.
 static void encode_zgemm_3m_from_sums(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
                                  ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
-                                 const ABMatrix T[4], ABMatrix Cr, ABMatrix Ci) {
-    ABMatrix T1 = T[0], T2 = T[1], T3 = T[2], T4 = T[3];
+                                 const ABMatrix T[4], ABMatrix Cr, ABMatrix Ci,
+                                 const ABMatrix* W) {
+    ABMatrix T1 = T[0], T2 = T[1];
     bool ci_is_input = Ci->buffer == Ar->buffer || Ci->buffer == Ai->buffer ||
                        Ci->buffer == Br->buffer || Ci->buffer == Bi->buffer;
-    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoderWithDispatchType:
-        ci_is_input ? MTLDispatchTypeSerial : MTLDispatchTypeConcurrent];
-    encode_dgemm_dispatch(enc, ctx, Ar, Br, T1);
-    encode_dgemm_dispatch(enc, ctx, Ai, Bi, T2);
-    encode_dgemm_dispatch(enc, ctx, T3, T4, Ci);
-    [enc endEncoding];
-    enc = [cmdBuf computeCommandEncoder];
+    const ABMatrix X[3] = {Ar, Ai, T[2]}, Y[3] = {Br, Bi, T[3]}, P[3] = {T1, T2, Ci};
+    encode_products(cmdBuf, ctx, 3, X, Y, P, ci_is_input, W);
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
     encode_elemwise_dispatch(enc, ctx.subPipeline, Ci, T1, Ci);
     encode_elemwise_dispatch(enc, ctx.subPipeline, T1, T2, Cr);
     [enc endEncoding];
@@ -3072,30 +3117,27 @@ static void encode_zgemm_3m_from_sums(id<MTLCommandBuffer> cmdBuf, ABContextImpl
 
 static void encode_zgemm_3m(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
                             ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
-                            const ABMatrix T[4], ABMatrix Cr, ABMatrix Ci) {
+                            const ABMatrix T[4], ABMatrix Cr, ABMatrix Ci, const ABMatrix* W) {
     int e = Ar->exp2 + Br->exp2;
     id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
     encode_elemwise_dispatch(enc, ctx.addPipeline, Ar, Ai, T[2]);
     encode_elemwise_dispatch(enc, ctx.addPipeline, Br, Bi, T[3]);
     [enc endEncoding];
-    encode_zgemm_3m_from_sums(cmdBuf, ctx, Ar, Ai, Br, Bi, T, Cr, Ci);
+    encode_zgemm_3m_from_sums(cmdBuf, ctx, Ar, Ai, Br, Bi, T, Cr, Ci, W);
     set_scale_unmeasured(Cr, e);
     set_scale_unmeasured(Ci, e);
 }
 
 // C = A B by 4M: T1..T4 = Ar*Br, Ai*Bi, Ai*Br, Ar*Bi (M x N each,
-// zgemm_temps) in one concurrent encoder, each on its own scale; then
-// Cr = T1 - T2 and Ci = T3 + T4, each pair brought to the larger of its
-// scales first. Only the temporaries are written before the last step, so C
-// may share buffers with A or B.
+// zgemm_temps) in one concurrent encoder (or by Strassen-Winograd on the
+// workspace W), each on its own scale; then Cr = T1 - T2 and Ci = T3 + T4,
+// each pair brought to the larger of its scales first. Only the temporaries
+// are written before the last step, so C may share buffers with A or B.
 static void encode_zgemm_4m(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
                             ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
-                            const ABMatrix T[4], ABMatrix Cr, ABMatrix Ci) {
+                            const ABMatrix T[4], ABMatrix Cr, ABMatrix Ci, const ABMatrix* W) {
     const ABMatrix X[4] = {Ar, Ai, Ai, Ar}, Y[4] = {Br, Bi, Br, Bi};
-    id<MTLComputeCommandEncoder> enc =
-        [cmdBuf computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
-    for (int t = 0; t < 4; t++) encode_dgemm_dispatch(enc, ctx, X[t], Y[t], T[t]);
-    [enc endEncoding];
+    encode_products(cmdBuf, ctx, 4, X, Y, T, false, W);
     for (int t = 0; t < 4; t += 2) {
         int e = MAX(X[t]->exp2 + Y[t]->exp2, X[t + 1]->exp2 + Y[t + 1]->exp2);
         for (int u = t; u < t + 2; u++) {
@@ -3103,7 +3145,7 @@ static void encode_zgemm_4m(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
             set_scale_unmeasured(T[u], e);
         }
     }
-    enc = [cmdBuf computeCommandEncoder];
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
     encode_elemwise_dispatch(enc, ctx.subPipeline, T[0], T[1], Cr);
     encode_elemwise_dispatch(enc, ctx.addPipeline, T[2], T[3], Ci);
     [enc endEncoding];
@@ -3126,43 +3168,86 @@ static bool zgemm_uses_4m(ab_zgemm_method_t method, ABMatrix Ar, ABMatrix Ai, AB
     return ab_gauss3m_rho(p, q) > AB_GAUSS3M_MAX_RHO;
 }
 
-// One ZGEMM's temporaries, NULL where unused: T1..T4 for encode_zgemm_3m or
-// encode_zgemm_4m, views of a staging-pool slot's buffers, and the copies
+// One GEMM's temporaries, NULL where unused: a ZGEMM's T1..T4 for
+// encode_zgemm_3m or encode_zgemm_4m and Strassen-Winograd's workspace W
+// (strassen.h), views of one staging-pool slot's buffers, and the copies
 // encode_align_zgemm makes for 3M. Blocks capture it by value.
 typedef struct {
     ABMatrix T[4];
+    ABMatrix W[AB_STRASSEN_WORKSPACE];
     ABMatrix aligned[2];
-    ab_stage_t* slot;               // T's buffers, which the pool keeps between calls
-} ZgemmTemps;
+    ab_stage_t* slot;               // T's and W's buffers, which the pool keeps between calls
+} GemmTemps;
 
-static void zgemm_temps_free(ZgemmTemps t) {
+static void gemm_temps_free(GemmTemps t) {
     for (int i = 0; i < 4; i++) ab_matrix_destroy(t.T[i]);
+    for (int i = 0; i < AB_STRASSEN_WORKSPACE; i++) ab_matrix_destroy(t.W[i]);
     for (int i = 0; i < 2; i++) ab_matrix_destroy(t.aligned[i]);
     ab_internal_stage_release(t.slot);
 }
 
-// T1..T4 for 4M or 3M into t, from the staging pool (BLAS-ABI Staging);
-// false, with t all NULL, if one cannot be allocated.
-static bool zgemm_temps(bool four_m, int M, int N, int K, ZgemmTemps* t) {
-    *t = ZgemmTemps();
-    const int rows[4] = {M, M, M, four_m ? M : K}, cols[4] = {N, N, four_m ? N : K, N};
-    t->slot = ab_internal_stage_views(4, rows, cols, t->T);
-    return t->slot != NULL;
+// Into t, from one slot of the staging pool (BLAS-ABI Staging): T1..T4 for
+// 4M (four_m) or 3M if zgemm, and Strassen-Winograd's workspace for the
+// M x K by K x N products if strassen (its pipeline built for dev).
+// AB_ERROR_SHADER_COMPILE if Metal refuses that pipeline, AB_ERROR_ALLOC_FAILED
+// if a buffer; either way t is all NULL.
+static ABStatus gemm_temps(id<MTLDevice> dev, bool zgemm, bool four_m, bool strassen, int M,
+                           int N, int K, GemmTemps* t) {
+    *t = GemmTemps();
+    int rows[4 + AB_STRASSEN_WORKSPACE] = {M, M, M, four_m ? M : K};
+    int cols[4 + AB_STRASSEN_WORKSPACE] = {N, N, four_m ? N : K, N};
+    const int z = zgemm ? 4 : 0;
+    int n = z;
+    if (strassen) {
+        if (!ab_internal_strassen_prepare(dev, M, N, K, rows + n, cols + n))
+            return AB_ERROR_SHADER_COMPILE;
+        n += AB_STRASSEN_WORKSPACE;
+    }
+    ABMatrix views[4 + AB_STRASSEN_WORKSPACE];
+    t->slot = ab_internal_stage_views(n, rows, cols, views);
+    if (!t->slot) return AB_ERROR_ALLOC_FAILED;
+    for (int i = 0; i < z; i++) t->T[i] = views[i];
+    for (int i = z; i < n; i++) t->W[i - z] = views[i];
+    return AB_OK;
+}
+
+// T1..T4 for a classical ZGEMM by 4M or 3M; false, with t all NULL, if one
+// cannot be allocated.
+static bool zgemm_temps(bool four_m, int M, int N, int K, GemmTemps* t) {
+    return gemm_temps(nil, true, four_m, false, M, N, K, t) == AB_OK;
+}
+
+// Strassen-Winograd's workspace alone, for a real M x K by K x N product.
+static ABStatus strassen_temps(id<MTLDevice> dev, int M, int N, int K, GemmTemps* t) {
+    return gemm_temps(dev, false, false, true, M, N, K, t);
+}
+
+// The workspace for encode_products: NULL for classical products.
+static const ABMatrix* strassen_ws(const GemmTemps* t) { return t->W[0] ? t->W : NULL; }
+
+// Whether an M x K by K x N GEMM takes Strassen-Winograd products, as
+// products says (ab_internal.h).
+static bool takes_strassen(ab_products_t products, int M, int N, int K) {
+    return products == AB_PRODUCTS_STRASSEN ||
+           (products == AB_PRODUCTS_ROUTED && ab_internal_strassen_wanted(M, N, K));
 }
 
 // C = A B by 4M (four_m) or by Gauss-3M, which first brings A's parts, and
 // B's, to one scale into aligned (encode_align_zgemm), with T1..T4 from
-// zgemm_temps. False if such a copy could not be allocated. The caller frees
-// T and aligned (zgemm_temps_free) once cmdBuf has completed.
+// gemm_temps and the real products by Strassen-Winograd on the workspace W
+// (gemm_temps), or classical if W is NULL. False if such a copy could not
+// be allocated. The caller frees T, W and aligned (gemm_temps_free) once cmdBuf
+// has completed.
 static bool encode_zgemm(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx, bool four_m,
                          ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
-                         const ABMatrix T[4], ABMatrix aligned[2], ABMatrix Cr, ABMatrix Ci) {
+                         const ABMatrix T[4], ABMatrix aligned[2], ABMatrix Cr, ABMatrix Ci,
+                         const ABMatrix* W) {
     if (four_m) {
-        encode_zgemm_4m(cmdBuf, ctx, Ar, Ai, Br, Bi, T, Cr, Ci);
+        encode_zgemm_4m(cmdBuf, ctx, Ar, Ai, Br, Bi, T, Cr, Ci, W);
         return true;
     }
     if (!encode_align_zgemm(cmdBuf, ctx, &Ar, &Ai, &Br, &Bi, aligned)) return false;
-    encode_zgemm_3m(cmdBuf, ctx, Ar, Ai, Br, Bi, T, Cr, Ci);
+    encode_zgemm_3m(cmdBuf, ctx, Ar, Ai, Br, Bi, T, Cr, Ci, W);
     return true;
 }
 
@@ -3170,13 +3255,52 @@ static bool encode_zgemm(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx, bool f
 // Public API: BLAS Operations
 // =============================================================================
 
-ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C) {
+// ab_dgemm_scaled, its products as products says (ab_internal.h).
+static ABStatus dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C,
+                             ab_products_t products) {
     ABAutoreleaseScope pool;
     if (!A || !B || !C) return AB_ERROR_INVALID_ARG;
     if (A->cols != B->rows || A->rows != C->rows || B->cols != C->cols) return AB_ERROR_DIMENSION_MISMATCH;
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return AB_ERROR_NO_DEVICE;
-    
+    GemmTemps tmp = GemmTemps();
+    if (takes_strassen(products, A->rows, B->cols, A->cols)) {
+        uint64_t temps_ns = host_ns();
+        ABStatus status = strassen_temps(ctx.device, A->rows, B->cols, A->cols, &tmp);
+        t_kernel_split.temps_ns += host_ns() - temps_ns;
+        if (status != AB_OK) return status;
+    }
+
+    int exp2 = scaled_gemm_scalars(A, B, C, &alpha, &beta);
+    double t0 = get_time_ms();
+
+    uint64_t encode_ns = host_ns();
+    id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
+    encode_product_scaled(cmdBuf, ctx, alpha, A, B, beta, C, strassen_ws(&tmp));
+    bool completed = commit_and_wait(cmdBuf, encode_ns);
+    set_scale_unmeasured(C, exp2);
+    if (tmp.slot) {
+        uint64_t temps_ns = host_ns();
+        gemm_temps_free(tmp);
+        t_kernel_split.temps_ns += host_ns() - temps_ns;
+    }
+    if (!completed) return AB_ERROR_KERNEL_FAILED;
+
+    stats_add_kernel(get_time_ms() - t0);
+    stats_add_dgemm();
+    return AB_OK;
+}
+
+// ab_dgemm, its products as products says (ab_internal.h).
+static ABStatus dgemm(ABMatrix A, ABMatrix B, ABMatrix C, ab_products_t products) {
+    ABAutoreleaseScope pool;
+    if (!A || !B || !C) return AB_ERROR_INVALID_ARG;
+    if (A->cols != B->rows || A->rows != C->rows || B->cols != C->cols) return AB_ERROR_DIMENSION_MISMATCH;
+    ABContextImpl* ctx = [ABContextImpl shared];
+    if (!ctx) return AB_ERROR_NO_DEVICE;
+    if (takes_strassen(products, A->rows, B->cols, A->cols))   // the same result, by Strassen-Winograd
+        return dgemm_scaled(1.0, A, B, 0.0, C, AB_PRODUCTS_STRASSEN);
+
     double t0 = get_time_ms();
     
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
@@ -3193,28 +3317,21 @@ ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C) {
     return AB_OK;
 }
 
+ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C) {
+    return dgemm(A, B, C, AB_PRODUCTS_ROUTED);
+}
+
 ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C) {
-    ABAutoreleaseScope pool;
-    if (!A || !B || !C) return AB_ERROR_INVALID_ARG;
-    if (A->cols != B->rows || A->rows != C->rows || B->cols != C->cols) return AB_ERROR_DIMENSION_MISMATCH;
-    ABContextImpl* ctx = [ABContextImpl shared];
-    if (!ctx) return AB_ERROR_NO_DEVICE;
+    return dgemm_scaled(alpha, A, B, beta, C, AB_PRODUCTS_ROUTED);
+}
 
-    int exp2 = scaled_gemm_scalars(A, B, C, &alpha, &beta);
-    double t0 = get_time_ms();
+ABStatus ab_dgemm_strassen(double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C) {
+    return dgemm_scaled(alpha, A, B, beta, C, AB_PRODUCTS_STRASSEN);
+}
 
-    uint64_t encode_ns = host_ns();
-    id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
-    encode_dgemm_scaled_dispatch(encoder, ctx, alpha, A, B, beta, C);
-    [encoder endEncoding];
-    bool completed = commit_and_wait(cmdBuf, encode_ns);
-    set_scale_unmeasured(C, exp2);
-    if (!completed) return AB_ERROR_KERNEL_FAILED;
-
-    stats_add_kernel(get_time_ms() - t0);
-    stats_add_dgemm();
-    return AB_OK;
+extern "C" ABStatus ab_internal_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta,
+                                             ABMatrix C, ab_products_t products) {
+    return dgemm_scaled(alpha, A, B, beta, C, products);
 }
 
 // C = A + B or A - B elementwise (pipeline), on one power-of-two scale.
@@ -3275,16 +3392,17 @@ ABStatus ab_matrix_scale(double alpha, ABMatrix A) {
 
 // Forward declaration of internal ZGEMM
 static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
-                                  ABMatrix Cr, ABMatrix Ci, bool four_m);
+                                  ABMatrix Cr, ABMatrix Ci, bool four_m, bool strassen);
 
 // Extended ZGEMM with transpose support (for QE compatibility), by the given
-// method (ab_internal.h).
+// method, its real products as products says (ab_internal.h).
 static ABStatus zgemm_ex(
     ABTranspose transA, ABTranspose transB,
     ABMatrix Ar, ABMatrix Ai,
     ABMatrix Br, ABMatrix Bi,
     ABMatrix Cr, ABMatrix Ci,
-    ab_zgemm_method_t method
+    ab_zgemm_method_t method,
+    ab_products_t products
 ) {
     ABAutoreleaseScope pool;
     if (!Ar || !Ai || !Br || !Bi || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
@@ -3437,7 +3555,8 @@ static ABStatus zgemm_ex(
     }
 
     // Call internal ZGEMM with (possibly transposed) matrices
-    status = ab_zgemm_internal(A_work_r, A_work_i, B_work_r, B_work_i, Cr, Ci, four_m);
+    status = ab_zgemm_internal(A_work_r, A_work_i, B_work_r, B_work_i, Cr, Ci, four_m,
+                               takes_strassen(products, M, N, K_A));
 
 cleanup:
     // Cleanup temporary transpose buffers
@@ -3455,26 +3574,28 @@ cleanup:
 
 ABStatus ab_zgemm_ex(ABTranspose transA, ABTranspose transB, ABMatrix Ar, ABMatrix Ai,
                      ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci) {
-    return zgemm_ex(transA, transB, Ar, Ai, Br, Bi, Cr, Ci, AB_ZGEMM_AUTO);
+    return zgemm_ex(transA, transB, Ar, Ai, Br, Bi, Cr, Ci, AB_ZGEMM_AUTO, AB_PRODUCTS_ROUTED);
 }
 
 extern "C" ABStatus ab_internal_zgemm(ABTranspose transA, ABTranspose transB, ABMatrix Ar,
                                       ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr,
-                                      ABMatrix Ci, ab_zgemm_method_t method) {
-    return zgemm_ex(transA, transB, Ar, Ai, Br, Bi, Cr, Ci, method);
+                                      ABMatrix Ci, ab_zgemm_method_t method,
+                                      ab_products_t products) {
+    return zgemm_ex(transA, transB, Ar, Ai, Br, Bi, Cr, Ci, method, products);
 }
 
 // ZGEMM using Gauss's trick: 3 real multiplications instead of 4
 // (A_r + iA_i)(B_r + iB_i) = (A_r*B_r - A_i*B_i) + i((A_r+A_i)(B_r+B_i) - A_r*B_r - A_i*B_i)
 // or, for parts whose imbalance would cost 3M's imaginary part its accuracy,
-// by 4M (four_m: zgemm_uses_4m); encode_zgemm.
+// by 4M (four_m: zgemm_uses_4m); encode_zgemm. The real products by
+// Strassen-Winograd if strassen.
 //
 // Fused implementation: 1 command buffer (was 8 separate round-trips); this
 // eliminates ~350μs of command buffer commit+wait overhead per ZGEMM call.
 //
 // NOTE: This is the internal implementation - ab_zgemm is now a wrapper
 static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
-                                  ABMatrix Cr, ABMatrix Ci, bool four_m) {
+                                  ABMatrix Cr, ABMatrix Ci, bool four_m, bool strassen) {
     if (!Ar || !Ai || !Br || !Bi || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
 
     int M = Ar->rows, N = Br->cols, K = Ar->cols;
@@ -3483,17 +3604,18 @@ static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatri
 
     // Allocate all temporaries upfront
     uint64_t temps_ns = host_ns();
-    ZgemmTemps tmp;
-    bool allocated = zgemm_temps(four_m, M, N, K, &tmp);
+    GemmTemps tmp;
+    ABStatus status = gemm_temps(ctx.device, true, four_m, strassen, M, N, K, &tmp);
     t_kernel_split.temps_ns += host_ns() - temps_ns;
-    if (!allocated) return AB_ERROR_ALLOC_FAILED;
+    if (status != AB_OK) return status;
 
     double t0 = get_time_ms();
 
     uint64_t encode_ns = host_ns();
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
-    if (!encode_zgemm(cmdBuf, ctx, four_m, Ar, Ai, Br, Bi, tmp.T, tmp.aligned, Cr, Ci)) {
-        zgemm_temps_free(tmp);
+    if (!encode_zgemm(cmdBuf, ctx, four_m, Ar, Ai, Br, Bi, tmp.T, tmp.aligned, Cr, Ci,
+                      strassen_ws(&tmp))) {
+        gemm_temps_free(tmp);
         return AB_ERROR_ALLOC_FAILED;
     }
     bool completed = commit_and_wait(cmdBuf, encode_ns);
@@ -3502,7 +3624,7 @@ static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatri
     stats_add_zgemm();
 
     temps_ns = host_ns();
-    zgemm_temps_free(tmp);
+    gemm_temps_free(tmp);
     t_kernel_split.temps_ns += host_ns() - temps_ns;
 
     if (!completed) {
@@ -3523,18 +3645,18 @@ static ABStatus ab_zgemm_internal_async(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, A
     if (!ctx) return AB_ERROR_NO_DEVICE;
 
     const bool four_m = zgemm_uses_4m(AB_ZGEMM_AUTO, Ar, Ai, Br, Bi);
-    ZgemmTemps tmp;
+    GemmTemps tmp;
     if (!zgemm_temps(four_m, M, N, K, &tmp)) return AB_ERROR_ALLOC_FAILED;
 
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
-    if (!encode_zgemm(cmdBuf, ctx, four_m, Ar, Ai, Br, Bi, tmp.T, tmp.aligned, Cr, Ci)) {
-        zgemm_temps_free(tmp);
+    if (!encode_zgemm(cmdBuf, ctx, four_m, Ar, Ai, Br, Bi, tmp.T, tmp.aligned, Cr, Ci, NULL)) {
+        gemm_temps_free(tmp);
         return AB_ERROR_ALLOC_FAILED;
     }
 
     // Completion handler cleans up temporaries when GPU finishes
     [cmdBuf addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull __unused buf) {
-        zgemm_temps_free(tmp);
+        gemm_temps_free(tmp);
     }];
 
     [cmdBuf commit];
@@ -3547,6 +3669,17 @@ static ABStatus ab_zgemm_internal_async(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, A
 // Public ab_zgemm: wrapper for ab_zgemm_ex with no transpose
 ABStatus ab_zgemm(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci) {
     return ab_zgemm_ex(AB_NO_TRANS, AB_NO_TRANS, Ar, Ai, Br, Bi, Cr, Ci);
+}
+
+ABStatus ab_zgemm_strassen(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr,
+                           ABMatrix Ci) {
+    if (!Ar || !Ai || !Br || !Bi || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
+    int M = Ar->rows, K = Ar->cols, N = Br->cols;
+    if (Ai->rows != M || Ai->cols != K || Br->rows != K || Bi->rows != K || Bi->cols != N ||
+        Cr->rows != M || Cr->cols != N || Ci->rows != M || Ci->cols != N)
+        return AB_ERROR_DIMENSION_MISMATCH;
+    return zgemm_ex(AB_NO_TRANS, AB_NO_TRANS, Ar, Ai, Br, Bi, Cr, Ci, AB_ZGEMM_AUTO,
+                    AB_PRODUCTS_STRASSEN);
 }
 
 ABStatus ab_dsyrk(ABMatrix A, ABMatrix C) {
@@ -3727,7 +3860,7 @@ ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
                     // B_remaining -= A_off * X_solved  (via GPU: alpha=-1, beta=1)
                     // First upload current B_remaining
                     ab_matrix_upload(mUpdate, &B_host[off_start * NRHS], true);
-                    ab_dgemm_scaled(-1.0, mA_off, mX, 1.0, mUpdate);
+                    dgemm_scaled(-1.0, mA_off, mX, 1.0, mUpdate, AB_PRODUCTS_CLASSICAL);
 
                     // Download updated B_remaining
                     ab_matrix_download(mUpdate, &B_host[off_start * NRHS], true);
@@ -3798,7 +3931,7 @@ ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
                     free(A_off_data);
 
                     ab_matrix_upload(mUpdate, B_host, true);
-                    ab_dgemm_scaled(-1.0, mA_off, mX, 1.0, mUpdate);
+                    dgemm_scaled(-1.0, mA_off, mX, 1.0, mUpdate, AB_PRODUCTS_CLASSICAL);
                     ab_matrix_download(mUpdate, B_host, true);
 
                     ab_matrix_destroy(mX);
@@ -3956,7 +4089,7 @@ ABStatus ab_dgesv_mpir(ABMatrix A, ABMatrix B) {
         ab_matrix_upload(mR_gpu, B_orig, true);  // R starts as B
 
         // R = B - A*X = -1.0 * A * X + 1.0 * B
-        ab_dgemm_scaled(-1.0, mA_gpu, mX_gpu, 1.0, mR_gpu);
+        dgemm_scaled(-1.0, mA_gpu, mX_gpu, 1.0, mR_gpu, AB_PRODUCTS_CLASSICAL);
 
         ab_matrix_download(mR_gpu, R_host, true);
         ab_matrix_destroy(mA_gpu);
@@ -4074,10 +4207,10 @@ ABStatus ab_zherk(ABMatrix Ar, ABMatrix Ai, ABMatrix Cr, ABMatrix Ci) {
     }
 
     // Ci = Ai × Arᵀ
-    if ((status = ab_dgemm(Ai, ArT, Ci)) != AB_OK) goto cleanup;
+    if ((status = dgemm(Ai, ArT, Ci, AB_PRODUCTS_CLASSICAL)) != AB_OK) goto cleanup;
 
     // temp = Ar × Aiᵀ
-    if ((status = ab_dgemm(Ar, AiT, temp)) != AB_OK) goto cleanup;
+    if ((status = dgemm(Ar, AiT, temp, AB_PRODUCTS_CLASSICAL)) != AB_OK) goto cleanup;
 
     // Ci = Ci - temp
     if ((status = ab_matrix_sub(Ci, temp, Ci)) != AB_OK) goto cleanup;
@@ -4148,7 +4281,8 @@ ABStatus ab_zgemm_batched(
 
     // Fall back to sequential for single ZGEMM
     if (batch_count == 1) {
-        return ab_zgemm(Ars[0], Ais[0], Brs[0], Bis[0], Crs[0], Cis[0]);
+        return zgemm_ex(AB_NO_TRANS, AB_NO_TRANS, Ars[0], Ais[0], Brs[0], Bis[0], Crs[0],
+                        Cis[0], AB_ZGEMM_AUTO, AB_PRODUCTS_CLASSICAL);
     }
 
     ABContextImpl* ctx = [ABContextImpl shared];
@@ -4163,7 +4297,7 @@ ABStatus ab_zgemm_batched(
     // only when dimensions change — QE's uniform workloads never trigger this.
 
     int cur_M = Ars[0]->rows, cur_N = Brs[0]->cols, cur_K = Ars[0]->cols;
-    ZgemmTemps shared[2] = {};          // [four_m]; their aligned slots stay NULL
+    GemmTemps shared[2] = {};          // [four_m]; their aligned slots stay NULL
 
     double t0 = get_time_ms();
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
@@ -4186,17 +4320,17 @@ ABStatus ab_zgemm_batched(
             cmdBuf = [ctx.commandQueue commandBuffer];
 
             for (int m = 0; m < 2; m++) {
-                zgemm_temps_free(shared[m]);
-                shared[m] = ZgemmTemps();
+                gemm_temps_free(shared[m]);
+                shared[m] = GemmTemps();
             }
             cur_M = M; cur_N = N; cur_K = K;
         }
 
         const bool four_m = zgemm_uses_4m(AB_ZGEMM_AUTO, Ars[i], Ais[i], Brs[i], Bis[i]);
-        ZgemmTemps* t = &shared[four_m];
+        GemmTemps* t = &shared[four_m];
         if ((!t->T[0] && !zgemm_temps(four_m, M, N, K, t)) ||
             !encode_zgemm(cmdBuf, ctx, four_m, Ars[i], Ais[i], Brs[i], Bis[i], t->T,
-                          &aligned[2 * i], Crs[i], Cis[i])) {
+                          &aligned[2 * i], Crs[i], Cis[i], NULL)) {
             status = AB_ERROR_ALLOC_FAILED;
             break;
         }
@@ -4209,7 +4343,7 @@ ABStatus ab_zgemm_batched(
     stats_add_kernel(get_time_ms() - t0);
     for (int i = 0; i < encoded; i++) stats_add_zgemm();
 
-    for (int m = 0; m < 2; m++) zgemm_temps_free(shared[m]);
+    for (int m = 0; m < 2; m++) gemm_temps_free(shared[m]);
     for (int i = 0; aligned && i < 2 * batch_count; i++) ab_matrix_destroy(aligned[i]);
     free(aligned);
 
@@ -4497,20 +4631,20 @@ ABStatus ab_batch_zgemm(ABBatch batch, ABMatrix Ar, ABMatrix Ai, ABMatrix Br, AB
     // Temporaries for Gauss's trick or 4M (zgemm_uses_4m), released by a
     // completion handler; the ZGEMM's encoders go between the batch's.
     const bool four_m = zgemm_uses_4m(AB_ZGEMM_AUTO, Ar, Ai, Br, Bi);
-    ZgemmTemps tmp;
+    GemmTemps tmp;
     if (!zgemm_temps(four_m, M, N, K, &tmp)) return AB_ERROR_ALLOC_FAILED;
     [batch->currentEncoder endEncoding];
     bool encoded = encode_zgemm(batch->cmdBuffer, ctx, four_m, Ar, Ai, Br, Bi, tmp.T,
-                                tmp.aligned, Cr, Ci);
+                                tmp.aligned, Cr, Ci, NULL);
     batch->currentEncoder = [batch->cmdBuffer computeCommandEncoder];
     if (!encoded) {
-        zgemm_temps_free(tmp);
+        gemm_temps_free(tmp);
         return AB_ERROR_ALLOC_FAILED;
     }
 
     // Cleanup temporaries via completion handler
     [batch->cmdBuffer addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull __unused buf) {
-        zgemm_temps_free(tmp);
+        gemm_temps_free(tmp);
     }];
 
     batch->op_count++;
@@ -4762,6 +4896,7 @@ struct ab_stage_s {
     int ld[3];                      // A, B, C's leading dimensions, staged or in place
     size_t elems[3];                // and the elements staged (0 in place)
     uint64_t generation;            // the pool's when the slot was made
+    GemmTemps strassen;             // during a call: Strassen-Winograd's workspace (another slot)
     struct ab_stage_s* next;        // idle list
 };
 
@@ -4921,7 +5056,15 @@ ab_stage_t* ab_internal_stage_acquire(const ab_stage_gemm_t* g) {
     stage_layout(s, g);
     size_t need[STAGE_ROLES];
     stage_needs(s, g, need);
-    return stage_fit(ctx, s, need) ? s : NULL;
+    if (!stage_fit(ctx, s, need)) return NULL;
+    // The products' workspace when AB_STRASSEN routes the shape (the run gives
+    // it back if a line is scaled: stage_lines_scaled).
+    if (takes_strassen(AB_PRODUCTS_ROUTED, g->M, g->N, g->K) &&
+        strassen_temps(ctx.device, g->M, g->N, g->K, &s->strassen) != AB_OK) {
+        ab_internal_stage_release(s);
+        return NULL;
+    }
+    return s;
 }
 
 void* ab_internal_stage_host(ab_stage_t* s, ab_stage_operand_t which, int* ld) {
@@ -4938,6 +5081,8 @@ int ab_internal_stage_in_place(const ab_stage_t* s) {
 void ab_internal_stage_release(ab_stage_t* s) {
     if (!s) return;
     ABAutoreleaseScope pool;
+    gemm_temps_free(s->strassen);
+    s->strassen = GemmTemps();
     for (int i = 0; i < 3; i++) s->ext[i] = nil;
     size_t cap = ab_staging_cap_bytes();
     struct ab_stage_s* freed = NULL;        // idle slots dropped, deleted after the lock
@@ -5137,6 +5282,14 @@ static ab_stage_result_t stage_commit(id<MTLCommandBuffer> cmdBuf, uint64_t enco
     return AB_STAGE_RAN;
 }
 
+// Whether the GPU gave a row of op(A) or a column of op(B) a scale of its own,
+// once the run's scales pass has completed: ab_scales sets those operands'
+// fix-up grids (never empty) only then.
+static bool stage_lines_scaled(ab_stage_t* s, const ab_stage_gemm_t* g) {
+    const uint32_t* st = (const uint32_t*)stage_buf(s, STAGE_STATS).contents;
+    return st[stage_fix_args(g, 0)] || st[stage_fix_args(g, 1)];
+}
+
 ab_stage_result_t ab_internal_stage_run(ab_stage_t* s, const ab_stage_gemm_t* g) {
     ABAutoreleaseScope pool;
     ABContextImpl* ctx = [ABContextImpl shared];
@@ -5192,13 +5345,26 @@ ab_stage_result_t ab_internal_stage_run(ab_stage_t* s, const ab_stage_gemm_t* g)
     for (int i = 0; i < passes; i++) encode_stage_pass(enc, ctx, s, g, &v, i, true);
     [enc endEncoding];
 
+    // Strassen-Winograd's block sums add rows of op(A), and columns of op(B),
+    // from different quadrants, which must share a scale. The GPU has just
+    // computed the lines' scales: run what is encoded, and if a line has one,
+    // give the workspace back and take classical products, as the host path
+    // does (ab_lines_products); then encode the rest anew.
+    if (strassen_ws(&s->strassen)) {
+        if (!commit_and_wait(cmdBuf, encode_ns)) return AB_STAGE_FAILED;
+        if (stage_lines_scaled(s, g)) {
+            gemm_temps_free(s->strassen);
+            s->strassen = GemmTemps();
+        }
+        encode_ns = host_ns();
+        cmdBuf = [ctx.commandQueue commandBuffer];
+    }
+    const ABMatrix* W = strassen_ws(&s->strassen);
     if (z) {                                 // Gauss-3M as ab_zgemm, T3 and T4 formed above
         const ABMatrix T[4] = {&v.T1, &v.T2, &v.A3, &v.B4};
-        encode_zgemm_3m_from_sums(cmdBuf, ctx, &v.A, &v.Ai, &v.B, &v.Bi, T, &v.C, &v.Ci);
+        encode_zgemm_3m_from_sums(cmdBuf, ctx, &v.A, &v.Ai, &v.B, &v.Bi, T, &v.C, &v.Ci, W);
     } else {
-        enc = [cmdBuf computeCommandEncoder];
-        encode_dgemm_scaled_dispatch(enc, ctx, g->alpha[0], &v.A, &v.B, g->beta[0], &v.C);
-        [enc endEncoding];
+        encode_product_scaled(cmdBuf, ctx, g->alpha[0], &v.A, &v.B, g->beta[0], &v.C, W);
     }
     encode_stage_epilogue(cmdBuf, ctx, s, g, &v);
     return stage_commit(cmdBuf, encode_ns, flag, t0);
@@ -5219,12 +5385,9 @@ ab_stage_result_t ab_internal_stage_redo_4m(ab_stage_t* s, const ab_stage_gemm_t
     double t0 = get_time_ms();
     uint64_t encode_ns = host_ns();
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> enc =
-        [cmdBuf computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
-    encode_dgemm_dispatch(enc, ctx, &v.Ai, &v.B, &v.T1);
-    encode_dgemm_dispatch(enc, ctx, &v.A, &v.Bi, &v.T2);
-    [enc endEncoding];
-    enc = [cmdBuf computeCommandEncoder];
+    const ABMatrix X[2] = {&v.Ai, &v.A}, Y[2] = {&v.B, &v.Bi}, P[2] = {&v.T1, &v.T2};
+    encode_products(cmdBuf, ctx, 2, X, Y, P, false, strassen_ws(&s->strassen));
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
     encode_elemwise_dispatch(enc, ctx.addPipeline, &v.T1, &v.T2, &v.Ci);
     [enc endEncoding];
     encode_stage_epilogue(cmdBuf, ctx, s, g, &v);

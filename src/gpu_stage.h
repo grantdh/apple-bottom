@@ -5,15 +5,19 @@
 //
 // A GPU-routed dgemm_/zgemm_ (blas_wrapper.c) first tries this path:
 //   1. ab_internal_stage_acquire(): the call's GPU buffers, from a per-process
-//      pool (no fresh MTLBuffers once it has grown). An operand lying in
-//      memory registered with ab_register_host_memory() is used in place.
+//      pool (no fresh MTLBuffers once it has grown), and Strassen-Winograd's
+//      workspace from a second slot when AB_STRASSEN routes the shape. An
+//      operand lying in memory registered with ab_register_host_memory() is
+//      used in place.
 //   2. The caller copies each other operand the GPU reads into its staging
 //      buffer (ab_internal_stage_host()), packed: column by column, one
 //      block when the operand is dense.
 //   3. ab_internal_stage_run(): one command buffer converts op(A), op(B) (and
 //      a DGEMM's C) to row-major DD on the GPU, runs the GEMM kernels of the
 //      ABMatrix API, and converts the result and applies the epilogue on the
-//      GPU, into C's staging buffer or C in place.
+//      GPU, into C's staging buffer or C in place. Under AB_STRASSEN there are
+//      two: Strassen-Winograd's products wait for the lines' scales, and a
+//      call with a scaled line takes classical ones.
 //   4. The caller copies the result into C. A ZGEMM with alpha != 1 or beta
 //      not 0 or 1 ("split") instead takes the product as the host epilogue
 //      reads it (ab_internal_stage_split()) and runs that epilogue.

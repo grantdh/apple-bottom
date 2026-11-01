@@ -7,9 +7,11 @@ multiplies two matrices with 7 products of half-size blocks instead of 8,
 plus 15 additions of blocks. That removes an eighth of the multiplications,
 at the price of a weaker error bound: it is normwise, not componentwise.
 
-On an M2 Max it makes resident DGEMMs 1.08× faster at N = 4096 and 1.12× at
-8192, and ZGEMMs 1.10–1.16×. Energy per product falls by about 10%. On data
-of uniform scale and mixed sign the error is 1.9× the classical DD GEMM's.
+Measured on an M2 Max at 274e778 (October 20, 2026, on 1.4.0's kernels), it
+made resident DGEMMs 1.08× faster at N = 4096 and 1.12× at 8192, and ZGEMMs
+1.10–1.16×, with about 10% less energy per product. Those runs predate its
+port to 1.6.0 and have not been repeated on it ([Speed](#speed)). On data of
+uniform scale and mixed sign the error is 1.9× the classical DD GEMM's.
 Where rows or columns differ widely in scale, the small elements of C have no
 correct digits.
 
@@ -20,25 +22,57 @@ It is off by default. With it off, every result is bitwise what it was.
 | | |
 |---|---|
 | `ab_dgemm_strassen(alpha, A, B, beta, C)` | what `ab_dgemm_scaled` computes, C = alpha A B + beta C |
-| `ab_zgemm_strassen(Ar, Ai, Br, Bi, Cr, Ci)` | what `ab_zgemm` computes: Gauss's three-multiplication form, each of its three real products by Strassen-Winograd |
-| `AB_STRASSEN=1` | `ab_dgemm`, `ab_dgemm_scaled`, `ab_zgemm` and `ab_zgemm_ex` call the two above when M, N and K are all at least `AB_STRASSEN_MIN`. That includes the BLAS-ABI (`dgemm_`, `zgemm_`) and device-API GEMMs that the routing sends to the GPU, which run through them. |
+| `ab_zgemm_strassen(Ar, Ai, Br, Bi, Cr, Ci)` | what `ab_zgemm` computes: Gauss's three-multiplication form, or four real products where the parts are imbalanced, chosen as `ab_zgemm` chooses; each real product by Strassen-Winograd |
+| `AB_STRASSEN=1` | `ab_dgemm`, `ab_dgemm_scaled`, `ab_zgemm` and `ab_zgemm_ex` take Strassen-Winograd products when M, N and K are all at least `AB_STRASSEN_MIN`, as do the BLAS-ABI GEMMs (`dgemm_`, `zgemm_`) that the routing sends to the GPU, on the staged path and on the host path, and the device-API GEMMs (`ab_dev_dgemm`, `ab_dev_zgemm`). |
 | `AB_STRASSEN_MIN=<n>` | that threshold, default 4096 ([why](#threshold)) |
 
-Both variables are read once per process. The batched, asynchronous and
-`ab_batch_*` GEMMs, DSYRK and ZHERK are never routed. The two entry points
-work for any shape: an odd dimension is padded with zeros as the blocks are
-read and cropped as C is written.
+Both variables are read once per process. Never routed: the batched,
+asynchronous and `ab_batch_*` GEMMs, and the library's own uses of its GEMMs,
+whose accuracy is stated for classical products: DSYRK, ZHERK, DTRSM's
+updates and the residuals of `ab_dgesv_mpir`. The session GEMMs
+(`ab_session_dgemm`, `ab_session_zgemm`) call `ab_dgemm` and `ab_zgemm` and
+are routed with them. The two entry points work for any shape: an odd
+dimension is padded with zeros as the blocks are read and cropped as C is
+written.
 
-**Memory.** A Strassen call needs a workspace of two ⌈M/2⌉ × ⌈K/2⌉ blocks,
-two ⌈K/2⌉ × ⌈N/2⌉ and three ⌈M/2⌉ × ⌈N/2⌉: 1.75 N² double-float values,
-14 bytes per element of a square C, so 940 MB at N = 8192. ZGEMM adds
-M × K, K × N and M × N for the sums Ar + Ai and Br + Bi and one of the real
-products, 4.75 N² in all. The workspace is kept between calls (a new Metal
-buffer costs 12–16 ms per GB the first time the GPU uses it), grows when a
-call needs more, and is freed by `ab_shutdown()`.
+**What a call keeps.** Strassen-Winograd takes the place of each real
+product inside the GEMM that would have made it, so everything the GEMM
+does around the product stays as it is:
+- the power-of-two scale of each matrix (data outside FP32's exponent
+  range, 1.5.0). The blocks of A share A's scale and those of B share B's,
+  so every sum adds values on one scale and every product carries A's plus
+  B's, as the classical product does. Scaled data gives the unscaled data's
+  result times the scales, bit for bit;
+- the choice between Gauss-3M and 4M for ZGEMM (1.5.0): per matrix in the
+  native API, per row and column in the BLAS ABI and the device API;
+- the BLAS ABI's staged path, with its conversions, line scales and
+  epilogue on the GPU, and its guard and fallbacks.
 
-**Threads.** Calls that use the workspace run one at a time; a second
-thread's Strassen call waits for the first.
+**Lines with scales of their own.** The BLAS ABI scales each row of op(A)
+and column of op(B) whose largest entry lies outside 2^±20 by its own power
+of two (1.5.0). The classical product never adds one line to another, so
+that is exact for it. Strassen-Winograd's block sums do: S2 = A21 + A22 − A11
+adds row i of A to row M/2 + i. Rows on scales 2^30 apart would put the
+larger one's rounding error into the other's elements, about 2^30 times the
+normwise bound. So a BLAS-ABI call with any line scaled takes classical
+products, on the staged path (which learns the scales on the GPU and waits
+for them before it encodes the products) and on the host path alike.
+
+**Memory.** Each real product needs a workspace of two ⌈M/2⌉ × ⌈K/2⌉
+blocks, two ⌈K/2⌉ × ⌈N/2⌉ and three ⌈M/2⌉ × ⌈N/2⌉: 1.75 N² double-float
+values, 14 bytes per element of a square C, so 940 MB at N = 8192. A ZGEMM's
+three or four products run one after another and share one workspace, next
+to the Gauss-3M or 4M temporaries the classical ZGEMM also takes (4 N² for a
+square N): 5.75 N² in all, 3.1 GB at 8192. The workspace comes from the same
+pool as those temporaries (`AB_STAGING_MB`, default 2048 MB), which keeps
+buffers between calls because a new Metal buffer is slow the first time the
+GPU uses it. The pool grows a buffer by an eighth more than a call asks for,
+and what it holds beyond the cap is freed when a call returns, so a ZGEMM at
+8192 gets new buffers on every call unless `AB_STAGING_MB` is about 3500 or
+more.
+
+**Threads.** Each call takes its own buffers from the pool, so Strassen
+calls on different threads run side by side, as the classical ones do.
 
 ## How it works
 
@@ -53,14 +87,15 @@ C11 = P1 + P2    C12 = U4 + P3    C21 = U3 − P4  C22 = U3 + P5
 ```
 
 (Boyer, Dumas, Pernet and Zhou, ISSAC 2009, Algorithm 1). `src/strassen.m`
-encodes one call in one serial compute encoder of one command buffer, so each
-step sees the writes of the ones before it:
+encodes one product in one serial compute encoder, inside the command buffer
+of the GEMM it serves (`src/strassen.h`), so each step sees the writes of the
+ones before it, and the GEMM's steps after it see C whole:
 
 - **The 7 products** run on the library's own GEMM kernels, dispatched exactly
-  as the classical ZGEMM dispatches its products, so any change to the kernels
-  or their dispatch applies to them too. They need contiguous operands: the
-  sums S and T are written that way, and P1–P4's quadrant operands are
-  copied (6 copies).
+  as the classical GEMMs dispatch their products, so any change to the kernels
+  or their dispatch, `AB_PRECISION=fast` included, applies to them too. They
+  need contiguous operands: the sums S and T are written that way, and P1–P4's
+  quadrant operands are copied (6 copies).
 - **Everything else** is one kernel, `dd_block_combine`: Z = X, X + Y or
   X − Y on blocks of row-major matrices with offsets and leading dimensions of
   their own, the block reading as zero beyond its matrix. It forms the S and T
@@ -77,6 +112,14 @@ The DD arithmetic is the library's: the MSL in `strassen.m` repeats
 compiled without fast math as the library's shaders are.
 
 ## Speed
+
+These runs are from October 20, 2026, at 274e778: before the port, on 1.4.0's
+kernels and its BLAS ABI. Since then 1.5.0 made the kernels faster with the
+same bits (float4 tile loads, 32 × 32 tiles for small grids, register
+prefetch, concurrent Gauss-3M products), kept the classical ZGEMM's
+temporaries between calls, and moved the BLAS ABI's conversions to the GPU
+(the staged path). All three change the comparison, so the tables below are
+not 1.6.0's; they are to be repeated on 1.6.0 before its release.
 
 **Setup.**
 - Machine and power: M2 Max (38-core GPU), macOS 27.0.1, AC power.
@@ -127,15 +170,17 @@ alone:
 | 6144 | 2212.6 ms | 1932.0 ms | 1.15× (1.14×) | 1.11× | 2935.8 ms | 1.52× |
 | 8192 | 5266 ms | 4529 ms | 1.16× (1.14×) | 1.13× | 6987 ms | 1.54× |
 
-The classical ZGEMM allocates its four Gauss-3M temporaries afresh on every
-call. Their first use costs 3–150 ms between commit and the GPU starting.
-Strassen's are kept in its workspace. That is why the wall-time speedup exceeds
-the GPU-time one. A classical ZGEMM with kept temporaries would gain the
-difference on its own.
+At 274e778 the classical ZGEMM allocated its four Gauss-3M temporaries afresh
+on every call. Their first use cost 3–150 ms between commit and the GPU
+starting, while Strassen's were kept in its workspace. That is why the
+wall-time speedup exceeds the GPU-time one. Since 1.5.0 the classical ZGEMM
+keeps its temporaries too (pooled ZGEMM temporaries), so on 1.6.0 the
+wall-time speedup should fall toward the GPU-time column.
 
 **Through the BLAS ABI** (`ab_*gemm_blas`, column-major FP64 in and out,
-`AB_MODE=gpu`): Strassen speeds up the whole call less than the native one.
-Packing, FP64 ⇄ DD conversion and the epilogue take the same time as before.
+`AB_MODE=gpu`; at 274e778 the host path, which converted on the CPU):
+Strassen speeds up the whole call less than the native one. Packing,
+FP64 ⇄ DD conversion and the epilogue take the same time as before.
 
 | call | GPU | GPU with `AB_STRASSEN=1` | speedup |
 |---|---:|---:|---:|
@@ -178,8 +223,8 @@ Odd dimensions cost a little. 4097³ splits into 2049³ products, each with a
 half-size products fill the GPU poorly lose: 2048 × 32768 × 2048 has
 1024 × 1024 outputs per product, 256 threadgroups.
 
-Strassen's first call for a shape grows the workspace: 31 ms more than a
-later call at 4096 and 48 ms at 8192. The first call in a process also
+Strassen's first call for a shape grows the workspace (now the pool's
+buffers): 31 ms more than a later call at 4096 and 48 ms at 8192. The first call in a process also
 compiles its kernel, about 20 ms. From about 2.5 GB of buffers per command
 buffer (DGEMM 8192, ZGEMM ≥ 6144), each Strassen call shows 12–50 ms
 between commit and the GPU starting, about 1% of the call. Shared and private
@@ -258,8 +303,12 @@ relative to ‖ |A||B| ‖_F: losing the DD low words would exceed it.
 
 Errors against a Dot2 reference of all of C (compensated FP64, as accurate
 as twice FP64 precision), `bench_strassen accuracy` at 274e778
-([data](../benchmarks/results/2026-10-20-274e778-strassen/)). The three
-kinds of data are:
+([data](../benchmarks/results/2026-10-20-274e778-strassen/)). The algorithm
+is unchanged by the port, and 1.5.0's kernel changes keep every product's
+bits, so these errors are expected to hold on 1.6.0 for the default
+precision; they are to be measured again with the speed runs. Under
+`AB_PRECISION=fast` the products use its accumulation, a combination that
+has not been measured. The three kinds of data are:
 
 - **uniform**: entries uniform in [−1, 1);
 - **positive**: entries in [0, 1), so there is no cancellation and |C| = |A||B|;
@@ -331,14 +380,40 @@ reference:
   the classical GEMM within its componentwise bound (K + 2) u.
 - Epilogue: alpha and beta, and beta = 0 with NaN in C.
 - ZGEMM, against the same bounds.
+- ZGEMM with imaginary parts 2⁻²⁴ of the real ones: it runs as 4M, and each
+  part stays within twice the bound for its own size (Gauss-3M would put Ci's
+  error at about 10⁻⁵ of that size, 700 times the bound).
+- Scaled data: A near 2⁸⁴, B near 2⁻²⁰ and C near 2⁶⁴ (DGEMM with alpha and
+  beta), and ZGEMMs on the same scales, by Gauss-3M (Ai 2⁻²⁰ of Ar, whose sum
+  needs them aligned) and by 4M (both imaginary parts 2⁻²⁰ of the real ones,
+  whose products are rescaled before they are combined), give the unscaled
+  results times the scales, bit for bit, and the unscaled ZGEMMs are within
+  the bound (the comparison alone would pass if both runs went wrong alike).
 - Argument checks.
 - Bitwise determinism after the workspace served other shapes and after
   `ab_shutdown()`.
 - Routing, in child processes with their own environment: `AB_STRASSEN`
   unset or 0 leaves every GEMM bitwise classical even with
   `AB_STRASSEN_MIN=1`. `AB_STRASSEN=1` sends a call with M, N, K ≥ the
-  threshold to Strassen, bitwise, through the native API and through
-  `dgemm_` and `zgemm_`, and leaves smaller ones classical.
+  threshold to Strassen, bitwise, through the native API, through `dgemm_`
+  and `zgemm_` (balanced and 4M) on the staged path and on the host path
+  (`AB_HOST_PACK=1`), and through `ab_dev_dgemm` and `ab_dev_zgemm`, and
+  leaves smaller ones classical.
+- Lines with scales of their own: `dgemm_` and `zgemm_`, on the staged path
+  and on the host path, whose rows of op(A) from M/2 on are 2⁻²¹ of the
+  others take classical products, every element within the classical
+  componentwise bound of its own |A||B|.
+- The library's own uses of its GEMMs (ZHERK, a one-element
+  `ab_zgemm_batched`, DTRSM, `ab_dgesv_mpir`) give the same bits with
+  `AB_STRASSEN=1 AB_STRASSEN_MIN=1` as without.
+
+Each of these planted defects fails a test: the scales ignored and 3M
+forced, as before the port (the scaled-data, 4M and staged-4M checks); the
+line-scale rule off on the staged path or on the host path (the lines checks
+of that path); the library's own uses routed (`test_routing_internal`);
+Gauss-3M's alignment skipped (the unscaled ZGEMM of `test_scaled_data`); 4M's
+rescaling skipped (`test_zgemm_imbalanced`, `test_scaled_data`'s 4M and the
+staged-4M check).
 
 `test_dgemm_scaled_rows` prints the case the componentwise bound is about. It
 uses a 512³ product whose rows of A are scaled by 2^e, e ∈ [−20, 20]. The

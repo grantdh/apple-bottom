@@ -1041,9 +1041,10 @@ static void zgemm_blas(
 
     // Compute C = op(A) * op(B), by 4M where some row of op(A) and column of
     // op(B) are imbalanced enough to cost Gauss-3M's imaginary part its
-    // accuracy (ab_internal.h).
+    // accuracy, by classical products where a line has a scale of its own
+    // (ab_internal.h).
     if (ab_internal_zgemm(AB_NO_TRANS, AB_NO_TRANS, mAr, mAi, mBr, mBi, mCr, mCi,
-                          ab_lines_method(&sa, &sb)) != AB_OK)
+                          ab_lines_method(&sa, &sb), ab_lines_products(ra, cb)) != AB_OK)
         goto cleanup;
     prof_kernel(p);
 
@@ -1187,8 +1188,10 @@ static void dgemm_blas(
         prof_stage(p, AB_PROF_STAGE_PACK);
     }
 
-    // Compute C = alpha*A*B + beta*C on GPU
-    if (ab_dgemm_scaled(alpha_s, mA, mB, beta_s, mC) != AB_OK) goto cleanup;
+    // Compute C = alpha*A*B + beta*C on GPU, by classical products where a
+    // line has a scale of its own (ab_internal.h)
+    if (ab_internal_dgemm_scaled(alpha_s, mA, mB, beta_s, mC, ab_lines_products(ra, cb)) != AB_OK)
+        goto cleanup;
     prof_kernel(p);
 
     // Download result (row-major to column-major); bit for bit

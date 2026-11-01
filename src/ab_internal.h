@@ -286,11 +286,35 @@ static inline ab_zgemm_method_t ab_lines_method(const ab_line_stats_t* sa,
 // Entry points of apple_bottom.m
 // =============================================================================
 
+// How a GEMM forms its real products (src/strassen.h): as AB_STRASSEN says,
+// always by Strassen-Winograd (ab_dgemm_strassen, ab_zgemm_strassen), or
+// always classically. Classical: the library's own uses of its GEMMs (ZHERK,
+// DTRSM, iterative refinement, one-element batches), and BLAS-ABI calls whose
+// rows of op(A) or columns of op(B) carry scales of their own, which
+// Strassen-Winograd's block sums would add across scales.
+typedef enum {
+    AB_PRODUCTS_ROUTED,
+    AB_PRODUCTS_STRASSEN,
+    AB_PRODUCTS_CLASSICAL,
+} ab_products_t;
+
+// The products of a BLAS-ABI GEMM on the host path, from its lines' scales
+// (ab_line_scales: ra for op(A)'s rows, cb for op(B)'s columns, NULL if none
+// is scaled). The staged path makes the same choice on the GPU's scales.
+static inline ab_products_t ab_lines_products(const int* ra, const int* cb) {
+    return ra || cb ? AB_PRODUCTS_CLASSICAL : AB_PRODUCTS_ROUTED;
+}
+
+// C = alpha*A*B + beta*C as ab_dgemm_scaled computes it, its products as
+// products says.
+ABStatus ab_internal_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C,
+                                  ab_products_t products);
+
 // C = op(A) op(B) for split-complex A (Ar, Ai) and B (Br, Bi), as ab_zgemm_ex
-// computes it, by the given method.
+// computes it, by the given method, its products as products says.
 ABStatus ab_internal_zgemm(ABTranspose transA, ABTranspose transB, ABMatrix Ar, ABMatrix Ai,
                            ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci,
-                           ab_zgemm_method_t method);
+                           ab_zgemm_method_t method, ab_products_t products);
 
 // Uploads row-major rows x cols data (the matrix's own shape) as
 // x * 2^-(row_exp[i] + col_exp[j] + shift) into m, whose power-of-two scale

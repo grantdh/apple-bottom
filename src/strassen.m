@@ -1,11 +1,11 @@
 // =============================================================================
-// strassen.m — one-level Strassen-Winograd over the double-float GEMM (opt-in)
+// strassen.m — one level of Strassen-Winograd over the double-float GEMM (opt-in)
 // Copyright (c) 2026 Grant Heileman, Technology Residue. MIT License.
 // =============================================================================
 //
 // The DD GEMM kernel runs close to the GPU's instruction-issue ceiling, so a
 // large product gets faster only by doing less work. One level of Winograd's
-// variant of Strassen's algorithm computes C = A*B from 7 products of
+// variant of Strassen's algorithm computes P = X*Y from 7 products of
 // half-size blocks instead of 8, plus 15 block additions (Boyer, Dumas,
 // Pernet and Zhou, ISSAC 2009, Alg. 1):
 //
@@ -15,27 +15,33 @@
 //   S4 = A12 - S2    T4 = T2 - B21    P4 = A22 T4
 //   C11 = P1 + P2    C12 = U4 + P3    C21 = U3 - P4  C22 = U3 + P5
 //
-// A (M x K), B (K x N) and C (M x N) split into ceil(M/2) x ceil(K/2),
-// ceil(K/2) x ceil(N/2) and ceil(M/2) x ceil(N/2) blocks. The trailing blocks
-// of an odd dimension read as zero beyond the matrix and are cropped when C
-// is written, so every shape works.
+// with A = X, B = Y and C = P. X (M x K), Y (K x N) and P (M x N) split into
+// ceil(M/2) x ceil(K/2), ceil(K/2) x ceil(N/2) and ceil(M/2) x ceil(N/2)
+// blocks. The trailing blocks of an odd dimension read as zero beyond the
+// matrix and are cropped when P is written, so every shape works.
 //
-// The products run on the library's GEMM kernels, dispatched as the classical
-// ZGEMM dispatches its products (ab_internal_encode_dgemm), on contiguous
-// workspace blocks. Every other step is one kernel, dd_block_combine:
-// Z = X, X + Y or X - Y on blocks of row-major matrices with offsets and
-// leading dimensions of their own, followed, when it writes C, by the GEMM
-// epilogue alpha*Z + beta*Z_old. It forms the S and T sums straight from the
-// quadrants of A and B, and the last additions write C's quadrants: only the
-// operands of P1-P4 are copied. A call is one serial compute encoder in one
-// command buffer, so each step sees the writes of the steps before it.
+// The half-size products run on the library's GEMM kernels, as its GEMMs
+// encode their products (ab_internal_encode_product), on whole workspace
+// matrices. Every other step is one kernel, dd_block_combine: Z = X, X + Y or
+// X - Y on blocks of row-major matrices with offsets and leading dimensions
+// of their own, followed, when it writes P, by the GEMM epilogue
+// alpha*Z + beta*Z_old. It forms the S and T sums straight from the
+// quadrants of X and Y, and the last additions write P's quadrants: only the
+// operands of P1-P4 are copied. The steps go in one serial compute encoder,
+// so each sees the writes of the steps before it.
 //
-// Workspace: two ceil(M/2) x ceil(K/2) blocks, two ceil(K/2) x ceil(N/2) and
-// three ceil(M/2) x ceil(N/2), 1.75 N^2 DD values for a square N; ZGEMM adds
-// M x K, K x N and M x N for Gauss-3M's sums and one of its products. It is
-// kept for the next call, grown when a call needs more and freed by
-// ab_shutdown(): a fresh Metal buffer costs ~12-16 ms per GB the first time
-// the GPU uses it. A mutex serializes the calls that use it.
+// Workspace (strassen.h): two ceil(M/2) x ceil(K/2) matrices, two
+// ceil(K/2) x ceil(N/2) and three ceil(M/2) x ceil(N/2), 1.75 N^2 DD values
+// for a square N. apple_bottom.m takes them from the staging pool, which
+// keeps them between calls, as it keeps the ZGEMMs' temporaries.
+//
+// Scales: the blocks of X share X's power-of-two scale and those of Y share
+// Y's, so every sum adds values on one scale and every product has X's plus
+// Y's, as the classical product does. The caller gives P that scale (or the
+// scale its epilogue's alpha and beta were adjusted to). The sums add rows of
+// X, and columns of Y, from different quadrants, so the lines of the DD
+// operands must be on one scale too: the BLAS ABI's calls with lines scaled
+// one by one take classical products instead (ab_internal.h).
 //
 // Accuracy (docs/STRASSEN.md): the classical GEMM's error is bounded
 // componentwise, |C - Ĉ| <= γ_K |A||B|; Strassen-Winograd's only normwise,
@@ -46,12 +52,12 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <os/lock.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <atomic>
 
 #include "apple_bottom.h"
-#include "apple_bottom_internal.h"
-#include "profiling/blas_profiler.h"
 #include "strassen.h"
 
 // Smallest M, N and K that AB_STRASSEN sends here unless AB_STRASSEN_MIN says
@@ -174,65 +180,58 @@ struct CombineArgs {
 
 enum : uint32_t { OP_COPY, OP_ADD, OP_SUB };
 
-// The epilogue of a write to C: C = alpha*U + beta*C if scale, else C = U.
+// Workspace matrices: two ceil(M/2) x ceil(K/2) (S sums, copies of X's
+// quadrants), two ceil(K/2) x ceil(N/2) (T sums, copies of Y's) and three
+// ceil(M/2) x ceil(N/2) (products and sums of them).
+enum { WS_A0, WS_A1, WS_B0, WS_B1, WS_C0, WS_C1, WS_C2, WS_COUNT };
+static_assert(WS_COUNT == AB_STRASSEN_WORKSPACE, "strassen.h's workspace size");
+
+// A block of m, as dd_block_combine reads or writes it; a product takes
+// whole workspace matrices.
+struct Operand {
+    ABMatrix m;
+    Block b;
+};
+
+// The epilogue of a write to P: P = alpha*U + beta*P if scale, else P = U.
 struct Epilogue {
     bool scale;
     DDF alpha, beta;
 };
 
-// A block of a matrix in buf, as dd_block_combine reads or writes it.
-struct Operand {
-    __unsafe_unretained id<MTLBuffer> buf;
-    Block b;
-};
-
-// Workspace buffers: two ceil(M/2) x ceil(K/2) blocks (S sums, copies of A's
-// quadrants), two ceil(K/2) x ceil(N/2) (T sums, copies of B's), three
-// ceil(M/2) x ceil(N/2) (products and sums of them) and, for ZGEMM, M x K
-// (Ar + Ai), K x N (Br + Bi) and M x N (Ai Bi).
-enum { WS_A0, WS_A1, WS_B0, WS_B1, WS_C0, WS_C1, WS_C2, WS_ZA, WS_ZB, WS_ZC, WS_COUNT };
-
-struct Workspace {
+struct Combine {
     id<MTLDevice> device;
-    id<MTLComputePipelineState> combine;
-    id<MTLBuffer> buf[WS_COUNT];
+    id<MTLComputePipelineState> pso;
 };
 }  // namespace
 
+// x as DD, as fp64_to_dd gives it.
 static DDF to_dd(double x) {
     float hi = (float)x;
     return {hi, (float)(x - (double)hi)};
 }
 
-static uint64_t now_ns(void) { return ab_prof_ticks_to_ns(ab_prof_now_ticks()); }
-
-// All of the row-major rows x cols matrix at the start of buf.
-static Operand whole(id<MTLBuffer> buf, uint32_t rows, uint32_t cols) {
-    return {buf, {0, cols, rows, cols}};
-}
-
-static Operand matrix(ABMatrix m) {
+// All of m.
+static Operand whole(ABMatrix m) {
     int rows, cols;
     ab_matrix_dims(m, &rows, &cols);
-    return whole(ab_internal_matrix_buffer(m), rows, cols);
+    return {m, {0, (uint32_t)cols, (uint32_t)rows, (uint32_t)cols}};
 }
 
 // Block (qi, qj) of m split into h x w blocks; it reads as zero beyond m.
 static Operand quadrant(const Operand &m, uint32_t h, uint32_t w, uint32_t qi, uint32_t qj) {
     uint32_t r0 = qi * h, c0 = qj * w;
-    return {m.buf, {m.b.offset + r0 * m.b.ld + c0, m.b.ld, MIN(h, m.b.rows - r0),
-                    MIN(w, m.b.cols - c0)}};
+    return {m.m,
+            {m.b.offset + r0 * m.b.ld + c0, m.b.ld, MIN(h, m.b.rows - r0), MIN(w, m.b.cols - c0)}};
 }
 
 // =============================================================================
-// Workspace
+// Pipeline
 // =============================================================================
 
-// Never freed at exit, only by ab_shutdown(): a fork()ed child, which cannot
-// use Metal, must not release the parent's buffers. g_lock is held by a call
-// from reserving the workspace until its command buffer completes.
-static Workspace *g_ws;
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+// Built once per device and never freed, so a call reads it without a lock.
+static std::atomic<const Combine *> g_combine{nullptr};
+static os_unfair_lock g_combine_lock = OS_UNFAIR_LOCK_INIT;
 
 static id<MTLComputePipelineState> build_combine(id<MTLDevice> dev) {
     MTLCompileOptions *opts = [[MTLCompileOptions alloc] init];
@@ -262,34 +261,20 @@ static id<MTLComputePipelineState> build_combine(id<MTLDevice> dev) {
     return pso;
 }
 
-// The workspace, its pipeline built on first use; NULL if Metal refuses the
-// pipeline. Called with g_lock held.
-static Workspace *workspace(id<MTLDevice> dev) {
-    if (!g_ws) {
+// The pipeline for dev, built on first use; NULL if it cannot be.
+static const Combine *combine_for(id<MTLDevice> dev) {
+    const Combine *c = g_combine.load(std::memory_order_acquire);
+    if (c && c->device == dev) return c;
+    os_unfair_lock_lock(&g_combine_lock);
+    c = g_combine.load(std::memory_order_relaxed);
+    if (!c || c->device != dev) {
+        // A replaced one stays allocated: another thread may still use it.
         id<MTLComputePipelineState> pso = build_combine(dev);
-        if (!pso) return NULL;
-        g_ws = new Workspace();
-        g_ws->device = dev;
-        g_ws->combine = pso;
+        c = pso ? new Combine{dev, pso} : NULL;
+        if (c) g_combine.store(c, std::memory_order_release);
     }
-    return g_ws;
-}
-
-// Makes ws->buf[i] hold n DD values; false if Metal refuses. A buffer that
-// grows is released first, so the old and new ones are never held together.
-static bool reserve(Workspace *ws, int i, size_t n) {
-    size_t bytes = n * sizeof(DDF);
-    if (ws->buf[i] && ws->buf[i].length >= bytes) return true;
-    ws->buf[i] = nil;
-    ws->buf[i] = [ws->device newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
-    return ws->buf[i] != nil;
-}
-
-void ab_internal_strassen_release(void) {
-    pthread_mutex_lock(&g_lock);
-    delete g_ws;
-    g_ws = NULL;
-    pthread_mutex_unlock(&g_lock);
+    os_unfair_lock_unlock(&g_combine_lock);
+    return c;
 }
 
 // =============================================================================
@@ -298,18 +283,20 @@ void ab_internal_strassen_release(void) {
 
 namespace {
 struct Encoder {
+    id ctx;
     id<MTLComputeCommandEncoder> enc;
-    const Workspace *ws;
+    id<MTLComputePipelineState> combine;
+    const ABMatrix *W;
 
     // z = x op y, then the epilogue if e says so.
     void op(uint32_t code, const Operand &z, const Operand &x, const Operand &y,
             Epilogue e) const {
-        if (!z.b.rows || !z.b.cols) return;  // a trailing block of C with nothing in it
+        if (!z.b.rows || !z.b.cols) return;  // a trailing block of P with nothing in it
         CombineArgs a = {x.b, y.b, z.b, code, e.scale, e.alpha, e.beta};
-        [enc setComputePipelineState:ws->combine];
-        [enc setBuffer:x.buf offset:0 atIndex:0];
-        [enc setBuffer:y.buf offset:0 atIndex:1];
-        [enc setBuffer:z.buf offset:0 atIndex:2];
+        [enc setComputePipelineState:combine];
+        [enc setBuffer:ab_internal_matrix_buffer(x.m) offset:0 atIndex:0];
+        [enc setBuffer:ab_internal_matrix_buffer(y.m) offset:0 atIndex:1];
+        [enc setBuffer:ab_internal_matrix_buffer(z.m) offset:0 atIndex:2];
         [enc setBytes:&a length:sizeof a atIndex:3];
         [enc dispatchThreads:MTLSizeMake(z.b.cols, z.b.rows, 1)
             threadsPerThreadgroup:MTLSizeMake(64, 4, 1)];
@@ -322,22 +309,19 @@ struct Encoder {
         op(OP_SUB, z, x, y, e);
     }
 
-    // p = x * y on whole workspace blocks.
+    // p = x * y on whole workspace matrices.
     void gemm(const Operand &p, const Operand &x, const Operand &y) const {
-        ab_internal_encode_dgemm(enc, x.buf, y.buf, p.buf, p.b.rows, p.b.cols, x.b.cols);
+        ab_internal_encode_product(ctx, enc, x.m, y.m, p.m);
     }
 
-    // Workspace buffer i as a rows x cols block.
-    Operand slot(int i, uint32_t rows, uint32_t cols) const {
-        return whole(ws->buf[i], rows, cols);
-    }
+    Operand slot(int i) const { return whole(W[i]); }
 };
 }  // namespace
 
 // C = A*B by one level of Strassen-Winograd, through epi when it writes C. The
 // order keeps three product blocks live, not seven.
 static void encode_winograd(const Encoder &e, const Operand &A, const Operand &B,
-                            const Operand &C, Epilogue epi = {}) {
+                            const Operand &C, Epilogue epi) {
     uint32_t m = (A.b.rows + 1) / 2, k = (A.b.cols + 1) / 2, n = (B.b.cols + 1) / 2;
     Operand a11 = quadrant(A, m, k, 0, 0), a12 = quadrant(A, m, k, 0, 1),
             a21 = quadrant(A, m, k, 1, 0), a22 = quadrant(A, m, k, 1, 1);
@@ -345,9 +329,9 @@ static void encode_winograd(const Encoder &e, const Operand &A, const Operand &B
             b21 = quadrant(B, k, n, 1, 0), b22 = quadrant(B, k, n, 1, 1);
     Operand c11 = quadrant(C, m, n, 0, 0), c12 = quadrant(C, m, n, 0, 1),
             c21 = quadrant(C, m, n, 1, 0), c22 = quadrant(C, m, n, 1, 1);
-    Operand x = e.slot(WS_A0, m, k), z = e.slot(WS_A1, m, k);
-    Operand y = e.slot(WS_B0, k, n), w = e.slot(WS_B1, k, n);
-    Operand pa = e.slot(WS_C0, m, n), pb = e.slot(WS_C1, m, n), pc = e.slot(WS_C2, m, n);
+    Operand x = e.slot(WS_A0), z = e.slot(WS_A1);
+    Operand y = e.slot(WS_B0), w = e.slot(WS_B1);
+    Operand pa = e.slot(WS_C0), pb = e.slot(WS_C1), pc = e.slot(WS_C2);
 
     // C11 = P1 + P2 = A11 B11 + A12 B21, on copies of the quadrants.
     e.copy(z, a11); e.copy(w, b11); e.gemm(pa, z, w);             // pa = P1
@@ -371,82 +355,30 @@ static void encode_winograd(const Encoder &e, const Operand &A, const Operand &B
     e.sub(c21, pc, pb, epi);
 }
 
-// Runs encode(e) on the workspace, reserved for an M x K by K x N product
-// (and ZGEMM's sums and product if complex_gemm) and held until the GPU is
-// done, in a command buffer of its own.
-template <typename F>
-static ABStatus run(bool complex_gemm, size_t M, size_t N, size_t K, F encode) {
-    id<MTLCommandQueue> queue = ab_internal_command_queue();
-    if (!queue) return AB_ERROR_NO_DEVICE;
-    size_t m = (M + 1) / 2, n = (N + 1) / 2, k = (K + 1) / 2, sizes[WS_COUNT] = {};
-    sizes[WS_A0] = sizes[WS_A1] = m * k;
-    sizes[WS_B0] = sizes[WS_B1] = k * n;
-    sizes[WS_C0] = sizes[WS_C1] = sizes[WS_C2] = m * n;
-    if (complex_gemm) {
-        sizes[WS_ZA] = M * K;
-        sizes[WS_ZB] = K * N;
-        sizes[WS_ZC] = M * N;
-    }
-
-    pthread_mutex_lock(&g_lock);
-    uint64_t t0 = now_ns();
-    Workspace *ws = workspace(queue.device);
-    ABStatus status = ws ? AB_OK : AB_ERROR_SHADER_COMPILE;
-    for (int i = 0; status == AB_OK && i < WS_COUNT; i++)
-        if (sizes[i] && !reserve(ws, i, sizes[i])) status = AB_ERROR_ALLOC_FAILED;
-    if (status == AB_OK)
-        status = ab_internal_run_gemm(complex_gemm, now_ns() - t0,
-                                      ^(id<MTLComputeCommandEncoder> enc) {
-                                          encode(Encoder{enc, ws});
-                                      });
-    pthread_mutex_unlock(&g_lock);
-    return status;
-}
-
 // =============================================================================
-// Entry points
+// Entry points (strassen.h)
 // =============================================================================
 
-ABStatus ab_dgemm_strassen(double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C) {
-    @autoreleasepool {
-        if (!A || !B || !C) return AB_ERROR_INVALID_ARG;
-        Operand a = matrix(A), b = matrix(B), c = matrix(C);
-        if (a.b.cols != b.b.rows || a.b.rows != c.b.rows || b.b.cols != c.b.cols)
-            return AB_ERROR_DIMENSION_MISMATCH;
-
-        // C = A*B needs no epilogue, as in ab_dgemm.
-        Epilogue epi = {alpha != 1.0 || beta != 0.0, to_dd(alpha), to_dd(beta)};
-        return run(false, a.b.rows, b.b.cols, a.b.cols,
-                   [&](const Encoder &e) { encode_winograd(e, a, b, c, epi); });
+bool ab_internal_strassen_prepare(id<MTLDevice> dev, int M, int N, int K,
+                                  int rows[AB_STRASSEN_WORKSPACE],
+                                  int cols[AB_STRASSEN_WORKSPACE]) {
+    if (!combine_for(dev)) return false;
+    int m = (M + 1) / 2, n = (N + 1) / 2, k = (K + 1) / 2;
+    const int r[WS_COUNT] = {m, m, k, k, m, m, m}, c[WS_COUNT] = {k, k, n, n, n, n, n};
+    for (int i = 0; i < WS_COUNT; i++) {
+        rows[i] = r[i];
+        cols[i] = c[i];
     }
+    return true;
 }
 
-// Gauss-3M as ab_zgemm computes it, each real product by Strassen-Winograd:
-// Ci = (Ar + Ai)(Br + Bi), Cr = Ar Br, T = Ai Bi; Ci = (Ci - Cr) - T, Cr = Cr - T.
-ABStatus ab_zgemm_strassen(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
-                           ABMatrix Cr, ABMatrix Ci) {
-    @autoreleasepool {
-        if (!Ar || !Ai || !Br || !Bi || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
-        Operand ar = matrix(Ar), ai = matrix(Ai), br = matrix(Br), bi = matrix(Bi);
-        Operand cr = matrix(Cr), ci = matrix(Ci);
-        uint32_t M = ar.b.rows, K = ar.b.cols, N = br.b.cols;
-        if (ai.b.rows != M || ai.b.cols != K || br.b.rows != K || bi.b.rows != K ||
-            bi.b.cols != N || cr.b.rows != M || cr.b.cols != N || ci.b.rows != M ||
-            ci.b.cols != N)
-            return AB_ERROR_DIMENSION_MISMATCH;
-
-        return run(true, M, N, K, [&](const Encoder &e) {
-            Operand sa = e.slot(WS_ZA, M, K), sb = e.slot(WS_ZB, K, N), t = e.slot(WS_ZC, M, N);
-            e.add(sa, ar, ai);
-            e.add(sb, br, bi);
-            encode_winograd(e, sa, sb, ci);
-            encode_winograd(e, ar, br, cr);
-            encode_winograd(e, ai, bi, t);
-            e.sub(ci, ci, cr);
-            e.sub(ci, ci, t);
-            e.sub(cr, cr, t);
-        });
-    }
+void ab_internal_encode_strassen(id ctx, id<MTLCommandBuffer> cmdBuf, double alpha, ABMatrix X,
+                                 ABMatrix Y, double beta, ABMatrix P,
+                                 const ABMatrix W[AB_STRASSEN_WORKSPACE]) {
+    Encoder e = {ctx, [cmdBuf computeCommandEncoder], combine_for(cmdBuf.device)->pso, W};
+    encode_winograd(e, whole(X), whole(Y), whole(P),
+                    {alpha != 1.0 || beta != 0.0, to_dd(alpha), to_dd(beta)});
+    [e.enc endEncoding];
 }
 
 // =============================================================================

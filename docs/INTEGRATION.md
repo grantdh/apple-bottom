@@ -490,7 +490,9 @@ The BLAS-ABI entry points (`dgemm_`, `zgemm_`, `ab_dgemm_`, `ab_zgemm_`,
 `zhemv_`, `ab_*gemv_blas`, `ab_zhemv_blas`) read these once per process, at
 their first call. The native `ABMatrix` and device APIs do not use them,
 except `AB_PREFETCH` and `AB_PRECISION`, which the library reads when it
-initializes and which apply to every API. `AB_DISPATCH_TABLE`, the FLOP thresholds and
+initializes and which apply to every API, and `AB_STRASSEN` and
+`AB_STRASSEN_MIN`, read at the first GEMM that could use them, which apply
+to the native, BLAS-ABI and device-API GEMMs (below). `AB_DISPATCH_TABLE`, the FLOP thresholds and
 `AB_TRACE` concern GEMM only; BLAS-2 calls are counted in `AB_REPORT` and
 `AB_PROFILE` as `dgemv`, `zgemv` and `zhemv`.
 
@@ -511,6 +513,8 @@ initializes and which apply to every API. `AB_DISPATCH_TABLE`, the FLOP threshol
 | `AB_PROFILE_THRESHOLD_NS` | `0` | Count only calls that took at least this many ns, in both reports. |
 | `AB_TRACE` | unset | A path: each process appends one line per call to `<path>.<pid>` (see [Per-call trace](#per-call-trace-ab_trace)). Unset or empty: no trace. |
 | `AB_TRACE_HASH` | off | With `AB_TRACE`, `1`: also hash the operands each call reads. |
+| `AB_STRASSEN` | off | `1`: GPU GEMMs with M, N and K ≥ `AB_STRASSEN_MIN` take each real product by one level of Strassen-Winograd (7 half-size products instead of 8; normwise error bound only): the native `ab_dgemm`, `ab_dgemm_scaled`, `ab_zgemm` and `ab_zgemm_ex`, the BLAS ABI on its staged and host paths, and the device API, but not the batched, asynchronous or `ab_batch_*` GEMMs, the library's own uses of its GEMMs (ZHERK, DTRSM, `ab_dgesv_mpir`), or BLAS-ABI calls with a row of op(A) or column of op(B) outside 2^±20, which the guard scales line by line. The GEMM keeps its scales and its choice of Gauss-3M or 4M. See [Strassen-Winograd](STRASSEN.md). |
+| `AB_STRASSEN_MIN` | `4096` | With `AB_STRASSEN=1`: the smallest M, N and K that use it. |
 | `AB_HOST_PACK` | off | `1`: every GPU call takes the host path (host pack, FP64 → DD and epilogue) instead of the staged path. The results are the same bits either way. |
 | `AB_STAGING_MB` | `2048` | The GPU buffers kept between calls by the staged path, by the native ZGEMMs (their Gauss-3M or 4M temporaries) and by the device-buffer API (its operands in double-float), at most this many MB per process; `0`: none kept, each call makes its own (and pays for fresh buffers). |
 | `AB_TEST_FAIL_STAGE` | unset | Test-only. `alloc`: every GPU buffer allocation (`ab_matrix_create()`, and the buffer pool's) fails; `kernel`: the command buffer of every `ab_dgemm_scaled()`, `ab_zgemm()` and staged call, the GEMMs of the GPU path, reports an error. A GPU-routed call then fails as it would on a real failure there and runs on Accelerate instead (a `gpu_failed` fallback). Never set it in production. |

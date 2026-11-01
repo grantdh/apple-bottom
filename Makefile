@@ -87,8 +87,12 @@ $(BUILD):
 # Library
 # =============================================================================
 
-$(BUILD)/apple_bottom.o: $(SRC)/apple_bottom.m $(SRC)/ab_internal.h $(INCLUDE)/apple_bottom.h $(SRC)/gpu_stage.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
+$(BUILD)/apple_bottom.o: $(SRC)/apple_bottom.m $(SRC)/ab_internal.h $(INCLUDE)/apple_bottom.h $(SRC)/gpu_stage.h $(SRC)/profiling/blas_profiler.h $(SRC)/strassen.h | $(BUILD)
 	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/apple_bottom.m -o $@
+
+# Opt-in one-level Strassen-Winograd products (src/strassen.h, docs/STRASSEN.md).
+$(BUILD)/strassen.o: $(SRC)/strassen.m $(SRC)/strassen.h $(INCLUDE)/apple_bottom.h | $(BUILD)
+	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/strassen.m -o $@
 
 $(BUILD)/blas_wrapper.o: $(SRC)/blas_wrapper.c $(SRC)/ab_internal.h $(SRC)/blas_trans.h $(SRC)/dispatch.h $(SRC)/gpu_stage.h $(INCLUDE)/apple_bottom.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $@
@@ -134,7 +138,7 @@ $(BUILD)/fft.o: $(SRC)/fft.m $(INCLUDE)/apple_bottom_fft.h $(INCLUDE)/apple_bott
 LIB_OBJS = $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o \
            $(BUILD)/fortran_bridge.o $(BUILD)/blas_profiler.o \
            $(BUILD)/device_api.o $(BUILD)/dispatch.o \
-           $(BUILD)/blas2.o $(BUILD)/blas2_abi.o $(BUILD)/fft.o
+           $(BUILD)/blas2.o $(BUILD)/blas2_abi.o $(BUILD)/fft.o $(BUILD)/strassen.o
 
 $(BUILD)/libapplebottom.a: $(LIB_OBJS)
 	ar rcs $@ $^
@@ -247,6 +251,15 @@ $(BUILD)/test_staging: tests/test_staging.c tests/test_blas_check.h tests/test_s
 	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
+# Opt-in Strassen-Winograd products: accuracy bounds against a Dot2 reference,
+# scaled data, 3M and 4M, and routing through the native API, dgemm_/zgemm_
+# (staged and host path, scaled lines classical), the device API and the
+# library's own GEMM uses (AB_STRASSEN, AB_STRASSEN_MIN; re-executes itself
+# with each setting).
+$(BUILD)/test_strassen: tests/test_strassen.c tests/test_blas_check.h tests/test_dot2.h tests/test_spawn.h tests/test_registry.h $(SRC)/gpu_stage.h lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
 $(BUILD)/test_convergence: tests/verification/test_convergence.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
@@ -277,7 +290,7 @@ $(BUILD)/test_dispatch: tests/test_dispatch.c $(BUILD)/dispatch.o $(SRC)/dispatc
 	$(CC) $(CFLAGS) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' $< $(BUILD)/dispatch.o -o $@ -framework IOKit -framework CoreFoundation
 	@echo "Built: $@"
 
-test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_staging $(BUILD)/test_blas2 $(BUILD)/test_fft test-ghost-detection test-symbols test-fortran
+test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_staging $(BUILD)/test_blas2 $(BUILD)/test_fft $(BUILD)/test_strassen test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "Running Tests"
@@ -292,6 +305,7 @@ test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api
 	./$(BUILD)/test_staging
 	./$(BUILD)/test_blas2
 	./$(BUILD)/test_fft
+	./$(BUILD)/test_strassen
 	@echo ""
 	@echo "✓ All tests passed!"
 
@@ -534,6 +548,11 @@ $(BUILD)/bench_split: benchmarks/bench_split.c tests/test_dot2.h lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -Itests $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) -framework IOKit -framework CoreFoundation $(EXE_RPATH)
 	@echo "Built: $@"
 
+# Strassen-Winograd speed and accuracy (docs/STRASSEN.md has the runs).
+$(BUILD)/bench_strassen: benchmarks/bench_strassen.c tests/test_blas_check.h tests/test_dot2.h $(SRC)/strassen.h $(SRC)/profiling/blas_profiler.h lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -Itests $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
 # BLAS-2 (GEMV, HEMV) in GB/s: resident and staged GPU, Accelerate, plain C
 # (see the header of benchmarks/bench_gemv.c; run it under machlock bench).
 $(BUILD)/bench_gemv: benchmarks/bench_gemv.c tests/test_blas2_ref.h tests/test_dot2.h $(SRC)/blas_trans.h lib | $(BUILD)
@@ -711,6 +730,8 @@ build-check: $(BUILD)/fft_metal_src.h | $(BUILD)/check
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c $(SRC)/blas2_abi.c -o $(BUILD)/check/blas2_abi.o
 	@echo "Compiling fft.m..."
 	@$(OBJC) $(FFT_OBJCFLAGS) -I$(INCLUDE) -I$(SRC) -I$(BUILD) -c $(SRC)/fft.m -o $(BUILD)/check/fft.o
+	@echo "Compiling strassen.m..."
+	@$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/strassen.m -o $(BUILD)/check/strassen.o
 	@echo "Compiling fft_emu.cpp and test_fft.c..."
 	@$(CXX) $(FFT_EMU_FLAGS) -c tests/fft_emu.cpp -o $(BUILD)/check/fft_emu.o
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_fft.c -o $(BUILD)/check/test_fft.o
@@ -730,6 +751,8 @@ build-check: $(BUILD)/fft_metal_src.h | $(BUILD)/check
 	@$(CC) $(CFLAGS) -I$(SRC) -c tests/test_dispatch.c -o $(BUILD)/check/test_dispatch.o
 	@echo "Compiling test_device_api.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c tests/test_device_api.c -o $(BUILD)/check/test_device_api.o
+	@echo "Compiling test_strassen.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c tests/test_strassen.c -o $(BUILD)/check/test_strassen.o
 	@echo "Compiling test_blas2.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' -c tests/test_blas2.c -o $(BUILD)/check/test_blas2.o
 	@echo "Compiling bench_gemv.c..."
@@ -738,6 +761,8 @@ build-check: $(BUILD)/fft_metal_src.h | $(BUILD)/check
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c benchmarks/calibrate.c -o $(BUILD)/check/calibrate.o
 	@echo "Compiling replay.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -Itests -c benchmarks/replay.c -o $(BUILD)/check/replay.o
+	@echo "Compiling bench_strassen.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -Itests -c benchmarks/bench_strassen.c -o $(BUILD)/check/bench_strassen.o
 	@echo "Compiling bench_split.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -Itests -c benchmarks/bench_split.c -o $(BUILD)/check/bench_split.o
 	@echo "Compiling test_chaos.c..."
@@ -754,12 +779,12 @@ build-check: $(BUILD)/fft_metal_src.h | $(BUILD)/check
 # Counting rule (also README.md, tests/README.md): TEST_TOTAL counts tests.
 # A test is one test_precision case, one TESTS[] registry entry of
 # test_correctness / test_chaos / test_device_api / test_dispatch /
-# test_trace / test_blas2 / test_fft, or one test_blas_abi suite. Device-API CHECKs and BLAS-ABI cases
+# test_trace / test_blas2 / test_fft / test_strassen, or one test_blas_abi suite. Device-API CHECKs and BLAS-ABI cases
 # are reported on their own lines and are not part of TEST_TOTAL, nor is
 # test_qe_golden (its TEST_QE_GOLDEN line says PASS, or SKIP on another device).
 # The report is written only after every binary passed, so TEST_PASSED =
 # TEST_TOTAL and TEST_FAILED = 0.
-ci-local: version-check dispatch-table-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_staging $(BUILD)/test_blas2 $(BUILD)/test_fft $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
+ci-local: version-check dispatch-table-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_staging $(BUILD)/test_blas2 $(BUILD)/test_fft $(BUILD)/test_strassen $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "CI Local Validation"
@@ -777,6 +802,7 @@ ci-local: version-check dispatch-table-check $(BUILD)/test_precision $(BUILD)/te
 	@./$(BUILD)/test_qe_golden > $(BUILD)/test_qe_golden.log 2>&1 && echo "✓ test_qe_golden: $$(sed -nE 's/^Golden bits: ([A-Z]+).*/\1/p' $(BUILD)/test_qe_golden.log)" || (echo "✗ test_qe_golden: FAIL" && cat $(BUILD)/test_qe_golden.log && exit 1)
 	@./$(BUILD)/test_staging > $(BUILD)/test_staging.log 2>&1 && echo "✓ test_staging: PASS" || (echo "✗ test_staging: FAIL" && cat $(BUILD)/test_staging.log && exit 1)
 	@./$(BUILD)/test_fft > $(BUILD)/test_fft.log 2>&1 && echo "✓ test_fft: PASS" || (echo "✗ test_fft: FAIL" && cat $(BUILD)/test_fft.log && exit 1)
+	@./$(BUILD)/test_strassen > $(BUILD)/test_strassen.log 2>&1 && echo "✓ test_strassen: PASS" || (echo "✗ test_strassen: FAIL" && cat $(BUILD)/test_strassen.log && exit 1)
 	@echo ""
 	@echo "Running convergence study (V-2)..."
 	@rm -f $(BUILD)/convergence_data.csv
@@ -794,12 +820,13 @@ ci-local: version-check dispatch-table-check $(BUILD)/test_precision $(BUILD)/te
 		TRACE=$$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_trace.log); \
 		BLAS2=$$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_blas2.log); \
 		FFT=$$(sed -nE "s/^Summary: ([0-9]+) test.*/\1/p" $(BUILD)/test_fft.log); \
+		STRASSEN=$$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_strassen.log); \
 		GOLDEN=$$(sed -nE "s/^Golden bits: //p" $(BUILD)/test_qe_golden.log); \
 		[ -n "$$GOLDEN" ] || { echo "✗ CI report: no Golden bits line in test_qe_golden.log"; exit 1; }; \
-		for n in "$$PRECISION" "$$CORRECTNESS" "$$CHAOS" "$$DEVICE_API" "$$DEVICE_API_CHECKS" "$$DISPATCH" "$$BLAS_ABI" "$$TRACE" "$$BLAS2" "$$FFT"; do \
+		for n in "$$PRECISION" "$$CORRECTNESS" "$$CHAOS" "$$DEVICE_API" "$$DEVICE_API_CHECKS" "$$DISPATCH" "$$BLAS_ABI" "$$TRACE" "$$BLAS2" "$$FFT" "$$STRASSEN"; do \
 			case "$$n" in ""|*[!0-9]*|0) echo "✗ CI report: could not read a test count from the logs"; exit 1;; esac; \
 		done; \
-		TOTAL=$$((PRECISION + CORRECTNESS + CHAOS + DEVICE_API + DISPATCH + BLAS_ABI + TRACE + BLAS2 + FFT)); \
+		TOTAL=$$((PRECISION + CORRECTNESS + CHAOS + DEVICE_API + DISPATCH + BLAS_ABI + TRACE + BLAS2 + FFT + STRASSEN)); \
 		echo "GIT_SHA: $$(git rev-parse HEAD)" > $(BUILD)/CI_REPORT.txt; \
 		echo "GIT_BRANCH: $$(git rev-parse --abbrev-ref HEAD)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "AB_BUILD_SHA: $(AB_BUILD_SHA)" >> $(BUILD)/CI_REPORT.txt; \
@@ -814,6 +841,7 @@ ci-local: version-check dispatch-table-check $(BUILD)/test_precision $(BUILD)/te
 		echo "TEST_TRACE: PASS ($$TRACE tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_BLAS2: PASS ($$BLAS2 tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_FFT: PASS ($$FFT tests)" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_STRASSEN: PASS ($$STRASSEN tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_QE_GOLDEN: $$GOLDEN" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_STAGING: PASS ($$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_staging.log) cases, the staged path against the host path)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_CONVERGENCE: PASS" >> $(BUILD)/CI_REPORT.txt; \

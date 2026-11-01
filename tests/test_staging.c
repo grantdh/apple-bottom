@@ -574,7 +574,7 @@ static uint64_t native_hash(const NativeShape *sh, NativeVia via) {
         ab_batch_destroy(b);
     } else {
         st = ab_internal_zgemm(AB_NO_TRANS, AB_NO_TRANS, m[0], m[1], m[2], m[3], m[4], m[5],
-                               via == VIA_4M ? AB_ZGEMM_4M : AB_ZGEMM_3M);
+                               via == VIA_4M ? AB_ZGEMM_4M : AB_ZGEMM_3M, AB_PRODUCTS_CLASSICAL);
     }
     return native_result(sh, m, st == AB_OK);
 }

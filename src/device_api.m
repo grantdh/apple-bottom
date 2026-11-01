@@ -536,7 +536,7 @@ ABStatus ab_dev_zgemm_offset(ABTranspose transA, ABTranspose transB,
     // rho(p, q) is symmetric, and C^T's rows and columns are op(B)'s columns
     // and op(A)'s rows, so C^T takes the decision C = op(A) * op(B) would.
     s = ab_internal_zgemm(transB, transA, mBr, mBi, mAr, mAi, mCr, mCi,
-                          ab_lines_method(&sa, &sb));
+                          ab_lines_method(&sa, &sb), AB_PRODUCTS_ROUTED);
     if (s != AB_OK) goto zgemm_cleanup;
 
     // Download (reinterleave real/imag → interleaved complex, DD→FP64) when
