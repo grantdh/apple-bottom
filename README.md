@@ -288,6 +288,7 @@ LIBS = -L/path/to/apple-bottom/build -Wl,-rpath,/path/to/apple-bottom/build -lap
 | `AB_DISPATCH_TABLE=<file>` | route from another calibration, e.g. one from your own machine |
 | `AB_HOST_PACK=1` | GPU calls pack and convert on the CPU, as in 1.4.0, instead of on the GPU; the same bits |
 | `AB_STAGING_MB=<n>` | GPU buffers kept between calls, at most n MB per process (default 2048) |
+| `AB_PRECISION=fast` | every GPU GEMM (all APIs) accumulates lazily: a few percent faster, about 1 bit less accurate, and outside the proven error bounds ([numbers](docs/INTEGRATION.md#environment-variables-and-run-reports)) |
 
 The [Integration Guide](docs/INTEGRATION.md) covers C, Fortran, Python
 (experimental bindings in [`python/`](python/)), a Quantum ESPRESSO
@@ -413,6 +414,10 @@ checked against a double-double reference and, bit for bit, against a CPU
 replay of its double-float arithmetic. `make ci-local` adds adversarial
 inputs and the convergence study;
 [tests/README.md](tests/README.md) gives the test counts.
+
+The opt-in `AB_PRECISION=fast` trades about one bit for a few percent of
+speed ([numbers](docs/INTEGRATION.md#environment-variables-and-run-reports));
+without it the kernels give the bits of 1.4.0.
 
 [V&V report](docs/vv/VV_REPORT.md) · [precision envelope](docs/vv/PRECISION_ENVELOPE.md) ·
 [limitations and scope](docs/vv/LIMITATIONS.md) ·

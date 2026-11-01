@@ -341,8 +341,14 @@ static const char* bin_labels[AB_PROF_HISTOGRAM_BINS] = {
     "1K-2K", "2K-4K", "4K-8K",  "8K+"
 };
 
+// " AB_PRECISION=fast" for the report headers in fast mode, else nothing, so
+// default-mode reports read as before.
+static const char* precision_token(void) {
+    return strcmp(ab_precision_mode(), "fast") == 0 ? " AB_PRECISION=fast" : "";
+}
+
 void ab_prof_dump(FILE* out) {
-    fprintf(out, "=== %s BLAS profile, pid %d", ab_build_info(), (int)getpid());
+    fprintf(out, "=== %s%s BLAS profile, pid %d", ab_build_info(), precision_token(), (int)getpid());
     if (g_threshold_ns)
         fprintf(out, ", calls under %llu ns not counted", (unsigned long long)g_threshold_ns);
     fprintf(out, " ===\n");
@@ -477,8 +483,8 @@ void ab_prof_report(FILE* out) {
     int pid = (int)getpid();
     report_line_t l = { .n = 0 };
     l.buf[0] = '\0';
-    line_add(&l, "AB_REPORT[%d] %s AB_MODE=%s", pid, ab_build_info(),
-             mode && *mode ? mode : "unset");
+    line_add(&l, "AB_REPORT[%d] %s AB_MODE=%s%s", pid, ab_build_info(),
+             mode && *mode ? mode : "unset", precision_token());
     if (g_threshold_ns)
         line_add(&l, " AB_PROFILE_THRESHOLD_NS=%llu", (unsigned long long)g_threshold_ns);
     // The chip and the table auto routed by (dispatch.h), so a report from
@@ -587,8 +593,8 @@ static void trace_header(int fd, pid_t pid) {
     line_add(&l, "# %s AB_TRACE pid=%d\n", ab_build_info(), (int)pid);
     // AB_MIN_GPU_DIM as the routing resolved it, so a replay routes as this run did.
     const ab_dispatch_config_t* dc = ab_dispatch_process_config();
-    line_add(&l, "# AB_MODE=%s AB_TRACE_HASH=%d AB_MIN_GPU_DIM=%d\n", mode && *mode ? mode : "unset",
-             g_trace_hash, dc->min_dim);
+    line_add(&l, "# AB_MODE=%s AB_TRACE_HASH=%d AB_MIN_GPU_DIM=%d%s\n", mode && *mode ? mode : "unset",
+             g_trace_hash, dc->min_dim, precision_token());
     // The chip and the routing table auto used (dispatch.h): a trace from
     // another machine then says what routed it. A replay routes by its own
     // machine's table.
@@ -736,6 +742,7 @@ void ab_prof_dump_json(const char* path) {
 
     fprintf(f, "{\n");
     fprintf(f, "  \"build\": \"%s\",\n", ab_build_info());
+    if (*precision_token()) fprintf(f, "  \"precision\": \"fast\",\n");
     fprintf(f, "  \"timestamp\": \"%s\",\n", ts);
     fprintf(f, "  \"pid\": %d,\n", (int)getpid());
     fprintf(f, "  \"threshold_ns\": %llu,\n", (unsigned long long)g_threshold_ns);

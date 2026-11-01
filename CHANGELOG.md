@@ -111,6 +111,22 @@ All notable changes to this project will be documented in this file.
   against FFTW (1 thread, an 8-thread plan, 8 single-thread workers) and
   vDSP, and accuracy against the double-double reference.
 
+- **`AB_PRECISION=fast`** (opt-in, read when the library initializes, every
+  API): the GEMM kernels accumulate lazily (Dot2-style). Each product's high
+  part goes into a running sum through TwoSum and every rounding error into a
+  separate running error, renormalized once per 16 terms of K. About 1 bit
+  less accurate: on `tests/test_precision.c` the normwise error is 1.8–1.9×
+  and the componentwise error 1.4–2.8× the default's; its new last case
+  re-initializes in fast mode, runs every case again and fails one above 4×.
+  The proven error bounds (`docs/vv/PRECISION_ENVELOPE.md` §1.2) cover the
+  default kernels only; none is proven for this mode. Measured on an M2 Max
+  on the kernels before register prefetch (d1a10ff), 1.05–1.11× faster for
+  DGEMM and ZGEMM of N = 2048–4096. `ab_precision_mode()` returns the mode,
+  the `AB_REPORT`, `AB_PROFILE` and `AB_TRACE` headers add
+  `AB_PRECISION=fast` in fast mode, and `make calibrate` refuses it. The
+  default kernels are compiled as before and keep the 1.4.0 bits
+  (`test_qe_golden`).
+
 ### Changed
 - **32 × 32 tiles are chosen by grid size, not output size**
   (`use_narrow_tiles` in `src/apple_bottom.m`). In 1.5.0 they took every C of

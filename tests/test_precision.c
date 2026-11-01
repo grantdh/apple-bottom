@@ -28,9 +28,11 @@
 //   normwise 0.21–0.23 √K·u² (DGEMM), 0.32 √K·u² (ZGEMM). NW_BOUND = 1.
 //   A build without MTLMathModeSafe exceeds both by more than 10⁶x.
 //
-// The first case is a MathModeSafe smoke test (exact 1x1 products).
+// The first case is a MathModeSafe smoke test (exact 1x1 products); the last
+// one compares AB_PRECISION=fast with the default mode (fast_vs_default).
 
 #include "apple_bottom.h"
+#include "test_blas_check.h"   // clear_ab_env()
 #include "test_dot2.h"
 #include "test_kernels.h"
 #include <stdio.h>
@@ -138,22 +140,51 @@ cleanup:
     return st;
 }
 
-// Returns 1 if passed, 0 if failed
-static int run_case(const PrecisionCase* pc) {
-    const int planes = n_planes(pc);
-    const size_t nA = (size_t)pc->M * pc->K, nB = (size_t)pc->K * pc->N, nC = (size_t)pc->M * pc->N;
-    double *A[2] = {NULL, NULL}, *B[2] = {NULL, NULL}, *C0 = NULL;
-    double *G[2] = {NULL, NULL}, *R[2] = {NULL, NULL}, *L[2] = {NULL, NULL};
-
+// A case's inputs, from its own seed: the same in every pass.
+static void case_inputs(const PrecisionCase* pc, double* A[2], double* B[2], double** C0) {
     srand48(pc->M + pc->K + pc->N);
-    for (int p = 0; p < planes; p++) {
-        A[p] = random_matrix(nA);
-        B[p] = random_matrix(nB);
-        G[p] = malloc(nC * sizeof(double));
-        R[p] = calloc(nC, sizeof(double));
-        L[p] = calloc(nC, sizeof(double));
+    for (int p = 0; p < n_planes(pc); p++) {
+        A[p] = random_matrix((size_t)pc->M * pc->K);
+        B[p] = random_matrix((size_t)pc->K * pc->N);
     }
-    if (pc->op == OP_DGEMM_SCALED) C0 = random_matrix(nC);
+    *C0 = pc->op == OP_DGEMM_SCALED ? random_matrix((size_t)pc->M * pc->N) : NULL;
+}
+
+// G's normwise and componentwise errors against R and L (NaN-propagating max).
+static void case_errors(const PrecisionCase* pc, double* const G[2], double* const R[2],
+                        double* const L[2], double* nw, double* cw) {
+    const size_t nC = (size_t)pc->M * pc->N;
+    double d2 = 0, r2 = 0;
+    *cw = 0;
+    for (int p = 0; p < n_planes(pc); p++) {
+        for (size_t i = 0; i < nC; i++) {
+            double d = G[p][i] - R[p][i];
+            double e = fabs(d) / L[p][i];
+            d2 += d * d;
+            r2 += R[p][i] * R[p][i];
+            if (!(e <= *cw)) *cw = e;
+        }
+    }
+    *nw = sqrt(d2 / r2);
+}
+
+// A case's reference and bound, and its default-mode errors in units of √K·u²
+// (NaN if the GPU failed), kept for fast_vs_default.
+typedef struct { double *R[2], *L[2]; double nw, cw; } CaseRef;
+
+// Returns 1 if passed, 0 if failed.
+static int run_case(const PrecisionCase* pc, CaseRef* ref) {
+    const int planes = n_planes(pc);
+    const size_t nC = (size_t)pc->M * pc->N;
+    double *A[2] = {NULL, NULL}, *B[2] = {NULL, NULL}, *C0 = NULL, *G[2] = {NULL, NULL};
+
+    case_inputs(pc, A, B, &C0);
+    *ref = (CaseRef){{NULL, NULL}, {NULL, NULL}, NAN, NAN};
+    for (int p = 0; p < planes; p++) {
+        G[p] = malloc(nC * sizeof(double));
+        ref->R[p] = calloc(nC, sizeof(double));
+        ref->L[p] = calloc(nC, sizeof(double));
+    }
 
     int passed = 0;
     KernelCounts before = kernel_counts();
@@ -163,28 +194,21 @@ static int run_case(const PrecisionCase* pc) {
         printf("  %-34s │ %s │ ✗ FAIL\n", pc->label, ab_status_string(st));
         goto cleanup;
     }
-    reference_gemm(pc, A, B, C0, R, L);
+    reference_gemm(pc, A, B, C0, ref->R, ref->L);
 
-    double d2 = 0, r2 = 0, cw = 0;
-    for (int p = 0; p < planes; p++) {
-        for (size_t i = 0; i < nC; i++) {
-            double d = G[p][i] - R[p][i];
-            double e = fabs(d) / L[p][i];
-            d2 += d * d;
-            r2 += R[p][i] * R[p][i];
-            if (!(e <= cw)) cw = e;   // NaN-propagating max
-        }
-    }
-    double nw = sqrt(d2 / r2), unit = sqrt((double)pc->K) * U2;
+    double nw, cw, unit = sqrt((double)pc->K) * U2;
+    case_errors(pc, G, ref->R, ref->L, &nw, &cw);
+    ref->nw = nw / unit;
+    ref->cw = cw / unit;
     char kernels[192];
     int on_kernel = !pc->kernel || kernel_check(&ran, pc->kernel, kernels, sizeof kernels);
-    passed = nw / unit <= NW_BOUND && cw / unit <= CW_BOUND && on_kernel;
+    passed = ref->nw <= NW_BOUND && ref->cw <= CW_BOUND && on_kernel;
     printf("  %-34s │ %.2e %8.3g │ %.2e %8.3g │ %s\n",
-           pc->label, nw, nw / unit, cw, cw / unit, passed ? "✓ PASS" : "✗ FAIL");
+           pc->label, nw, ref->nw, cw, ref->cw, passed ? "✓ PASS" : "✗ FAIL");
     if (!on_kernel) printf("    %s\n", kernels);
 
 cleanup:
-    for (int p = 0; p < 2; p++) { free(A[p]); free(B[p]); free(G[p]); free(R[p]); free(L[p]); }
+    for (int p = 0; p < 2; p++) { free(A[p]); free(B[p]); free(G[p]); }
     free(C0);
     return passed;
 }
@@ -216,7 +240,50 @@ static int run_safe_math_smoke(void) {
     return passed;
 }
 
+// AB_PRECISION=fast (lazy accumulation) takes effect when the library
+// initializes: re-initialize in fast mode, run every case again against the
+// default pass's reference, and require each case's normwise and componentwise
+// errors within FAST_ERROR_RATIO times the default mode's, and some of them
+// changed. Returns 1 if passed; the library is shut down after it.
+#define FAST_ERROR_RATIO 4.0
+
+static int fast_vs_default(const PrecisionCase* cases, const CaseRef* refs, int n_cases) {
+    ab_shutdown();
+    setenv("AB_PRECISION", "fast", 1);
+    int passed = ab_init() == AB_OK && strcmp(ab_precision_mode(), "fast") == 0;
+    int changed = 0;
+    double worst = 0;
+    const char* worst_label = "-";
+    for (int c = 0; passed && c < n_cases; c++) {
+        const PrecisionCase* pc = &cases[c];
+        double *A[2] = {NULL, NULL}, *B[2] = {NULL, NULL}, *C0 = NULL, *G[2] = {NULL, NULL};
+        double nw = NAN, cw = NAN, unit = sqrt((double)pc->K) * U2;
+        case_inputs(pc, A, B, &C0);
+        for (int p = 0; p < n_planes(pc); p++) G[p] = malloc((size_t)pc->M * pc->N * sizeof(double));
+        if (gpu_gemm(pc, A, B, C0, G) == AB_OK) {
+            case_errors(pc, G, refs[c].R, refs[c].L, &nw, &cw);
+            nw /= unit;
+            cw /= unit;
+        }
+        changed += nw != refs[c].nw || cw != refs[c].cw;
+        double r = fmax(nw / refs[c].nw, cw / refs[c].cw);
+        if (!(r <= FAST_ERROR_RATIO)) passed = 0;   // NaN fails
+        if (r > worst) { worst = r; worst_label = pc->label; }
+        for (int p = 0; p < 2; p++) { free(A[p]); free(B[p]); free(G[p]); }
+        free(C0);
+    }
+    passed = passed && changed > 0;
+    ab_shutdown();
+    unsetenv("AB_PRECISION");
+    printf("  %-34s │ worst %.2fx of default (<= %.0fx), %s; %d of %d errors changed │ %s\n",
+           "AB_PRECISION=fast vs default", worst, FAST_ERROR_RATIO, worst_label, changed, n_cases,
+           passed ? "✓ PASS" : "✗ FAIL");
+    return passed;
+}
+
 int main(void) {
+    clear_ab_env();   // the default mode, whatever the environment
+
     printf("╔══════════════════════════════════════════════════════════════════════════╗\n");
     printf("║  apple-bottom Precision Test (componentwise + normwise vs Dot2 FP64 ref)  ║\n");
     printf("╚══════════════════════════════════════════════════════════════════════════╝\n\n");
@@ -257,11 +324,15 @@ int main(void) {
         {"ab_zgemm 4000x40 K=512 (ts)",       OP_ZGEMM, 4000,  512,   40, 0, 0, "dd_dgemm_ab_ts"},
     };
     const int n_cases = (int)(sizeof(cases) / sizeof(cases[0]));
-    const int n_total = n_cases + 1;   // + the smoke test
+    const int n_total = n_cases + 2;   // + the smoke test and fast_vs_default
+    CaseRef refs[sizeof(cases) / sizeof(cases[0])];
 
     int n_passed = run_safe_math_smoke();
     for (int c = 0; c < n_cases; c++)
-        n_passed += run_case(&cases[c]);
+        n_passed += run_case(&cases[c], &refs[c]);
+    n_passed += fast_vs_default(cases, refs, n_cases);
+    for (int c = 0; c < n_cases; c++)
+        for (int p = 0; p < 2; p++) { free(refs[c].R[p]); free(refs[c].L[p]); }
 
     printf("\n═══════════════════════════════════════════════════════════════════════════\n");
     if (n_passed == n_total) {

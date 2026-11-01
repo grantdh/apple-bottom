@@ -489,8 +489,8 @@ The BLAS-ABI entry points (`dgemm_`, `zgemm_`, `ab_dgemm_`, `ab_zgemm_`,
 `ab_dgemm_blas`, `ab_zgemm_blas`, and the BLAS-2 `dgemv_`, `zgemv_`,
 `zhemv_`, `ab_*gemv_blas`, `ab_zhemv_blas`) read these once per process, at
 their first call. The native `ABMatrix` and device APIs do not use them,
-except `AB_PREFETCH`, which the library reads when it initializes and which
-applies to every API. `AB_DISPATCH_TABLE`, the FLOP thresholds and
+except `AB_PREFETCH` and `AB_PRECISION`, which the library reads when it
+initializes and which apply to every API. `AB_DISPATCH_TABLE`, the FLOP thresholds and
 `AB_TRACE` concern GEMM only; BLAS-2 calls are counted in `AB_REPORT` and
 `AB_PROFILE` as `dgemv`, `zgemv` and `zhemv`.
 
@@ -498,6 +498,7 @@ applies to every API. `AB_DISPATCH_TABLE`, the FLOP thresholds and
 |----------|---------|--------|
 | `AB_MODE` | `auto` | `cpu`: every call on Accelerate. `gpu`: on the GPU unless a dimension is ≤ `AB_MIN_GPU_DIM`. `auto` (or any other value): by the calibrated dispatch table, or by a FLOP threshold if one is set (see [Routing](#routing-ab_modeauto)). |
 | `AB_MIN_GPU_DIM` | `32` | Calls with M, N or K ≤ this run on Accelerate in every mode. |
+| `AB_PRECISION` | unset | `fast`: every GPU GEMM kernel accumulates lazily, Dot2-style (each product's high part goes into a running sum through TwoSum and every rounding error into a separate sum, renormalized once per 16 terms of K). Measured on an M2 Max on the kernels before register prefetch (d1a10ff): 1.05–1.11× faster for DGEMM and ZGEMM of N = 2048–4096, and about 1 bit less accurate: on `tests/test_precision.c` the normwise error is 1.8-1.9× and the componentwise error 1.4-2.8× the default's (up to 2.2 √K·2⁻⁴⁸ of \|A\|\|B\|, default 1.0). The proven error bounds (`docs/vv/PRECISION_ENVELOPE.md` §1.2) cover the default kernels only; none is proven for this mode. Results differ from the default in the last bits; `ab_precision_mode()` returns the mode and the report and trace headers show `AB_PRECISION=fast`. Any other value: the default kernels, with the bits of 1.4.0. |
 | `AB_DISPATCH_TABLE` | unset | `auto`: read the dispatch table from this file (the `dispatch_table.txt` that `make calibrate` writes) instead of the built-in table for this chip. A file that cannot be read or parsed is reported on stderr and the built-in table for this chip is kept (none on an uncalibrated chip); a file calibrated on another chip or core count (its `# chip:` and `# gpu_cores:` header keys) is used with a note on stderr. |
 | `AB_CHIP` | unset | `auto`: the chip whose built-in table to use, in place of this machine's `machdep.cpu.brand_string` (e.g. `Apple M2 Max`). For tests, and to borrow another chip's table deliberately (with `AB_GPU_CORES` matching that table's count when it has one). |
 | `AB_GPU_CORES` | unset | `auto`: the GPU core count that picks among a chip's tables, in place of the IORegistry's `gpu-core-count`; also how a sibling borrows another variant's table on purpose (`AB_GPU_CORES=38` on a 30-core M2 Max). |

@@ -285,6 +285,26 @@ inline DD dd_fma(DD a, DD b, DD c) {
 
 #endif  // APPLEBOTTOM_USE_DWTIMESDW3
 
+// The GEMM kernels' accumulation step acc += a·b, and the K-tiles between
+// renormalizations of acc (RENORM_INTERVAL). Default: dd_fma, every 8 tiles.
+// AB_LAZY_ACCUMULATION (AB_PRECISION=fast): Dot2-style, acc.hi a running sum
+// and acc.lo a running error, every tile; DWTimesDW2's product even in a
+// DWTIMESDW3 build. About 1 bit less accurate.
+#ifdef AB_LAZY_ACCUMULATION
+inline DD dd_acc(DD a, DD b, DD c) {
+    float p, e;
+    twoProduct(a.hi, b.hi, p, e);
+    e = fma(a.hi, b.lo, fma(a.lo, b.hi, e));
+    float s, r;
+    twoSum(c.hi, p, s, r);
+    return {s, c.lo + (r + e)};
+}
+#define RENORM_INTERVAL 1
+#else
+inline DD dd_acc(DD a, DD b, DD c) { return dd_fma(a, b, c); }
+#define RENORM_INTERVAL 8  // Every 8 tiles × TK=16 = 128 K-elements
+#endif
+
 // DD scaling by single float
 inline DD dd_scale(DD a, float s) {
     float p, e;
@@ -344,12 +364,11 @@ static_assert(TM % 2 == 0 && TN % 2 == 0 && TM_NW % 2 == 0 && TN_NW % 2 == 0,
 static_assert(TK_TS == TK, "narrow and tall-skinny kernels share the K tiling");
 
 // Block-wise compensated accumulation: renormalize accumulators every
-// RENORM_INTERVAL K-tiles to prevent drift in long dot products.
-// Per Wilkinson's probabilistic analysis, Frobenius error scales as O(sqrt(K)).
-// Periodic twoSum renormalization ensures the DD representation stays
-// well-conditioned, preventing edge-case denormalization when magnitudes
+// RENORM_INTERVAL K-tiles (defined with dd_acc) to prevent drift in long dot
+// products. Per Wilkinson's probabilistic analysis, Frobenius error scales as
+// O(sqrt(K)). Periodic twoSum renormalization ensures the DD representation
+// stays well-conditioned, preventing edge-case denormalization when magnitudes
 // shift during long accumulations. (Higham 2002, §4.2)
-#define RENORM_INTERVAL 8  // Every 8 tiles × TK=16 = 128 K-elements
 
 // =============================================================================
 // Morton Z-Order Threadgroup Remapping
@@ -523,7 +542,7 @@ kernel void dd_dgemm_t(
             }
             for (uint i = 0; i < TM; i++)
                 for (uint j = 0; j < TN; j++)
-                    acc[i][j] = dd_fma(av[i], bv[j], acc[i][j]);
+                    acc[i][j] = dd_acc(av[i], bv[j], acc[i][j]);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -635,7 +654,7 @@ kernel void dd_dgemm_ab_t(
             }
             for (uint i = 0; i < TM; i++)
                 for (uint j = 0; j < TN; j++)
-                    acc[i][j] = dd_fma(av[i], bv[j], acc[i][j]);
+                    acc[i][j] = dd_acc(av[i], bv[j], acc[i][j]);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -745,7 +764,7 @@ kernel void dd_dgemm_ab_ts_t(
             for (uint j = 0; j < TN_TS; j++) bv[j] = tileB[k * BN_TS + tx * TN_TS + j];
             for (uint i = 0; i < TM_TS; i++)
                 for (uint j = 0; j < TN_TS; j++)
-                    acc[i][j] = dd_fma(av[i], bv[j], acc[i][j]);
+                    acc[i][j] = dd_acc(av[i], bv[j], acc[i][j]);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -846,7 +865,7 @@ inline void dd_gemm_narrow_mainloop(
             }
             for (uint i = 0; i < TM_NW; i++)
                 for (uint j = 0; j < TN_NW; j++)
-                    acc[i][j] = dd_fma(av[i], bv[j], acc[i][j]);
+                    acc[i][j] = dd_acc(av[i], bv[j], acc[i][j]);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -1022,7 +1041,7 @@ kernel void dd_dsyrk_t(
             }
             for (uint i = 0; i < TM; i++)
                 for (uint j = 0; j < TN; j++)
-                    acc[i][j] = dd_fma(av[i], bv[j], acc[i][j]);
+                    acc[i][j] = dd_acc(av[i], bv[j], acc[i][j]);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -1693,6 +1712,7 @@ typedef enum { AB_PREFETCH_RULE, AB_PREFETCH_OFF, AB_PREFETCH_ALL } ABPrefetchMo
 @property (nonatomic, strong) id<MTLComputePipelineState> epiDPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> epiZPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> scalesPipeline;
+@property (nonatomic) bool precisionFast;   // AB_PRECISION=fast at initialization
 + (instancetype)shared;
 + (void)shutdown;
 @end
@@ -1754,10 +1774,19 @@ static void ab_atfork_child(void) { g_forked_child = true; }
         // Default build: two-FMA variant of DWTimesDW2 (< 6.000001u², proven in
         // PRECISION_ENVELOPE.md §1.2). Opt-in: DWTimesDW3 (JMP 2017 Alg 12 /
         // MR 2022 Thm 2.8, < 4u²).
+        NSMutableDictionary* macros = [NSMutableDictionary dictionary];
 #ifdef APPLEBOTTOM_USE_DWTIMESDW3
-        opts.preprocessorMacros = @{@"APPLEBOTTOM_USE_DWTIMESDW3": @1};
+        macros[@"APPLEBOTTOM_USE_DWTIMESDW3"] = @1;
         NSLog(@"apple-bottom: MSL compiled with DWTimesDW3 (JMP 2017 Alg 12)");
 #endif
+        // AB_PRECISION=fast: the GEMM kernels accumulate lazily (dd_acc)
+        const char* precision = getenv("AB_PRECISION");
+        _precisionFast = precision && strcasecmp(precision, "fast") == 0;
+        if (_precisionFast) {
+            macros[@"AB_LAZY_ACCUMULATION"] = @1;
+            NSLog(@"apple-bottom: AB_PRECISION=fast: GEMM kernels accumulate lazily (about 1 bit less accurate)");
+        }
+        if (macros.count) opts.preprocessorMacros = macros;
 
         id<MTLLibrary> library = [_device newLibraryWithSource:kShaderSource options:opts error:&error];
         if (!library) { NSLog(@"Shader compile failed: %@", error); return nil; }
@@ -2155,6 +2184,11 @@ const char* ab_device_name(void) {
 }
 
 bool ab_is_initialized(void) { return [ABContextImpl shared] != nil; }
+
+const char* ab_precision_mode(void) {
+    ABContextImpl* ctx = [ABContextImpl shared];
+    return ctx && ctx.precisionFast ? "fast" : "default";
+}
 
 // =============================================================================
 // Public API: Matrix Lifecycle

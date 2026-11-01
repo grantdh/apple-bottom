@@ -44,8 +44,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 197, every test but
-the chaos ones, and `make ci-local` all 215 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 198, every test but
+the chaos ones, and `make ci-local` all 216 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -80,7 +80,8 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
   - `tests/test_fft.c` — 14 tests of the double-float FFT, see below
 
 - **Not yet registry-based (one `main`, no ghost guard):**
-  - `tests/test_precision.c` — 16 tests; needs decomposition strategy
+  - `tests/test_precision.c` — 17 tests (the last compares
+    `AB_PRECISION=fast` with the default mode); needs decomposition strategy
   - `tests/test_qe_golden.c` — 32 golden-bits cases, see below
   - `tests/test_staging.c` — 127 cases of the staged path against the
     host path, bit for bit, see below (its `TEST_STAGING` line is not
