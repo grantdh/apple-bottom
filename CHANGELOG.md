@@ -191,7 +191,7 @@ All notable changes to this project will be documented in this file.
   and beta (7.33 → 5.73 ms) and 0.71× with alpha alone; 160 × 160 × 9140
   'C','N', whose C is small, is unchanged (0.99×).
 
-## [1.5.1] - Unreleased
+## [1.5.1] - 2026-11-01
 
 Documentation corrections and a new check (`make test-dd-bound`); results are
 those of 1.5.0.
