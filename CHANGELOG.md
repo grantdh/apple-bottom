@@ -34,6 +34,35 @@ All notable changes to this project will be documented in this file.
   `benchmarks/results/2026-10-25-2825d2a-narrow-tiles/`. The coverage cases
   move to shapes that still reach each kernel: 1100 × 1000 for the 64 × 64
   prefetch instances, 4000 × 40 for tall-skinny.
+- **The device-buffer API converts its operands where they lie, across
+  cores.** `ab_dev_dgemm` and `ab_dev_zgemm` copied each operand out of its
+  buffer into FP64 arrays (complex ones split into real and imaginary
+  parts) before converting those to double-float, and copied C back the
+  same way, the copies of C and of real operands on one core. One pass now
+  converts each operand in its buffer, in chunks across cores, measuring
+  each part's range for its scale and gathering ZGEMM's per-line
+  statistics as it goes; C converts back into its buffer the same way, and
+  a transposed DGEMM operand through a small tile in cache. The host
+  epilogue of a ZGEMM with general alpha and beta runs across cores too.
+  Results are bitwise unchanged. On an M2 Max, at QE's shapes, a call
+  takes 0.79× the time at 160×160×9140 'C','N' (`ab_dev_zgemm`, 10.5 →
+  8.3 ms) and 0.75× at 9140×160×160 'N','N' (0.70× with general alpha and
+  beta); `ab_dev_dgemm` takes 0.64× at 'T','N' 160×160×18280 and 0.77× at
+  'N','N' 18280×160×160.
+- **The device-buffer API keeps its double-float buffers between calls.**
+  `ab_dev_dgemm` and `ab_dev_zgemm` made the `ABMatrix` handles of their
+  operands (3 and 6; 11.7 MB each for a part of a 9140×160 complex operand)
+  as fresh GPU buffers every call, and paid for them in page faults as the
+  conversion first wrote them, before the GPU started on them and when the
+  host first read the result. They now take them from the staged path's
+  pool (at most `AB_STAGING_MB`), as the native ZGEMMs take their
+  temporaries; `ab_dev_zgemm` with general alpha and beta still makes the
+  two handles of its product every call. Results are bitwise unchanged. On
+  an M2 Max, at QE's shapes, a call takes 0.79× the time at 160×160×9140
+  'C','N' (`ab_dev_zgemm`, 7.9 → 6.3 ms) and 0.76× at 9140×160×160 'N','N';
+  `ab_dev_dgemm` takes 0.65× at 'T','N' 160×160×18280 and 0.64× at 'N','N'
+  18280×160×160. The host's part of these calls, above the GEMM alone,
+  fell from 2.8–4.4 ms to 1.3–1.6 ms.
 
 ## [1.5.1] - Unreleased
 

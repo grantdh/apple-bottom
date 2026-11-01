@@ -5,7 +5,8 @@
 // apple_bottom.m owns the ABMatrix layout and the FP64 <-> double-float (DD)
 // conversion; blas_wrapper.c's BLAS-ABI path uses these to scale operands by
 // powers of two on the way in (the exponent-range guard, blas_wrapper.c), and
-// device_api.m's ZGEMM to choose between Gauss-3M and 4M as that path does.
+// device_api.m to convert its column-major operands where they lie and, for
+// ZGEMM, to choose between Gauss-3M and 4M as that path does.
 // =============================================================================
 #ifndef AB_INTERNAL_H
 #define AB_INTERNAL_H
@@ -59,7 +60,7 @@ static inline int ab_scalar_exp(double x, int window) {
 // =============================================================================
 // Host loops across cores
 // =============================================================================
-// apple_bottom.m's FP64 <-> DD conversions and device_api.m's staging copies
+// apple_bottom.m's FP64 <-> DD conversions and device_api.m's ZGEMM epilogue
 // split large arrays into chunks across cores.
 #define AB_CONVERT_PARALLEL_MIN ((size_t)1 << 20)  // elements; serial below this
 #define AB_CONVERT_CHUNKS 8
@@ -113,6 +114,12 @@ typedef struct {
 #define AB_RANGE_EMPTY ((ab_range_t){0u, UINT32_MAX})
 
 static inline bool ab_range_nonfinite(ab_range_t r) { return r.max >= AB_HIWORD_NONFINITE; }
+
+// The range of the values of a and b together.
+static inline ab_range_t ab_range_merge(ab_range_t a, ab_range_t b) {
+    ab_range_t r = {a.max > b.max ? a.max : b.max, a.min < b.min ? a.min : b.min};
+    return r;
+}
 
 // Adds high word h to a maximum mx, or to a minimum mn as in ab_range_t
 // (ignoring 0), or to both, in selects that vectorize.
@@ -292,6 +299,23 @@ ABStatus ab_internal_zgemm(ABTranspose transA, ABTranspose transB, ABMatrix Ar, 
 // the scaled values.
 ABStatus ab_internal_upload_scaled(ABMatrix m, const double* data, const int* row_exp,
                                    const int* col_exp, int shift, ab_range_t* range);
+
+// device_api.m's column-major operands, converted where they lie (no staging
+// copy) in chunks across cores: each matrix gets the values, scale and
+// largest magnitude ab_matrix_upload gives an array of its elements, and
+// downloads as ab_matrix_download writes one.
+//
+// Row i of re is x[i * ld + j], j < its cols. With im, x holds complex pairs
+// and ld counts pairs: rows i of re and im are the real and imaginary parts
+// of the pairs x[2 * (i * ld + j)], x[2 * (i * ld + j) + 1]; and if lines is
+// not NULL (complex only), the high words of the largest |Re| and |Im| of
+// each row (by_row) or column are added to lines->rmax and lines->imax.
+ABStatus ab_internal_upload_rows(ABMatrix re, ABMatrix im, const double* x, size_t ld,
+                                 ab_line_stats_t* lines, bool by_row);
+// Element (i, j) of m is x[j * ld + i]: a column-major matrix, not transposed.
+ABStatus ab_internal_upload_cols(ABMatrix m, const double* x, size_t ld);
+// re (and im) into the rows ab_internal_upload_rows reads.
+ABStatus ab_internal_download_rows(ABMatrix re, ABMatrix im, double* x, size_t ld);
 
 #ifdef __cplusplus
 }

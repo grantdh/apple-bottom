@@ -479,7 +479,7 @@ to every API.
 | `AB_TRACE` | unset | A path: each process appends one line per call to `<path>.<pid>` (see [Per-call trace](#per-call-trace-ab_trace)). Unset or empty: no trace. |
 | `AB_TRACE_HASH` | off | With `AB_TRACE`, `1`: also hash the operands each call reads. |
 | `AB_HOST_PACK` | off | `1`: every GPU call takes the host path (host pack, FP64 → DD and epilogue) instead of the staged path. The results are the same bits either way. |
-| `AB_STAGING_MB` | `2048` | The GPU buffers kept between calls by the staged path and by the native ZGEMMs (their Gauss-3M or 4M temporaries), at most this many MB per process; `0`: none kept, each call makes its own (and pays for fresh buffers). |
+| `AB_STAGING_MB` | `2048` | The GPU buffers kept between calls by the staged path, by the native ZGEMMs (their Gauss-3M or 4M temporaries) and by the device-buffer API (its operands in double-float), at most this many MB per process; `0`: none kept, each call makes its own (and pays for fresh buffers). |
 | `AB_TEST_FAIL_STAGE` | unset | Test-only. `alloc`: every GPU buffer allocation (`ab_matrix_create()`, and the buffer pool's) fails; `kernel`: the command buffer of every `ab_dgemm_scaled()`, `ab_zgemm()` and staged call, the GEMMs of the GPU path, reports an error. A GPU-routed call then fails as it would on a real failure there and runs on Accelerate instead (a `gpu_failed` fallback). Never set it in production. |
 
 ### Routing (AB_MODE=auto)
