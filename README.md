@@ -55,9 +55,9 @@ It depends on where the matrices live.
   GPU**: yes, by a lot. They are bound by memory bandwidth, not arithmetic,
   and at 8192²–16384² the GPU runs them at 260–360 GB/s, 2.8–36× Accelerate's
   speed and 2.7–4.4× a threaded C loop's. One-shot BLAS-ABI calls pay to
-  map the matrix each time; `AB_MODE=auto` sends only the large DGEMV `'N'`,
-  ZGEMV `'N'` and ZHEMV calls that still win to the GPU
-  ([BLAS-2](#blas-2-matrix-vector-products)).
+  map the matrix each time; on the M2 Max, where it was measured,
+  `AB_MODE=auto` sends only the large DGEMV `'N'`, ZGEMV `'N'` and ZHEMV
+  calls that still win to the GPU ([BLAS-2](#blas-2-matrix-vector-products)).
 
 The measurements are below, each with the data it came from.
 [docs/COMPARISON.md](docs/COMPARISON.md) compares apple-bottom with the
@@ -208,9 +208,11 @@ five runs ([data](benchmarks/results/2026-10-19-ba345df-gemv/), ZHEMV
   double-float's full-precision range (FP32's exponents), or that involves
   NaN or Inf, runs on Accelerate instead, before y is written.
 - **One-shot calls** (`dgemv_`, `zgemv_`, `zhemv_`, `ab_*gemv_blas`) map A
-  for the GPU on every call, at 10–22 ms/GB. `AB_MODE=auto` sends one to the
-  GPU only where that was measured at least 1.10× faster than Accelerate in
-  two runs: DGEMV `'N'` from 2048² to 16384² elements (3.0–3.2× in the
+  for the GPU on every call, at 10–22 ms/GB. On the M2 Max (38-core GPU),
+  where this was measured, `AB_MODE=auto` sends one to the GPU only where it
+  was at least 1.10× faster than Accelerate in two runs; on any other chip
+  every one-shot call stays on Accelerate until it is measured there. On
+  the M2 Max: DGEMV `'N'` from 2048² to 16384² elements (3.0–3.2× in the
   table), ZGEMV `'N'` from 3072² to 12288², and ZHEMV from 2048 to 16384
   (3.8–4.7×). DGEMV `'T'` (0.94–1.40×, too close to call) and ZGEMV `'T'`
   and `'C'` (0.4–0.6×) stay on Accelerate, as do smaller and larger calls;

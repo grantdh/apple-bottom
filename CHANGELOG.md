@@ -57,9 +57,10 @@ All notable changes to this project will be documented in this file.
   - `ab_dgemv_blas`, `ab_zgemv_blas`, `ab_zhemv_blas` and the Fortran
     symbols `dgemv_`, `zgemv_`, `zhemv_`, routed like GEMM (`AB_MODE`,
     then `AB_MIN_GPU_DIM`, through `ab_dispatch_mode_route()`):
-    `AB_MODE=auto` sends a call to the GPU only for shapes measured at
-    least 1.10× faster end to end in two runs, mapping the matrix for the
-    call included (DGEMV `'N'` 2048²–16384² elements, ZGEMV `'N'`
+    `AB_MODE=auto` sends a call to the GPU only on the M2 Max (38-core
+    GPU) it was measured on, matched as the GEMM tables are, and only for
+    shapes measured at least 1.10× faster end to end in two runs, mapping
+    the matrix for the call included (DGEMV `'N'` 2048²–16384² elements, ZGEMV `'N'`
     3072²–12288², ZHEMV 2048–16384; data in
     `benchmarks/results/2026-10-19-ba345df-gemv/` and, for ZHEMV,
     `2026-10-19-1bc503a-zhemv/`). Smaller calls, DGEMV `'T'`/`'C'`

@@ -945,24 +945,33 @@ static int child_paths(int n) {
 }
 
 static void test_routing_modes(void) {
-    struct { const char *env[3]; const char *n; const char *d, *z, *h; } R[] = {
+#define M2MAX "AB_CHIP=Apple M2 Max", "AB_GPU_CORES=38"
+    struct { const char *env[4]; const char *n; const char *d, *z, *h; } R[] = {
         {{"AB_MODE=cpu", NULL}, "600", "cpu", "cpu", "cpu"},
         {{"AB_MODE=gpu", NULL}, "600", "gpu", "gpu", "gpu"},
         {{"AB_MODE=gpu", NULL}, "32", "cpu", "cpu", "cpu"},
         {{"AB_MODE=gpu", "AB_MIN_GPU_DIM=700", NULL}, "600", "cpu", "cpu", "cpu"},
-        // AB_MODE=auto (src/blas2_abi.c, kRoutes): below every row, then
-        // dgemv 'N' and zhemv on the GPU while zgemv 'C' never is.
-        {{NULL}, "64", "cpu", "cpu", "cpu"},
-        {{"AB_MODE=auto", NULL}, "1024", "cpu", "cpu", "cpu"},
-        {{"AB_MODE=auto", NULL}, "2048", "gpu", "cpu", "gpu"},
+        // AB_MODE=auto (src/blas2_abi.c, kRoutes) on the M2 Max it was measured
+        // on: below every row, then dgemv 'N' and zhemv on the GPU while
+        // zgemv 'C' never is.
+        {{M2MAX, NULL}, "64", "cpu", "cpu", "cpu"},
+        {{"AB_MODE=auto", M2MAX, NULL}, "1024", "cpu", "cpu", "cpu"},
+        {{"AB_MODE=auto", M2MAX, NULL}, "2048", "gpu", "cpu", "gpu"},
+        // Another chip, or the M2 Max with another GPU core count: Accelerate.
+        {{"AB_MODE=auto", "AB_CHIP=Apple M4 Max", "AB_GPU_CORES=40", NULL}, "2048", "cpu", "cpu",
+         "cpu"},
+        {{"AB_MODE=auto", "AB_CHIP=Apple M2 Max", "AB_GPU_CORES=30", NULL}, "2048", "cpu", "cpu",
+         "cpu"},
     };
+#undef M2MAX
     for (size_t k = 0; k < sizeof R / sizeof *R; k++) {
         char *args[] = {"--child-paths", (char *)R[k].n, NULL}, *out, want[96];
         int st = run_self(args, R[k].env, &out);
         snprintf(want, sizeof want, "dgemv=%s\nzgemv=%s\nzhemv=%s\n", R[k].d, R[k].z, R[k].h);
         if (st != 0 || !strstr(out, want))
-            fail_case("%s %s n=%s: %s", R[k].env[0] ? R[k].env[0] : "AB_MODE unset",
-                      R[k].env[0] && R[k].env[1] ? R[k].env[1] : "", R[k].n, out);
+            fail_case("%s %s %s n=%s: %s", R[k].env[0] ? R[k].env[0] : "AB_MODE unset",
+                      R[k].env[0] && R[k].env[1] ? R[k].env[1] : "",
+                      R[k].env[0] && R[k].env[1] && R[k].env[2] ? R[k].env[2] : "", R[k].n, out);
         free(out);
     }
     finish();
@@ -1088,7 +1097,7 @@ static const TestCase TESTS[] = {
     {"registered memory", test_registered_memory},
     {"invalid device-API arguments", test_invalid_dev_args},
     {"AB_MODE=auto rule against its measurements", test_auto_rule_matches_data},
-    {"routing: AB_MODE, AB_MIN_GPU_DIM", test_routing_modes},
+    {"routing: AB_MODE, AB_MIN_GPU_DIM, the chip", test_routing_modes},
     {"illegal BLAS arguments (cblas xerbla)", test_illegal_args},
     {"forced GPU failures (AB_TEST_FAIL_STAGE)", test_forced_gpu_failure},
     {"AB_REPORT counts", test_report_counts},

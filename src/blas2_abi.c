@@ -40,7 +40,8 @@
 // when min_elems <= m * n <= max_elems and min(m, n) >= min_dim. No row:
 // Accelerate.
 //
-// Measured on an M2 Max (38-core GPU, macOS 27.0.1), staged GPU calls
+// Measured on an M2 Max (38-core GPU, macOS 27.0.1; routes_gpu applies the
+// rows on that chip only), staged GPU calls
 // (ab_*_blas, AB_MODE=gpu, each call mapping A) against Accelerate cblas in
 // one process, alpha 1, beta 0, tight lda, 3 warm-ups and the median of 7,
 // twice: benchmarks/results/2026-10-19-ba345df-gemv/ for GEMV (sweep_square:
@@ -87,9 +88,22 @@ bool ab_internal_b2_auto_gpu(ab_b2_routine_t routine, char op, int m, int n) {
     return false;
 }
 
+// The chip kRoutes were measured on. As with the GEMM tables (dispatch.h),
+// they apply only to it, by ab_dispatch_select_table's matching rule: on
+// another chip, or a sibling with another GPU core count, every auto call
+// stays on Accelerate until BLAS-2 is measured there.
+static const ab_dispatch_row_t kNoRows[] = {{0}};
+static const ab_dispatch_table_t kRoutesChip[] = {
+    {"Apple M2 Max", 38, "AMX", NULL, kNoRows},
+    {NULL, 0, NULL, NULL, NULL},
+};
+
 static bool routes_gpu(const ab_b2_call_t *c) {
-    int by_mode = ab_dispatch_mode_route(ab_dispatch_process_config(), c->m < c->n ? c->m : c->n);
-    return by_mode >= 0 ? by_mode : ab_internal_b2_auto_gpu(c->routine, c->op, c->m, c->n);
+    const ab_dispatch_config_t *cfg = ab_dispatch_process_config();
+    int by_mode = ab_dispatch_mode_route(cfg, c->m < c->n ? c->m : c->n);
+    if (by_mode >= 0) return by_mode;
+    return ab_dispatch_select_table(kRoutesChip, cfg->chip, cfg->gpu_cores) &&
+           ab_internal_b2_auto_gpu(c->routine, c->op, c->m, c->n);
 }
 
 // =============================================================================

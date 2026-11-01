@@ -616,7 +616,9 @@ registration.
 
 BLAS-2 calls (`dgemv_`, `zgemv_`, `zhemv_`) follow steps 1-4 (with alpha
 or beta NaN or Inf also on Accelerate), then in `auto` a built-in rule in
-`src/blas2_abi.c` from the same kind of measurement, taken twice
+`src/blas2_abi.c` from the same kind of measurement on the M2 Max (38-core
+GPU), which applies on that chip only, matched as the GEMM tables are; on
+any other chip `auto` keeps BLAS-2 calls on Accelerate. It was taken twice
 (`benchmarks/bench_gemv.c --sweep` and `--rect`; data in
 `benchmarks/results/2026-10-19-ba345df-gemv/` and, for ZHEMV,
 `2026-10-19-1bc503a-zhemv/`, which `tests/test_blas2.c` checks the rule
