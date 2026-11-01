@@ -81,13 +81,26 @@ All notable changes to this project will be documented in this file.
   conversion first wrote them, before the GPU started on them and when the
   host first read the result. They now take them from the staged path's
   pool (at most `AB_STAGING_MB`), as the native ZGEMMs take their
-  temporaries; `ab_dev_zgemm` with general alpha and beta still makes the
-  two handles of its product every call. Results are bitwise unchanged. On
-  an M2 Max, at QE's shapes, a call takes 0.79× the time at 160×160×9140
-  'C','N' (`ab_dev_zgemm`, 7.9 → 6.3 ms) and 0.76× at 9140×160×160 'N','N';
+  temporaries. Results are bitwise unchanged. On an M2 Max, at QE's
+  shapes, a call takes 0.79× the time at 160×160×9140 'C','N'
+  (`ab_dev_zgemm`, 7.9 → 6.3 ms) and 0.76× at 9140×160×160 'N','N';
   `ab_dev_dgemm` takes 0.65× at 'T','N' 160×160×18280 and 0.64× at 'N','N'
   18280×160×160. The host's part of these calls, above the GEMM alone,
   fell from 2.8–4.4 ms to 1.3–1.6 ms.
+- **The device ZGEMM's general alpha/beta epilogue runs where C lies.**
+  With alpha ≠ 1 or beta ≠ 0, `ab_dev_zgemm` downloaded T = op(A) op(B)
+  and C into fresh FP64 arrays, formed alpha T + beta C, uploaded the
+  result and downloaded it into C's buffer: about nine passes over C, four
+  fresh m × n arrays and two GPU handles for T. The GEMM now writes T into
+  C's handles, and three passes over C's buffer give the same values: C's
+  ranges, the epilogue from T's double-float and C, and the result's round
+  trip through double-float in place. Results are bitwise unchanged: C,
+  padding included, matches the previous build in 41 cases (every
+  alpha/beta path; scaled, imbalanced and line-wise data; padded leading
+  dimensions; shapes from 40 × 300 × 56 to 1024³). On an M2 Max, a
+  9140 × 160 × 160 'N','N' call takes 0.78× the time with general alpha
+  and beta (7.33 → 5.73 ms) and 0.71× with alpha alone; 160 × 160 × 9140
+  'C','N', whose C is small, is unchanged (0.99×).
 
 ## [1.5.1] - Unreleased
 
