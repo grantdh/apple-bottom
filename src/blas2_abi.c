@@ -89,12 +89,13 @@ bool ab_internal_b2_auto_gpu(ab_b2_routine_t routine, char op, int m, int n) {
 }
 
 // The chip kRoutes were measured on. As with the GEMM tables (dispatch.h),
-// they apply only to it, by ab_dispatch_select_table's matching rule: on
-// another chip, or a sibling with another GPU core count, every auto call
-// stays on Accelerate until BLAS-2 is measured there.
-static const ab_dispatch_row_t kNoRows[] = {{0}};
+// they apply only to it, by ab_dispatch_select_table's matching rule (which
+// reads only chip and gpu_cores): on another chip, or a sibling with another
+// GPU core count, every auto call stays on Accelerate until BLAS-2 is
+// measured there. Not derived from the GEMM tables: a chip that gains one
+// has no BLAS-2 measurements.
 static const ab_dispatch_table_t kRoutesChip[] = {
-    {"Apple M2 Max", 38, "AMX", NULL, kNoRows},
+    {"Apple M2 Max", 38, NULL, NULL, NULL},
     {NULL, 0, NULL, NULL, NULL},
 };
 
@@ -102,8 +103,8 @@ static bool routes_gpu(const ab_b2_call_t *c) {
     const ab_dispatch_config_t *cfg = ab_dispatch_process_config();
     int by_mode = ab_dispatch_mode_route(cfg, c->m < c->n ? c->m : c->n);
     if (by_mode >= 0) return by_mode;
-    return ab_dispatch_select_table(kRoutesChip, cfg->chip, cfg->gpu_cores) &&
-           ab_internal_b2_auto_gpu(c->routine, c->op, c->m, c->n);
+    return ab_internal_b2_auto_gpu(c->routine, c->op, c->m, c->n) &&
+           ab_dispatch_select_table(kRoutesChip, cfg->chip, cfg->gpu_cores);
 }
 
 // =============================================================================

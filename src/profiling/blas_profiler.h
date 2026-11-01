@@ -150,8 +150,8 @@ void ab_prof_stage_mark(uint64_t* stage_ns, uint64_t* mark, ab_prof_stage_t s);
 
 // Under AB_PROFILE, on stderr in one write each: the line of a GPU call that
 // took total_ns with its stage times (and "other", the rest) and its staged
-// outcome (AB_PROF_STAGED_NONE: none), and the line of a GPU-routed call that
-// ran on cblas instead, with why.
+// outcome (none printed for AB_PROF_STAGED_NONE), and the line of a GPU-routed
+// call that ran on cblas instead, with why.
 void ab_prof_print_gpu_call(const char* routine, int m, int n, int k, uint64_t total_ns,
                             const uint64_t* stage_ns, ab_prof_staged_t staged);
 void ab_prof_print_fallback(const char* routine, int m, int n, int k, const char* why);

@@ -718,8 +718,9 @@ AB_REPORT[<pid>] <routine> staged kept=… kept_4m=… host_pack=… fpcr=… sc
 tables of the GPU stages, the fallbacks and the staged path's outcomes, and
 the dimension histogram of the routine with the most time. During the run it
 prints an `AB_PROFILE <routine> M=… N=… K=…` line with the stages of each GPU
-call and its staged outcome (`staged=kept`, or the first reason it took the
-host path), and one for each fallback, with its reason.
+call and, for a call that reached the staged path, its outcome
+(`staged=kept`, or the first reason it took the host path), and one for each
+fallback, with its reason.
 
 ### Per-call trace (AB_TRACE)
 

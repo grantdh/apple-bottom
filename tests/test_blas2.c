@@ -969,9 +969,7 @@ static void test_routing_modes(void) {
         int st = run_self(args, R[k].env, &out);
         snprintf(want, sizeof want, "dgemv=%s\nzgemv=%s\nzhemv=%s\n", R[k].d, R[k].z, R[k].h);
         if (st != 0 || !strstr(out, want))
-            fail_case("%s %s %s n=%s: %s", R[k].env[0] ? R[k].env[0] : "AB_MODE unset",
-                      R[k].env[0] && R[k].env[1] ? R[k].env[1] : "",
-                      R[k].env[0] && R[k].env[1] && R[k].env[2] ? R[k].env[2] : "", R[k].n, out);
+            fail_case("case %zu n=%s: %s", k, R[k].n, out);
         free(out);
     }
     finish();

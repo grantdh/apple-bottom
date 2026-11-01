@@ -540,9 +540,8 @@ uint64_t ab_prof_kernel_ns(uint64_t wall_ns, double gpu_seconds) {
 
 uint64_t ab_prof_take_kernel_ns(uint64_t wall_ns, ab_prof_kernel_split_t* split) {
     ab_prof_kernel_split_t k;
-    uint64_t gpu = (uint64_t)(ab_internal_take_gpu_seconds(&k) * 1e9);
-    bool timed = gpu && gpu < wall_ns;
-    if (timed) {
+    uint64_t ns = ab_prof_kernel_ns(wall_ns, ab_internal_take_gpu_seconds(&k));
+    if (ns < wall_ns) {   // the GPU's time was used
         split->temps_ns += k.temps_ns;
         split->encode_ns += k.encode_ns;
         split->submit_ns += k.submit_ns;
@@ -550,7 +549,7 @@ uint64_t ab_prof_take_kernel_ns(uint64_t wall_ns, ab_prof_kernel_split_t* split)
     }
     if (!split->gpu_start_ns) split->gpu_start_ns = k.gpu_start_ns;
     if (k.gpu_end_ns) split->gpu_end_ns = k.gpu_end_ns;
-    return timed ? gpu : wall_ns;
+    return ns;
 }
 
 void ab_prof_stage_mark(uint64_t* stage_ns, uint64_t* mark, ab_prof_stage_t s) {
@@ -573,9 +572,12 @@ void ab_prof_print_gpu_call(const char* routine, int m, int n, int k, uint64_t t
                                 stage_ns[s] / 1e6);
     }
     if (len < sizeof line)
-        snprintf(line + len, sizeof line - len, " other=%.3f  total=%.3f ms  staged=%s\n",
-                 (total_ns > named ? total_ns - named : 0) / 1e6, total_ns / 1e6,
-                 staged > AB_PROF_STAGED_NONE ? ab_prof_staged_names[staged] : "");
+        len += (size_t)snprintf(line + len, sizeof line - len, " other=%.3f  total=%.3f ms",
+                                (total_ns > named ? total_ns - named : 0) / 1e6, total_ns / 1e6);
+    if (len < sizeof line && staged > AB_PROF_STAGED_NONE)
+        len += (size_t)snprintf(line + len, sizeof line - len, "  staged=%s",
+                                ab_prof_staged_names[staged]);
+    if (len < sizeof line) snprintf(line + len, sizeof line - len, "\n");
     fputs(line, stderr);
 }
 

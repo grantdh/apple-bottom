@@ -520,10 +520,7 @@ static CallProf *prof_begin(CallProf *p) {
 }
 
 static void prof_stage(CallProf *p, ab_prof_stage_t s) {
-    if (!p) return;
-    uint64_t now = ab_prof_now_ticks();
-    p->stage_ns[s] += ab_prof_ticks_to_ns(now - p->mark);
-    p->mark = now;
+    if (p) ab_prof_stage_mark(p->stage_ns, &p->mark, s);
 }
 
 // The kernel stage (ab_prof_take_kernel_ns); the rest of the kernel call is
