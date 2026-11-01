@@ -60,7 +60,7 @@ static inline int ab_scalar_exp(double x, int window) {
 // =============================================================================
 // Host loops across cores
 // =============================================================================
-// apple_bottom.m's FP64 <-> DD conversions and device_api.m's ZGEMM epilogue
+// apple_bottom.m's FP64 <-> DD conversions and device-API ZGEMM epilogue
 // split large arrays into chunks across cores.
 #define AB_CONVERT_PARALLEL_MIN ((size_t)1 << 20)  // elements; serial below this
 #define AB_CONVERT_CHUNKS 8
@@ -316,6 +316,15 @@ ABStatus ab_internal_upload_rows(ABMatrix re, ABMatrix im, const double* x, size
 ABStatus ab_internal_upload_cols(ABMatrix m, const double* x, size_t ld);
 // re (and im) into the rows ab_internal_upload_rows reads.
 ABStatus ab_internal_download_rows(ABMatrix re, ABMatrix im, double* x, size_t ld);
+// C = alpha T + beta C, C the complex rows ab_internal_upload_rows reads (not
+// read if beta is 0) and T = (tr, ti) as a GEMM left it: device_api.m's ZGEMM
+// with alpha != 1 or beta != 0. Each value is the one C took through handles:
+// C's parts uploaded and downloaded, T downloaded, then
+//     (ar*tr - ai*ti) + (br*cr - bi*ci),  (ar*ti + ai*tr) + (br*ci + bi*cr)
+// in FP64 (cr = ci = 0 if beta is 0), and the result's parts uploaded and
+// downloaded, each round trip at the scale an upload gives the part.
+ABStatus ab_internal_zgemm_epilogue(ABMatrix tr, ABMatrix ti, double* x, size_t ld,
+                                    const double alpha[2], const double beta[2]);
 
 #ifdef __cplusplus
 }
