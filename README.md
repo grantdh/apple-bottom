@@ -281,7 +281,8 @@ adds adversarial inputs and the convergence study;
   bit-for-bit agreement with CPU BLAS.
 - **FP32's exponent range, worked around.** DD values are FP32 pairs.
   Products below about 2⁻⁷⁸ lose their low part, values below 2⁻¹²⁶ flush to
-  zero on the GPU, and sums overflow at 2¹²⁸.
+  zero on the GPU (an entry's own low part from about 2⁻¹⁰² down), and sums
+  overflow at 2¹²⁸.
   - The BLAS ABI scales each row of op(A) and column of op(B) whose largest
     entry lies outside 2^±20 by an exact power of two, and undoes it in C.
     It runs on Accelerate whatever that cannot keep in range, and any call

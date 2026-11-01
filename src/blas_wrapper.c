@@ -95,6 +95,11 @@ static inline int line_min_exp(const ab_line_stats_t* s, int i) {
     return ab_hiword_ilogb(s->min[i]) - s->e[i];
 }
 
+// The exponent of nonzero line i's largest scaled |x|.
+static inline int line_max_exp(const ab_line_stats_t* s, int i) {
+    return ab_hiword_ilogb(s->max[i]) - s->e[i];
+}
+
 // Adds a complex element to a line's statistics: its parts' high words to
 // their maxima (rmx, imx), and the larger of them to the smallest (mn), as
 // AB_RANGE_ADD adds a real element's. The line's max follows from rmx and imx
@@ -339,14 +344,20 @@ static inline int stage1_floor(int alpha_exp) { return AB_PRODUCT_MIN_EXP - imin
 // FP32's range in every C_ij, times a scalar below 2^(alpha_exp + 1):
 //   - Overflow: the largest scaled magnitudes bound every product and sum.
 //   - Stage 1: every nonzero scaled product is at least 2^AB_PRODUCT_MIN_EXP,
-//     by the smallest nonzero magnitudes of the lines.
+//     by the smallest nonzero magnitudes of the lines, and every nonzero
+//     scaled entry at least 2^AB_ENTRY_MIN_EXP: below that an entry's FP32
+//     low part can be subnormal, which the GPU reads as zero.
 //   - Stage 2 (ab_range_guard), for the pairs of lines stage 1 cannot tell
 //     about (lines whose magnitudes span many binades): C_ij's scaled
 //     |op(A)||op(B)| sum is at least |A'_ik| |B'_kj| for k = the column of
 //     row i's largest |A'| and for k = the row of column j's largest |B'|;
 //     one of the two must reach K * 2^AB_PRODUCT_MIN_EXP, so that the at most
 //     K flushed parts below 2^-126 (about 2^-48 of 2^AB_PRODUCT_MIN_EXP) stay
-//     at DD's rounding level.
+//     at DD's rounding level. A row with an entry below 2^AB_ENTRY_MIN_EXP
+//     loses less than 2^-126 |B'_kj| per term (the entry's low part, or the
+//     whole entry, read as zero), at most K 2^-126 max_k |B'_kj| in C_ij
+//     (twice that for complex parts); the same lower bound on C_ij's sum must
+//     cover 2^48 times that, for every column j. Columns likewise.
 // Rows of op(A) and columns of op(B) that are zero, and C_ij with nonzero
 // lines whose terms all vanish, are exact. Pairs with disjoint supports that
 // stage 1 passes are not checked further (their C_ij is 0 either way).
@@ -360,7 +371,8 @@ ab_guard_t ab_range_guard_stage1(int K, const ab_line_stats_t* sa, const ab_line
     // magnitudes' product; alpha's scalar is below 2^(alpha_exp + 1).
     int headroom = (complex_products ? 2 : 0) + 2 + ilogb((double)K) + 1 + alpha_exp + 1;
     if (amax + bmax + headroom > AB_SUM_MAX_EXP) return AB_GUARD_REJECT;
-    return amin + bmin >= stage1_floor(alpha_exp) ? AB_GUARD_CERTIFIED : AB_GUARD_STAGE2;
+    return amin + bmin >= stage1_floor(alpha_exp) && amin >= AB_ENTRY_MIN_EXP &&
+           bmin >= AB_ENTRY_MIN_EXP ? AB_GUARD_CERTIFIED : AB_GUARD_STAGE2;
 }
 
 bool ab_range_guard(int K, const ab_line_stats_t* sa, const ab_line_stats_t* sb, int alpha_exp,
@@ -377,15 +389,21 @@ bool ab_range_guard(int K, const ab_line_stats_t* sa, const ab_line_stats_t* sb,
     lines_extremes(sb, &bmax, &bmin);
     const double floor_ij = fmax(ldexp((double)K, AB_PRODUCT_MIN_EXP),
                                  ldexp(1.0, AB_PRODUCT_MIN_EXP - alpha_exp));
+    const double entry_k = (double)K * (a->complex_pairs ? 2 : 1);
     int *rows = malloc((size_t)M * sizeof *rows), *ka = malloc((size_t)M * sizeof *ka);
     int *cols = malloc((size_t)N * sizeof *cols), *kb = malloc((size_t)N * sizeof *kb);
     double *av = malloc((size_t)M * sizeof *av), *bv = malloc((size_t)N * sizeof *bv);
     bool ok = rows && ka && cols && kb && av && bv;
+    // Lines with an entry below the entry floor pair with every line of the
+    // other operand, so then every nonzero line is examined.
+    const bool entry_a = amin < AB_ENTRY_MIN_EXP, entry_b = bmin < AB_ENTRY_MIN_EXP;
     int nr = 0, nc = 0;
     for (int i = 0; ok && i < M; i++)
-        if (sa->max[i] != 0 && line_min_exp(sa, i) + bmin < lo) rows[nr++] = i;
+        if (sa->max[i] != 0 && (entry_b || line_min_exp(sa, i) + bmin < lo ||
+                                line_min_exp(sa, i) < AB_ENTRY_MIN_EXP)) rows[nr++] = i;
     for (int j = 0; ok && j < N; j++)
-        if (sb->max[j] != 0 && line_min_exp(sb, j) + amin < lo) cols[nc++] = j;
+        if (sb->max[j] != 0 && (entry_a || line_min_exp(sb, j) + amin < lo ||
+                                line_min_exp(sb, j) < AB_ENTRY_MIN_EXP)) cols[nc++] = j;
     for (int r = 0; r < nr; r++) {
         double best = -1.0;
         for (int k = 0; k < K; k++) {
@@ -406,9 +424,16 @@ bool ab_range_guard(int K, const ab_line_stats_t* sa, const ab_line_stats_t* sb,
         const int i = rows[r];
         for (int c = 0; ok && c < nc; c++) {
             const int j = cols[c];
-            if (line_min_exp(sa, i) + line_min_exp(sb, j) >= lo) continue;
-            ok = av[r] * ldexp(op_mag(b, ka[r], j), -sb->e[j]) >= floor_ij ||
-                 ldexp(op_mag(a, i, kb[c]), -sa->e[i]) * bv[c] >= floor_ij;
+            // what the sum must reach: the product floor, and K 2^-78 times
+            // the other line's largest entry where a line is below the entry floor
+            double need = line_min_exp(sa, i) + line_min_exp(sb, j) < lo ? floor_ij : 0.0;
+            if (line_min_exp(sa, i) < AB_ENTRY_MIN_EXP)
+                need = fmax(need, ldexp(entry_k, AB_ENTRY_MIN_EXP + line_max_exp(sb, j) + 1));
+            if (line_min_exp(sb, j) < AB_ENTRY_MIN_EXP)
+                need = fmax(need, ldexp(entry_k, AB_ENTRY_MIN_EXP + line_max_exp(sa, i) + 1));
+            if (need == 0.0) continue;
+            ok = av[r] * ldexp(op_mag(b, ka[r], j), -sb->e[j]) >= need ||
+                 ldexp(op_mag(a, i, kb[c]), -sa->e[i]) * bv[c] >= need;
         }
     }
     free(rows); free(ka); free(cols); free(kb); free(av); free(bv);

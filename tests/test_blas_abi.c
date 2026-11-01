@@ -166,6 +166,12 @@ typedef enum {
     RANGE_C_TINY,       // row 0 of op(A) zero, the other rows of C0 x 2^-100: they only round
                         // away beside the products (the GPU must certify it)
     RANGE_C_HUGE,       // C0 x 2^135, beta = 2^-20: beta C0 fits FP32, C0 does not (Accelerate)
+    RANGE_ENTRY_LOW_A,  // op(A)_ik x 1 for k = 0 and x 2^-105 else, op(B)_kj x 0 for k = 0 and
+                        // x 2^30 else: every product is about 2^-75, but the small entries'
+                        // FP32 low parts are subnormal, which the GPU reads as zero (Accelerate)
+    RANGE_ENTRY_LOW_B,  // the same with op(A) and op(B) swapped (Accelerate)
+    RANGE_ENTRY_LOW_OK, // op(A) as RANGE_ENTRY_LOW_A, op(B) x 1: the k = 0 products dominate
+                        // C, so the small entries' low parts round away (the GPU must keep it)
 } RangeData;
 
 static const char *const RANGE_TAG[] = {
@@ -174,7 +180,8 @@ static const char *const RANGE_TAG[] = {
     [RANGE_INF] = "inf", [RANGE_ALPHA_TINY] = "alpha-tiny", [RANGE_ALPHA_HUGE] = "alpha-huge",
     [RANGE_EXACT] = "exact", [RANGE_ROWS_LOW] = "rows-low", [RANGE_COLS_HIGH] = "cols-high",
     [RANGE_UNIFORM_EXACT] = "uniform-exact", [RANGE_C_ZERO_ROW] = "c-zero-row",
-    [RANGE_C_TINY] = "c-tiny", [RANGE_C_HUGE] = "c-huge",
+    [RANGE_C_TINY] = "c-tiny", [RANGE_C_HUGE] = "c-huge", [RANGE_ENTRY_LOW_A] = "entry-low-a",
+    [RANGE_ENTRY_LOW_B] = "entry-low-b", [RANGE_ENTRY_LOW_OK] = "entry-low-ok",
 };
 
 typedef struct {
@@ -538,7 +545,8 @@ static void gen_memory(const Suite *s) {
 
 // Exponent range. DD has FP32's exponent range: entries or products below
 // about 2^-126 flush to zero, low parts below about 2^-78 times the result
-// are lost, and above about 2^128 they overflow, silently in 1.4.
+// are lost (an entry's own low part is subnormal from about 2^-102 down, the
+// guard's entry floor), and above about 2^128 they overflow, silently in 1.4.
 //   - Through dgemm_ / zgemm_ (AB_MODE=gpu, no ab_init()), each call must
 //     run on the GPU where power-of-two scaling of op(A)'s rows and op(B)'s
 //     columns puts every product back in range (ROUTE_GPU), and on Accelerate
@@ -590,6 +598,11 @@ static void gen_range(const Suite *s) {
         {OP_DGEMM_SYM, 'N', 'N', RANGE_C_ZERO_ROW, ROUTE_CPU},
         {OP_DGEMM_SYM, 'T', 'T', RANGE_C_TINY, ROUTE_GPU},
         {OP_DGEMM_SYM, 'N', 'T', RANGE_C_HUGE, ROUTE_CPU},
+        {OP_DGEMM_SYM, 'N', 'N', RANGE_ENTRY_LOW_A, ROUTE_CPU},
+        {OP_DGEMM_SYM, 'T', 'N', RANGE_ENTRY_LOW_B, ROUTE_CPU},
+        {OP_ZGEMM_SYM, 'N', 'C', RANGE_ENTRY_LOW_A, ROUTE_CPU},
+        {OP_DGEMM_SYM, 'N', 'T', RANGE_ENTRY_LOW_OK, ROUTE_GPU},
+        {OP_ZGEMM_SYM, 'T', 'N', RANGE_ENTRY_LOW_OK, ROUTE_GPU},
         {OP_DGEMM_SYM, 'N', 'N', RANGE_EXACT, ROUTE_GPU},
         {OP_DGEMM_SYM, 'T', 'T', RANGE_EXACT, ROUTE_GPU},
         {OP_ZGEMM_SYM, 'N', 'N', RANGE_EXACT, ROUTE_GPU},
@@ -1497,6 +1510,9 @@ static double range_a(RangeData d, int i, int k, int M) {
     case RANGE_UNIFORM_EXACT: return 0x1p90;
     case RANGE_C_ZERO_ROW:
     case RANGE_C_TINY:        return i == 0 ? 0.0 : 1.0;
+    case RANGE_ENTRY_LOW_A:
+    case RANGE_ENTRY_LOW_OK:  return k == 0 ? 1.0 : 0x1p-105;
+    case RANGE_ENTRY_LOW_B:   return k == 0 ? 0.0 : 0x1p30;
     default:                  return 1.0;
     }
 }
@@ -1511,6 +1527,8 @@ static double range_b(RangeData d, int k, int j, int N) {
     case RANGE_EXACT:         return ldexp(1.0, exact_col_exp(j));
     case RANGE_COLS_HIGH:     return ldexp(1.0, spread(j, N, 60, 100));
     case RANGE_UNIFORM_EXACT: return 0x1p90;
+    case RANGE_ENTRY_LOW_A:   return k == 0 ? 0.0 : 0x1p30;
+    case RANGE_ENTRY_LOW_B:   return k == 0 ? 1.0 : 0x1p-105;
     default:                  return 1.0;
     }
 }

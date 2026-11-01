@@ -29,6 +29,9 @@ extern "C" {
 // and sums overflow at 2^128 (measured on an M2 Max; docs/vv/LIMITATIONS.md,
 // "Exponent range"). The power-of-two scaling of both APIs keeps data inside.
 #define AB_PRODUCT_MIN_EXP (-78)    // products from 2^-78 up keep full DD precision
+// An entry's FP32 low part below 2^-126 is read as zero on the GPU; from 2^-78
+// up that loses at most 2^-48 of the entry, DD's rounding level.
+#define AB_ENTRY_MIN_EXP (-78)
 #define AB_SUM_MAX_EXP 122          // sums up to 2^122 stay clear of FP32's 2^128
 // A native matrix whose nonzero magnitudes all lie in 2^±AB_NATIVE_WINDOW
 // gives products of at least 2^AB_PRODUCT_MIN_EXP with any other such matrix.

@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **The exponent-range guard now has an entry floor.** In 1.5.1 it certified
+  a call when every product of scaled entries reached 2⁻⁷⁸, with no floor on
+  single entries. An entry below about 2⁻¹⁰² in a row (or column) that needs
+  no scaling has a subnormal FP32 low part, which the GPU reads as zero, so
+  such products kept only FP32 accuracy: `dgemm_` with a row [1, 2⁻¹⁰⁵(1+¾·2⁻²⁴)]
+  of A and a column [0, 2³⁰] of B returned a relative error of 4.5×10⁻⁸ on
+  the GPU and reported success. Stage 1 now also requires every nonzero
+  scaled entry to be at least 2⁻⁷⁸; stage 2 accepts smaller entries where the
+  sum through the largest entries covers K·2⁻⁷⁸ times the other line's
+  largest entry (the most such entries can lose), and Accelerate takes the
+  rest. Data whose scaled entries all reach 2⁻⁷⁸ is routed and computed as
+  before. New cases `range-entry-low-*` in `tests/test_blas_abi.c`.
+
 ## [1.5.1] - 2026-11-01
 
 Documentation corrections and a new check (`make test-dd-bound`); results are

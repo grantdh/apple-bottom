@@ -37,7 +37,7 @@ The library keeps data out of those limits with exact powers of two. A power of 
   - A DGEMM alpha or beta outside [2⁻²⁰, 2²⁰] gives its exponent to C's scale the same way.
   - A call runs on the GPU only when a guard certifies, from the scaled operands, that:
     - no sum can reach 2¹²²;
-    - every nonzero product is at least 2⁻⁷⁸; or, failing that, for every C_ij one of two products through the largest entries of its row and column reaches K·2⁻⁷⁸;
+    - every nonzero product is at least 2⁻⁷⁸, and every nonzero entry is too (below about 2⁻¹⁰² an entry's FP32 low part is subnormal, and the GPU reads it as zero); or, failing that, for every C_ij one of two products through the largest entries of its row and column reaches K·2⁻⁷⁸ and, where its row (column) has an entry below 2⁻⁷⁸, K·2⁻⁷⁸ times its column's (row's) largest entry, twice that for ZGEMM (added after 1.5.1, which had no entry floor and could return FP32-level errors, 4.5×10⁻⁸ relative, for such data);
     - C as scaled for the upload, and beta times it, stay below 2¹²², and beta·C keeps full precision wherever it is the whole of C_ij.
   - Any other call runs on Accelerate, counted as a `range` fallback in `AB_REPORT`, as do calls with NaN or Inf in op(A) or op(B) (or in C with beta ≠ 0, for DGEMM). Those therefore get IEEE results instead of DD's NaN from Inf − Inf.
   - Rows and columns inside the window are not scaled, so ordinary data computes exactly as in 1.4. `tests/test_qe_golden.c` holds such calls to 1.4.0's bits. The exponent-range suite of `tests/test_blas_abi.c` checks scaled calls against cblas and, bit for bit, against the unscaled call times its power of two.
