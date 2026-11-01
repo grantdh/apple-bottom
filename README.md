@@ -24,6 +24,9 @@ ZHEMV ([BLAS-2](#blas-2-matrix-vector-products)), three ways:
   for Fortran codes such as Quantum ESPRESSO, which sends each call to the
   GPU or to Accelerate according to measured timings.
 
+There is also a [double-float FFT](#double-float-fft): batched 1D, 2D and
+3D complex transforms, FP64 in and out.
+
 ## Is it faster than Accelerate?
 
 It depends on where the matrices live.
@@ -290,6 +293,67 @@ The [Integration Guide](docs/INTEGRATION.md) covers C, Fortran, Python
 (experimental bindings in [`python/`](python/)), a Quantum ESPRESSO
 `make.inc` and every environment variable.
 
+## Double-float FFT
+
+[`apple_bottom_fft.h`](include/apple_bottom_fft.h) adds batched 1D, 2D and
+3D complex FFTs on interleaved FP64 data (`fftw_complex`, Fortran
+`COMPLEX(8)`), computed on the GPU in double-float. It needs no `ab_init()`.
+
+```c
+#include "apple_bottom_fft.h"
+
+ABStatus st;
+ab_fft_plan_t p = ab_fft_plan_3d(72, 72, 72, nbands, AB_FFT_BACKWARD, AB_FFT_NORM_NONE, &st);
+ab_fft_execute(p, psic, psic);       // in place, on any array; FP64 in and out
+ab_fft_destroy(p);
+```
+
+- **Layout:** column-major, `n[0]` contiguous, as in Fortran and Quantum
+  ESPRESSO's `psic(nr1x, nr2x, nr3x)`. `ab_fft_plan_many` takes FFTW's
+  advanced-interface strides, distances and embeddings, with the
+  dimensions in FFTW's Fortran order. Forward is `exp(−i…)` as
+  `FFTW_FORWARD`; each plan states its scale: 1, 1/N or 1/√N.
+- **Lengths:** factors 2, 3, 5, 7, 11 and 13; up to 2048 per dimension,
+  and up to 2048² in 1D (two passes).
+- **Memory:** any array works, through staging buffers the plan reuses,
+  copied in 32 MB chunks that overlap the GPU work. Memory from
+  `ab_fft_malloc`, or registered with `ab_fft_register`, is used in place.
+  Nothing is wrapped implicitly.
+
+**Accuracy.** Not FP64: against a double-double reference the relative L2
+error on random data is 5.9–7.5 × 10⁻¹⁵ for 48³ to 128³ grids, 20–24× FFTW's
+FP64 error (2.5–3.7 × 10⁻¹⁶). Additions use a faster double-float sum
+whose error bound is absolute, which suits an FFT's normwise bound; the
+exponent range is FP32's.
+
+**Speed.** Forward 3D transforms, ms per transform, M2 Max on AC power.
+FFTW is 3.3.10 from Homebrew with `FFTW_PATIENT` plans, faster in every case
+than a NEON build of FFTW. "8 cores" is the faster of one 8-thread plan and
+8 single-thread workers, as 8 MPI ranks would run them. Batch 1: one run
+([data, all eight grids and vDSP](benchmarks/results/2026-10-23-c138543-fft/));
+batch 128: the median of five runs
+([data, all eight grids](benchmarks/results/2026-10-29-9fc4547-fft/)):
+
+| n³ | batch | GPU staged | GPU zero copy | FFTW 1 thread | FFTW 8 cores |
+|---:|---:|---:|---:|---:|---:|
+| 48 | 1 | 0.310 | 0.223 | 0.527 | 0.164 |
+| 72 | 1 | 0.668 | 0.387 | 1.923 | 0.327 |
+| 96 | 1 | 0.959 | 0.551 | 4.899 | 0.825 |
+| 120 | 1 | 1.637 | 1.024 | 10.513 | 2.442 |
+| 48 | 128 | 0.057 | 0.043 | 0.596 | 0.106 |
+| 72 | 128 | 0.195 | 0.171 | 1.997 | 0.335 |
+| 96 | 128 | 0.445 | 0.363 | 5.009 | 0.755 |
+| 120 | 128 | 0.925 | 0.809 | 10.543 | 1.511 |
+
+- **Against FFTW on one thread** the GPU is faster on every grid from 48³ to
+  128³: 1.7–6.4× staged and 2.4–15× with zero copy one transform at a time,
+  9–15× and 12–20× in batches of 128.
+- **Against eight cores**, a batch of 128 (a band set) is 1.5–2.4× faster
+  staged and 1.9–3.2× faster with zero copy on every grid (1.4–2.6× and
+  1.9–3.4× in single runs). One transform at a time it takes 96³ or more
+  with zero copy (1.5–2.4×) and 120³ or more staged (1.0–1.5×); below that
+  FFTW's eight threads win.
+
 ## How it works
 
 Each value is stored as an unevaluated sum `hi + lo` of two FP32 numbers,
@@ -344,8 +408,10 @@ entry points in a conformance harness (with long-K precision, data far
 outside FP32's exponent range, imbalanced complex parts, determinism,
 concurrency, memory and fork checks), the staged path against the host
 path bit for bit, and the per-call trace and forced GPU failures; it also
-holds GPU-routed BLAS results to the bits 1.4.0 produced. `make ci-local`
-adds adversarial inputs and the convergence study;
+holds GPU-routed BLAS results to the bits 1.4.0 produced. The FFT is
+checked against a double-double reference and, bit for bit, against a CPU
+replay of its double-float arithmetic. `make ci-local` adds adversarial
+inputs and the convergence study;
 [tests/README.md](tests/README.md) gives the test counts.
 
 [V&V report](docs/vv/VV_REPORT.md) · [precision envelope](docs/vv/PRECISION_ENVELOPE.md) ·
@@ -392,13 +458,16 @@ adds adversarial inputs and the convergence study;
 - **Size.** rows × cols ≤ 2³¹ − 1 per matrix and within the GPU's
   `maxBufferLength`; larger BLAS-ABI operands run on Accelerate.
 - **ZHERK on the GPU is slower than Accelerate**; call `cblas_zherk`.
+- **FFT:** about 20× FFTW's FP64 error, and one transform at a time is
+  faster on eight CPU threads below 96³ (below 120³ through staging).
 
 ## Project layout
 
 ```
-include/apple_bottom.h          public API (and apple_bottom_device.h)
+include/apple_bottom.h          public API (and apple_bottom_device.h, apple_bottom_fft.h)
 src/apple_bottom.m              Metal context and DD kernels
 src/device_api.m                device-buffer API (apple_bottom_device.h)
+src/fft.m, src/fft/             double-float FFT: plans, staging, kernel source
 src/blas_wrapper.c              BLAS ABI: the staged path, the host path, fallbacks
 src/gpu_stage.h                 the staged path's GPU buffers and conversion (internal)
 src/blas2.m, blas2_abi.c        BLAS-2 kernels; dgemv_ / zgemv_ / zhemv_, ab_dev_*gemv

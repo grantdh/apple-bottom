@@ -82,6 +82,35 @@ All notable changes to this project will be documented in this file.
     and `ZHEMV`, and `make test-symbols` checks `_dgemv_`, `_zgemv_` and
     `_zhemv_`. `ab_get_last_dispatch_path()` also reports BLAS-2 calls.
 
+- **Double-float FFT** (`include/apple_bottom_fft.h`, `src/fft.m`,
+  `src/fft/`): batched 1D, 2D and 3D complex transforms on interleaved FP64
+  data, computed on the GPU in double-float. Column-major layout (`n[0]`
+  contiguous, as Fortran and Quantum ESPRESSO), FFTW advanced-interface
+  strides, distances and embeddings, forward or backward, and the scale (1,
+  1/N or 1/√N) chosen per plan. Lengths with factors 2, 3, 5, 7, 11 and 13,
+  up to 2048 per dimension and up to 2048² in 1D (four-step). Each axis is
+  one GPU pass of Stockham line FFTs in threadgroup memory, adapted from the
+  Quantum ESPRESSO band-FFT library (libqemetal); the first pass converts the
+  FP64 input on the GPU, the last rounds to FP64 exactly with integer
+  arithmetic, without a software FP64 add. Caller arrays go through staging
+  buffers the plan reuses, in 32 MB chunks that overlap the GPU work;
+  `ab_fft_malloc` / `ab_fft_register` memory is used in place. Relative L2
+  error 5.9–7.5 × 10⁻¹⁵ on 48³–128³ grids, 20–24× FFTW's FP64 error. Against
+  Homebrew FFTW with `FFTW_PATIENT` plans on an M2 Max: in batches of 128,
+  1.5–2.4× faster than eight cores staged and 1.9–3.2× with zero copy (the
+  medians of five runs); one transform at a time, faster than one thread
+  everywhere and than eight threads from 96³ with zero copy. See
+  "Double-float FFT" in `README.md`,
+  `benchmarks/results/2026-10-23-c138543-fft/` and
+  `benchmarks/results/2026-10-29-9fc4547-fft/`.
+- **`tests/test_fft.c`** (14 tests, in `make test` and `make ci-local`):
+  every result against a double-double reference DFT (`tests/fft_ref.h`)
+  and, bit for bit, against a CPU emulator of the GPU arithmetic
+  (`tests/fft_emu.cpp`); see "Double-float FFT" in `tests/README.md`.
+- **`benchmarks/bench_fft.c`** (`make bench-fft`): time per transform
+  against FFTW (1 thread, an 8-thread plan, 8 single-thread workers) and
+  vDSP, and accuracy against the double-double reference.
+
 ### Changed
 - **32 × 32 tiles are chosen by grid size, not output size**
   (`use_narrow_tiles` in `src/apple_bottom.m`). In 1.5.0 they took every C of

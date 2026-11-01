@@ -514,6 +514,10 @@ applies to every API. `AB_DISPATCH_TABLE`, the FLOP thresholds and
 | `AB_STAGING_MB` | `2048` | The GPU buffers kept between calls by the staged path, by the native ZGEMMs (their Gauss-3M or 4M temporaries) and by the device-buffer API (its operands in double-float), at most this many MB per process; `0`: none kept, each call makes its own (and pays for fresh buffers). |
 | `AB_TEST_FAIL_STAGE` | unset | Test-only. `alloc`: every GPU buffer allocation (`ab_matrix_create()`, and the buffer pool's) fails; `kernel`: the command buffer of every `ab_dgemm_scaled()`, `ab_zgemm()` and staged call, the GEMMs of the GPU path, reports an error. A GPU-routed call then fails as it would on a real failure there and runs on Accelerate instead (a `gpu_failed` fallback). Never set it in production. |
 
+The FFT (`apple_bottom_fft.h`) reads one variable, when a plan is created:
+`AB_FFT_WORK_MB` (default 256) caps the double-float work buffer of a plan
+with more than one GPU pass; larger batches run in groups that fit it.
+
 ### Routing (AB_MODE=auto)
 
 `src/dispatch.c` decides where each GEMM BLAS-ABI call runs, in this order
