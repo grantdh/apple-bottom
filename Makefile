@@ -183,11 +183,11 @@ bench-report: bench
 # Tests
 # =============================================================================
 
-$(BUILD)/test_precision: tests/test_precision.c tests/test_dot2.h lib | $(BUILD)
+$(BUILD)/test_precision: tests/test_precision.c tests/test_dot2.h tests/test_kernels.h lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
-$(BUILD)/test_correctness: tests/test_correctness.c lib | $(BUILD)
+$(BUILD)/test_correctness: tests/test_correctness.c tests/test_kernels.h lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
@@ -199,7 +199,7 @@ $(BUILD)/test_device_api: tests/test_device_api.c tests/test_dot2.h lib | $(BUIL
 # dgemm_ / zgemm_ vs Accelerate cblas. Known failures are tracked in the
 # XFAIL table in tests/test_blas_abi.c (XPASS and stale entries fail the run).
 # AB_EXPECT_BUILD_SHA: the exit-report suite checks ab_build_info() names it.
-$(BUILD)/test_blas_abi: tests/test_blas_abi.c tests/test_blas_check.h tests/test_dot2.h tests/test_spawn.h lib | $(BUILD)
+$(BUILD)/test_blas_abi: tests/test_blas_abi.c tests/test_blas_check.h tests/test_dot2.h tests/test_kernels.h tests/test_spawn.h lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) '-DAB_EXPECT_BUILD_SHA="$(AB_BUILD_SHA)"' $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 

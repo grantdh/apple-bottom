@@ -1,6 +1,6 @@
 # Rectangular Matrix Tile-Dispatch Design Note
 
-This note documents the rationale for apple-bottom's default tile configuration (BM=BN=64, TM=TN=4, TK=16), the tall-skinny variant (BM=128, BN=16) used for QE's Davidson eigensolver shapes and the narrow-output variant (BM=BN=32) for small C. It is intended as a reference for future tile-size tuning on new Apple Silicon generations or workloads with different aspect ratios.
+This note documents the rationale for apple-bottom's default tile configuration (BM=BN=64, TM=TN=4, TK=16), the tall-skinny variant (BM=128, BN=16) used for QE's Davidson eigensolver shapes and the narrow-output variant (BM=BN=32) for small grids. It is intended as a reference for future tile-size tuning on new Apple Silicon generations or workloads with different aspect ratios.
 
 DD error stays within its O(K)·2⁻⁴⁸ componentwise bound for all tested aspect ratios from 121:1 (tall-skinny) to 1:100 (short-wide); `test_rectangular.c` checks this on tall, wide and thin-K shapes up to 18277 × 150 × 18277.
 
@@ -27,8 +27,9 @@ The tall-skinny kernel reduces boundary waste for N = 150 from ~22% under BN=64 
 **Narrow-output variant** (deployed; `BM_NW`/`BN_NW` in `src/apple_bottom.m`):
 - BM = BN = 32, TM = TN = 2, TK = 16
 - Threadgroup layout 16×16 = 256 threads
-- Selected by `use_narrow_tiles` for a C of at most 480 × 480 elements: in place of the 64 × 64 kernel, and in place of the tall-skinny one only where its 32 columns per tile add no padding to that kernel's 16 (N = 17-32, 49-64, ...) or where the tall-skinny grid would have at most 16 threadgroups, as for Davidson's overlaps with a small subspace (200 × 40 × 18277: 6 threadgroups, 2.1× faster on 32 × 32 tiles)
-- Four times the threadgroups of the 64 × 64 tiling: a 160 × 160 C is 25 threadgroups instead of 9, 2.6× faster on 160 × 160 × 18432 on a 38-core M2 Max. 512 × 512 breaks even, so larger outputs keep the 64 × 64 tiles
+- Selected by `use_narrow_tiles` for grids of at most 1024 narrow threadgroups alone on the GPU, or 441 in a concurrent encoder (Gauss-3M's and 4M's products). In place of the 64 × 64 kernel, except where that kernel prefetches (at most 64 threadgroups, serial encoder) and the narrow grid has more than 239. In place of the tall-skinny kernel while the narrow grid takes at most twice as many GPU steps (below), as for Davidson's overlaps with a small subspace (200 × 40 × 18277: 6 threadgroups, 2.1× faster on 32 × 32 tiles) and 1024 × 40 (1.25×)
+- Why: alone on a 38-core M2 Max, every kernel's GPU time rises in steps of about 33 threadgroups as its grid grows (one-row grid sweeps in [`benchmarks/results/2026-10-25-2825d2a-narrow-tiles/`](../../benchmarks/results/2026-10-25-2825d2a-narrow-tiles/README.md)). A step of narrow threadgroups costs 0.29× a 64 × 64 step and half a tall-skinny step, while at full occupancy a narrow output costs ~16% more. So the four times finer tiles win while a grid takes few steps: 2.6× on 160 × 160 × 18432, 1.04-1.46× from 544 × 544 to 1024 × 1024 (0.92-0.98× at 832 × 832 and 896 × 896, whose 64 × 64 grids fill their last step). Beyond the limits the larger tiles win, by up to 12%. Three or four concurrent products fill the steps sooner, hence the lower limit there
+- Re-calibrate the limits and the 33-threadgroup step on a GPU with another core count
 - Each output gets the same dd_fma sequence and renormalizations as in the other kernels, so the results are bitwise the same
 
 **Register prefetch** (deployed; the `*_pf` instances of every tiled kernel):

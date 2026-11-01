@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.0] - Unreleased
+
+### Added
+- **Kernel dispatch counts in the tests.** The library counts every
+  GEMM-family dispatch by kernel and by plain or register-prefetch instance
+  where it binds the pipeline (`gemm_pipeline`), and `tests/test_kernels.h`
+  reads the counts. The coverage cases of `test_correctness`,
+  `test_precision` and `test_blas_abi` name the kernel they are for and check
+  that it ran, so a routing change that moves one fails the test instead of
+  leaving a comment wrong.
+
+### Changed
+- **32 × 32 tiles are chosen by grid size, not output size**
+  (`use_narrow_tiles` in `src/apple_bottom.m`). In 1.5.0 they took every C of
+  at most 480 × 480 elements. Alone on the GPU, a grid's time rises in steps
+  of about 33 threadgroups for every kernel, and a step of 32 × 32
+  threadgroups costs 0.29× a 64 × 64 step, so the finer tiles win while a
+  grid takes few steps. They now take grids of up to 1024 of their
+  threadgroups alone on the GPU, 441 for ZGEMM's concurrent products. The
+  64 × 64 kernels keep grids of at most 64 threadgroups, where they
+  prefetch, unless the 32 × 32 grid has at most 239. A tall C (M ≥ 4N) moves
+  off the tall-skinny kernel while the 32 × 32 grid takes at most twice as
+  many steps. Kernel GPU time on M2 Max against the 1.5.0 rule: 1.04–1.46×
+  on most squares from 544 × 544 to 1024 × 1024 (0.92–0.98× at 832 × 832 and
+  896 × 896), 1.41× on 600 × 600 × 9140, 1.26× on 1024 × 40 × 4608, and down
+  to 0.88× on some concurrent tall-skinny products with tiny grids. Over all
+  482 measured lines the geometric mean is 1.043×; the 228 that change
+  kernel run 1.093× faster (194 faster, 34 slower). Results are bitwise
+  unchanged. Measurements:
+  `benchmarks/results/2026-10-25-2825d2a-narrow-tiles/`. The coverage cases
+  move to shapes that still reach each kernel: 1100 × 1000 for the 64 × 64
+  prefetch instances, 4000 × 40 for tall-skinny.
+
 ## [1.5.1] - Unreleased
 
 Documentation corrections and a new check (`make test-dd-bound`); results are

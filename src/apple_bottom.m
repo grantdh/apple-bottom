@@ -321,8 +321,9 @@ inline DD dd_scale(DD a, float s) {
 #define NT_TS ((BM_TS/TM_TS) * (BN_TS/TN_TS))
 
 // Narrow-output tiling: 32×32 blocks, 256 threads with 2×2 outputs each.
-// Four times the threadgroups of the square tiling, for a C too small to
-// keep the GPU busy with 64×64 blocks (routing: use_narrow_tiles, host side)
+// Four times the threadgroups of the square tiling, for grids small enough
+// that finer tiles spread better over the GPU's cores (routing:
+// use_narrow_tiles, host side)
 #define BM_NW 32
 #define BN_NW 32
 #define TM_NW 2
@@ -2433,27 +2434,28 @@ static bool encode_align_zgemm(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
 // epilogue (plain C = A*B, or alpha/beta), so the choice never changes results.
 //   - 64×64 (dd_dgemm, dd_dgemm_ab): the default.
 //   - Tall-skinny 128×16 (dd_dgemm_ab_ts) for M >= 4N.
-//   - Narrow 32×32 (dd_dgemm_narrow, dd_dgemm_ab_narrow) for C of at most
-//     AB_NARROW_MAX_OUTPUTS elements. Over tall-skinny only where 32 columns
-//     per tile add no padding to its 16 (N = 20, 32, 64, 150, ...) or where
-//     the tall-skinny grid would have at most AB_NARROW_MAX_TS_GROUPS
-//     threadgroups (Davidson's small nbase+notcnv × notcnv overlaps).
-// Measured on M2 Max (38-core GPU): 480×480 is the largest C measured faster
-// on the narrow tiles than on 64×64; 512×512 breaks even. Tall-skinny stays
-// faster where N pads more and its grid is larger, by up to 1.8x (18277×5).
-#define AB_NARROW_MAX_OUTPUTS (480u * 480u)
-#define AB_NARROW_MAX_TS_GROUPS 16u
+//   - Narrow 32×32 (dd_dgemm_narrow, dd_dgemm_ab_narrow) for small grids
+//     (use_narrow_tiles): at most AB_NARROW_MAX_GROUPS threadgroups alone on
+//     the GPU, AB_NARROW_MAX_GROUPS_CONCURRENT in a concurrent encoder
+//     (Gauss-3M's and 4M's products), AB_NARROW_MAX_GROUPS_VS_PF against
+//     64×64 tiles that prefetch; against tall-skinny ones while taking at most
+//     twice their GPU steps. AB_PREFETCH changes the instances, never the tiling.
+// Measured on M2 Max (38-core GPU), kernel GPU time: alone on the GPU, every
+// kernel's time rises in steps of about AB_GPU_STEP_GROUPS threadgroups. A
+// narrow threadgroup's step costs half a tall-skinny one's and 0.29x a 64×64
+// one's (~16% more per output at full occupancy), so the finer tiles win
+// while a grid takes few steps: 1.04-1.46x from 544×544 to 1024×1024 (but
+// 0.92-0.98x at 832×832 and 896×896, whose 64×64 grids fill their last
+// step), and 1.1-1.35x over tall-skinny on small grids whose N the 32-column
+// tiles pad more (1024×40, 1200×100). Beyond the limits the larger tiles win,
+// by up to 12%. Re-calibrate these limits, AB_GPU_STEP_GROUPS and the
+// prefetch limits below on a GPU with another core count.
+#define AB_NARROW_MAX_GROUPS 1024u
+#define AB_NARROW_MAX_GROUPS_CONCURRENT 441u
+#define AB_NARROW_MAX_GROUPS_VS_PF 239u
+#define AB_GPU_STEP_GROUPS 33u
 
 static bool use_tall_skinny(uint32_t M, uint32_t N) { return M >= 4 * N; }
-
-// The narrow kernels instead of 64×64 tiles, or of tall-skinny ones when
-// tall_skinny.
-static bool use_narrow_tiles(uint32_t M, uint32_t N, bool tall_skinny) {
-    if ((uint64_t)M * N > AB_NARROW_MAX_OUTPUTS) return false;
-    if (!tall_skinny) return true;
-    uint32_t ts_groups = (M + 127) / 128 * ((N + 15) / 16);
-    return (N + 31) / 32 * 32 == (N + 15) / 16 * 16 || ts_groups <= AB_NARROW_MAX_TS_GROUPS;
-}
 
 // Register prefetch: the *_pf instance of a kernel (Register Prefetch in the
 // MSL; same bits) instead of the plain one, while the GPU holds few enough
@@ -2472,20 +2474,59 @@ static bool use_narrow_tiles(uint32_t M, uint32_t N, bool tall_skinny) {
 #define AB_PREFETCH_MAX_TS_GROUPS 512u
 #define AB_PREFETCH_MAX_NARROW_GROUPS UINT32_MAX
 
-static uint64_t g_prefetch_dispatches = 0;
+// The GEMM-family kernels, each with a plain and a *_pf instance
+typedef enum {
+    AB_KERNEL_DGEMM, AB_KERNEL_DGEMM_NARROW, AB_KERNEL_DGEMM_AB, AB_KERNEL_DGEMM_AB_NARROW,
+    AB_KERNEL_DGEMM_AB_TS, AB_KERNEL_DSYRK, AB_KERNEL_KINDS
+} ABKernel;
+
+static const char* const g_kernel_names[AB_KERNEL_KINDS] = {
+    "dd_dgemm", "dd_dgemm_narrow", "dd_dgemm_ab", "dd_dgemm_ab_narrow", "dd_dgemm_ab_ts",
+    "dd_dsyrk",
+};
+static uint64_t g_kernel_dispatches[AB_KERNEL_KINDS][2];   // [kind][plain, *_pf]
 
 // The *_pf kernel for a grid of `groups` threadgroups while at most
-// max_groups (AB_PREFETCH=1: always, =0: never). Each true counts one dispatch.
+// max_groups (AB_PREFETCH=1: always, =0: never).
 static bool use_prefetch(ABContextImpl* ctx, uint32_t groups, uint32_t max_groups) {
     ABPrefetchMode mode = ctx.prefetchMode;
-    if (mode == AB_PREFETCH_OFF || (mode == AB_PREFETCH_RULE && groups > max_groups)) return false;
-    __atomic_fetch_add(&g_prefetch_dispatches, 1, __ATOMIC_RELAXED);
-    return true;
+    return mode == AB_PREFETCH_ALL || (mode == AB_PREFETCH_RULE && groups <= max_groups);
 }
 
-// Dispatches of a *_pf kernel since the process started, for the tests.
-extern "C" uint64_t ab_internal_prefetch_dispatches(void) {
-    return __atomic_load_n(&g_prefetch_dispatches, __ATOMIC_RELAXED);
+// Kernel kind's pipeline for a grid of `groups` threadgroups, its *_pf
+// instance by use_prefetch. Counts the dispatch, for the tests.
+static id<MTLComputePipelineState> gemm_pipeline(ABContextImpl* ctx, ABKernel kind,
+                                                  uint32_t groups, uint32_t max_groups) {
+    bool pf = use_prefetch(ctx, groups, max_groups);
+    __atomic_fetch_add(&g_kernel_dispatches[kind][pf], 1, __ATOMIC_RELAXED);
+    switch (kind) {
+    case AB_KERNEL_DGEMM:
+        return pf ? ctx.dgemmPFPipeline : ctx.dgemmPipeline;
+    case AB_KERNEL_DGEMM_NARROW:
+        return pf ? ctx.dgemmNarrowPFPipeline : ctx.dgemmNarrowPipeline;
+    case AB_KERNEL_DGEMM_AB:
+        return pf ? ctx.dgemmABPFPipeline : ctx.dgemmABPipeline;
+    case AB_KERNEL_DGEMM_AB_NARROW:
+        return pf ? ctx.dgemmABNarrowPFPipeline : ctx.dgemmABNarrowPipeline;
+    case AB_KERNEL_DGEMM_AB_TS:
+        return pf ? ctx.dgemmABTSPFPipeline : ctx.dgemmABTSPipeline;
+    case AB_KERNEL_DSYRK:
+        return pf ? ctx.dsyrkPFPipeline : ctx.dsyrkPipeline;
+    default:
+        return nil;
+    }
+}
+
+// Dispatches since the process started of GEMM-family kernel `kind`'s plain
+// (pf 0) or *_pf (pf 1) instance, and the kernel's Metal function name (NULL
+// from AB_KERNEL_KINDS on), for the tests (tests/test_kernels.h).
+extern "C" uint64_t ab_internal_kernel_dispatches(int kind, int pf) {
+    return kind >= 0 && kind < AB_KERNEL_KINDS && (pf == 0 || pf == 1)
+               ? __atomic_load_n(&g_kernel_dispatches[kind][pf], __ATOMIC_RELAXED) : 0;
+}
+
+extern "C" const char* ab_internal_kernel_name(int kind) {
+    return kind >= 0 && kind < AB_KERNEL_KINDS ? g_kernel_names[kind] : NULL;
 }
 
 // The 64×64 kernels' prefetch limit: none in a concurrent encoder, whose
@@ -2494,25 +2535,44 @@ static uint32_t square_prefetch_max(id<MTLComputeCommandEncoder> encoder) {
     return encoder.dispatchType == MTLDispatchTypeConcurrent ? 0 : AB_PREFETCH_MAX_GROUPS;
 }
 
+// GPU steps of a grid of `groups` threadgroups alone on the GPU (Output tiling)
+static uint32_t gpu_steps(uint32_t groups) {
+    return (groups + AB_GPU_STEP_GROUPS - 1) / AB_GPU_STEP_GROUPS;
+}
+
+// The narrow kernels instead of 64×64 tiles, or of tall-skinny ones when
+// tall_skinny, for a dispatch into encoder (Output tiling, above).
+static bool use_narrow_tiles(id<MTLComputeCommandEncoder> encoder, uint32_t M, uint32_t N,
+                             bool tall_skinny) {
+    uint32_t groups = ((M + 31) / 32) * ((N + 31) / 32);
+    bool concurrent = encoder.dispatchType == MTLDispatchTypeConcurrent;
+    if (groups > (concurrent ? AB_NARROW_MAX_GROUPS_CONCURRENT : AB_NARROW_MAX_GROUPS)) return false;
+    if (tall_skinny) {
+        uint32_t ts_groups = ((M + 127) / 128) * ((N + 15) / 16);
+        return gpu_steps(groups) <= 2 * gpu_steps(ts_groups);
+    }
+    uint32_t square_groups = ((M + 63) / 64) * ((N + 63) / 64);
+    return square_groups > square_prefetch_max(encoder) || groups <= AB_NARROW_MAX_GROUPS_VS_PF;
+}
+
 // dd_dgemm (C = A*B) with all of its buffers bound, including the Morton grid
-// dims at 6/7, or dd_dgemm_narrow (same buffers) for a small C, or their
+// dims at 6/7, or dd_dgemm_narrow (same buffers) for a small grid, or their
 // prefetch instances. ab_dgemm and ab_dgemm_async always come here, so their
 // results are bitwise identical.
 static void encode_dgemm_square_dispatch(id<MTLComputeCommandEncoder> encoder,
                                           ABContextImpl* ctx,
                                           ABMatrix A, ABMatrix B, ABMatrix C) {
     uint32_t M = A->rows, N = B->cols, K = A->cols;
-    bool narrow = use_narrow_tiles(M, N, false);
+    bool narrow = use_narrow_tiles(encoder, M, N, false);
     uint32_t tile = narrow ? 32 : 64;
     uint32_t gridW = (N + tile - 1) / tile, gridH = (M + tile - 1) / tile;
-    id<MTLComputePipelineState> plain = ctx.dgemmPipeline, pf = ctx.dgemmPFPipeline;
+    ABKernel kind = AB_KERNEL_DGEMM;
     uint32_t max_groups = square_prefetch_max(encoder);
     if (narrow) {
-        plain = ctx.dgemmNarrowPipeline;
-        pf = ctx.dgemmNarrowPFPipeline;
+        kind = AB_KERNEL_DGEMM_NARROW;
         max_groups = AB_PREFETCH_MAX_NARROW_GROUPS;
     }
-    [encoder setComputePipelineState:use_prefetch(ctx, gridW * gridH, max_groups) ? pf : plain];
+    [encoder setComputePipelineState:gemm_pipeline(ctx, kind, gridW * gridH, max_groups)];
     [encoder setBuffer:A->buffer offset:0 atIndex:0];
     [encoder setBuffer:B->buffer offset:0 atIndex:1];
     [encoder setBuffer:C->buffer offset:0 atIndex:2];
@@ -2536,28 +2596,26 @@ static void encode_dgemm_scaled_dispatch(id<MTLComputeCommandEncoder> encoder,
     DDFloat alpha_dd = fp64_to_dd(alpha);
     DDFloat beta_dd = fp64_to_dd(beta);
     bool use_ts = use_tall_skinny(M, N);
-    bool narrow = use_narrow_tiles(M, N, use_ts);
+    bool narrow = use_narrow_tiles(encoder, M, N, use_ts);
     // Tile rows × columns and threadgroup: 64×64 and narrow use 16×16 threads,
     // tall-skinny (TM=4, TN=2) 8×32
     uint32_t bm = 64, bn = 64;
     MTLSize threads = MTLSizeMake(16, 16, 1);
-    id<MTLComputePipelineState> plain = ctx.dgemmABPipeline, pf = ctx.dgemmABPFPipeline;
+    ABKernel kind = AB_KERNEL_DGEMM_AB;
     uint32_t max_groups = square_prefetch_max(encoder);
     if (narrow) {
         bm = bn = 32;
-        plain = ctx.dgemmABNarrowPipeline;
-        pf = ctx.dgemmABNarrowPFPipeline;
+        kind = AB_KERNEL_DGEMM_AB_NARROW;
         max_groups = AB_PREFETCH_MAX_NARROW_GROUPS;
     } else if (use_ts) {
         bm = 128;
         bn = 16;
         threads = MTLSizeMake(8, 32, 1);
-        plain = ctx.dgemmABTSPipeline;
-        pf = ctx.dgemmABTSPFPipeline;
+        kind = AB_KERNEL_DGEMM_AB_TS;
         max_groups = AB_PREFETCH_MAX_TS_GROUPS;
     }
     uint32_t gridW = (N + bn - 1) / bn, gridH = (M + bm - 1) / bm;
-    [encoder setComputePipelineState:use_prefetch(ctx, gridW * gridH, max_groups) ? pf : plain];
+    [encoder setComputePipelineState:gemm_pipeline(ctx, kind, gridW * gridH, max_groups)];
     [encoder setBuffer:A->buffer offset:0 atIndex:0];
     [encoder setBuffer:B->buffer offset:0 atIndex:1];
     [encoder setBuffer:C->buffer offset:0 atIndex:2];
@@ -3126,8 +3184,8 @@ ABStatus ab_dsyrk(ABMatrix A, ABMatrix C) {
     encode_rescale(cmdBuf, ctx, C, C->exp2 - 2 * A->exp2);
     id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
     uint32_t gridW = (N + 63) / 64, gridH = (N + 63) / 64;
-    bool pf = use_prefetch(ctx, gridW * gridH, square_prefetch_max(encoder));
-    [encoder setComputePipelineState:pf ? ctx.dsyrkPFPipeline : ctx.dsyrkPipeline];
+    [encoder setComputePipelineState:gemm_pipeline(ctx, AB_KERNEL_DSYRK, gridW * gridH,
+                                                   square_prefetch_max(encoder))];
     [encoder setBuffer:A->buffer offset:0 atIndex:0];
     [encoder setBuffer:C->buffer offset:0 atIndex:1];
     [encoder setBytes:&N length:sizeof(N) atIndex:2];

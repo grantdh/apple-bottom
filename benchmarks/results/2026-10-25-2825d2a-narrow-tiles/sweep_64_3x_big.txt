@@ -1,0 +1,73 @@
+# Apple M2 Max, library compiled in 1 ms
+# dd_dgemm               maxThreads  832  staticTG 16384  pipeline 1.6 ms
+# dd_dgemm_pf            maxThreads  512  staticTG 16384  pipeline 0.0 ms  (not run)
+# dd_dgemm_narrow        maxThreads 1024  staticTG  8192  pipeline 0.0 ms  (not run)
+# dd_dgemm_narrow_pf     maxThreads  896  staticTG  8192  pipeline 0.0 ms  (not run)
+# dd_dgemm_ab            maxThreads  832  staticTG 16384  pipeline 0.0 ms  (not run)
+# dd_dgemm_ab_pf         maxThreads  512  staticTG 16384  pipeline 0.0 ms  (not run)
+# dd_dgemm_ab_narrow     maxThreads 1024  staticTG  8192  pipeline 0.0 ms  (not run)
+# dd_dgemm_ab_narrow_pf  maxThreads  896  staticTG  8192  pipeline 0.0 ms  (not run)
+# dd_dgemm_ab_ts         maxThreads  896  staticTG 18432  pipeline 0.0 ms  (not run)
+# dd_dgemm_ab_ts_pf      maxThreads  576  staticTG 18432  pipeline 0.0 ms  (not run)
+# dd_dsyrk               maxThreads  768  staticTG 16384  pipeline 0.0 ms  (not run)
+# dd_dsyrk_pf            maxThreads  512  staticTG 16384  pipeline 0.0 ms  (not run)
+    G      K  np       sq  |   MHz
+  210   1024  3x    7.990  |   1389
+  215   1024  3x    8.093  |   1396
+  220   1024  3x    8.354  |   1393
+  225   1024  3x    8.244  |   1394
+  230   1024  3x    8.538  |   1395
+  235   1024  3x    8.600  |   1392
+  240   1024  3x    8.973  |   1394
+  245   1024  3x    9.098  |   1391
+  250   1024  3x    9.250  |   1390
+  255   1024  3x    9.418  |   1394
+  260   1024  3x    9.514  |   1394
+  265   1024  3x    9.907  |   1387
+  270   1024  3x    9.880  |   1391
+  275   1024  3x   10.283  |   1390
+  280   1024  3x   10.294  |   1394
+  285   1024  3x   10.533  |   1389
+  290   1024  3x   10.755  |   1391
+  295   1024  3x   10.772  |   1388
+  300   1024  3x   10.732  |   1395
+  305   1024  3x   11.209  |   1392
+  310   1024  3x   11.328  |   1394
+  315   1024  3x   11.626  |   1393
+  320   1024  3x   11.683  |   1389
+  325   1024  3x   11.692  |   1392
+  330   1024  3x   12.127  |   1386
+  335   1024  3x   12.086  |   1391
+  340   1024  3x   12.521  |   1391
+  345   1024  3x   12.542  |   1389
+  350   1024  3x   13.127  |   1374
+  355   1024  3x   13.214  |   1365
+  360   1024  3x   13.679  |   1358
+  365   1024  3x   13.777  |   1354
+  370   1024  3x   13.885  |   1342
+  375   1024  3x   14.157  |   1327
+  380   1024  3x   14.441  |   1332
+  385   1024  3x   14.711  |   1342
+  390   1024  3x   14.790  |   1344
+  395   1024  3x   14.774  |   1344
+  400   1024  3x   14.907  |   1332
+  405   1024  3x   15.460  |   1324
+  410   1024  3x   15.532  |   1322
+  415   1024  3x   15.657  |   1325
+  420   1024  3x   15.880  |   1328
+  425   1024  3x   16.074  |   1311
+  430   1024  3x   16.394  |   1323
+  435   1024  3x   16.285  |   1332
+  440   1024  3x   16.940  |   1316
+  445   1024  3x   16.898  |   1320
+  450   1024  3x   17.062  |   1312
+  455   1024  3x   17.478  |   1310
+  460   1024  3x   17.370  |   1320
+  465   1024  3x   17.915  |   1313
+  470   1024  3x   17.864  |   1318
+  475   1024  3x   18.261  |   1307
+  480   1024  3x   18.440  |   1309
+  485   1024  3x   18.494  |   1310
+  490   1024  3x   19.099  |   1296
+  495   1024  3x   19.014  |   1302
+  500   1024  3x   18.959  |   1305
