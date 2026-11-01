@@ -73,7 +73,7 @@ Check that CI passed on the latest commit:
 
 **Check at:** `https://github.com/grantdh/apple-bottom/actions`
 
-**Note:** GitHub-hosted runners don't give jobs a usable Metal GPU, so CI runs only the checks that need none: `make version-check`, `make build-check`, `make lib`, `make test-symbols` and the routing unit tests (`build/test_dispatch`). The GPU suites and the convergence study run locally via `make ci-local` (step 2 above).
+**Note:** GitHub-hosted runners don't give jobs a usable Metal GPU, so CI runs only the checks that need none: `make version-check`, `make build-check`, `make lib`, `make test-symbols`, the routing unit tests (`build/test_dispatch`) and `make dispatch-table-check` (the built-in routing tables against `benchmarks/calibration/`). The GPU suites and the convergence study run locally via `make ci-local` (step 2 above).
 
 ### 4. Documentation Review
 
@@ -82,9 +82,13 @@ Check that CI passed on the latest commit:
 - [ ] `docs/vv/VV_REPORT.md` references current validated baseline (if V&V changed)
 - [ ] `docs/vv/PRECISION_ENVELOPE.md` validated range is accurate
 - [ ] If the BLAS-ABI GPU path or the kernels changed since the last
-      calibration: `make calibrate` on an idle machine, and commit the
-      regenerated `src/dispatch_table.h` with its
-      `benchmarks/results/<date>-<sha>-calibrate/` directory
+      calibration: `make calibrate` on an idle machine, which files this
+      chip's table under `benchmarks/calibration/<chip>/` and regenerates
+      `src/dispatch_table.h`; commit both with the
+      `benchmarks/results/<date>-<sha>-calibrate/` directory. Other chips'
+      tables stay as they are until someone recalibrates them
+      (`make dispatch-table-check` confirms the header matches the filed
+      tables)
 
 ### 5. Version Update
 

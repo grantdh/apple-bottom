@@ -46,7 +46,7 @@ Complete guide for integrating apple-bottom into scientific computing codes.
 ### Building your program
 
 With the library built in place (`make`), the shared library carries its
-Metal, Foundation and C++ dependencies:
+Metal, Foundation, IOKit and C++ dependencies:
 
 ```bash
 clang -I/path/to/apple-bottom/include my_prog.c -o my_prog \
@@ -58,7 +58,7 @@ Linking the static archive instead needs those dependencies spelled out:
 ```bash
 clang -I/path/to/apple-bottom/include my_prog.c -o my_prog \
       /path/to/apple-bottom/build/libapplebottom.a \
-      -lc++ -framework Metal -framework Foundation -framework Accelerate
+      -lc++ -framework Metal -framework Foundation -framework Accelerate -framework IOKit
 ```
 
 After `make install PREFIX=$HOME/.local` (default `/usr/local`), pkg-config
@@ -347,14 +347,16 @@ Static archive:
 
 ```makefile
 LIBS = /path/to/apple-bottom/build/libapplebottom.a \
-       -lc++ -framework Metal -framework Foundation -framework Accelerate
+       -lc++ -framework Metal -framework Foundation -framework Accelerate -framework IOKit
 ```
 
 Keep apple-bottom first. The linker binds `dgemm_`/`zgemm_` to the first
 library on the command line that exports them, and in a flat namespace
 (`-Wl,-flat_namespace`, which Homebrew's Open MPI wrappers add) the first
 loaded library wins at run time. Without `-lc++`, a static link fails with
-an undefined `___gxx_personality_v0`.
+an undefined `___gxx_personality_v0`; without `-framework IOKit`, with an
+undefined `_IOServiceGetMatchingServices` (the routing reads the GPU core
+count from the IORegistry).
 
 ### Check that the calls arrive
 
@@ -468,7 +470,9 @@ to every API.
 |----------|---------|--------|
 | `AB_MODE` | `auto` | `cpu`: every call on Accelerate. `gpu`: on the GPU unless a dimension is ≤ `AB_MIN_GPU_DIM`. `auto` (or any other value): by the calibrated dispatch table, or by a FLOP threshold if one is set (see [Routing](#routing-ab_modeauto)). |
 | `AB_MIN_GPU_DIM` | `32` | Calls with M, N or K ≤ this run on Accelerate in every mode. |
-| `AB_DISPATCH_TABLE` | unset | `auto`: read the dispatch table from this file (the `dispatch_table.txt` that `make calibrate` writes) instead of using the built-in one. A file that cannot be read or parsed is reported on stderr and the built-in table is used. |
+| `AB_DISPATCH_TABLE` | unset | `auto`: read the dispatch table from this file (the `dispatch_table.txt` that `make calibrate` writes) instead of the built-in table for this chip. A file that cannot be read or parsed is reported on stderr and the built-in table for this chip is kept (none on an uncalibrated chip); a file calibrated on another chip or core count (its `# chip:` and `# gpu_cores:` header keys) is used with a note on stderr. |
+| `AB_CHIP` | unset | `auto`: the chip whose built-in table to use, in place of this machine's `machdep.cpu.brand_string` (e.g. `Apple M2 Max`). For tests, and to borrow another chip's table deliberately (with `AB_GPU_CORES` matching that table's count when it has one). |
+| `AB_GPU_CORES` | unset | `auto`: the GPU core count that picks among a chip's tables, in place of the IORegistry's `gpu-core-count`; also how a sibling borrows another variant's table on purpose (`AB_GPU_CORES=38` on a 30-core M2 Max). |
 | `AB_CROSSOVER_FLOPS` | unset | `auto`: replaces the table by a FLOP threshold. Calls with at least this many FLOPs (2·M·N·K real, 8·M·N·K complex) go to the GPU: ZGEMM, and DGEMM unless `AB_CROSSOVER_FLOPS_REAL` is set. |
 | `AB_CROSSOVER_FLOPS_REAL` | unset | `auto`: the same for DGEMM only. |
 | `AB_PREFETCH` | unset | Which GPU GEMM kernels load the next K-tile into registers while they compute the current one (register prefetch). Unset or any other value: where the GPU holds few threadgroups, by `use_prefetch` in `src/apple_bottom.m` (on an M2 Max up to 1.47× faster there in kernel GPU time; [measurements](../benchmarks/results/2026-10-24-15ef7b9-prefetch/)). `0`: never. `1`: on every grid. The results are bitwise the same in all three; `0` and `1` are for timing comparisons. |
@@ -496,9 +500,13 @@ this order:
    (ZGEMM, and DGEMM without `AB_CROSSOVER_FLOPS_REAL`) set: the GPU if the
    call has at least that many FLOPs.
 6. `auto`: the dispatch table, from the file `AB_DISPATCH_TABLE` names or
-   else the built-in `src/dispatch_table.h`. The GPU if a row of the call's
-   routine and TRANS class has min_M ≤ M, min_N ≤ N and min_K ≤ K, else
-   Accelerate.
+   else the built-in table for this machine's chip (`src/dispatch_table.h`,
+   one table per calibrated chip, keyed by the chip's brand string and GPU
+   core count). The GPU if a row of the call's routine and TRANS class has
+   min_M ≤ M, min_N ≤ N and min_K ≤ K, else Accelerate. A chip without a
+   built-in table, or a sibling with another core count (an M2 Max with 30
+   cores instead of 38), has no rows: every `auto` call runs on Accelerate
+   until that chip is calibrated.
 
 The table comes from measurements, not a model. `make calibrate` (about 15
 minutes) times each shape of a grid end to end, through `ab_*gemm_blas`
@@ -516,19 +524,40 @@ without rows keeps every `auto` call on Accelerate:
 zgemm T T 4096 4096 4096
 ```
 
-The built-in table was measured on an M2 Max (38-core GPU, macOS 27.0.1;
-data in `benchmarks/results/2026-10-14-52f1880-calibrate/`) at 52f1880,
-on 1.4.0's host path, which packed and converted on the CPU. The GPU path
-was at least 1.10× faster only for ZGEMM with both operands transposed or
-conjugated, from 4096 up (1.11× at 4096, 1.20× at 6144): that is the
-table's one row. Every QE si64 shape (0.09–0.76× Accelerate's speed) and
-every DGEMM (at most 0.84×) was slower on the GPU, and the other ZGEMMs
-reached at most 1.02× (6144, one operand transposed). So `auto` keeps QE's
-calls on Accelerate. The table has not been measured again on 1.5.0's
-staged path; `make calibrate` on 1.5.0 measures that path. To
-calibrate another machine, run `make calibrate` and set
-`AB_DISPATCH_TABLE` to the `dispatch_table.txt` it writes, or rebuild:
-it also rewrites `src/dispatch_table.h`.
+The built-in tables live in `benchmarks/calibration/<chip>/`, one directory
+per calibrated chip (`M2-Max-38c`: the chip without "Apple ", then the GPU
+core count), each holding the `dispatch_table.txt` and `calibrate_summary.csv`
+of its calibration; `src/dispatch_table.h` is generated from them. The M2 Max
+table (38-core GPU, macOS 27.0.1; measured in
+`benchmarks/results/2026-10-14-52f1880-calibrate/`) is so far the only one.
+It was measured at 52f1880, on 1.4.0's host path, which packed and
+converted on the CPU. There the GPU path was at least 1.10× faster only for ZGEMM with both
+operands transposed or conjugated, from 4096 up (1.11× at 4096, 1.20× at
+6144): that is the table's one row. Every QE si64 shape (0.09–0.76×
+Accelerate's speed) and every DGEMM (at most 0.84×) was slower on the GPU,
+and the other ZGEMMs reached at most 1.02× (6144, one operand transposed).
+So `auto` keeps QE's calls on Accelerate on an M2 Max, and on every other
+chip, which has no table yet. The M2 Max table has not been measured again
+on 1.5.0's staged path; `make calibrate` measures that path.
+
+To calibrate another machine, run `make calibrate` there (about 15 minutes,
+idle, on AC power): it writes the results under `benchmarks/results/`, files
+them as that chip's table under `benchmarks/calibration/` through
+`scripts/ingest_calibration.py`, and regenerates `src/dispatch_table.h`;
+rebuild to compile the table in, and commit the header with the directory
+(`make dispatch-table-check`, part of `ci-local` and CI, verifies they
+agree). A calibration made elsewhere, a directory with its
+`dispatch_table.txt` and `calibrate_summary.csv`, is filed the same way with
+`python3 scripts/ingest_calibration.py <dir>`. The script checks the table
+against its measurements (every row a ≥ 1.10× win, no measured loss covered)
+and refuses a table from part of the grid (`--only`), which still works through
+`AB_DISPATCH_TABLE`. The table file's header carries the chip, the GPU core
+count and the matrix unit Accelerate ran on (`# chip:`, `# gpu_cores:`,
+`# cpu_matrix: AMX` or `SME`): the Accelerate side of the comparison is AMX on
+the M1 to M3 and SME from the M4, so a table is only ever applied to the chip it
+was measured on. The `AB_REPORT` and `AB_TRACE` headers name the table a run
+used (`table=builtin:M2-Max-38c`, `file:<path>`, `none:uncalibrated-chip`, or
+`none:unknown-chip` when the chip's brand string cannot be read).
 
 ### Zero-copy operands
 
@@ -562,7 +591,7 @@ registration.
 `AB_REPORT=1` prints, when the process exits:
 
 ```
-AB_REPORT[<pid>] apple-bottom <version> (<commit>[-dirty]) AB_MODE=<mode|unset>
+AB_REPORT[<pid>] apple-bottom <version> (<commit>[-dirty]) AB_MODE=<mode|unset> chip="<chip>" gpu_cores=<n> table=<table>
 AB_REPORT[<pid>] <routine> calls=… gpu_calls=… cpu_calls=… gpu_calls%=… total_ms=… gpu_ms=… cpu_ms=… gpu_time%=… fallbacks=…
 AB_REPORT[<pid>] <routine> gpu_stages_ms init=… alloc=… pack=… upload=… kernel=… download=… epilogue=… other=…
 AB_REPORT[<pid>] <routine> fallbacks no_device=… too_large=… gpu_failed=… other=… range=…
@@ -573,7 +602,11 @@ AB_REPORT[<pid>] <routine> staged kept=… kept_4m=… host_pack=… fpcr=… sc
   the version and the git commit it was built from, `-dirty` if tracked
   files differed from that commit, `unknown` if it was built outside a git
   checkout. Keep it with any timing you quote. The `AB_PROFILE` table starts
-  with the same string.
+  with the same string. The line goes on with this machine's chip and GPU
+  core count and the routing table `auto` used: `table=builtin:M2-Max-38c`,
+  `file:<path>` for an `AB_DISPATCH_TABLE`, `none:unknown-chip` when the brand
+  string could not be read (the line then says `chip="unknown"`), or `none:uncalibrated-chip` when
+  the chip has no built-in table (every `auto` call then ran on Accelerate).
 - **`gpu_calls%` is a share of calls, `gpu_time%` a share of time**: the
   routine's BLAS wall time spent in calls that ran on the GPU. They can
   differ widely, e.g. many small calls on Accelerate and a few large ones on
@@ -639,7 +672,10 @@ in every `AB_MODE`, so that a run can be replayed or its timeline lined up
 with other processes'. Each process appends to its own file,
 `<path>.<pid>`: a `fork()`ed child, or an MPI rank, gets a file of its own.
 A file starts with `#` lines naming the build (`ab_build_info()`), the pid,
-`AB_MODE`, `AB_MIN_GPU_DIM` as the routing resolved it, the MPI rank and size
+`AB_MODE`, `AB_MIN_GPU_DIM` as the routing resolved it, the chip and the
+routing table the run used (`table=builtin:<chip slug>`, `file:<path>`,
+`none:uncalibrated-chip` or `none:unknown-chip`; a replay routes by its own
+machine's table), the MPI rank and size
 the launcher exported (`OMPI_COMM_WORLD_RANK`/`_SIZE`, else
 `PMI_RANK`/`PMI_SIZE`; `mpi_rank=-1 mpi_size=-1` outside MPI) and the field
 legend. Each call then adds one line of `key=value` fields when it returns,

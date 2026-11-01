@@ -44,8 +44,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 160, every test but
-the chaos ones, and `make ci-local` all 178 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 164, every test but
+the chaos ones, and `make ci-local` all 182 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -70,7 +70,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     gives its first bits again right after NaN data (which a beta = 0
     call must not read), after larger and smaller shapes, and from 4
     threads at once
-  - `tests/test_dispatch.c` — 9 tests of the BLAS-ABI routing, no GPU,
+  - `tests/test_dispatch.c` — 13 tests of the BLAS-ABI routing, no GPU,
     see below
   - `tests/test_blas_abi.c` — 33 suites (1069 cases), see below
   - `tests/test_trace.c` — 5 tests of `AB_TRACE` and
@@ -90,7 +90,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 
 | Target | What it runs |
 |---|---|
-| `make ci-local` | `make version-check`, every suite of `make test`, the chaos tests and the V-2 convergence study (the DGEMM error-versus-N study of `docs/vv/VV_REPORT.md`, `tests/verification/test_convergence.c`); writes `build/CI_REPORT.txt` |
+| `make ci-local` | `make version-check`, `make dispatch-table-check` (the built-in routing tables against `benchmarks/calibration/`), every suite of `make test`, the chaos tests and the V-2 convergence study (the DGEMM error-versus-N study of `docs/vv/VV_REPORT.md`, `tests/verification/test_convergence.c`); writes `build/CI_REPORT.txt` |
 | `make test-chaos` | pathological inputs, IEEE edge cases, concurrent threads |
 | `make test-verification` | the V-2 convergence study alone |
 | `make test-rectangular` | `test_rectangular.c`: tall, wide, thin-K and conjugate-transposed shapes up to 18277 × 150 × 18277, componentwise against cblas, then timings (peaks at ~21 GB) |
@@ -120,7 +120,8 @@ DGEMM shapes that the old 46340-per-dimension limit kept on cblas (see
 `zgemm_` without `ab_init()`; each must run on the GPU. It checks
 robustness only: those DGEMMs are faster on Accelerate (the GPU ran them
 at 0.09–0.15× in `make calibrate`).
-`test_auto_mode` runs `AB_MODE=auto` with the built-in calibrated table:
+`test_auto_mode` runs `AB_MODE=auto` with this chip's built-in table (none
+on an uncalibrated chip, where the shapes stay on Accelerate either way):
 the QE cegterg-like call and QE si64 PAW and Davidson shapes, which the GPU
 path was measured slower on, must stay on Accelerate through every entry
 point. `test_profile_path` runs `auto` with a test `AB_DISPATCH_TABLE`
@@ -336,12 +337,17 @@ fallback and the trace must say `fallback:gpu_failed`.
 
 `tests/test_dispatch.c` tests the routing decision of the BLAS-ABI entry
 points (`src/dispatch.c`, see `dispatch.h`), built from that file alone,
-without the library or a GPU. It checks the built-in table
-(`src/dispatch_table.h`, written by `make calibrate`) against the
-`calibrate_summary.csv` it was derived from: every measured shape routes as
-recorded there, and no shape that was not at least 1.10x faster on the GPU
-goes there; each Quantum ESPRESSO si64 shape must have been measured. It
-also checks the precedence of `AB_MODE`, `AB_MIN_GPU_DIM` and
+without the library or a GPU. It checks every built-in table
+(`src/dispatch_table.h`, one per calibrated chip, generated from
+`benchmarks/calibration/<chip>/` by `scripts/ingest_calibration.py`) against
+the `calibrate_summary.csv` it was derived from: every measured shape routes
+as recorded there, and no shape that was not at least 1.10x faster on the
+GPU goes there; each Quantum ESPRESSO si64 shape must have been measured.
+It checks the choice of table by chip and GPU core count (`AB_CHIP`,
+`AB_GPU_CORES`; a sibling with another core count or an uncalibrated chip
+gets no rows), the chip slug and the `# chip:` / `# gpu_cores:` header
+keys of a table file. The host it runs on may have no table (a CI runner).
+It also checks the precedence of `AB_MODE`, `AB_MIN_GPU_DIM` and
 `AB_CROSSOVER_FLOPS[_REAL]` over the table, the row bounds and TRANS
 classes (`'C'` is `'T'`), and the `AB_DISPATCH_TABLE` format: parsing,
 loading, malformed and missing files.

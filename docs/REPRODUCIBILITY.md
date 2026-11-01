@@ -7,7 +7,7 @@ library build they came from:
 | What | Command | Results |
 |---|---|---|
 | Native-API GEMM throughput | `make build/bench_paper && ./build/bench_paper --csv` (three runs) | `benchmarks/results/2026-10-14-3253a22-bench-paper/` |
-| BLAS-ABI GPU vs Accelerate, and the `AB_MODE=auto` table | `make calibrate` (about 15 minutes) | `benchmarks/results/2026-10-14-52f1880-calibrate/` |
+| BLAS-ABI GPU vs Accelerate, and the `AB_MODE=auto` table | `make calibrate` (about 15 minutes) | `benchmarks/results/2026-10-14-52f1880-calibrate/`, filed as `benchmarks/calibration/M2-Max-38c/` |
 | Quantum ESPRESSO validation (VAL-1) | `benchmarks/qe/run_campaign.sh` (see `benchmarks/qe/README.md`) | `benchmarks/results/2026-10-14-1dbdb52-qe-si64/` |
 | Quantum ESPRESSO, 1.4.0 release check (QE compiled `-O3`, 1 and 8 ranks) | `benchmarks/qe/run_campaign.sh` | `benchmarks/results/2026-10-15-c5a1fa6-qe-si64-opt/` |
 | Register prefetch: kernel GPU times, bit checks, BLAS-ABI timings | the folder's `pfprobe.m` (build and run lines in its header); `bench_rect_dgemm` / `bench_rect_zgemm` over its `shapes/qe_e2e.txt` | `benchmarks/results/2026-10-24-15ef7b9-prefetch/` |

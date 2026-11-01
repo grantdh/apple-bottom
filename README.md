@@ -108,10 +108,13 @@ GPU time, median of 7 after 3 warm-ups, measured at 52f1880
 | Quantum ESPRESSO si64 Davidson ZGEMMs | 0.14–0.76× | Accelerate |
 | Quantum ESPRESSO si64 PAW DGEMMs | 0.09–0.15× | Accelerate |
 
-The built-in routing table of `AB_MODE=auto` comes from this measurement.
-`make calibrate` repeats it on your machine, through 1.5.0's staged path,
-and writes a new routing table: rebuild to compile it in, or point
-`AB_DISPATCH_TABLE` at its `dispatch_table.txt`.
+The built-in tables are keyed by chip and GPU core count, and so far only the
+M2 Max (38-core GPU) has one: on any other chip `auto` keeps every call on
+Accelerate. `make calibrate` repeats this measurement on your machine, through
+the staged path, and files the result as your chip's table
+(`benchmarks/calibration/<chip>/`; rebuild to compile it in, and a pull
+request with it adds your chip for everyone), or point `AB_DISPATCH_TABLE` at
+its `dispatch_table.txt`.
 
 The staged path, the default in 1.5.0, has not been calibrated on the M2
 Max yet. With registered, well-scaled operands it ran large squares faster
@@ -196,7 +199,7 @@ LIBS = -L/path/to/apple-bottom/build -Wl,-rpath,/path/to/apple-bottom/build -lap
 
 | Variable | Effect |
 |----------|--------|
-| `AB_MODE=auto` (default) | GPU only for shapes measured ≥ 1.10× faster there (`src/dispatch_table.h`, measured on 1.4.0's host path) |
+| `AB_MODE=auto` (default) | GPU only for shapes measured ≥ 1.10× faster there on this chip (`src/dispatch_table.h`, one table per calibrated chip, the M2 Max's measured on 1.4.0's host path; an uncalibrated chip stays on Accelerate) |
 | `AB_MODE=cpu` / `AB_MODE=gpu` | everything on Accelerate / everything above `AB_MIN_GPU_DIM` on the GPU |
 | `AB_REPORT=1` | at exit: calls and time by route, GPU stage costs, fallbacks, and why calls left the staged path |
 | `AB_TRACE=<path>` | a line per call in `<path>.<pid>`: arguments, timestamps, route, GPU stages |
@@ -313,7 +316,7 @@ src/apple_bottom.m              Metal context and DD kernels
 src/device_api.m                device-buffer API (apple_bottom_device.h)
 src/blas_wrapper.c              BLAS ABI: the staged path, the host path, fallbacks
 src/gpu_stage.h                 the staged path's GPU buffers and conversion (internal)
-src/dispatch.c, dispatch_table.h  AB_MODE routing and the calibrated table
+src/dispatch.c, dispatch_table.h  AB_MODE routing and the calibrated tables, one per chip
 src/fortran_bridge.c            dgemm_ / zgemm_ / ab_*gemm_ entry points
 src/profiling/                  AB_PROFILE / AB_REPORT accounting, AB_TRACE
 tests/                          test suites (tests/README.md)

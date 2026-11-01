@@ -481,6 +481,11 @@ void ab_prof_report(FILE* out) {
              mode && *mode ? mode : "unset");
     if (g_threshold_ns)
         line_add(&l, " AB_PROFILE_THRESHOLD_NS=%llu", (unsigned long long)g_threshold_ns);
+    // The chip and the table auto routed by (dispatch.h), so a report from
+    // another machine says what routed it.
+    const ab_dispatch_config_t* dc = ab_dispatch_process_config();
+    line_add(&l, " chip=\"%s\" gpu_cores=%d table=%s", dc->chip[0] ? dc->chip : "unknown", dc->gpu_cores,
+             dc->table);
     line_add(&l, "\n");
     line_emit(&l, out);
     if (g_entry_count == 0) {
@@ -544,8 +549,14 @@ static void trace_header(int fd, pid_t pid) {
     l.buf[0] = '\0';
     line_add(&l, "# %s AB_TRACE pid=%d\n", ab_build_info(), (int)pid);
     // AB_MIN_GPU_DIM as the routing resolved it, so a replay routes as this run did.
+    const ab_dispatch_config_t* dc = ab_dispatch_process_config();
     line_add(&l, "# AB_MODE=%s AB_TRACE_HASH=%d AB_MIN_GPU_DIM=%d\n", mode && *mode ? mode : "unset",
-             g_trace_hash, ab_dispatch_process_config()->min_dim);
+             g_trace_hash, dc->min_dim);
+    // The chip and the routing table auto used (dispatch.h): a trace from
+    // another machine then says what routed it. A replay routes by its own
+    // machine's table.
+    line_add(&l, "# chip=\"%s\" gpu_cores=%d table=%s\n", dc->chip[0] ? dc->chip : "unknown", dc->gpu_cores,
+             dc->table);
     // The MPI rank and size one launcher exported (Open MPI, else PMI), so a
     // replay can map the files of one run to its ranks; -1 when not under MPI.
     const char *rank = getenv("OMPI_COMM_WORLD_RANK"), *size = getenv("OMPI_COMM_WORLD_SIZE");
