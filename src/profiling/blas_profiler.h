@@ -3,10 +3,11 @@
 // =============================================================================
 //
 // Per-routine accounting of BLAS-ABI calls (dgemm_, zgemm_, ab_*gemm_,
-// ab_*gemm_blas): calls and wall time by where C was computed (GPU or
-// cblas), the stage costs of the GPU calls, fallbacks to cblas by reason,
+// ab_*gemm_blas, and the BLAS-2 dgemv_, zgemv_, zhemv_, ab_*gemv_blas,
+// ab_zhemv_blas): calls and wall time by where the result was computed (GPU
+// or cblas), the stage costs of the GPU calls, fallbacks to cblas by reason,
 // and dimension histograms. Zero-overhead when disabled (a cached env read
-// and a branch).
+// and a branch). AB_TRACE covers GEMM only.
 //
 // Usage:
 //   AB_REPORT=1                             concise summary on stderr at exit
@@ -42,22 +43,23 @@ extern "C" {
 #define AB_PROF_HISTOGRAM_BINS     8
 
 // Where the wall time of a GPU call went, in call order. The host path
-// (host pack, conversion and epilogue) and the staged path (gpu_stage.h)
-// fill them differently.
+// (host pack, conversion and epilogue), the staged path (gpu_stage.h) and
+// BLAS-2 (blas2.m) fill them differently.
 typedef enum {
     AB_PROF_STAGE_INIT,      // routing, size checks, Metal context creation on first use
     AB_PROF_STAGE_ALLOC,     // ABMatrix and host scratch allocation and release; staged:
-                             // the pool's buffers for the call
+                             // the pool's buffers for the call; BLAS-2: its GPU scratch
     AB_PROF_STAGE_PACK,      // column-major op(A), op(B), C -> row-major host copies; range check;
-                             // staged: the range check
+                             // staged: the range check; BLAS-2: staging x
     AB_PROF_STAGE_UPLOAD,    // FP64 -> DD conversion into the GPU buffers; staged: the
-                             // copies of the operands into them
+                             // copies of the operands into them; BLAS-2: mapping A for the GPU
     AB_PROF_STAGE_KERNEL,    // command-buffer GPU time (wall time if Metal reports none);
                              // staged: with the GPU's conversion and epilogue
     AB_PROF_STAGE_DOWNLOAD,  // DD -> FP64 conversion out of the GPU buffers; staged: the
-                             // copy of the result into C
+                             // copy of the result into C; BLAS-2: the range guard's check
     AB_PROF_STAGE_EPILOGUE,  // row-major result -> column-major C (ZGEMM: with alpha, beta);
-                             // staged: ZGEMM's host alpha and beta, when not 1 and 0 or 1
+                             // staged: ZGEMM's host alpha and beta, when not 1 and 0 or 1;
+                             // BLAS-2: y with alpha and beta
     AB_PROF_STAGE_COUNT
 } ab_prof_stage_t;
 
@@ -67,8 +69,9 @@ typedef enum {
     AB_PROF_FB_NO_DEVICE,    // no Metal context: no device, or a fork()ed child
     AB_PROF_FB_TOO_LARGE,    // an operand beyond the ABMatrix size limits
     AB_PROF_FB_GPU_FAILED,   // an allocation, upload or kernel failed before C was written
-    AB_PROF_FB_OTHER,
+    AB_PROF_FB_OTHER,        // anything else, e.g. BLAS-2's A not mappable for the GPU
     AB_PROF_FB_RANGE,        // values beyond double-float's exponent range, or NaN/Inf
+                             // (BLAS-2: its range guard)
     AB_PROF_FB_COUNT
 } ab_prof_fallback_t;
 
@@ -141,6 +144,18 @@ int  ab_prof_verbose(void);
 extern const char* const ab_prof_stage_names[AB_PROF_STAGE_COUNT];
 extern const char* const ab_prof_staged_names[AB_PROF_STAGED_COUNT];
 
+// Adds the time since *mark (ticks) to stage_ns[s] and restarts *mark from
+// now; nothing if stage_ns is NULL (the call is not timed).
+void ab_prof_stage_mark(uint64_t* stage_ns, uint64_t* mark, ab_prof_stage_t s);
+
+// Under AB_PROFILE, on stderr in one write each: the line of a GPU call that
+// took total_ns with its stage times (and "other", the rest) and its staged
+// outcome (AB_PROF_STAGED_NONE: none), and the line of a GPU-routed call that
+// ran on cblas instead, with why.
+void ab_prof_print_gpu_call(const char* routine, int m, int n, int k, uint64_t total_ns,
+                            const uint64_t* stage_ns, ab_prof_staged_t staged);
+void ab_prof_print_fallback(const char* routine, int m, int n, int k, const char* why);
+
 // Convert mach_absolute_time() ticks to nanoseconds using timebase.
 uint64_t ab_prof_ticks_to_ns(uint64_t ticks);
 
@@ -185,6 +200,10 @@ double ab_internal_take_gpu_seconds(ab_prof_kernel_split_t* split);
 // get nothing. The BLAS-ABI layer and benchmarks/replay.c both stage a
 // kernel call with it.
 uint64_t ab_prof_take_kernel_ns(uint64_t wall_ns, ab_prof_kernel_split_t* split);
+
+// The same rule for a step whose command buffers ran gpu_seconds on the GPU
+// (0 if Metal reported none): that time, or wall_ns.
+uint64_t ab_prof_kernel_ns(uint64_t wall_ns, double gpu_seconds);
 
 // One BLAS-ABI call: its arguments as the entry point received them, and
 // what the trace adds to the profile's record of it.

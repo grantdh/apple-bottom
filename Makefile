@@ -106,12 +106,20 @@ $(BUILD)/build_sha.stamp: FORCE | $(BUILD)
 $(BUILD)/blas_profiler.o: $(SRC)/profiling/blas_profiler.c $(SRC)/profiling/blas_profiler.h $(SRC)/dispatch.h $(INCLUDE)/apple_bottom.h $(BUILD)/build_sha.stamp | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) '-DAB_BUILD_SHA="$(AB_BUILD_SHA)"' -c $(SRC)/profiling/blas_profiler.c -o $@
 
-$(BUILD)/device_api.o: $(SRC)/device_api.m $(SRC)/ab_internal.h $(SRC)/gpu_stage.h $(INCLUDE)/apple_bottom.h $(INCLUDE)/apple_bottom_device.h | $(BUILD)
+$(BUILD)/device_api.o: $(SRC)/device_api.m $(SRC)/ab_internal.h $(SRC)/device_internal.h $(SRC)/gpu_stage.h $(INCLUDE)/apple_bottom.h $(INCLUDE)/apple_bottom_device.h | $(BUILD)
 	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/device_api.m -o $@
+
+# BLAS-2 (GEMV, HEMV): GPU kernels and host side, and the BLAS-ABI entry points.
+$(BUILD)/blas2.o: $(SRC)/blas2.m $(SRC)/blas2.h $(SRC)/device_internal.h $(INCLUDE)/apple_bottom.h $(INCLUDE)/apple_bottom_device.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
+	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -I$(SRC) -xobjective-c++ -c $(SRC)/blas2.m -o $@
+
+$(BUILD)/blas2_abi.o: $(SRC)/blas2_abi.c $(SRC)/blas2.h $(SRC)/blas_trans.h $(SRC)/dispatch.h $(INCLUDE)/apple_bottom.h $(INCLUDE)/apple_bottom_device.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c $(SRC)/blas2_abi.c -o $@
 
 LIB_OBJS = $(BUILD)/apple_bottom.o $(BUILD)/blas_wrapper.o \
            $(BUILD)/fortran_bridge.o $(BUILD)/blas_profiler.o \
-           $(BUILD)/device_api.o $(BUILD)/dispatch.o
+           $(BUILD)/device_api.o $(BUILD)/dispatch.o \
+           $(BUILD)/blas2.o $(BUILD)/blas2_abi.o
 
 $(BUILD)/libapplebottom.a: $(LIB_OBJS)
 	ar rcs $@ $^
@@ -228,6 +236,14 @@ $(BUILD)/test_convergence: tests/verification/test_convergence.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
+# BLAS-2 (GEMV, HEMV): every entry point against Accelerate and a compensated
+# reference, the GPU's FP64-to-DD conversion bit for bit, special values, the
+# range guard, routing, xerbla and forced failures (tests/test_blas2.c;
+# re-executes itself for the routing modes).
+$(BUILD)/test_blas2: tests/test_blas2.c tests/test_blas2_ref.h tests/test_dot2.h tests/test_blas_check.h tests/test_spawn.h tests/test_registry.h $(SRC)/blas2.h $(SRC)/device_internal.h lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
 # Routing unit tests: dispatch.c alone, no library or GPU. They check every
 # built-in table against its calibration data, found under AB_SOURCE_ROOT.
 # dispatch.c reads the chip from sysctl and the GPU core count from IOKit.
@@ -235,7 +251,7 @@ $(BUILD)/test_dispatch: tests/test_dispatch.c $(BUILD)/dispatch.o $(SRC)/dispatc
 	$(CC) $(CFLAGS) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' $< $(BUILD)/dispatch.o -o $@ -framework IOKit -framework CoreFoundation
 	@echo "Built: $@"
 
-test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_staging test-ghost-detection test-symbols test-fortran
+test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_staging $(BUILD)/test_blas2 test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "Running Tests"
@@ -248,6 +264,7 @@ test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api
 	./$(BUILD)/test_trace
 	./$(BUILD)/test_qe_golden
 	./$(BUILD)/test_staging
+	./$(BUILD)/test_blas2
 	@echo ""
 	@echo "✓ All tests passed!"
 
@@ -488,6 +505,16 @@ $(BUILD)/bench_split: benchmarks/bench_split.c tests/test_dot2.h lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -Itests $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) -framework IOKit -framework CoreFoundation $(EXE_RPATH)
 	@echo "Built: $@"
 
+# BLAS-2 (GEMV, HEMV) in GB/s: resident and staged GPU, Accelerate, plain C
+# (see the header of benchmarks/bench_gemv.c; run it under machlock bench).
+$(BUILD)/bench_gemv: benchmarks/bench_gemv.c tests/test_blas2_ref.h tests/test_dot2.h $(SRC)/blas_trans.h lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -Itests $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
+.PHONY: bench-gemv
+bench-gemv: $(BUILD)/bench_gemv
+	./$(BUILD)/bench_gemv
+
 $(BUILD)/bench_rect_dgemm: benchmarks/bench_rect_dgemm.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
@@ -595,14 +622,14 @@ test-symbols: $(BUILD)/libapplebottom.dylib $(BUILD)/libapplebottom.a
 	@bad=0; \
 	for lib in $^; do \
 		syms=$$(nm -gU $$lib 2>/dev/null | awk '{print $$NF}'); \
-		for s in _dgemm_ _zgemm_; do \
+		for s in _dgemm_ _zgemm_ _dgemv_ _zgemv_ _zhemv_; do \
 			if echo "$$syms" | grep -qx "$$s"; then \
 				echo "  ✓ $$lib exports $$s"; \
 			else \
 				echo "  ✗ $$lib does not export $$s (H-P0-1)"; bad=1; \
 			fi; \
 		done; \
-		for s in '_dgemm$$NEWLAPACK' '_zgemm$$NEWLAPACK'; do \
+		for s in '_dgemm$$NEWLAPACK' '_zgemm$$NEWLAPACK' '_dgemv$$NEWLAPACK' '_zgemv$$NEWLAPACK' '_zhemv$$NEWLAPACK'; do \
 			if echo "$$syms" | grep -qxF "$$s"; then \
 				echo "  ✗ $$lib exports $$s"; bad=1; \
 			fi; \
@@ -634,6 +661,10 @@ build-check: | $(BUILD)/check
 	@$(CC) $(CFLAGS) -c $(SRC)/dispatch.c -o $(BUILD)/check/dispatch.o
 	@echo "Compiling device_api.m..."
 	@$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/device_api.m -o $(BUILD)/check/device_api.o
+	@echo "Compiling blas2.m..."
+	@$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -I$(SRC) -xobjective-c++ -c $(SRC)/blas2.m -o $(BUILD)/check/blas2.o
+	@echo "Compiling blas2_abi.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c $(SRC)/blas2_abi.c -o $(BUILD)/check/blas2_abi.o
 	@echo "Compiling test_correctness.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_correctness.c -o $(BUILD)/check/test_correctness.o
 	@echo "Compiling test_precision.c..."
@@ -650,6 +681,10 @@ build-check: | $(BUILD)/check
 	@$(CC) $(CFLAGS) -I$(SRC) -c tests/test_dispatch.c -o $(BUILD)/check/test_dispatch.o
 	@echo "Compiling test_device_api.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c tests/test_device_api.c -o $(BUILD)/check/test_device_api.o
+	@echo "Compiling test_blas2.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' -c tests/test_blas2.c -o $(BUILD)/check/test_blas2.o
+	@echo "Compiling bench_gemv.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -Itests -c benchmarks/bench_gemv.c -o $(BUILD)/check/bench_gemv.o
 	@echo "Compiling calibrate.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c benchmarks/calibrate.c -o $(BUILD)/check/calibrate.o
 	@echo "Compiling replay.c..."
@@ -670,12 +705,12 @@ build-check: | $(BUILD)/check
 # Counting rule (also README.md, tests/README.md): TEST_TOTAL counts tests.
 # A test is one test_precision case, one TESTS[] registry entry of
 # test_correctness / test_chaos / test_device_api / test_dispatch /
-# test_trace, or one test_blas_abi suite. Device-API CHECKs and BLAS-ABI cases
+# test_trace / test_blas2, or one test_blas_abi suite. Device-API CHECKs and BLAS-ABI cases
 # are reported on their own lines and are not part of TEST_TOTAL, nor is
 # test_qe_golden (its TEST_QE_GOLDEN line says PASS, or SKIP on another device).
 # The report is written only after every binary passed, so TEST_PASSED =
 # TEST_TOTAL and TEST_FAILED = 0.
-ci-local: version-check dispatch-table-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_staging $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
+ci-local: version-check dispatch-table-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_staging $(BUILD)/test_blas2 $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "CI Local Validation"
@@ -689,6 +724,7 @@ ci-local: version-check dispatch-table-check $(BUILD)/test_precision $(BUILD)/te
 	@./$(BUILD)/test_dispatch > $(BUILD)/test_dispatch.log 2>&1 && echo "✓ test_dispatch: PASS" || (echo "✗ test_dispatch: FAIL" && cat $(BUILD)/test_dispatch.log && exit 1)
 	@./$(BUILD)/test_blas_abi > $(BUILD)/test_blas_abi.log 2>&1 && echo "✓ test_blas_abi: PASS" || (echo "✗ test_blas_abi: FAIL" && cat $(BUILD)/test_blas_abi.log && exit 1)
 	@./$(BUILD)/test_trace > $(BUILD)/test_trace.log 2>&1 && echo "✓ test_trace: PASS" || (echo "✗ test_trace: FAIL" && cat $(BUILD)/test_trace.log && exit 1)
+	@./$(BUILD)/test_blas2 > $(BUILD)/test_blas2.log 2>&1 && echo "✓ test_blas2: PASS" || (echo "✗ test_blas2: FAIL" && cat $(BUILD)/test_blas2.log && exit 1)
 	@./$(BUILD)/test_qe_golden > $(BUILD)/test_qe_golden.log 2>&1 && echo "✓ test_qe_golden: $$(sed -nE 's/^Golden bits: ([A-Z]+).*/\1/p' $(BUILD)/test_qe_golden.log)" || (echo "✗ test_qe_golden: FAIL" && cat $(BUILD)/test_qe_golden.log && exit 1)
 	@./$(BUILD)/test_staging > $(BUILD)/test_staging.log 2>&1 && echo "✓ test_staging: PASS" || (echo "✗ test_staging: FAIL" && cat $(BUILD)/test_staging.log && exit 1)
 	@echo ""
@@ -706,12 +742,13 @@ ci-local: version-check dispatch-table-check $(BUILD)/test_precision $(BUILD)/te
 		DISPATCH=$$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_dispatch.log); \
 		BLAS_ABI=$$(grep -cE "^\[[0-9]+/[0-9]+\] " $(BUILD)/test_blas_abi.log); \
 		TRACE=$$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_trace.log); \
+		BLAS2=$$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_blas2.log); \
 		GOLDEN=$$(sed -nE "s/^Golden bits: //p" $(BUILD)/test_qe_golden.log); \
 		[ -n "$$GOLDEN" ] || { echo "✗ CI report: no Golden bits line in test_qe_golden.log"; exit 1; }; \
-		for n in "$$PRECISION" "$$CORRECTNESS" "$$CHAOS" "$$DEVICE_API" "$$DEVICE_API_CHECKS" "$$DISPATCH" "$$BLAS_ABI" "$$TRACE"; do \
+		for n in "$$PRECISION" "$$CORRECTNESS" "$$CHAOS" "$$DEVICE_API" "$$DEVICE_API_CHECKS" "$$DISPATCH" "$$BLAS_ABI" "$$TRACE" "$$BLAS2"; do \
 			case "$$n" in ""|*[!0-9]*|0) echo "✗ CI report: could not read a test count from the logs"; exit 1;; esac; \
 		done; \
-		TOTAL=$$((PRECISION + CORRECTNESS + CHAOS + DEVICE_API + DISPATCH + BLAS_ABI + TRACE)); \
+		TOTAL=$$((PRECISION + CORRECTNESS + CHAOS + DEVICE_API + DISPATCH + BLAS_ABI + TRACE + BLAS2)); \
 		echo "GIT_SHA: $$(git rev-parse HEAD)" > $(BUILD)/CI_REPORT.txt; \
 		echo "GIT_BRANCH: $$(git rev-parse --abbrev-ref HEAD)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "AB_BUILD_SHA: $(AB_BUILD_SHA)" >> $(BUILD)/CI_REPORT.txt; \
@@ -724,6 +761,7 @@ ci-local: version-check dispatch-table-check $(BUILD)/test_precision $(BUILD)/te
 		echo "TEST_DISPATCH: PASS ($$DISPATCH tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_BLAS_ABI: PASS ($$BLAS_ABI tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_TRACE: PASS ($$TRACE tests)" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_BLAS2: PASS ($$BLAS2 tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_QE_GOLDEN: $$GOLDEN" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_STAGING: PASS ($$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_staging.log) cases, the staged path against the host path)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_CONVERGENCE: PASS" >> $(BUILD)/CI_REPORT.txt; \

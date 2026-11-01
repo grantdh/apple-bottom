@@ -38,6 +38,49 @@ All notable changes to this project will be documented in this file.
   `-framework IOKit`; pkg-config carries it); `test_dispatch` checks
   every built-in table against its own measurements (13 tests, were 9).
 
+- **BLAS-2 on the GPU: DGEMV, ZGEMV (`'N'`, `'T'`, `'C'`) and ZHEMV**
+  (`src/blas2.m`, `src/blas2_abi.c`). The kernels read the caller's
+  column-major FP64 matrix in place, convert each element to double-float
+  in registers and accumulate in double-float, adding partial sums in an
+  order fixed by the shape (bitwise reproducible); ZHEMV reads its stored
+  triangle once, each element feeding its row's and, conjugated, its
+  column's sum. A matrix-vector product is bound by memory bandwidth,
+  where the GPU leads the CPU; see "BLAS-2" in README.md for the measured
+  rates.
+  - `ab_dev_register(ptr, nbytes)`: a device buffer over memory the caller
+    already owns, without a copy (a no-copy `MTLBuffer` over the
+    page-rounded span; NULL if part of it is unmapped or unreadable).
+    Every `ab_dev_*` call works on it. Free the handle before the memory.
+  - `ab_dev_dgemv`, `ab_dev_zgemv`, `ab_dev_zhemv`: products with a matrix
+    kept in a device buffer, for solvers that use one matrix many times
+    (Lanczos, Haydock, other Krylov methods).
+  - `ab_dgemv_blas`, `ab_zgemv_blas`, `ab_zhemv_blas` and the Fortran
+    symbols `dgemv_`, `zgemv_`, `zhemv_`, routed like GEMM (`AB_MODE`,
+    then `AB_MIN_GPU_DIM`, through `ab_dispatch_mode_route()`):
+    `AB_MODE=auto` sends a call to the GPU only for shapes measured at
+    least 1.10× faster end to end in two runs, mapping the matrix for the
+    call included (DGEMV `'N'` 2048²–16384² elements, ZGEMV `'N'`
+    3072²–12288², ZHEMV 2048–16384; data in
+    `benchmarks/results/2026-10-19-ba345df-gemv/` and, for ZHEMV,
+    `2026-10-19-1bc503a-zhemv/`). Smaller calls, DGEMV `'T'`/`'C'`
+    (0.94–1.40×), ZGEMV `'T'`/`'C'` and calls beyond the measured sizes
+    stay on Accelerate. Counted in `AB_REPORT` and `AB_PROFILE`; not
+    traced.
+  - A range guard computed by the kernels from the FP64 exponents, at no
+    extra memory traffic: a call whose data leave double-float's
+    full-precision range (FP32's exponents, subnormals flushed on the GPU),
+    or that involves NaN or Inf, runs on Accelerate instead, before y is
+    written (counted as a `range` fallback; an A that cannot be mapped for
+    the GPU counts as `other`).
+  - `tests/test_blas2.c` (19 tests, 957 cases; in `make test` and
+    `make ci-local`, including a check of the `AB_MODE=auto` rule against
+    its measurements and of the kernels' FP64-to-double-float conversion,
+    bit for bit, on 4.2 million inputs) and `benchmarks/bench_gemv.c`
+    (`make bench-gemv`; `--sweep` and `--rect` for the routing data). The
+    Fortran binding probe (`make test-fortran`) also calls `DGEMV`, `ZGEMV`
+    and `ZHEMV`, and `make test-symbols` checks `_dgemv_`, `_zgemv_` and
+    `_zhemv_`. `ab_get_last_dispatch_path()` also reports BLAS-2 calls.
+
 ### Changed
 - **32 × 32 tiles are chosen by grid size, not output size**
   (`use_narrow_tiles` in `src/apple_bottom.m`). In 1.5.0 they took every C of

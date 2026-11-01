@@ -11,6 +11,10 @@
 //     Shared storage is the right default on unified-memory Apple Silicon —
 //     the CPU pointer and GPU address point at the same physical page, so
 //     a "memcpy_h2d" is really just memcpy() into that page.
+//   - ab_dev_register() wraps memory the caller already owns, no copy: a
+//     no-copy MTLBuffer over the page-rounded span, the caller's data
+//     `base` bytes in (device_internal.h). Every CPU access goes through
+//     dev_data(), so registered and allocated buffers behave the same.
 //   - The "stream" abstraction currently exposes a singleton, which is all
 //     a code that uses one device stream (e.g. OpenACC's acc_stream(0))
 //     needs. Multiple streams are not implemented.
@@ -24,22 +28,21 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <fenv.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <os/lock.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "apple_bottom.h"
 #include "apple_bottom_device.h"
 #include "ab_internal.h"
+#include "device_internal.h"   // struct ab_dev_buffer_s
 #include "gpu_stage.h"
 
 // -----------------------------------------------------------------------------
 // Opaque types
 // -----------------------------------------------------------------------------
-
-struct ab_dev_buffer_s {
-    id<MTLBuffer> mtl;
-    size_t nbytes;
-};
 
 struct ab_dev_stream_s {
     id<MTLCommandQueue> queue;
@@ -83,6 +86,24 @@ static bool dev_ensure_init(void) {
 // Lifecycle
 // -----------------------------------------------------------------------------
 
+// The caller's first byte, CPU address.
+static inline char* dev_data(ab_dev_buffer_t b) { return (char*)[b->mtl contents] + b->base; }
+
+void* ab_internal_dev_data(ab_dev_buffer_t buf) { return dev_data(buf); }
+
+// A handle for the caller's nbytes, `base` bytes into mtl.
+static ab_dev_buffer_t new_handle(id<MTLBuffer> mtl, size_t nbytes, size_t base) {
+    // Under ObjC++ ARC, a struct with a strong `id` field is non-POD;
+    // using `new` (rather than calloc) lets the implicit constructor
+    // initialize the ARC-managed slot correctly, and `delete` runs the
+    // destructor that releases the MTLBuffer.
+    struct ab_dev_buffer_s* buf = new struct ab_dev_buffer_s();
+    buf->mtl    = mtl;
+    buf->nbytes = nbytes;
+    buf->base   = base;
+    return buf;
+}
+
 ab_dev_buffer_t ab_dev_malloc(size_t nbytes) {
     if (nbytes == 0) return NULL;
     if (!dev_ensure_init()) return NULL;
@@ -90,24 +111,60 @@ ab_dev_buffer_t ab_dev_malloc(size_t nbytes) {
     @autoreleasepool {
         id<MTLBuffer> mtl = [g_dev_device newBufferWithLength:nbytes
                                                       options:MTLResourceStorageModeShared];
-        if (!mtl) return NULL;
+        return mtl ? new_handle(mtl, nbytes, 0) : NULL;
+    }
+}
 
-        // Under ObjC++ ARC, a struct with a strong `id` field is non-POD;
-        // using `new` (rather than calloc) lets the implicit constructor
-        // initialize the ARC-managed slot correctly, and `delete` runs the
-        // destructor that releases the MTLBuffer.
-        struct ab_dev_buffer_s* buf = new struct ab_dev_buffer_s();
-        if (!buf) return NULL;
-        buf->mtl    = mtl;
-        buf->nbytes = nbytes;
-        return buf;
+// True if [lo, hi) is mapped readable throughout, without holes. One large
+// allocation spans several VM map entries (the kernel caps an anonymous
+// entry at 128 MB), so the regions are walked rather than required to be one.
+static bool span_is_mapped(uintptr_t lo, uintptr_t hi) {
+    for (mach_vm_address_t at = lo; at < hi;) {
+        mach_vm_address_t addr = at;
+        mach_vm_size_t size = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object = MACH_PORT_NULL;
+        kern_return_t kr = mach_vm_region(mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO_64,
+                                          (vm_region_info_t)&info, &count, &object);
+        if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+        // mach_vm_region reports the region at or above `at`: above means a hole.
+        if (kr != KERN_SUCCESS || addr > at || !(info.protection & VM_PROT_READ)) return false;
+        at = addr + size;
+    }
+    return true;
+}
+
+id<MTLBuffer> ab_internal_wrap_host(id<MTLDevice> dev, const void *ptr, size_t nbytes,
+                                    size_t *offset) {
+    if (!dev || !ptr || nbytes == 0) return nil;
+    uintptr_t page = (uintptr_t)getpagesize();
+    uintptr_t lo = (uintptr_t)ptr & ~(page - 1);
+    uintptr_t end = (uintptr_t)ptr + nbytes;
+    if (end < (uintptr_t)ptr || end > UINTPTR_MAX - page) return nil;
+    uintptr_t hi = (end + page - 1) & ~(page - 1);
+    if (hi - lo > dev.maxBufferLength || !span_is_mapped(lo, hi)) return nil;
+    id<MTLBuffer> mtl = [dev newBufferWithBytesNoCopy:(void *)lo length:hi - lo
+                                              options:MTLResourceStorageModeShared
+                                          deallocator:nil];
+    if (mtl) *offset = (uintptr_t)ptr - lo;
+    return mtl;
+}
+
+ab_dev_buffer_t ab_dev_register(void* ptr, size_t nbytes) {
+    if (!ptr || nbytes == 0 || !dev_ensure_init()) return NULL;
+    @autoreleasepool {
+        size_t base = 0;
+        id<MTLBuffer> mtl = ab_internal_wrap_host(g_dev_device, ptr, nbytes, &base);
+        return mtl ? new_handle(mtl, nbytes, base) : NULL;
     }
 }
 
 void ab_dev_free(ab_dev_buffer_t buf) {
     if (!buf) return;
     @autoreleasepool {
-        delete buf;  // destructor releases the retained MTLBuffer
+        delete buf;  // destructor releases the retained MTLBuffer (a registration's
+                     // wrapper only: the caller's memory stays theirs)
     }
 }
 
@@ -132,7 +189,7 @@ ABStatus ab_dev_memcpy_h2d(ab_dev_buffer_t dst, size_t dst_offset,
         return AB_ERROR_INVALID_ARG;
     if (nbytes == 0) return AB_OK;
 
-    void* contents = [dst->mtl contents];
+    void* contents = dev_data(dst);
     if (!contents) return AB_ERROR_ALLOC_FAILED;
     memcpy((char*)contents + dst_offset, src, nbytes);
     return AB_OK;
@@ -150,7 +207,7 @@ ABStatus ab_dev_memcpy_d2h(void* dst, ab_dev_buffer_t src, size_t src_offset,
     // call documents the contract for when there is.
     (void)ab_dev_stream_sync(NULL);
 
-    const void* contents = [src->mtl contents];
+    const void* contents = dev_data(src);
     if (!contents) return AB_ERROR_ALLOC_FAILED;
     memcpy(dst, (const char*)contents + src_offset, nbytes);
     return AB_OK;
@@ -169,8 +226,8 @@ ABStatus ab_dev_memcpy_d2d(ab_dev_buffer_t dst, size_t dst_offset,
     // small transfers. Blit becomes preferable with private-storage
     // buffers, which are not implemented.
     (void)ab_dev_stream_sync(NULL);
-    void*       d = [dst->mtl contents];
-    const void* s = [src->mtl contents];
+    void*       d = dev_data(dst);
+    const void* s = dev_data(src);
     if (!d || !s) return AB_ERROR_ALLOC_FAILED;
     memmove((char*)d + dst_offset, (const char*)s + src_offset, nbytes);
     return AB_OK;
@@ -196,7 +253,7 @@ ABStatus ab_dev_memset(ab_dev_buffer_t buf, size_t offset,
     if (!buf) return AB_ERROR_INVALID_ARG;
     if (!range_in_bounds(offset, nbytes, buf->nbytes)) return AB_ERROR_INVALID_ARG;
     if (nbytes == 0) return AB_OK;
-    void* contents = [buf->mtl contents];
+    void* contents = dev_data(buf);
     if (!contents) return AB_ERROR_ALLOC_FAILED;
     memset((char*)contents + offset, value, nbytes);
     return AB_OK;
@@ -266,6 +323,12 @@ static bool dev_submatrix_fits(ab_dev_buffer_t buf, size_t offset, int ld,
     return ld >= rows && range_in_bounds(offset, span, buf->nbytes / elem_size);
 }
 
+bool ab_internal_dev_matrix_fits(ab_dev_buffer_t buf, size_t offset, int ld, int rows, int cols,
+                                 size_t elem_size) {
+    if (!buf || ld < rows) return false;
+    return rows == 0 || cols == 0 || dev_submatrix_fits(buf, offset, ld, rows, cols, elem_size);
+}
+
 // Helper: AB_OK if the m×k, k×n and m×n operands (or their transposes, the
 // same sizes) fit the ABMatrix size limits, else the failing check's status.
 static ABStatus dev_operands_fit(int m, int n, int k) {
@@ -287,7 +350,7 @@ static ABStatus dev_operands_fit(int m, int n, int k) {
 static ABStatus dev_upload_real_submatrix(
     ABMatrix dst, ab_dev_buffer_t src, size_t elem_offset, int ld, bool transpose)
 {
-    const double* base = (const double*)[src->mtl contents] + elem_offset;
+    const double* base = (const double*)dev_data(src) + elem_offset;
     return transpose ? ab_internal_upload_cols(dst, base, (size_t)ld)
                      : ab_internal_upload_rows(dst, NULL, base, (size_t)ld, NULL, false);
 }
@@ -296,7 +359,7 @@ static ABStatus dev_upload_real_submatrix(
 static ABStatus dev_download_real_submatrix(
     ab_dev_buffer_t dst, size_t elem_offset, int ld, ABMatrix src)
 {
-    double* base = (double*)[dst->mtl contents] + elem_offset;
+    double* base = (double*)dev_data(dst) + elem_offset;
     return ab_internal_download_rows(src, NULL, base, (size_t)ld);
 }
 
@@ -311,7 +374,7 @@ static ABStatus dev_upload_complex_submatrix(
     ab_dev_buffer_t src, size_t cmplx_offset, int ld,
     ab_line_stats_t* lines, bool by_col)
 {
-    const double* base = (const double*)[src->mtl contents] + cmplx_offset * 2;
+    const double* base = (const double*)dev_data(src) + cmplx_offset * 2;
     return ab_internal_upload_rows(dst_r, dst_i, base, (size_t)ld, lines, by_col);
 }
 
@@ -321,7 +384,7 @@ static ABStatus dev_download_complex_submatrix(
     ab_dev_buffer_t dst, size_t cmplx_offset, int ld,
     ABMatrix src_r, ABMatrix src_i)
 {
-    double* base = (double*)[dst->mtl contents] + cmplx_offset * 2;
+    double* base = (double*)dev_data(dst) + cmplx_offset * 2;
     return ab_internal_download_rows(src_r, src_i, base, (size_t)ld);
 }
 
@@ -331,7 +394,7 @@ static ABStatus dev_epilogue_complex_submatrix(
     ab_dev_buffer_t dst, size_t cmplx_offset, int ld,
     ABMatrix t_r, ABMatrix t_i, const double alpha[2], const double beta[2])
 {
-    double* base = (double*)[dst->mtl contents] + cmplx_offset * 2;
+    double* base = (double*)dev_data(dst) + cmplx_offset * 2;
     return ab_internal_zgemm_epilogue(t_r, t_i, base, (size_t)ld, alpha, beta);
 }
 
@@ -498,7 +561,7 @@ ABStatus ab_dev_conjg_c(ab_dev_buffer_t buf, size_t offset, size_t n) {
     if (!buf) return AB_ERROR_INVALID_ARG;
     if (n == 0) return AB_OK;
     // Negate imaginary parts in-place.  Data is interleaved [r0,i0,r1,i1,...].
-    double* base = (double*)[buf->mtl contents] + offset * 2;
+    double* base = (double*)dev_data(buf) + offset * 2;
     for (size_t i = 0; i < n; i++)
         base[i * 2 + 1] = -base[i * 2 + 1];
     return AB_OK;
@@ -509,7 +572,7 @@ ABStatus ab_dev_scale_z(ab_dev_buffer_t buf, size_t offset, size_t n,
     if (!buf || !alpha) return AB_ERROR_INVALID_ARG;
     if (n == 0) return AB_OK;
     double ar = alpha[0], ai = alpha[1];
-    double* base = (double*)[buf->mtl contents] + offset * 2;
+    double* base = (double*)dev_data(buf) + offset * 2;
     for (size_t i = 0; i < n; i++) {
         double r = base[i * 2], im = base[i * 2 + 1];
         base[i * 2]     = ar * r - ai * im;
@@ -525,8 +588,8 @@ ABStatus ab_dev_axpy_z(size_t n,
     if (!x || !y || !alpha) return AB_ERROR_INVALID_ARG;
     if (n == 0) return AB_OK;
     double ar = alpha[0], ai = alpha[1];
-    const double* xp = (const double*)[x->mtl contents] + x_offset * 2;
-    double* yp = (double*)[y->mtl contents] + y_offset * 2;
+    const double* xp = (const double*)dev_data(x) + x_offset * 2;
+    double* yp = (double*)dev_data(y) + y_offset * 2;
     for (size_t i = 0; i < n; i++) {
         double xr = xp[i * incx * 2],     xi = xp[i * incx * 2 + 1];
         double yr = yp[i * incy * 2],     yi = yp[i * incy * 2 + 1];
