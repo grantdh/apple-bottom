@@ -1294,8 +1294,8 @@ struct ABStage { uint rows, cols, ld, k, stat, fix, ecol; };
 // It also gathers the exponent-range guard's statistics (ab_internal.h,
 // ab_line_stats_scan): per line of op(X), the high words of its largest |x|
 // (complex: of its largest |Re x| into smax and |Im x| into simax, the
-// statistics' rmax and imax) and of its smallest nonzero |x| (complex: of
-// max(|Re x|, |Im x|)), by integer max and min, which every order of
+// statistics' rmax and imax) and of its smallest nonzero |x| (complex: its
+// smallest nonzero part), by integer max and min, which every order of
 // reduction gives exactly. smax and simax start at 0, smin at 0xFFFFFFFF,
 // and an element outside op(X) counts as 0. stat picks the lines: the rows
 // of op(X), its columns, or all of it as line 0.
@@ -1307,14 +1307,14 @@ static uint ab_hiword(uint hi32) { return hi32 & 0x7FFFFFFFu; }
 
 // An element's high words h: of |x| (h.y = 0), or of |Re x| and |Im x|. A
 // line's statistics so far: their largest, mx, and the smallest nonzero high
-// word of max(|Re x|, |Im x|), mn, gathered into the arrays of an
-// ABLineStats. A real pre-pass has no simax and never writes it (mx.y is 0).
+// word of its parts, mn, gathered into the arrays of an ABLineStats. A real
+// pre-pass has no simax and never writes it (mx.y is 0).
 struct ABLineStats { device atomic_uint* smax; device atomic_uint* simax; device atomic_uint* smin; };
 
-// An element's part in its line's smallest nonzero high word.
+// An element's part in its line's smallest nonzero high word: that of its
+// smaller nonzero part.
 static uint ab_stat_min(uint2 h) {
-    uint m = max(h.x, h.y);
-    return m ? m : 0xFFFFFFFFu;
+    return min(h.x ? h.x : 0xFFFFFFFFu, h.y ? h.y : 0xFFFFFFFFu);
 }
 
 static void ab_stat_add(ABLineStats st, uint line, uint2 mx, uint mn) {

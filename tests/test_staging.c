@@ -423,7 +423,8 @@ static bool expected_staged(const Problem *P) {
             }
     if (ok && case_c_in(c))
         ok = z ? !ab_range_nonfinite(r)
-               : ab_range_guard_c(&sa, &sb, r, ilogb(creal(be)), P->C0, P->lc.ld, 0);
+               : ab_range_guard_c(&sa, &sb, r, creal(al), creal(be), P->C0, P->lc.ld, 0,
+                                  &va, &vb);
     ab_line_stats_free(&sa);
     ab_line_stats_free(&sb);
     return ok;

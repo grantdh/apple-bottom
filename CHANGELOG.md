@@ -17,6 +17,38 @@ All notable changes to this project will be documented in this file.
   largest entry (the most such entries can lose), and Accelerate takes the
   rest. Data whose scaled entries all reach 2⁻⁷⁸ is routed and computed as
   before. New cases `range-entry-low-*` in `tests/test_blas_abi.c`.
+- **The guard's floors now hold for DGEMM's C and for each complex part.**
+  Three more gaps of the same kind, each confirmed on the GPU in 1.5.1, every
+  call reporting success:
+  - For DGEMM with beta ≠ 0 the guard checked C′ (C as scaled for the upload)
+    only through |β′C′| ≥ 2⁻⁷⁸, so with β = 2²⁰ a C′ down to 2⁻⁹⁸ passed,
+    whose FP32 low word is subnormal: a zero row of op(A) with
+    c = 2⁻⁹⁸(1+2⁻²⁹) came back with relative error 2⁻²⁹. Stage 1 now also
+    requires every nonzero C′ to be at least 2⁻⁷⁸.
+  - Below that floor it checked C only in zero rows of op(A) and zero columns
+    of op(B), not where a row and a column have disjoint supports, which also
+    leaves C_ij's product part zero: with β = 1, row [1, 0] and column [0, 1],
+    c = 2⁻ᵏ(1+2⁻²⁹) lost its low word for k ≥ 98 and came back as zero for
+    k ≥ 127. Now each C′_ij below the floors needs a product in its own
+    entry, through the largest element of its row or of its column, that α′
+    brings to 2⁻⁷⁸·max(1, |β′|), so that what C′_ij can lose stays below u²
+    of it; without one (a zero line, or supports that miss each other) the
+    call runs on Accelerate.
+  - Complex statistics measured an element by its larger part, so a small
+    part went unchecked: with every element of A and B 1 + t·i, Im C (by 4M)
+    lost 2⁻²⁹ of itself for t below 2⁻⁹⁷ and came back as zero below 2⁻¹²⁶.
+    The floors now apply to every nonzero real and imaginary part, and stage 2
+    checks each part of C_ij in its own scale (|Ar||Br| + |Ai||Bi| for the
+    real part, |Ar||Bi| + |Ai||Br| for the imaginary part).
+
+  Calls whose scaled entries (for ZGEMM, every nonzero part and every product
+  of two parts) and whose C′ and β′C′ reach 2⁻⁷⁸ are routed and computed as
+  before (golden bits unchanged). ZGEMMs with smaller parts or products of
+  parts now go through stage 2, which reads the operands on the host, and
+  some of them to Accelerate. New cases `range-c-floor`,
+  `range-c-disjoint` and `imag-part-low` (Accelerate; they fail on 1.5.1),
+  and `range-c-near` and `imag-part-ok` (they must stay on the GPU), in
+  `tests/test_blas_abi.c`.
 
 ## [1.5.1] - 2026-11-01
 

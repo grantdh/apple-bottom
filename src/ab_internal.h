@@ -151,14 +151,21 @@ static inline bool ab_range_nonfinite(ab_range_t r) { return r.max >= AB_HIWORD_
 //      Accelerate (the "range" fallback) if a line has NaN or Inf, or if the
 //      scaled sums could reach 2^AB_SUM_MAX_EXP. It is certified if every
 //      nonzero scaled product, times alpha's scale when that is below 1, is at
-//      least 2^AB_PRODUCT_MIN_EXP (stage 1). Otherwise stage 2 checks, for each
-//      C_ij of a row and column that stage 1 leaves open, the products through
-//      the largest elements of that row and that column, on the operands.
+//      least 2^AB_PRODUCT_MIN_EXP and every nonzero scaled entry at least
+//      2^AB_ENTRY_MIN_EXP (stage 1; for complex data, every part). Otherwise
+//      stage 2 checks, for each C_ij of a row and column that stage 1 leaves
+//      open, the products through the largest elements of that row and that
+//      column, on the operands (for complex data, in each part of C_ij).
 //   4. A DGEMM with beta != 0 checks C as it uploads, C' = C_ij 2^-(ra[i] +
 //      cb[j] + ea - eb), in the same way (ab_range_guard_c): NaN or Inf, or a
-//      C' or beta' C' that could reach 2^AB_SUM_MAX_EXP, go to Accelerate;
-//      where a row of op(A) or a column of op(B) is zero, beta' C' must be at
-//      least 2^AB_PRODUCT_MIN_EXP.
+//      C' or beta' C' that could reach 2^AB_SUM_MAX_EXP, go to Accelerate. It
+//      is certified if every nonzero C' is at least 2^AB_ENTRY_MIN_EXP and
+//      beta' C' at least 2^AB_PRODUCT_MIN_EXP (stage 1). Otherwise every C'_ij
+//      below those floors needs a product in its own entry, through the
+//      largest element of row i or of column j, that alpha' brings to
+//      2^AB_PRODUCT_MIN_EXP max(1, |beta'|) (stage 2): in a zero line, or
+//      where row i's and column j's supports miss each other, beta' C'_ij is
+//      all of C_ij. Without such a product the call goes to Accelerate.
 // The unscale, bit for bit (dgemm_blas, zgemm_blas): each GPU result C'_ij
 // becomes FP64 as (double)hi + (double)lo, then is multiplied by
 // 2^(ra[i] + cb[j] + ea) (ea = 0 for ZGEMM) with ab_scale2, one rounding. A
@@ -181,8 +188,9 @@ typedef struct {
 // Statistics of the lines of op(X), its rows (op(A)) or columns (op(B)): per
 // line, the high words of its largest |x| (0 for a zero line;
 // AB_HIWORD_NONFINITE or more if it has NaN or Inf) and of its smallest
-// nonzero |x| (UINT32_MAX for a zero line), with |x| = max(|Re x|, |Im x|)
-// for complex; and the exponent of its scale (ab_line_scales). Complex
+// nonzero |x| (UINT32_MAX for a zero line), for complex data the largest
+// max(|Re x|, |Im x|) and the smallest nonzero part (|Re x| or |Im x|); and
+// the exponent of its scale (ab_line_scales). Complex
 // statistics also hold the high words of each line's largest |Re x| and
 // largest |Im x| (rmax, imax), from which ab_lines_rho chooses between
 // Gauss-3M and 4M. The arrays are plain pointers a caller may set (a GPU
@@ -229,15 +237,17 @@ bool ab_range_guard(int K, const ab_line_stats_t* sa, const ab_line_stats_t* sb,
                     const ab_op_view_t* a, const ab_op_view_t* b);
 
 // Step 4 without its entrywise part: r is the range of C as uploaded
-// (C itself when nothing is scaled and ea == eb), beta_exp ilogb of the
-// scalar the GPU multiplies it by (beta 2^-eb).
-ab_guard_t ab_range_guard_c_stage1(const ab_line_stats_t* sa, const ab_line_stats_t* sb,
-                                   ab_range_t r, int beta_exp);
+// (C itself when nothing is scaled and ea == eb), beta the nonzero scalar the
+// GPU multiplies it by (beta 2^-eb).
+ab_guard_t ab_range_guard_c_stage1(ab_range_t r, double beta);
 
 // Step 4: true if the GPU may take C. C is the caller's M x N C (leading
-// dimension ldC), uploaded as C_ij 2^-(ra[i] + cb[j] + shift), shift = ea - eb.
+// dimension ldC), uploaded as C_ij 2^-(ra[i] + cb[j] + shift), shift = ea - eb;
+// alpha is the scalar the GPU multiplies the product by (alpha 2^-ea), and a
+// and b are the operands sa and sb describe.
 bool ab_range_guard_c(const ab_line_stats_t* sa, const ab_line_stats_t* sb, ab_range_t r,
-                      int beta_exp, const double* C, int ldC, int shift);
+                      double alpha, double beta, const double* C, int ldC, int shift,
+                      const ab_op_view_t* a, const ab_op_view_t* b);
 
 // =============================================================================
 // Complex products: Gauss-3M or 4M

@@ -101,14 +101,13 @@ static inline int line_max_exp(const ab_line_stats_t* s, int i) {
 }
 
 // Adds a complex element to a line's statistics: its parts' high words to
-// their maxima (rmx, imx), and the larger of them to the smallest (mn), as
-// AB_RANGE_ADD adds a real element's. The line's max follows from rmx and imx
-// (pack_op_complex_stats).
-#define LINE_ADD_COMPLEX(re, im, rmx, imx, mn) do {                \
-        uint32_t hr_ = ab_abs_hiword(re), hi_ = ab_abs_hiword(im); \
-        AB_HIWORD_MAX(hr_, rmx);                                   \
-        AB_HIWORD_MAX(hi_, imx);                                   \
-        AB_HIWORD_MIN(hr_ > hi_ ? hr_ : hi_, mn);                  \
+// their maxima (rmx, imx) and, each nonzero one, to the smallest (mn), as
+// AB_RANGE_ADD adds a real element's: the GPU multiplies the parts one by
+// one, so the guard's floors apply to each. The line's max follows from rmx
+// and imx (pack_op_complex_stats).
+#define LINE_ADD_COMPLEX(re, im, rmx, imx, mn) do { \
+        AB_RANGE_ADD(re, rmx, mn);                   \
+        AB_RANGE_ADD(im, imx, mn);                   \
     } while (0)
 
 // The range [*lo, *hi] of |Im x|/|Re x| over s's nonzero lines, each line's
@@ -311,11 +310,36 @@ void ab_line_stats_scan(const ab_op_view_t* v, bool by_row, ab_line_stats_t* s) 
         pack_op_real_stats(t, v->x, v->ld, v->rows, v->cols, NULL, by_row, s);
 }
 
+static inline size_t op_at(const ab_op_view_t* v, int i, int k) {
+    return v->trans ? (size_t)i * v->ld + k : (size_t)k * v->ld + i;
+}
+
 // |op(X)_ik|, unscaled; max(|Re|, |Im|) for complex.
 static inline double op_mag(const ab_op_view_t* v, int i, int k) {
-    const size_t x = v->trans ? (size_t)i * v->ld + k : (size_t)k * v->ld + i;
+    const size_t x = op_at(v, i, k);
     if (!v->complex_pairs) return fabs(v->x[x]);
     return fmax(fabs(v->x[2 * x]), fabs(v->x[2 * x + 1]));
+}
+
+// |Re op(X)_ik| and |Im op(X)_ik| (0 for real data), times 2^-e.
+static inline void op_parts(const ab_op_view_t* v, int i, int k, int e, double* re,
+                            double* im) {
+    const size_t x = op_at(v, i, k);
+    *re = ab_scale2(fabs(v->complex_pairs ? v->x[2 * x] : v->x[x]), -e);
+    *im = v->complex_pairs ? ab_scale2(fabs(v->x[2 * x + 1]), -e) : 0.0;
+}
+
+// The k of the first largest |op(X)_lk| (op_mag) along row l of op(X)
+// (by_row) or column l.
+static int line_argmax(const ab_op_view_t* v, int l, bool by_row) {
+    const int len = by_row ? v->cols : v->rows;
+    double best = -1.0;
+    int at = 0;
+    for (int k = 0; k < len; k++) {
+        double m = by_row ? op_mag(v, l, k) : op_mag(v, k, l);
+        if (m > best) { best = m; at = k; }
+    }
+    return at;
 }
 
 static inline int imax2(int a, int b) { return a > b ? a : b; }
@@ -358,6 +382,12 @@ static inline int stage1_floor(int alpha_exp) { return AB_PRODUCT_MIN_EXP - imin
 //     whole entry, read as zero), at most K 2^-126 max_k |B'_kj| in C_ij
 //     (twice that for complex parts); the same lower bound on C_ij's sum must
 //     cover 2^48 times that, for every column j. Columns likewise.
+// Complex data is held to all of this part by part, as the GPU multiplies
+// the parts: stage 1 by each line's smallest nonzero part, and stage 2 in
+// each part of C_ij that has products, through the same two elements, in
+// that part's own scale: |Ar||Br| + |Ai||Bi| for the real part, |Ar||Bi| +
+// |Ai||Br| for the imaginary part (by 4M, each part's error is bounded in its
+// own scale, and a small part's losses would hide in a larger one's).
 // Rows of op(A) and columns of op(B) that are zero, and C_ij with nonzero
 // lines whose terms all vanish, are exact. Pairs with disjoint supports that
 // stage 1 passes are not checked further (their C_ij is 0 either way).
@@ -375,6 +405,25 @@ ab_guard_t ab_range_guard_stage1(int K, const ab_line_stats_t* sa, const ab_line
            bmin >= AB_ENTRY_MIN_EXP ? AB_GUARD_CERTIFIED : AB_GUARD_STAGE2;
 }
 
+// Whether part re (else the imaginary part) of C_ij has products: it has none
+// where every part of row i and column j that it multiplies is zero, and is
+// then exactly zero. Real data has only the real part.
+static bool part_has_products(const ab_line_stats_t* sa, const ab_line_stats_t* sb, int i, int j,
+                              bool complex_pairs, bool re) {
+    if (!complex_pairs) return re;
+    const bool ar = sa->rmax[i], ai = sa->imax[i], br = sb->rmax[j], bi = sb->imax[j];
+    return re ? (ar && br) || (ai && bi) : (ar && bi) || (ai && br);
+}
+
+// The scales of C_ij's parts through one k, from the scaled parts of
+// op(A)_ik (ar, ai) and op(B)_kj (br, bi): |Ar||Br| + |Ai||Bi| (*re; for
+// real data the product's magnitude) and |Ar||Bi| + |Ai||Br| (*im).
+static inline void k_part_scales(double ar, double ai, double br, double bi, double* re,
+                                 double* im) {
+    *re = ar * br + ai * bi;
+    *im = ar * bi + ai * br;
+}
+
 bool ab_range_guard(int K, const ab_line_stats_t* sa, const ab_line_stats_t* sb, int alpha_exp,
                     const ab_op_view_t* a, const ab_op_view_t* b) {
     ab_guard_t g = ab_range_guard_stage1(K, sa, sb, alpha_exp, a->complex_pairs);
@@ -382,18 +431,20 @@ bool ab_range_guard(int K, const ab_line_stats_t* sa, const ab_line_stats_t* sb,
 
     // Stage 2, on the operands as scaled, for the rows and columns with a
     // partner that stage 1 does not pass: the column of each such row's
-    // largest element, the row of each such column's, then the pairs.
+    // largest element and its parts, the row of each such column's, then the
+    // pairs.
     const int M = sa->n, N = sb->n, lo = stage1_floor(alpha_exp);
+    const bool z = a->complex_pairs;
     int amax, amin, bmax, bmin;
     lines_extremes(sa, &amax, &amin);
     lines_extremes(sb, &bmax, &bmin);
     const double floor_ij = fmax(ldexp((double)K, AB_PRODUCT_MIN_EXP),
                                  ldexp(1.0, AB_PRODUCT_MIN_EXP - alpha_exp));
-    const double entry_k = (double)K * (a->complex_pairs ? 2 : 1);
+    const double entry_k = (double)K * (z ? 2 : 1);
     int *rows = malloc((size_t)M * sizeof *rows), *ka = malloc((size_t)M * sizeof *ka);
     int *cols = malloc((size_t)N * sizeof *cols), *kb = malloc((size_t)N * sizeof *kb);
-    double *av = malloc((size_t)M * sizeof *av), *bv = malloc((size_t)N * sizeof *bv);
-    bool ok = rows && ka && cols && kb && av && bv;
+    double *ap = malloc((size_t)M * 2 * sizeof *ap), *bp = malloc((size_t)N * 2 * sizeof *bp);
+    bool ok = rows && ka && cols && kb && ap && bp;
     // Lines with an entry below the entry floor pair with every line of the
     // other operand, so then every nonzero line is examined.
     const bool entry_a = amin < AB_ENTRY_MIN_EXP, entry_b = bmin < AB_ENTRY_MIN_EXP;
@@ -405,20 +456,12 @@ bool ab_range_guard(int K, const ab_line_stats_t* sa, const ab_line_stats_t* sb,
         if (sb->max[j] != 0 && (entry_a || line_min_exp(sb, j) + amin < lo ||
                                 line_min_exp(sb, j) < AB_ENTRY_MIN_EXP)) cols[nc++] = j;
     for (int r = 0; r < nr; r++) {
-        double best = -1.0;
-        for (int k = 0; k < K; k++) {
-            double m = op_mag(a, rows[r], k);
-            if (m > best) { best = m; ka[r] = k; }
-        }
-        av[r] = ldexp(best, -sa->e[rows[r]]);
+        ka[r] = line_argmax(a, rows[r], true);
+        op_parts(a, rows[r], ka[r], sa->e[rows[r]], &ap[2 * r], &ap[2 * r + 1]);
     }
     for (int c = 0; c < nc; c++) {
-        double best = -1.0;
-        for (int k = 0; k < K; k++) {
-            double m = op_mag(b, k, cols[c]);
-            if (m > best) { best = m; kb[c] = k; }
-        }
-        bv[c] = ldexp(best, -sb->e[cols[c]]);
+        kb[c] = line_argmax(b, cols[c], false);
+        op_parts(b, kb[c], cols[c], sb->e[cols[c]], &bp[2 * c], &bp[2 * c + 1]);
     }
     for (int r = 0; ok && r < nr; r++) {
         const int i = rows[r];
@@ -432,53 +475,90 @@ bool ab_range_guard(int K, const ab_line_stats_t* sa, const ab_line_stats_t* sb,
             if (line_min_exp(sb, j) < AB_ENTRY_MIN_EXP)
                 need = fmax(need, ldexp(entry_k, AB_ENTRY_MIN_EXP + line_max_exp(sa, i) + 1));
             if (need == 0.0) continue;
-            ok = av[r] * ldexp(op_mag(b, ka[r], j), -sb->e[j]) >= need ||
-                 ldexp(op_mag(a, i, kb[c]), -sa->e[i]) * bv[c] >= need;
+            // each part with products must reach it, through row i's largest
+            // element or, where that falls short, column j's
+            const double nre = part_has_products(sa, sb, i, j, z, true) ? need : 0.0;
+            const double nim = part_has_products(sa, sb, i, j, z, false) ? need : 0.0;
+            double ar, ai, br, bi, re, im, re2, im2;
+            op_parts(b, ka[r], j, sb->e[j], &br, &bi);
+            k_part_scales(ap[2 * r], ap[2 * r + 1], br, bi, &re, &im);
+            if (re < nre || im < nim) {
+                op_parts(a, i, kb[c], sa->e[i], &ar, &ai);
+                k_part_scales(ar, ai, bp[2 * c], bp[2 * c + 1], &re2, &im2);
+                re = fmax(re, re2);
+                im = fmax(im, im2);
+            }
+            ok = re >= nre && im >= nim;
         }
     }
-    free(rows); free(ka); free(cols); free(kb); free(av); free(bv);
+    free(rows); free(ka); free(cols); free(kb); free(ap); free(bp);
     return ok;
 }
 
+// Whether a nonzero C' of exponent c_exp, times a beta' of exponent
+// beta_exp, keeps its full DD precision: C' itself must reach the entry
+// floor (below it its FP32 low word can be subnormal, which the GPU reads as
+// zero) and beta' C' the product floor.
+static inline bool c_floors_hold(int c_exp, int beta_exp) {
+    return c_exp >= AB_ENTRY_MIN_EXP && c_exp + beta_exp >= AB_PRODUCT_MIN_EXP;
+}
+
 // The DGEMM's beta' C', with C' the C scaled as uploaded (r: the range of its
-// values) and |beta'| below 2^(beta_exp + 1), must stay in FP32's range and,
-// where the product part of C_ij is 0 for want of products (a zero row of
-// op(A) or column of op(B)), keep its full DD precision. Elsewhere a C' far
-// below the product part only rounds away, as it would in FP64.
-ab_guard_t ab_range_guard_c_stage1(const ab_line_stats_t* sa, const ab_line_stats_t* sb,
-                                   ab_range_t r, int beta_exp) {
+// values) and beta' the nonzero scalar the GPU multiplies it by, must stay in
+// FP32's range and keep its full DD precision wherever it is all of C_ij.
+// Stage 1 certifies C when every nonzero C' meets c_floors_hold; otherwise
+// stage 2 (ab_range_guard_c) checks the C'_ij below the floors.
+ab_guard_t ab_range_guard_c_stage1(ab_range_t r, double beta) {
     if (ab_range_nonfinite(r)) return AB_GUARD_REJECT;
     if (r.max == 0) return AB_GUARD_CERTIFIED;
+    const int beta_exp = ilogb(beta);
     // C' is stored in DD before beta' multiplies it, and beta' C' joins the sums.
     if (ab_hiword_ilogb(r.max) + imax2(beta_exp, 0) + 1 > AB_SUM_MAX_EXP) return AB_GUARD_REJECT;
-    if (ab_hiword_ilogb(r.min) + beta_exp >= AB_PRODUCT_MIN_EXP) return AB_GUARD_CERTIFIED;
-    for (int i = 0; i < sa->n; i++) if (sa->max[i] == 0) return AB_GUARD_STAGE2;
-    for (int j = 0; j < sb->n; j++) if (sb->max[j] == 0) return AB_GUARD_STAGE2;
-    return AB_GUARD_CERTIFIED;
+    return c_floors_hold(ab_hiword_ilogb(r.min), beta_exp) ? AB_GUARD_CERTIFIED
+                                                           : AB_GUARD_STAGE2;
 }
 
-// Whether beta' times C'_ij = C_ij 2^-e keeps full DD precision.
-static inline bool c_entry_ok(double c, int e, int beta_exp) {
-    double v = ldexp(fabs(c), -e);
-    return v == 0.0 || ilogb(v) + beta_exp >= AB_PRODUCT_MIN_EXP;
-}
-
+// Stage 2: a C'_ij below the floors loses less than (|beta'| + 4) 2^-126 (its
+// own low word or all of it, and the flushed parts of beta' C'), within u^2
+// of a product of its entry that alpha' brings to 2^AB_PRODUCT_MIN_EXP
+// max(1, |beta'|). As ab_range_guard's stage 2, it looks through the largest
+// element of row i and that of column j: alpha' A'_ik B'_kj at k = either
+// one's must reach that, which a zero row or column rules out, and so do a
+// row's and a column's supports that miss each other (beta' C'_ij is then all
+// of C_ij); else the call runs on Accelerate.
 bool ab_range_guard_c(const ab_line_stats_t* sa, const ab_line_stats_t* sb, ab_range_t r,
-                      int beta_exp, const double* C, int ldC, int shift) {
-    ab_guard_t g = ab_range_guard_c_stage1(sa, sb, r, beta_exp);
+                      double alpha, double beta, const double* C, int ldC, int shift,
+                      const ab_op_view_t* a, const ab_op_view_t* b) {
+    ab_guard_t g = ab_range_guard_c_stage1(r, beta);
     if (g != AB_GUARD_STAGE2) return g == AB_GUARD_CERTIFIED;
-    const int M = sa->n, N = sb->n;
-    for (int i = 0; i < M; i++)
-        if (sa->max[i] == 0)
-            for (int j = 0; j < N; j++)
-                if (!c_entry_ok(C[(size_t)j * ldC + i], sa->e[i] + sb->e[j] + shift, beta_exp))
-                    return false;
-    for (int j = 0; j < N; j++)
-        if (sb->max[j] == 0)
-            for (int i = 0; i < M; i++)
-                if (!c_entry_ok(C[(size_t)j * ldC + i], sa->e[i] + sb->e[j] + shift, beta_exp))
-                    return false;
-    return true;
+    const int M = sa->n, N = sb->n, beta_exp = ilogb(beta);
+    const double need = ldexp(fmax(1.0, fabs(beta)), AB_PRODUCT_MIN_EXP), al = fabs(alpha);
+    int *ka = malloc((size_t)M * sizeof *ka), *kb = malloc((size_t)N * sizeof *kb);
+    double *av = malloc((size_t)M * sizeof *av), *bv = malloc((size_t)N * sizeof *bv);
+    bool ok = ka && kb && av && bv;
+    for (int i = 0; ok && i < M; i++) ka[i] = -1;         // found as needed
+    for (int j = 0; ok && j < N; j++) kb[j] = -1;
+    for (int j = 0; ok && j < N; j++)
+        for (int i = 0; ok && i < M; i++) {
+            const double c = C[(size_t)j * ldC + i];
+            const int e = sa->e[i] + sb->e[j] + shift;   // C'_ij = c 2^-e
+            if (c == 0.0 || c_floors_hold(ab_hiword_ilogb(ab_abs_hiword(c)) - e, beta_exp))
+                continue;
+            if (sa->max[i] == 0 || sb->max[j] == 0) { ok = false; break; }
+            if (ka[i] < 0) {
+                ka[i] = line_argmax(a, i, true);
+                av[i] = ab_scale2(op_mag(a, i, ka[i]), -sa->e[i]);
+            }
+            ok = al * av[i] * ab_scale2(op_mag(b, ka[i], j), -sb->e[j]) >= need;
+            if (ok) continue;
+            if (kb[j] < 0) {
+                kb[j] = line_argmax(b, j, false);
+                bv[j] = ab_scale2(op_mag(b, kb[j], j), -sb->e[j]);
+            }
+            ok = al * ab_scale2(op_mag(a, i, kb[j]), -sa->e[i]) * bv[j] >= need;
+        }
+    free(ka); free(kb); free(av); free(bv);
+    return ok;
 }
 
 // The gate of dgemm_blas and zgemm_blas (dispatch.h): Accelerate where the
@@ -848,7 +928,8 @@ static ab_prof_staged_t staged_refusal(ab_stage_t *s, const ab_stage_gemm_t *g, 
         memcmp(sb.e, gpu + g->M, (size_t)g->N * sizeof *gpu))
         return AB_PROF_STAGED_GPU_FAILED;
     if (!ab_range_guard(g->K, &sa, &sb, z ? 0 : ilogb(g->alpha[0]), &va, &vb) ||
-        (!z && g->c_in && !ab_range_guard_c(&sa, &sb, c, ilogb(g->beta[0]), C->ptr, C->ld, 0)))
+        (!z && g->c_in && !ab_range_guard_c(&sa, &sb, c, g->alpha[0], g->beta[0], C->ptr, C->ld,
+                                            0, &va, &vb)))
         return AB_PROF_STAGED_RANGE;
     return AB_PROF_STAGED_KEPT;
 }
@@ -1198,10 +1279,10 @@ static void dgemm_blas(
     // 2^(ra[i] + cb[j] + ea), so C goes up as C * 2^-(ra[i] + cb[j] + ea - eb).
     int ea = ab_scalar_exp(alpha, AB_SCALAR_WINDOW), eb = ab_scalar_exp(beta, AB_SCALAR_WINDOW);
     double alpha_s = ab_scale2(alpha, -ea), beta_s = ab_scale2(beta, -eb);
+    const ab_op_view_t va = {A, ldA, M, K, ta != CblasNoTrans, false};
+    const ab_op_view_t vb = {B, ldB, K, N, tb != CblasNoTrans, false};
     if (!isfinite(alpha) || !isfinite(beta) ||
-        !ab_range_guard(K, &sa, &sb, ilogb(alpha_s),
-                        &(ab_op_view_t){A, ldA, M, K, ta != CblasNoTrans, false},
-                        &(ab_op_view_t){B, ldB, K, N, tb != CblasNoTrans, false})) {
+        !ab_range_guard(K, &sa, &sb, ilogb(alpha_s), &va, &vb)) {
         fallback = AB_PROF_FB_RANGE;
         goto cleanup;
     }
@@ -1221,7 +1302,7 @@ static void dgemm_blas(
         if (ab_internal_upload_scaled(mC, C_row, ra, cb, ea - eb, scaled_c ? &cr : NULL) != AB_OK)
             goto cleanup;
         prof_stage(p, AB_PROF_STAGE_UPLOAD);
-        if (!ab_range_guard_c(&sa, &sb, cr, ilogb(beta_s), C, ldC, ea - eb)) {
+        if (!ab_range_guard_c(&sa, &sb, cr, alpha_s, beta_s, C, ldC, ea - eb, &va, &vb)) {
             fallback = AB_PROF_FB_RANGE;
             goto cleanup;
         }

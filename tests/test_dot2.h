@@ -90,22 +90,35 @@ static inline void abs_gemm_acc(int M, int N, int K, const double *X1, const dou
 // 3M misses Im(C) by about 1/(2 IMAG_RATIO) of its scale there.
 #define IMAG_BOUND 8.0          // units of u²
 #define IMAG_RATIO 1e-6         // the smaller part's magnitude, relative
+// A value whose FP32 low word, 2^-127, is subnormal, which the GPU reads as
+// zero: the exponent-range guard's probes put it in C and in complex parts.
+#define C_LOW (0x1p-98 * (1.0 + 0x1p-29))
 
 typedef enum {
     IMAG_SMALL,         // Im x IMAG_RATIO: nearly real A and B
     IMAG_LARGE,         // Re x IMAG_RATIO: nearly imaginary
     IMAG_LINES,         // even rows of op(A) and columns of op(B) nearly real, odd ones nearly
                         // imaginary: every row and column imbalanced, A and B as a whole not
+    IMAG_PART_LOW,      // Im = +-C_LOW, below the guard's entry floor (the BLAS ABI must use
+                        // Accelerate)
+    IMAG_PART_OK,       // Im x 2^-60: Ai Bi lies below 2^-78, but in Re(C) beside Ar Br
 } ImagData;
 
 static inline const char *imag_tag(ImagData d) {
-    return d == IMAG_SMALL ? "small-im" : d == IMAG_LARGE ? "small-re" : "lines";
+    return d == IMAG_SMALL ? "small-im" : d == IMAG_LARGE ? "small-re"
+         : d == IMAG_PART_LOW ? "part-low" : d == IMAG_PART_OK ? "part-ok" : "lines";
 }
 
 // Whether line l of op(A) (a row) or op(B) (a column) gets its real part
-// (else its imaginary part) multiplied by IMAG_RATIO.
+// (else its imaginary part) made small.
 static inline bool imag_small_re(ImagData d, int l) {
     return d == IMAG_LARGE || (d == IMAG_LINES && l % 2);
+}
+
+// x, a part made small: times IMAG_RATIO, or as the IMAG_PART_* data say.
+static inline double imag_small(ImagData d, double x) {
+    return d == IMAG_PART_LOW ? copysign(C_LOW, x)
+         : d == IMAG_PART_OK ? x * 0x1p-60 : x * IMAG_RATIO;
 }
 
 // x's sign, with a magnitude in [0.5, 1).
