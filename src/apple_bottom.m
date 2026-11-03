@@ -3153,9 +3153,64 @@ ABStatus ab_dsyrk(ABMatrix A, ABMatrix C) {
 //   3. Repeat until all columns/rows are solved
 // This gives FP64-class accuracy via the DD-DGEMM updates while keeping
 // the small triangular solves on the fast AMX coprocessor.
+// An update whose GPU step fails runs on cblas instead, in FP64, as the BLAS
+// interface runs a call whose GPU step fails (blas_wrapper.c).
 // =============================================================================
 
 #define DTRSM_BLOCK_SIZE 64
+
+// C = C0 - A*X by DD-DGEMM on the GPU, for the solvers' row-major host arrays
+// (A m x k, X k x n, C0 and C m x n; C may be C0). False if any GPU step
+// fails; C is then as it was, since only the last step, the download, writes
+// it, and a download fails only on its arguments, before writing.
+static bool gpu_sub_product(const double* A, const double* X, const double* C0, double* C,
+                            int m, int n, int k) {
+    ABMatrix mA = ab_matrix_create(m, k);
+    ABMatrix mX = ab_matrix_create(k, n);
+    ABMatrix mC = ab_matrix_create(m, n);
+    bool ok = mA && mX && mC &&
+              ab_matrix_upload(mA, A, true) == AB_OK &&
+              ab_matrix_upload(mX, X, true) == AB_OK &&
+              ab_matrix_upload(mC, C0, true) == AB_OK &&
+              ab_dgemm_scaled(-1.0, mA, mX, 1.0, mC) == AB_OK &&
+              ab_matrix_download(mC, C, true) == AB_OK;
+    ab_matrix_destroy(mA);
+    ab_matrix_destroy(mX);
+    ab_matrix_destroy(mC);
+    return ok;
+}
+
+// Under AB_PROFILE, the line blas_wrapper.c prints for a call that falls back
+// to cblas, for an m x n x k GEMM step of a solver that did.
+static void note_solver_fallback(const char* routine, int m, int n, int k) {
+    if (ab_prof_verbose())
+        fprintf(stderr, "AB_PROFILE %s M=%d N=%d K=%d  GPU fallback to cblas: GPU step failed\n",
+                routine, m, n, k);
+}
+
+// One panel update of the left solve, on the row-major host copies of A
+// (N x N) and B (N x NRHS): rows [r0, r0+rows) of B less op(A)'s block in
+// those rows and columns [jb, jb+nb) times the solved panel, rows [jb, jb+nb)
+// of B.
+static void dtrsm_panel_update(const double* A_host, int N, bool no_trans, int jb, int nb,
+                               int r0, int rows, double* B_host, int NRHS) {
+    // op(A)'s block as stored: A[r0.., jb..], or A[jb.., r0..] to transpose
+    const double* A_blk = no_trans ? &A_host[(size_t)r0 * N + jb] : &A_host[(size_t)jb * N + r0];
+    const double* X = &B_host[(size_t)jb * NRHS];
+    double* B_rows = &B_host[(size_t)r0 * NRHS];
+    double* A_off = (double*)malloc((size_t)rows * nb * sizeof(double));  // op(A)'s block, packed
+    if (A_off)
+        for (size_t r = 0; r < (size_t)rows; r++)
+            for (size_t c = 0; c < (size_t)nb; c++)
+                A_off[r * nb + c] = no_trans ? A_blk[r * N + c] : A_blk[c * N + r];
+    bool ok = A_off && gpu_sub_product(A_off, X, B_rows, B_rows, rows, NRHS, nb);
+    free(A_off);
+    if (!ok) {
+        note_solver_fallback("ab_dtrsm", rows, NRHS, nb);
+        cblas_dgemm(CblasRowMajor, no_trans ? CblasNoTrans : CblasTrans, CblasNoTrans,
+                    rows, NRHS, nb, -1.0, A_blk, N, X, NRHS, 1.0, B_rows, NRHS);
+    }
+}
 
 ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
                   double alpha, ABMatrix A, ABMatrix B) {
@@ -3178,17 +3233,16 @@ ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
 
     int NB = DTRSM_BLOCK_SIZE;
 
-    // Download B to host (row-major) for the blocked solve
+    // Download B (for the blocked solve) and A to host (row-major)
     size_t B_count = (size_t)M * NRHS;
-    double* B_host = (double*)malloc(B_count * sizeof(double));
-    if (!B_host) return AB_ERROR_ALLOC_FAILED;
-    ab_matrix_download(B, B_host, true);
-
-    // Download A to host (row-major)
     size_t A_count = (size_t)N * N;
+    double* B_host = (double*)malloc(B_count * sizeof(double));
     double* A_host = (double*)malloc(A_count * sizeof(double));
-    if (!A_host) { free(B_host); return AB_ERROR_ALLOC_FAILED; }
-    ab_matrix_download(A, A_host, true);
+    double* A_col = (double*)malloc(A_count * sizeof(double));
+    ABStatus status = B_host && A_host && A_col ? AB_OK : AB_ERROR_ALLOC_FAILED;
+    if (status == AB_OK) status = ab_matrix_download(B, B_host, true);
+    if (status == AB_OK) status = ab_matrix_download(A, A_host, true);
+    if (status != AB_OK) goto dtrsm_cleanup;
 
     // Apply alpha scaling to B
     if (alpha != 1.0) {
@@ -3197,13 +3251,9 @@ ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
     }
 
     // Convert A to column-major for cblas_dtrsm
-    double* A_col = (double*)malloc(A_count * sizeof(double));
-    if (!A_col) { free(B_host); free(A_host); return AB_ERROR_ALLOC_FAILED; }
     for (int j = 0; j < N; j++)
         for (int i = 0; i < N; i++)
             A_col[j * N + i] = A_host[i * N + j];
-
-    ABStatus status = AB_OK;
 
     // Blocked triangular solve: LEFT side, op(A) * X = B
     // Process NB columns at a time
@@ -3241,62 +3291,10 @@ ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
                         B_host[(jb + r) * NRHS + c] = B_panel_col[c * nb + r];
                 free(B_panel_col);
 
-                // GPU DGEMM update: B_remaining -= A_off * X_solved
+                // DGEMM update: B_remaining -= A_off * X_solved
                 int remaining = N - jb - nb;
-                if (remaining > 0) {
-                    // Upload solved panel X (nb × NRHS, row-major)
-                    ABMatrix mX = ab_matrix_create(nb, NRHS);
-                    // Upload the off-diagonal block
-                    ABMatrix mA_off = ab_matrix_create(remaining, nb);
-                    ABMatrix mUpdate = ab_matrix_create(remaining, NRHS);
-                    if (!mX || !mA_off || !mUpdate) {
-                        if (mX) ab_matrix_destroy(mX);
-                        if (mA_off) ab_matrix_destroy(mA_off);
-                        if (mUpdate) ab_matrix_destroy(mUpdate);
-                        status = AB_ERROR_ALLOC_FAILED;
-                        goto dtrsm_cleanup;
-                    }
-
-                    ab_matrix_upload(mX, &B_host[jb * NRHS], true);
-
-                    // Extract off-diagonal block from A_host (row-major)
-                    int off_start = jb + nb;
-                    double* A_off_data = (double*)malloc((size_t)remaining * nb * sizeof(double));
-                    if (!A_off_data) {
-                        ab_matrix_destroy(mX);
-                        ab_matrix_destroy(mA_off);
-                        ab_matrix_destroy(mUpdate);
-                        status = AB_ERROR_ALLOC_FAILED;
-                        goto dtrsm_cleanup;
-                    }
-
-                    // Get the correct off-diagonal block based on transpose
-                    if (no_trans) {
-                        // A[off_start:N, jb:jb+nb] in row-major
-                        for (int r = 0; r < remaining; r++)
-                            for (int c = 0; c < nb; c++)
-                                A_off_data[r * nb + c] = A_host[(off_start + r) * N + jb + c];
-                    } else {
-                        // A^T[off_start:N, jb:jb+nb] = A[jb:jb+nb, off_start:N]^T
-                        for (int r = 0; r < remaining; r++)
-                            for (int c = 0; c < nb; c++)
-                                A_off_data[r * nb + c] = A_host[(jb + c) * N + off_start + r];
-                    }
-                    ab_matrix_upload(mA_off, A_off_data, true);
-                    free(A_off_data);
-
-                    // B_remaining -= A_off * X_solved  (via GPU: alpha=-1, beta=1)
-                    // First upload current B_remaining
-                    ab_matrix_upload(mUpdate, &B_host[off_start * NRHS], true);
-                    ab_dgemm_scaled(-1.0, mA_off, mX, 1.0, mUpdate);
-
-                    // Download updated B_remaining
-                    ab_matrix_download(mUpdate, &B_host[off_start * NRHS], true);
-
-                    ab_matrix_destroy(mX);
-                    ab_matrix_destroy(mA_off);
-                    ab_matrix_destroy(mUpdate);
-                }
+                if (remaining > 0)
+                    dtrsm_panel_update(A_host, N, no_trans, jb, nb, jb + nb, remaining, B_host, NRHS);
             }
         } else {
             // Backward substitution: blocks N-NB, N-2*NB, ..., 0
@@ -3320,52 +3318,9 @@ ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
                         B_host[(jb + r) * NRHS + c] = B_panel_col[c * nb + r];
                 free(B_panel_col);
 
-                // GPU DGEMM update: B_above -= A_off * X_solved
-                if (jb > 0) {
-                    ABMatrix mX = ab_matrix_create(nb, NRHS);
-                    ABMatrix mA_off = ab_matrix_create(jb, nb);
-                    ABMatrix mUpdate = ab_matrix_create(jb, NRHS);
-                    if (!mX || !mA_off || !mUpdate) {
-                        if (mX) ab_matrix_destroy(mX);
-                        if (mA_off) ab_matrix_destroy(mA_off);
-                        if (mUpdate) ab_matrix_destroy(mUpdate);
-                        status = AB_ERROR_ALLOC_FAILED;
-                        goto dtrsm_cleanup;
-                    }
-
-                    ab_matrix_upload(mX, &B_host[jb * NRHS], true);
-
-                    double* A_off_data = (double*)malloc((size_t)jb * nb * sizeof(double));
-                    if (!A_off_data) {
-                        ab_matrix_destroy(mX);
-                        ab_matrix_destroy(mA_off);
-                        ab_matrix_destroy(mUpdate);
-                        status = AB_ERROR_ALLOC_FAILED;
-                        goto dtrsm_cleanup;
-                    }
-
-                    if (no_trans) {
-                        // A[0:jb, jb:jb+nb] in row-major
-                        for (int r = 0; r < jb; r++)
-                            for (int c = 0; c < nb; c++)
-                                A_off_data[r * nb + c] = A_host[r * N + jb + c];
-                    } else {
-                        // A^T[0:jb, jb:jb+nb] = A[jb:jb+nb, 0:jb]^T
-                        for (int r = 0; r < jb; r++)
-                            for (int c = 0; c < nb; c++)
-                                A_off_data[r * nb + c] = A_host[(jb + c) * N + r];
-                    }
-                    ab_matrix_upload(mA_off, A_off_data, true);
-                    free(A_off_data);
-
-                    ab_matrix_upload(mUpdate, B_host, true);
-                    ab_dgemm_scaled(-1.0, mA_off, mX, 1.0, mUpdate);
-                    ab_matrix_download(mUpdate, B_host, true);
-
-                    ab_matrix_destroy(mX);
-                    ab_matrix_destroy(mA_off);
-                    ab_matrix_destroy(mUpdate);
-                }
+                // DGEMM update: B_above -= A_off * X_solved
+                if (jb > 0)
+                    dtrsm_panel_update(A_host, N, no_trans, jb, nb, 0, jb, B_host, NRHS);
             }
         }
     } else {
@@ -3392,7 +3347,7 @@ ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
     }
 
     // Upload solved B back to GPU
-    ab_matrix_upload(B, B_host, true);
+    status = ab_matrix_upload(B, B_host, true);
 
 dtrsm_cleanup:
     free(B_host);
@@ -3417,6 +3372,8 @@ dtrsm_cleanup:
 // This avoids the need for a bespoke DD-DTRSM shader and the catastrophic
 // κ(A)² error amplification of explicit inversion (Paper §6).
 // Convergence: 1-3 iterations for well-conditioned DFT matrices.
+// A residual whose GPU step fails is computed by cblas instead, in FP64, as
+// a DTRSM panel update is.
 // =============================================================================
 
 ABStatus ab_dgesv_mpir(ABMatrix A, ABMatrix B) {
@@ -3458,8 +3415,9 @@ ABStatus ab_dgesv_mpir(ABMatrix A, ABMatrix B) {
     }
 
     // Download A and B from GPU (row-major doubles)
-    ab_matrix_download(A, A_host, true);
-    ab_matrix_download(B, B_orig, true);
+    status = ab_matrix_download(A, A_host, true);
+    if (status == AB_OK) status = ab_matrix_download(B, B_orig, true);
+    if (status != AB_OK) goto mpir_cleanup;
 
     // --- Step 1: FP32 LU factorization ---
     // Convert A to FP32 column-major for LAPACK
@@ -3499,30 +3457,13 @@ ABStatus ab_dgesv_mpir(ABMatrix A, ABMatrix B) {
 
     // --- Steps 3-6: Iterative refinement ---
     for (int iter = 0; iter < max_iter; iter++) {
-        // Residual R = B - A*X via DD-DGEMM on GPU
-        ABMatrix mA_gpu = ab_matrix_create(N, N);
-        ABMatrix mX_gpu = ab_matrix_create(N, NRHS);
-        ABMatrix mR_gpu = ab_matrix_create(N, NRHS);
-
-        if (!mA_gpu || !mX_gpu || !mR_gpu) {
-            if (mA_gpu) ab_matrix_destroy(mA_gpu);
-            if (mX_gpu) ab_matrix_destroy(mX_gpu);
-            if (mR_gpu) ab_matrix_destroy(mR_gpu);
-            status = AB_ERROR_ALLOC_FAILED;
-            goto mpir_cleanup;
+        // Residual R = B - A*X via DD-DGEMM on GPU, or on cblas if that fails
+        if (!gpu_sub_product(A_host, X_host, B_orig, R_host, N, NRHS, N)) {
+            note_solver_fallback("ab_dgesv_mpir", N, NRHS, N);
+            memcpy(R_host, B_orig, B_count * sizeof(double));
+            cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, N, NRHS, N, -1.0, A_host, N,
+                        X_host, NRHS, 1.0, R_host, NRHS);
         }
-
-        ab_matrix_upload(mA_gpu, A_host, true);
-        ab_matrix_upload(mX_gpu, X_host, true);
-        ab_matrix_upload(mR_gpu, B_orig, true);  // R starts as B
-
-        // R = B - A*X = -1.0 * A * X + 1.0 * B
-        ab_dgemm_scaled(-1.0, mA_gpu, mX_gpu, 1.0, mR_gpu);
-
-        ab_matrix_download(mR_gpu, R_host, true);
-        ab_matrix_destroy(mA_gpu);
-        ab_matrix_destroy(mX_gpu);
-        ab_matrix_destroy(mR_gpu);
 
         // Check convergence: ||R||_F / ||B||_F
         double r_norm_sq = 0, b_norm_sq = 0;
@@ -3551,7 +3492,7 @@ ABStatus ab_dgesv_mpir(ABMatrix A, ABMatrix B) {
     }
 
     // Upload final solution to B's GPU buffer
-    ab_matrix_upload(B, X_host, true);
+    status = ab_matrix_upload(B, X_host, true);
 
 mpir_cleanup:
     free(A_host);

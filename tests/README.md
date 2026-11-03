@@ -44,8 +44,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 159, every test but
-the chaos ones, and `make ci-local` all 177 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 160, every test but
+the chaos ones, and `make ci-local` all 178 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -68,7 +68,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
   - `tests/test_dispatch.c` — 9 tests of the BLAS-ABI routing, no GPU,
     see below
   - `tests/test_blas_abi.c` — 33 suites (1069 cases), see below
-  - `tests/test_trace.c` — 5 tests of `AB_TRACE` and
+  - `tests/test_trace.c` — 6 tests of `AB_TRACE` and
     `AB_TEST_FAIL_STAGE`, see below
 
 - **Not yet registry-based (one `main`, no ghost guard):**
@@ -326,6 +326,17 @@ kernels of the GPU work before the failure (none for `alloc`; for
 `kernel` the uploads, and the ZGEMM, which counts its kernel before it
 reports the failure), `AB_REPORT` must count each as a `gpu_failed`
 fallback and the trace must say `fallback:gpu_failed`.
+`test_fail_stage_solvers` runs `ab_dtrsm`'s four left solves (forward and
+backward, op(A)'s blocks as stored and transposed; A is 200 × 200, so each
+solve makes several 64-row panel updates) and `ab_dgesv_mpir` with
+`AB_PROFILE=1`, then again with `AB_TEST_FAIL_STAGE=kernel`. Each solve must
+return `AB_OK` with X within 10⁻¹² of `cblas_dtrsm`'s solution (for MPIR, of
+the X that B was made from). The first time the GPU must run the GEMM steps
+and none may fall back. Under the hook, which fails each GEMM after the GPU
+ran it, so that a solve using its result anyway would still be accurate,
+none may count as run, and each step must be reported as an `AB_PROFILE`
+fallback to cblas: for `ab_dtrsm` as many as the GPU ran the first time, for
+`ab_dgesv_mpir` one per residual.
 
 ## Routing unit tests
 

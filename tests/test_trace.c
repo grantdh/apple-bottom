@@ -28,6 +28,11 @@
 //           result, the path record says "cpu", ab_get_stats() shows the GPU
 //           work done before the failure, AB_REPORT counts gpu_failed and the
 //           trace says fallback:gpu_failed.
+//   solve   AB_PROFILE=1, then also AB_TEST_FAIL_STAGE=kernel: ab_dtrsm's left
+//           solves and ab_dgesv_mpir return AB_OK with the solution to 1e-12.
+//           Under the hook every GPU panel update and residual fails and is
+//           done on cblas instead, each with an AB_PROFILE fallback line: for
+//           ab_dtrsm as many as the GEMMs the GPU ran without the hook.
 // =============================================================================
 
 #include "apple_bottom.h"
@@ -123,6 +128,31 @@ static const Call HASH_CALLS[] = {
 
 // The GPU steps AB_TEST_FAIL_STAGE can fail, in the order the GPU path reaches them.
 static const char *const FAIL_STAGES[] = {"alloc", "kernel"};
+
+// The solve scenario. With N = 200, each of ab_dtrsm's left solves makes
+// several GPU panel updates (64-row panels, DTRSM_BLOCK_SIZE in
+// src/apple_bottom.m, the last one partial).
+#define DTRSM_N    200
+#define DTRSM_NRHS 7
+#define MPIR_N     150
+#define MPIR_NRHS  4
+
+typedef struct {
+    const char *tag;
+    ABUplo uplo;
+    ABTranspose trans;
+    ABDiag diag;
+    double alpha;
+} Solve;
+
+// Forward (lower, upper transposed) and backward (upper, lower transposed)
+// solves, each with op(A)'s blocks as stored and transposed.
+static const Solve SOLVES[] = {
+    {"dtrsm-ln", AB_LOWER, AB_NO_TRANS, AB_NON_UNIT,  1.0},
+    {"dtrsm-un", AB_UPPER, AB_NO_TRANS, AB_NON_UNIT, -0.5},
+    {"dtrsm-lt", AB_LOWER, AB_TRANS,    AB_UNIT_DIAG, 1.0},
+    {"dtrsm-ut", AB_UPPER, AB_TRANS,    AB_NON_UNIT,  2.0},
+};
 
 // Storage of A, B and C.
 static void layouts(const Call *c, Layout l[3]) {
@@ -260,6 +290,80 @@ static void child_fail_calls(void) {
     }
 }
 
+// A rows x cols row-major solve operand of value()s, or if `dominant` a
+// diagonally dominant square one: off-diagonal entries below 2^-8 in
+// magnitude, the diagonal in [2, 3).
+static double *solve_operand(unsigned seed, int rows, int cols, bool dominant) {
+    double *x = malloc(sizeof(double) * rows * cols);
+    for (int i = 0; i < rows; i++)
+        for (int j = 0; j < cols; j++) {
+            double v = value(seed, i, j, 0, false);
+            x[(size_t)i * cols + j] = !dominant ? v : i == j ? 2.0 + fabs(v) : ldexp(v, -8);
+        }
+    return x;
+}
+
+// max |x - ref| / max |ref|; NaN if x holds one.
+static double rel_diff(const double *x, const double *ref, size_t n) {
+    double d = 0.0, m = 0.0;
+    for (size_t i = 0; i < n; i++) {
+        double e = fabs(x[i] - ref[i]);
+        if (isnan(e)) return NAN;
+        d = fmax(d, e);
+        m = fmax(m, fabs(ref[i]));
+    }
+    return d / m;
+}
+
+// Solves with A (n x n) and B (n x nrhs) uploaded: the left solve c by
+// ab_dtrsm, or ab_dgesv_mpir if c is NULL. Prints "solve <tag>
+// status=<ABStatus> accurate=<0|1> gemms=<n>": whether X is within 1e-12 of
+// ref, and the GEMMs the GPU ran.
+static void run_solve(const Solve *c, const double *A, const double *B, const double *ref,
+                      int n, int nrhs) {
+    ABMatrix mA = ab_matrix_create(n, n), mB = ab_matrix_create(n, nrhs);
+    double *X = calloc((size_t)n * nrhs, sizeof *X);
+    ab_matrix_upload(mA, A, true);
+    ab_matrix_upload(mB, B, true);
+    uint64_t gemms = gpu_gemm_count();
+    ABStatus st = c ? ab_dtrsm(AB_LEFT, c->uplo, c->trans, c->diag, c->alpha, mA, mB)
+                    : ab_dgesv_mpir(mA, mB);
+    gemms = gpu_gemm_count() - gemms;
+    ab_matrix_download(mB, X, true);
+    printf("solve %s status=%d accurate=%d gemms=%llu\n", c ? c->tag : "mpir", (int)st,
+           rel_diff(X, ref, (size_t)n * nrhs) <= 1e-12, (unsigned long long)gemms);
+    free(X);
+    ab_matrix_destroy(mA);
+    ab_matrix_destroy(mB);
+}
+
+// The solves: each ab_dtrsm against cblas_dtrsm on the same A, which is filled
+// in full (both read only their triangle), then ab_dgesv_mpir against the X
+// that B was made from.
+static void child_solves(void) {
+    ab_init();
+    const int n = DTRSM_N, nrhs = DTRSM_NRHS, m = MPIR_N, mrhs = MPIR_NRHS;
+    double *A = solve_operand(1, n, n, true), *B = solve_operand(2, n, nrhs, false),
+           *ref = malloc(sizeof(double) * n * nrhs);
+    for (size_t s = 0; s < TEST_REGISTRY_SIZE(SOLVES); s++) {
+        const Solve *c = &SOLVES[s];
+        memcpy(ref, B, sizeof(double) * n * nrhs);
+        cblas_dtrsm(CblasRowMajor, CblasLeft, c->uplo == AB_LOWER ? CblasLower : CblasUpper,
+                    c->trans == AB_NO_TRANS ? CblasNoTrans : CblasTrans,
+                    c->diag == AB_UNIT_DIAG ? CblasUnit : CblasNonUnit, n, nrhs, c->alpha, A, n,
+                    ref, nrhs);
+        run_solve(c, A, B, ref, n, nrhs);
+    }
+    free(A); free(B); free(ref);
+
+    double *Am = solve_operand(3, m, m, true), *X = solve_operand(4, m, mrhs, false),
+           *Bm = malloc(sizeof(double) * m * mrhs);
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, m, mrhs, m, 1.0, Am, m, X, mrhs, 0.0,
+                Bm, mrhs);
+    run_solve(NULL, Am, Bm, X, m, mrhs);
+    free(Am); free(X); free(Bm);
+}
+
 // The descriptor this process's trace file is open on, found by its path;
 // -1 if there is none.
 static int trace_fd(void) {
@@ -319,6 +423,10 @@ static int child_main(const char *scenario, const char *dir) {
     }
     if (!strcmp(scenario, "fail")) {
         child_fail_calls();
+        return 0;
+    }
+    if (!strcmp(scenario, "solve")) {
+        child_solves();
         return 0;
     }
     return 2;
@@ -861,16 +969,77 @@ static void test_fail_stage(int stage_index) {
 static void test_fail_stage_alloc(void)  { test_fail_stage(0); }
 static void test_fail_stage_kernel(void) { test_fail_stage(1); }
 
+// How many lines of out start with prefix.
+static int count_lines(const char *out, const char *prefix) {
+    int n = 0;
+    size_t lp = strlen(prefix);
+    for (const char *p = out; p && *p; p = strchr(p, '\n'), p = p ? p + 1 : NULL)
+        n += !strncmp(p, prefix, lp);
+    return n;
+}
+
+// The solve scenario under AB_PROFILE=1, first as is, then with
+// AB_TEST_FAIL_STAGE=kernel, which reports every GPU GEMM failed after the
+// GPU ran it: a solve that used such a result would still be accurate, so the
+// fallbacks are what tell. Every solve must return AB_OK with X to 1e-12. As
+// is, the GPU runs every GEMM step and nothing falls back; under the hook no
+// GEMM counts as run, and AB_PROFILE reports each step as a fallback to
+// cblas: for ab_dtrsm as many as the GPU ran before, for ab_dgesv_mpir one
+// per residual (1 to 10).
+static void test_fail_stage_solvers(void) {
+    begin();
+    char dir[PATH_MAX];
+    test_dir("solve", dir, sizeof dir);
+    const char *none[] = {"AB_PROFILE=1", NULL};
+    const char *kernel[] = {"AB_PROFILE=1", "AB_TEST_FAIL_STAGE=kernel", NULL};
+    const size_t n = TEST_REGISTRY_SIZE(SOLVES);
+    unsigned long long dtrsm_gemms = 0;
+    for (int fail = 0; fail < 2 && !first_failure[0]; fail++) {
+        const char *how = fail ? "under AB_TEST_FAIL_STAGE=kernel" : "without a failure";
+        ChildRun r = {0};
+        if (run_child("solve", dir, fail ? kernel : none, &r)) {
+            for (size_t i = 0; i <= n && !first_failure[0]; i++) {
+                const char *tag = i < n ? SOLVES[i].tag : "mpir";
+                char prefix[32], line[256];
+                int st = -1, accurate = 0;
+                unsigned long long gemms = 0;
+                snprintf(prefix, sizeof prefix, "solve %s ", tag);
+                const char *l = find_line(r.out, prefix, line, sizeof line);
+                if (expect(l && sscanf(l + strlen(prefix), "status=%d accurate=%d gemms=%llu",
+                                       &st, &accurate, &gemms) == 3,
+                           "%s: no line for %s: %s", how, tag, r.out))
+                    expect(st == AB_OK && accurate && (fail ? gemms == 0 : gemms > 0),
+                           "%s: '%s', expected AB_OK, X to 1e-12 and %s", how, l,
+                           fail ? "no GEMM counted as run" : "GEMMs run on the GPU");
+                if (!fail && i < n) dtrsm_gemms += gemms;
+            }
+            int dtrsm = count_lines(r.out, "AB_PROFILE ab_dtrsm ");
+            int mpir = count_lines(r.out, "AB_PROFILE ab_dgesv_mpir ");
+            if (!first_failure[0] && fail)
+                expect(dtrsm == (int)dtrsm_gemms && mpir >= 1 && mpir <= 10,
+                       "%s: %d ab_dtrsm and %d ab_dgesv_mpir fallback lines, expected %llu (the "
+                       "GEMMs the GPU ran without the failure) and 1 to 10: %s",
+                       how, dtrsm, mpir, dtrsm_gemms, r.out);
+            else if (!first_failure[0])
+                expect(dtrsm + mpir == 0, "%s: %d fallback lines: %s", how, dtrsm + mpir, r.out);
+        }
+        free(r.out);
+    }
+    clean_dir(dir);
+    finish();
+}
+
 // =============================================================================
 // Main
 // =============================================================================
 
 static const TestCase TESTS[] = {
-    {"test_trace_lines",       test_trace_lines},
-    {"test_trace_hash",        test_trace_hash},
-    {"test_trace_off",         test_trace_off},
-    {"test_fail_stage_alloc",  test_fail_stage_alloc},
-    {"test_fail_stage_kernel", test_fail_stage_kernel},
+    {"test_trace_lines",        test_trace_lines},
+    {"test_trace_hash",         test_trace_hash},
+    {"test_trace_off",          test_trace_off},
+    {"test_fail_stage_alloc",   test_fail_stage_alloc},
+    {"test_fail_stage_kernel",  test_fail_stage_kernel},
+    {"test_fail_stage_solvers", test_fail_stage_solvers},
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
 

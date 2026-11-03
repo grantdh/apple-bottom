@@ -190,6 +190,9 @@ ABStatus ab_dsyrk(ABMatrix A, ABMatrix C);
 // where A is triangular. Result overwrites B.
 // Uses blocked forward/back-substitution with DGEMM for the panel updates.
 // GPU-efficient for N >= 1024 (panel solves are CPU-bound for small blocks).
+// A panel update whose GPU step fails (a GPU buffer, a conversion, the
+// command buffer) runs on Accelerate in FP64 instead, as dgemm_ runs a call
+// whose GPU step fails, so AB_OK means B holds X either way.
 //
 // Parameters:
 //   side:   AB_LEFT  → op(A) * X = alpha * B
@@ -207,6 +210,7 @@ ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
 // Uses FP32 LU factorization (Accelerate LAPACK) + DD-DGEMM residual correction.
 // Avoids explicit inversion (κ² error) and bespoke DD-DTRSM shaders.
 // Converges to DD precision (~10⁻¹⁵) in 1-3 iterations for well-conditioned A.
+// A residual whose GPU step fails is computed on Accelerate in FP64 instead.
 //
 // Parameters:
 //   A: N×N coefficient matrix (not modified)

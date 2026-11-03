@@ -630,7 +630,11 @@ tables of the GPU stages, the fallbacks and the staged path's outcomes, and
 the dimension histogram of the routine with the most time. During the run it
 prints an `AB_PROFILE <routine> M=… N=… K=…` line with the stages of each GPU
 call and its staged outcome (`staged=kept`, or the first reason it took the
-host path), and one for each fallback, with its reason.
+host path), and one for each fallback, with its reason. The native solvers
+`ab_dtrsm` and `ab_dgesv_mpir` print the same fallback line (`AB_PROFILE
+ab_dtrsm M=… N=… K=…  GPU fallback to cblas: GPU step failed`) for each
+panel update or residual whose GPU step failed and that ran on Accelerate
+instead; they are not in the tables.
 
 ### Per-call trace (AB_TRACE)
 

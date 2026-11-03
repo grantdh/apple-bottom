@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **`ab_dtrsm` and `ab_dgesv_mpir` no longer ignore a failed GPU step.**
+  Their GPU panel updates (DTRSM) and residuals (MPIR) dropped the statuses
+  of `ab_matrix_upload`, `ab_dgemm_scaled` and `ab_matrix_download`. When a
+  command buffer failed (macOS stops long GPU work while the display is
+  busy, `kIOGPUCommandBufferCallbackErrorImpactingInteractivity`), the solve
+  went on with whatever the failed command buffer left in those rows and
+  returned `AB_OK`. A step that fails is now done on Accelerate in FP64
+  (`cblas_dgemm`), as the BLAS interface runs a call whose GPU step fails,
+  so `AB_OK` again means B holds the solution, and `AB_PROFILE=1` prints the
+  BLAS interface's fallback line for each such step (`AB_PROFILE ab_dtrsm
+  M=… N=… K=…  GPU fallback to cblas: GPU step failed`), so a timing that
+  fell back is not taken for the GPU's. This also covers a GPU buffer the
+  solve cannot get, which used to fail the whole call with
+  `AB_ERROR_ALLOC_FAILED`. The downloads of A and B and the upload of the
+  result now return their status. New test `test_fail_stage_solvers` in
+  `tests/test_trace.c`.
+
 ## [1.5.1] - 2026-11-01
 
 Documentation corrections and a new check (`make test-dd-bound`); results are
