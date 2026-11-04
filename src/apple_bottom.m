@@ -1916,17 +1916,22 @@ static ab_range_t for_each_chunk(size_t count, size_t work,
     return r;
 }
 
-// What convert_fp64_to_dd measures of the values it converts: nothing, their
-// high words (MEASURE_HIWORDS: native_scale_exp's range, which leaves out a
-// nonzero |x| below 2^-1042), or the range the exponent-range guard reads
-// (MEASURE_GUARD: ab_stat_hiword_scaled, which counts it).
-typedef enum { MEASURE_NONE, MEASURE_HIWORDS, MEASURE_GUARD } Measure;
+// What convert_fp64_to_dd measures of the values it converts: nothing, the
+// range the exponent-range guard reads (MEASURE_GUARD: ab_stat_hiword_scaled,
+// which counts a nonzero |x| below 2^-1042 as AB_HIWORD_TINY), or the native
+// scale's (MEASURE_NATIVE, native_scale_exp): such an |x| there counts in the
+// largest magnitude only, so that a matrix made only of such values is not
+// read as zero, and one with larger values keeps the scale they give it.
+typedef enum { MEASURE_NONE, MEASURE_NATIVE, MEASURE_GUARD } Measure;
 
 // Adds v, the value x converts to, to the range (mx, mn) as M measures it.
 template <Measure M>
 static inline void measure_add(double v, double x, uint32_t& mx, uint32_t& mn) {
-    if (M == MEASURE_HIWORDS) AB_HIWORD_ADD(ab_abs_hiword(v), mx, mn);
     if (M == MEASURE_GUARD) AB_HIWORD_ADD(ab_stat_hiword_scaled(v, x), mx, mn);
+    if (M == MEASURE_NATIVE) {
+        AB_HIWORD_MAX(ab_stat_hiword_scaled(v, x), mx);
+        AB_HIWORD_MIN(ab_abs_hiword(v), mn);
+    }
 }
 
 // src * 2^-e to DD, each value rounded once; also returns the range of the
@@ -2002,7 +2007,7 @@ struct ABMatrix_s {
     size_t capacity;  // elements the buffer holds (>= count after pool reuse)
     bool uploaded;
     int exp2;         // power-of-two scale: element = DD * 2^exp2
-    uint32_t maxhw;   // high word of the largest |element| (ab_internal.h), or AB_MAXHW_UNKNOWN
+    uint32_t maxhw;   // high word of the largest |element| (MEASURE_NATIVE), or AB_MAXHW_UNKNOWN
 };
 
 #define AB_MAXHW_UNKNOWN UINT32_MAX     // above the high word of any |x|, NaN included
@@ -2021,8 +2026,10 @@ static inline int floor_to(int s, int q) { return s >= 0 ? s / q * q : -((q - 1 
 #define AB_STORE_MIN_EXP (-100)
 #define AB_STORE_MAX_EXP 120
 
-// The power-of-two scale e for a matrix whose entries have range r; it stores
-// value * 2^-e. The scales that bring every nonzero magnitude into
+// The power-of-two scale e for a matrix whose entries have range r (as
+// MEASURE_NATIVE measures them: a range with a largest magnitude but no
+// smallest holds only values below 2^-1042, read as [2^-1074, 2^-1042]); it
+// stores value * 2^-e. The scales that bring every nonzero magnitude into
 // 2^±AB_NATIVE_WINDOW are [hi - W, lo + W] (none if the span exceeds 2W):
 //   - 0 if it is one of them (data inside the window, as before), or if an
 //     entry is NaN or Inf (which no scale helps);
@@ -2033,7 +2040,8 @@ static inline int floor_to(int s, int q) { return s >= 0 ? s / q * q : -((q - 1 
 //     when FP32 can hold it at all, else keeps its top at 2^AB_STORE_MAX_EXP.
 static int native_scale_exp(ab_range_t r) {
     if (r.max == 0 || ab_range_nonfinite(r)) return 0;
-    int hi = ab_hiword_ilogb(r.max), lo = ab_hiword_ilogb(r.min);
+    int hi = ab_hiword_ilogb(r.max);
+    int lo = r.min != UINT32_MAX ? ab_hiword_ilogb(r.min) : ab_hiword_min_ilogb(r.max);
     int centre = floor_to(lo + hi, 2) / 2;
     if (hi - lo <= 2 * AB_NATIVE_WINDOW) {
         int elo = hi - AB_NATIVE_WINDOW, ehi = lo + AB_NATIVE_WINDOW;
@@ -2216,8 +2224,8 @@ ABStatus ab_matrix_upload(ABMatrix m, const double* data, bool parallel) {
     double t0 = get_time_ms();
     DDFloat* dst = (DDFloat*)m->buffer.contents;
     ab_range_t range =
-        parallel ? convert_fp64_to_dd_parallel<MEASURE_HIWORDS>(data, dst, m->count, 0)
-                 : convert_fp64_to_dd<MEASURE_HIWORDS>(data, dst, m->count, 0);
+        parallel ? convert_fp64_to_dd_parallel<MEASURE_NATIVE>(data, dst, m->count, 0)
+                 : convert_fp64_to_dd<MEASURE_NATIVE>(data, dst, m->count, 0);
     m->exp2 = native_scale_exp(range);
     m->maxhw = range.max;
     if (m->exp2 != 0) {

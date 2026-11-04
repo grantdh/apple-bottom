@@ -67,7 +67,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     operands of 2²⁰ elements, which it stages in chunks across cores
   - `tests/test_dispatch.c` — 9 tests of the BLAS-ABI routing, no GPU,
     see below
-  - `tests/test_blas_abi.c` — 33 suites (1088 cases), see below
+  - `tests/test_blas_abi.c` — 33 suites (1091 cases), see below
   - `tests/test_trace.c` — 5 tests of `AB_TRACE` and
     `AB_TEST_FAIL_STAGE`, see below
 
@@ -189,8 +189,9 @@ with random signs, so the pattern alone sets the span.
 - **Exactness**: C of data scaled by 2^{-100, 0, 100} per row and column
   must be bit for bit that power of two times C of the unscaled data.
 - **Native `ab_dgemm`, `ab_dgemm_scaled` and `ab_zgemm`**: the same 1e±25
-  data, rows spread over 2⁻¹⁰⁰…2⁻⁶⁰, columns over 2⁶⁰…2¹⁰⁰, and an
-  exactness case (A and B × 2⁹⁰).
+  data, rows spread over 2⁻¹⁰⁰…2⁻⁶⁰, columns over 2⁶⁰…2¹⁰⁰, an exactness
+  case (A and B × 2⁹⁰), and an A made only of values below 2⁻¹⁰⁴², which
+  must get a scale, not be stored as zeros.
 
 `test_zgemm_imbalance` gives `zgemm_` (`AB_MODE=gpu`, alpha = 1, beta = 0,
 every TRANS kind) data whose real and imaginary parts are 10⁻⁶ apart:

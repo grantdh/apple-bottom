@@ -73,14 +73,22 @@ All notable changes to this project will be documented in this file.
   decides, and a C′ that is all of C_ij goes to Accelerate. Data without
   values below 2⁻¹⁰⁴¹ is routed and computed as before (golden bits
   unchanged; the word also stands for [2⁻¹⁰⁴², 2⁻¹⁰⁴¹), whose minima now read
-  low, conservatively). The native `ABMatrix` API chooses its scales as
-  before, so a native matrix made only of such values is still stored as
-  zeros. New cases `range-c-subnormal`,
+  low, conservatively). New cases `range-c-subnormal`,
   `range-c-scaled-out`, `range-entry-subnormal` and `imag-part-subnormal`
   (Accelerate) and `range-a-subnormal`, `range-b-subnormal` (GPU) in
   `tests/test_blas_abi.c`, which all fail on the previous guard (errors from
   2.8×10⁻⁹ to 1, Im 2.7×10⁷ u²); `subnormal` and `subnormalC` data in
   `tests/test_staging.c` hold the host and GPU statistics to the same counts.
+- **The native API now scales a matrix made only of values below 2⁻¹⁰⁴².**
+  `ab_matrix_upload` measured such a matrix as zero and stored it as zeros:
+  `ab_dgemm` and `ab_zgemm` with every entry of A at 2⁻ᵏ against B at 2¹⁰⁰⁰
+  returned 0 for k ≥ 1043 (confirmed on the GPU, through A and through B).
+  It now counts such values in a matrix's largest magnitude only, so a
+  matrix made only of them is scaled as if they spanned [2⁻¹⁰⁷⁴, 2⁻¹⁰⁴²] (the
+  probes are exact for every k up to 1074), and a matrix that also holds
+  larger values keeps its scale. New cases `range-all-subnormal`
+  (`ab_dgemm`, `ab_dgemm_scaled`, `ab_zgemm`) in `tests/test_blas_abi.c`,
+  which fail on the previous build.
 
 ## [1.5.1] - 2026-11-01
 

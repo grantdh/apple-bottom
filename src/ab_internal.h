@@ -143,9 +143,9 @@ static inline double ab_hiword_value(uint32_t h) {
 }
 
 // The magnitudes of some FP64 values, as high words (the guard's: AB_RANGE_ADD;
-// the native ab_matrix_upload's: plain ones): of the largest |x| (0 if all
-// are zero; AB_HIWORD_NONFINITE or more if any is NaN or Inf) and of the
-// smallest nonzero one (UINT32_MAX if none).
+// the native ab_matrix_upload's: MEASURE_NATIVE in apple_bottom.m): of the
+// largest |x| (0 if all are zero; AB_HIWORD_NONFINITE or more if any is NaN
+// or Inf) and of the smallest nonzero one (UINT32_MAX if none).
 typedef struct {
     uint32_t max, min;
 } ab_range_t;

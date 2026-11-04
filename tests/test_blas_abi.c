@@ -193,6 +193,8 @@ typedef enum {
     RANGE_ENTRY_SUBNORMAL, // op(A)_ik x 1 for k = 0 and x 2^-1050 else, op(B)_kj x 0 for k = 0
                         // and x 2^1000 else: every product is about 2^-50, through entries the
                         // GPU reads as zero (Accelerate)
+    RANGE_ALL_SUBNORMAL, // native: A x 2^-1050 (all of it), B x 2^1000: A must get a scale, not be
+                        // stored as zeros
 } RangeData;
 
 static const char *const RANGE_TAG[] = {
@@ -206,7 +208,7 @@ static const char *const RANGE_TAG[] = {
     [RANGE_C_FLOOR] = "c-floor", [RANGE_C_DISJOINT] = "c-disjoint", [RANGE_C_NEAR] = "c-near",
     [RANGE_C_SUBNORMAL] = "c-subnormal", [RANGE_C_SCALED_OUT] = "c-scaled-out",
     [RANGE_A_SUBNORMAL] = "a-subnormal", [RANGE_B_SUBNORMAL] = "b-subnormal",
-    [RANGE_ENTRY_SUBNORMAL] = "entry-subnormal",
+    [RANGE_ENTRY_SUBNORMAL] = "entry-subnormal", [RANGE_ALL_SUBNORMAL] = "all-subnormal",
 };
 
 typedef struct {
@@ -656,6 +658,9 @@ static void gen_range(const Suite *s) {
         {OP_ZGEMM, 'N', 'N', RANGE_COLS_HIGH, ROUTE_GPU},
         {OP_DGEMM, 'N', 'N', RANGE_UNIFORM_EXACT, ROUTE_GPU},
         {OP_ZGEMM, 'N', 'N', RANGE_UNIFORM_EXACT, ROUTE_GPU},
+        {OP_DGEMM, 'N', 'N', RANGE_ALL_SUBNORMAL, ROUTE_GPU},
+        {OP_DGEMM_SCALED, 'N', 'N', RANGE_ALL_SUBNORMAL, ROUTE_GPU},
+        {OP_ZGEMM, 'N', 'N', RANGE_ALL_SUBNORMAL, ROUTE_GPU},
     };
     for (size_t i = 0; i < TEST_REGISTRY_SIZE(R); i++)
         add_range(s, R[i].op, R[i].ta, R[i].tb, R[i].data, R[i].route);
@@ -1569,6 +1574,7 @@ static double range_a(RangeData d, int i, int k, int M) {
     case RANGE_A_SUBNORMAL:   return i == 0 ? F_SUBNORMAL : 1.0;
     case RANGE_B_SUBNORMAL:   return 0x1p1000;
     case RANGE_ENTRY_SUBNORMAL: return k == 0 ? 1.0 : F_SUBNORMAL;
+    case RANGE_ALL_SUBNORMAL: return F_SUBNORMAL;
     default:                  return 1.0;
     }
 }
@@ -1591,6 +1597,7 @@ static double range_b(RangeData d, int k, int j, int N) {
     case RANGE_A_SUBNORMAL:   return 0x1p1000;
     case RANGE_B_SUBNORMAL:   return j == 0 ? F_SUBNORMAL : 1.0;
     case RANGE_ENTRY_SUBNORMAL: return k == 0 ? 0.0 : 0x1p1000;
+    case RANGE_ALL_SUBNORMAL: return 0x1p1000;
     default:                  return 1.0;
     }
 }
