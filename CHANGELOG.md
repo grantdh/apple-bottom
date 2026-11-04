@@ -21,6 +21,39 @@ All notable changes to this project will be documented in this file.
   `AB_ERROR_ALLOC_FAILED`. The downloads of A and B and the upload of the
   result now return their status. New test `test_fail_stage_solvers` in
   `tests/test_trace.c`.
+- **`ab_dgesv_mpir` no longer returns `AB_OK` for a refinement that did not
+  converge.** After ten iterations it returned whatever X it had. In one
+  probe on M2 Max (N = 64), the relative error of X for κ(A) = 10⁸, 10¹⁰ and
+  10¹² was 2×10⁻², 54 and 9×10³, where LAPACK `dgesv` gets 9×10⁻¹⁰, 10⁻⁷ and
+  6×10⁻⁶; for the Hilbert matrices of order 8 and 10 it was 1.0 and 3.7. It
+  now does what LAPACK's `dsgesv` does. X is solved in FP64 instead, by
+  `dgetrf` and `dgetrs` on the host copies, when refinement does not converge
+  (next entry), when the FP32 factorization is singular, or when A or B lies
+  outside FP32's range. `AB_PROFILE=1` prints `AB_PROFILE ab_dgesv_mpir N=…
+  NRHS=…  FP64 LU fallback: <why>` for such a solve. Those solves now get
+  3×10⁻⁹, 3×10⁻⁷ and 2×10⁻⁵, and 10⁻⁷ and 2×10⁻⁴, with backward errors near
+  10⁻¹⁶ (A and B reach the solver rounded to double-float, as all native API
+  data does). A singular FP32 factorization used to return
+  `AB_ERROR_KERNEL_FAILED` even where FP64 solves A, as for
+  [[1, 1], [1, 1 + 2⁻³⁰]]; that status now means A is singular in FP64. The
+  `sgetrs` status inside the loop is now checked too (it can only report an
+  illegal argument).
+- **`ab_dgesv_mpir` also ends refinement where its DD residual levels off.**
+  For dense A, ‖R‖_F / ‖B‖_F stops falling above the 10⁻¹⁴ the solver stops
+  on, because A and X are rounded to double-float for the residual: on
+  uniform random A it levels off at 1.3×10⁻¹⁴ for N = 150, 3.5×10⁻¹⁴ for 1024
+  and 5×10⁻¹⁴ for 2048. Such solves had converged after 3–4 residuals but ran
+  all ten. Refinement now also stops when a correction does not at least
+  halve the worst column's ‖r_j‖∞ / ‖x_j‖∞, or after ten residuals, and then
+  keeps X only if every column passes dsgesv's test,
+  ‖r_j‖∞ ≤ √N · 2⁻⁴⁸ · ‖A‖∞ · ‖x_j‖∞ (double-float's unit roundoff 2⁻⁴⁸ in place
+  of FP64's 2⁻⁵³; converged dense solves read 0.04–0.4 of the bound), and
+  otherwise solves in FP64. Dense solves at N = 1024–4096 now take 5
+  residuals with the backward error the ten gave (8×10⁻¹⁶). Solves that met
+  10⁻¹⁴ before still stop there, with the same X.
+  New tests `test_mpir_ill_conditioned` and `test_mpir_fp32_singular` in
+  `tests/test_correctness.c`, and `test_mpir_fallback_lines` in
+  `tests/test_trace.c`.
 
 ## [1.5.1] - 2026-11-01
 

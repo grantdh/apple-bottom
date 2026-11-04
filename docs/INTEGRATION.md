@@ -634,7 +634,10 @@ host path), and one for each fallback, with its reason. The native solvers
 `ab_dtrsm` and `ab_dgesv_mpir` print the same fallback line (`AB_PROFILE
 ab_dtrsm M=… N=… K=…  GPU fallback to cblas: GPU step failed`) for each
 panel update or residual whose GPU step failed and that ran on Accelerate
-instead; they are not in the tables.
+instead; they are not in the tables. `ab_dgesv_mpir` also prints
+`AB_PROFILE ab_dgesv_mpir N=… NRHS=…  FP64 LU fallback: <why>` for a solve
+it did in FP64 instead (refinement that did not converge, a singular FP32
+factorization, A or B outside FP32's range; `include/apple_bottom.h`).
 
 ### Per-call trace (AB_TRACE)
 

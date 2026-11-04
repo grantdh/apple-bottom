@@ -33,6 +33,12 @@
 //           Under the hook every GPU panel update and residual fails and is
 //           done on cblas instead, each with an AB_PROFILE fallback line: for
 //           ab_dtrsm as many as the GEMMs the GPU ran without the hook.
+//   mpir    AB_PROFILE=1: ab_dgesv_mpir on a dense A that refinement solves
+//           (no fallback line, 3 to 5 GPU residuals), on the 8 x 8 Hilbert
+//           matrix, on which FP32 refinement fails, and on an A singular in
+//           FP32 only. The last two are solved in FP64 instead, each with one
+//           AB_PROFILE line saying why. All three return AB_OK with a backward
+//           error below 1e-14.
 // =============================================================================
 
 #include "apple_bottom.h"
@@ -152,6 +158,24 @@ static const Solve SOLVES[] = {
     {"dtrsm-un", AB_UPPER, AB_NO_TRANS, AB_NON_UNIT, -0.5},
     {"dtrsm-lt", AB_LOWER, AB_TRANS,    AB_UNIT_DIAG, 1.0},
     {"dtrsm-ut", AB_UPPER, AB_TRANS,    AB_NON_UNIT,  2.0},
+};
+
+// The mpir scenario's solves, each on B = A X for X of value()s: A is n x n
+// value()s ("dense"), the Hilbert matrix 1/(i+j+1) (condition number 1.5e10
+// for n = 8), or [[1, 1], [1, 1 + 2^-30]], singular once rounded to FP32
+// ("single"). reason: the start of the reason on the FP64 LU fallback line
+// the solve must print, NULL for none; gemms: the GPU residuals allowed.
+typedef struct {
+    const char *which;
+    int n, nrhs;
+    const char *reason;
+    unsigned long long min_gemms, max_gemms;
+} MpirCase;
+
+static const MpirCase MPIR_CASES[] = {
+    {"dense",   256, 4, NULL,               3, 5},
+    {"hilbert", 8,   2, "refinement ",      1, 10},
+    {"single",  2,   1, "FP32 LU singular", 0, 0},
 };
 
 // Storage of A, B and C.
@@ -364,6 +388,46 @@ static void child_solves(void) {
     free(Am); free(X); free(Bm);
 }
 
+// The mpir scenario: each MPIR_CASES solve; prints "mpir <which>
+// status=<ABStatus> backward=<||B - A Y||_F / (||A||_F ||Y||_F + ||B||_F)>
+// gemms=<GEMMs the GPU ran>" for its solution Y.
+static void child_mpir(void) {
+    ab_init();
+    for (size_t c = 0; c < TEST_REGISTRY_SIZE(MPIR_CASES); c++) {
+        const MpirCase *mc = &MPIR_CASES[c];
+        int n = mc->n, nrhs = mc->nrhs, na = n * n, nb = n * nrhs;
+        double *A = solve_operand(5, n, n, false), *X = solve_operand(6, n, nrhs, false),
+               *B = malloc(sizeof(double) * nb), *Y = calloc(nb, sizeof *Y),
+               *R = malloc(sizeof(double) * nb);
+        if (!strcmp(mc->which, "hilbert"))
+            for (int i = 0; i < n; i++)
+                for (int j = 0; j < n; j++) A[i * n + j] = 1.0 / (i + j + 1);
+        if (!strcmp(mc->which, "single")) {
+            A[0] = A[1] = A[2] = 1.0;
+            A[3] = 1.0 + ldexp(1.0, -30);
+        }
+        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, n, nrhs, n, 1.0, A, n, X, nrhs, 0.0,
+                    B, nrhs);
+        ABMatrix mA = ab_matrix_create(n, n), mB = ab_matrix_create(n, nrhs);
+        ab_matrix_upload(mA, A, true);
+        ab_matrix_upload(mB, B, true);
+        uint64_t gemms = gpu_gemm_count();
+        ABStatus st = ab_dgesv_mpir(mA, mB);
+        gemms = gpu_gemm_count() - gemms;
+        ab_matrix_download(mB, Y, true);
+        memcpy(R, B, sizeof(double) * nb);
+        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, n, nrhs, n, -1.0, A, n, Y, nrhs, 1.0,
+                    R, nrhs);
+        printf("mpir %s status=%d backward=%.3e gemms=%llu\n", mc->which, (int)st,
+               cblas_dnrm2(nb, R, 1) /
+                   (cblas_dnrm2(na, A, 1) * cblas_dnrm2(nb, Y, 1) + cblas_dnrm2(nb, B, 1)),
+               (unsigned long long)gemms);
+        ab_matrix_destroy(mA);
+        ab_matrix_destroy(mB);
+        free(A); free(X); free(B); free(Y); free(R);
+    }
+}
+
 // The descriptor this process's trace file is open on, found by its path;
 // -1 if there is none.
 static int trace_fd(void) {
@@ -427,6 +491,10 @@ static int child_main(const char *scenario, const char *dir) {
     }
     if (!strcmp(scenario, "solve")) {
         child_solves();
+        return 0;
+    }
+    if (!strcmp(scenario, "mpir")) {
+        child_mpir();
         return 0;
     }
     return 2;
@@ -1029,6 +1097,54 @@ static void test_fail_stage_solvers(void) {
     finish();
 }
 
+// The mpir scenario under AB_PROFILE=1. Every solve must return AB_OK with a
+// backward error below 1e-14 after as many GPU residuals as its case allows.
+// The dense one, whose DD residual levels off above 1e-14 relative (so
+// refinement used to run all 10 residuals), must keep its X once refinement
+// stops improving, without a fallback line. The Hilbert matrix must be solved
+// in FP64 after a failed refinement and the FP32-singular A in FP64 at once,
+// each with one AB_PROFILE line giving that reason.
+static void test_mpir_fallback_lines(void) {
+    begin();
+    char dir[PATH_MAX];
+    test_dir("mpir", dir, sizeof dir);
+    const char *env[] = {"AB_PROFILE=1", NULL};
+    ChildRun r = {0};
+    if (run_child("mpir", dir, env, &r)) {
+        int fallbacks = 0;
+        for (size_t c = 0; c < TEST_REGISTRY_SIZE(MPIR_CASES) && !first_failure[0]; c++) {
+            const MpirCase *mc = &MPIR_CASES[c];
+            char prefix[32], line[256], want[128], got[256];
+            int st = -1;
+            double bwd = NAN;
+            unsigned long long gemms = 0;
+            snprintf(prefix, sizeof prefix, "mpir %s ", mc->which);
+            const char *l = find_line(r.out, prefix, line, sizeof line);
+            if (expect(l && sscanf(l + strlen(prefix), "status=%d backward=%lf gemms=%llu", &st,
+                                   &bwd, &gemms) == 3,
+                       "no line for %s: %s", mc->which, r.out))
+                expect(st == AB_OK && bwd <= 1e-14 && gemms >= mc->min_gemms &&
+                           gemms <= mc->max_gemms,
+                       "'%s', expected AB_OK, backward error <= 1e-14 and %llu to %llu GPU "
+                       "residuals", l, mc->min_gemms, mc->max_gemms);
+            if (mc->reason) {
+                fallbacks++;
+                snprintf(want, sizeof want,
+                         "AB_PROFILE ab_dgesv_mpir N=%d NRHS=%d  FP64 LU fallback: %s", mc->n,
+                         mc->nrhs, mc->reason);
+                expect(find_line(r.out, want, got, sizeof got), "no line '%s...': %s", want, r.out);
+            }
+        }
+        int lines = count_lines(r.out, "AB_PROFILE ab_dgesv_mpir ");
+        if (!first_failure[0])
+            expect(lines == fallbacks, "%d ab_dgesv_mpir lines, expected %d (none for the dense "
+                   "solve): %s", lines, fallbacks, r.out);
+    }
+    free(r.out);
+    clean_dir(dir);
+    finish();
+}
+
 // =============================================================================
 // Main
 // =============================================================================
@@ -1040,6 +1156,7 @@ static const TestCase TESTS[] = {
     {"test_fail_stage_alloc",   test_fail_stage_alloc},
     {"test_fail_stage_kernel",  test_fail_stage_kernel},
     {"test_fail_stage_solvers", test_fail_stage_solvers},
+    {"test_mpir_fallback_lines", test_mpir_fallback_lines},
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
 

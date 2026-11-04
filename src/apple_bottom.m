@@ -22,6 +22,7 @@
 #import <os/lock.h>
 #include <atomic>
 #include <fenv.h>
+#include <float.h>
 #include <limits.h>
 #include <math.h>
 #include <mach/mach.h>
@@ -3361,20 +3362,73 @@ dtrsm_cleanup:
 // =============================================================================
 // Solves A * X = B where A is N×N, B is N×NRHS. B is overwritten with X.
 //
-// Algorithm (adapted from Trilinos/Belos for Apple Silicon):
+// Algorithm (adapted from Trilinos/Belos for Apple Silicon; the FP64 fallback
+// and its test are LAPACK dsgesv's):
 //   1. LU factorize A in FP32 via Accelerate LAPACK (O(N³) at full speed)
 //   2. Initial solve X₀ = LU⁻¹ B in FP32
-//   3. Compute residual R = B - A*X₀ using DD-DGEMM (10⁻¹⁵ fidelity)
-//   4. Solve correction ΔX = LU⁻¹ R in FP32
-//   5. Update X = X + ΔX
-//   6. Repeat 3-5 until ||R||/||B|| < 10⁻¹⁴
+//   3. Compute residual R = B - A*X using DD-DGEMM
+//   4. Stop if ||R||_F / ||B||_F < 10⁻¹⁴
+//   5. If the last correction did not at least halve the worst column's
+//      ||r_j||∞ / ||x_j||∞, or MPIR_MAX_RESIDUALS residuals are done, stop:
+//      keep X if every column has ||r_j||∞ <= √N · 2⁻⁴⁸ · ||A||∞ · ||x_j||∞,
+//      else solve in FP64 instead
+//   6. Solve correction ΔX = LU⁻¹ R in FP32, update X = X + ΔX, back to 3
+//
+// Step 5 lets refinement end at the level where a DD residual stops falling
+// (A and X are rounded to DD for it, so it levels off near 2⁻⁴⁸·|A||X|),
+// which lies above step 4's 10⁻¹⁴ for dense A from N ≈ 150. Its test is
+// dsgesv's with DD's unit roundoff, 2⁻⁴⁸, in place of FP64's 2⁻⁵³.
+//
+// Where FP32 cannot solve the system, X is solved in FP64 instead, by dgetrf
+// and dgetrs on the host copies, as dsgesv does: A or B beyond FP32's range,
+// a singular FP32 factor, or refinement that fails step 5's test, which for
+// FP32 LU sets in near κ(A) ≈ 10⁷-10⁸. AB_PROFILE=1 prints a line saying why.
 //
 // This avoids the need for a bespoke DD-DTRSM shader and the catastrophic
 // κ(A)² error amplification of explicit inversion (Paper §6).
-// Convergence: 1-3 iterations for well-conditioned DFT matrices.
+// Convergence: 2-4 corrections for well-conditioned matrices.
 // A residual whose GPU step fails is computed by cblas instead, in FP64, as
 // a DTRSM panel update is.
 // =============================================================================
+
+// Most residuals one solve computes (step 5).
+#define MPIR_MAX_RESIDUALS 10
+
+// The largest ||r_j||∞ / ||x_j||∞ over the columns of the row-major N×NRHS
+// residual R and solution X: 0 for a column where r_j = 0, +inf where only
+// x_j = 0, NaN if R or X holds a NaN or inf.
+static double mpir_worst_column(const double* R, const double* X, int N, int NRHS) {
+    double worst = 0.0;
+    for (size_t j = 0; j < (size_t)NRHS; j++) {
+        double r_max = 0.0, x_max = 0.0;
+        for (size_t i = 0; i < (size_t)N; i++) {
+            double r = fabs(R[i * NRHS + j]), x = fabs(X[i * NRHS + j]);
+            if (!isfinite(r) || !isfinite(x)) return NAN;
+            r_max = fmax(r_max, r);
+            x_max = fmax(x_max, x);
+        }
+        if (r_max > 0.0) worst = fmax(worst, r_max / x_max);
+    }
+    return worst;
+}
+
+// X = LU⁻¹ S in FP32, or X += LU⁻¹ S if add, for row-major N×NRHS S and X
+// (W: N×NRHS floats, column-major workspace). False if sgetrs reports an
+// error (it reports only an illegal argument).
+static bool mpir_solve_f32(int N, int NRHS, const float* LU, const int* ipiv, const double* S,
+                           float* W, double* X, bool add) {
+    for (size_t i = 0; i < (size_t)N; i++)
+        for (size_t j = 0; j < (size_t)NRHS; j++)
+            W[j * N + i] = (float)S[i * NRHS + j];
+    char trans = 'N';
+    int n = N, nrhs = NRHS, lda = N, ldb = N, info = 0;
+    sgetrs_(&trans, &n, &nrhs, LU, &lda, ipiv, W, &ldb, &info);
+    if (info != 0) return false;
+    for (size_t i = 0; i < (size_t)N; i++)
+        for (size_t j = 0; j < (size_t)NRHS; j++)
+            X[i * NRHS + j] = add ? X[i * NRHS + j] + (double)W[j * N + i] : (double)W[j * N + i];
+    return true;
+}
 
 ABStatus ab_dgesv_mpir(ABMatrix A, ABMatrix B) {
     if (!A || !B) return AB_ERROR_INVALID_ARG;
@@ -3384,10 +3438,7 @@ ABStatus ab_dgesv_mpir(ABMatrix A, ABMatrix B) {
     int N = A->rows;
     int NRHS = B->cols;
     ABStatus status = AB_OK;
-
-    // MPIR parameters
-    int max_iter = 10;
-    double tol = 1e-14;  // Target DD-level precision
+    char why[160] = "";  // why X is solved in FP64 instead; empty if refinement converged
 
     // Host arrays
     size_t A_count = (size_t)N * N;
@@ -3421,74 +3472,114 @@ ABStatus ab_dgesv_mpir(ABMatrix A, ABMatrix B) {
 
     // --- Step 1: FP32 LU factorization ---
     // Convert A to FP32 column-major for LAPACK
-    for (int i = 0; i < N; i++)
-        for (int j = 0; j < N; j++)
-            A_f32[j * N + i] = (float)A_host[i * N + j];
-
+    {
+        bool out_of_range = false;
+        for (int i = 0; i < N; i++)
+            for (int j = 0; j < N; j++) {
+                double a = A_host[(size_t)i * N + j];
+                out_of_range |= fabs(a) > FLT_MAX;
+                A_f32[(size_t)j * N + i] = (float)a;
+            }
+        if (out_of_range) {
+            snprintf(why, sizeof why, "A outside FP32's range");
+            goto mpir_fp64;
+        }
+    }
     {
         int n = N, lda = N, info = 0;
         sgetrf_(&n, &n, A_f32, &lda, ipiv, &info);
-        if (info != 0) {
-            status = AB_ERROR_KERNEL_FAILED;  // Singular matrix
-            goto mpir_cleanup;
-        }
-    }
-
-    // --- Step 2: Initial solve X₀ in FP32 ---
-    // Convert B to FP32 column-major
-    for (int i = 0; i < N; i++)
-        for (int j = 0; j < NRHS; j++)
-            work_f32[j * N + i] = (float)B_orig[i * NRHS + j];
-
-    {
-        char trans = 'N';
-        int n = N, nrhs = NRHS, lda = N, ldb = N, info = 0;
-        sgetrs_(&trans, &n, &nrhs, A_f32, &lda, ipiv, work_f32, &ldb, &info);
-        if (info != 0) {
+        if (info < 0) {
             status = AB_ERROR_KERNEL_FAILED;
             goto mpir_cleanup;
         }
+        if (info > 0) {
+            snprintf(why, sizeof why, "FP32 LU singular (sgetrf info=%d)", info);
+            goto mpir_fp64;
+        }
     }
 
-    // Convert X₀ back to double row-major
-    for (int i = 0; i < N; i++)
-        for (int j = 0; j < NRHS; j++)
-            X_host[i * NRHS + j] = (double)work_f32[j * N + i];
+    // --- Step 2: Initial solve X₀ = LU⁻¹ B in FP32 ---
+    for (size_t i = 0; i < B_count; i++)
+        if (fabs(B_orig[i]) > FLT_MAX) {
+            snprintf(why, sizeof why, "B outside FP32's range");
+            goto mpir_fp64;
+        }
+    if (!mpir_solve_f32(N, NRHS, A_f32, ipiv, B_orig, work_f32, X_host, false)) {
+        status = AB_ERROR_KERNEL_FAILED;
+        goto mpir_cleanup;
+    }
 
     // --- Steps 3-6: Iterative refinement ---
-    for (int iter = 0; iter < max_iter; iter++) {
-        // Residual R = B - A*X via DD-DGEMM on GPU, or on cblas if that fails
-        if (!gpu_sub_product(A_host, X_host, B_orig, R_host, N, NRHS, N)) {
-            note_solver_fallback("ab_dgesv_mpir", N, NRHS, N);
-            memcpy(R_host, B_orig, B_count * sizeof(double));
-            cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, N, NRHS, N, -1.0, A_host, N,
-                        X_host, NRHS, 1.0, R_host, NRHS);
-        }
+    {
+        double b_norm_sq = 0.0;
+        for (size_t i = 0; i < B_count; i++) b_norm_sq += B_orig[i] * B_orig[i];
+        double a_norm = 0.0;  // ||A||∞
+        for (int i = 0; i < N; i++)
+            a_norm = fmax(a_norm, cblas_dasum(N, &A_host[(size_t)i * N], 1));
+        // dsgesv's bound on ||r_j||∞ / ||x_j||∞, with DD's unit roundoff 2⁻⁴⁸
+        const double cte = sqrt((double)N) * ldexp(1.0, -48) * a_norm;
+        double prev = INFINITY;
+        for (int k = 1;; k++) {
+            // Residual R = B - A*X via DD-DGEMM on GPU, or on cblas if that fails
+            if (!gpu_sub_product(A_host, X_host, B_orig, R_host, N, NRHS, N)) {
+                note_solver_fallback("ab_dgesv_mpir", N, NRHS, N);
+                memcpy(R_host, B_orig, B_count * sizeof(double));
+                cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, N, NRHS, N, -1.0, A_host, N,
+                            X_host, NRHS, 1.0, R_host, NRHS);
+            }
 
-        // Check convergence: ||R||_F / ||B||_F
-        double r_norm_sq = 0, b_norm_sq = 0;
-        for (size_t i = 0; i < B_count; i++) {
-            r_norm_sq += R_host[i] * R_host[i];
-            b_norm_sq += B_orig[i] * B_orig[i];
-        }
-        if (b_norm_sq > 0 && sqrt(r_norm_sq / b_norm_sq) < tol)
-            break;  // Converged
+            // Converged: ||R||_F / ||B||_F < 10⁻¹⁴ (or R = 0)
+            double r_norm_sq = 0.0;
+            for (size_t i = 0; i < B_count; i++) r_norm_sq += R_host[i] * R_host[i];
+            if (r_norm_sq == 0.0 || (b_norm_sq > 0.0 && sqrt(r_norm_sq / b_norm_sq) < 1e-14))
+                break;
 
-        // Solve correction ΔX = LU⁻¹ R in FP32
+            // Stopped improving, or out of residuals: X stays if every column
+            // passes dsgesv's test (R has reached its floor), else FP64
+            double worst = mpir_worst_column(R_host, X_host, N, NRHS);
+            bool stalled = !isfinite(worst) || !(worst <= 0.5 * prev);
+            if (stalled || k == MPIR_MAX_RESIDUALS) {
+                if (worst <= cte) break;
+                snprintf(why, sizeof why,
+                         stalled ? "refinement stopped improving at residual %d (backward error "
+                                   "%.2e, needs <= %.2e)"
+                                 : "refinement did not converge in %d residuals (backward error "
+                                   "%.2e, needs <= %.2e)",
+                         k, worst / a_norm, cte / a_norm);
+                goto mpir_fp64;
+            }
+            prev = worst;
+
+            // Correction ΔX = LU⁻¹ R in FP32, then X = X + ΔX
+            if (!mpir_solve_f32(N, NRHS, A_f32, ipiv, R_host, work_f32, X_host, true)) {
+                status = AB_ERROR_KERNEL_FAILED;
+                goto mpir_cleanup;
+            }
+        }
+    }
+
+    // --- FP64 fallback, as dsgesv: dgetrf + dgetrs ---
+    // LAPACK reads the row-major A_host as Aᵀ, so dgetrs('T') solves A X = B;
+    // B goes column-major into R_host.
+mpir_fp64:
+    if (why[0]) {
+        if (ab_prof_verbose())
+            fprintf(stderr, "AB_PROFILE ab_dgesv_mpir N=%d NRHS=%d  FP64 LU fallback: %s\n", N,
+                    NRHS, why);
         for (int i = 0; i < N; i++)
             for (int j = 0; j < NRHS; j++)
-                work_f32[j * N + i] = (float)R_host[i * NRHS + j];
-
-        {
-            char trans = 'N';
-            int n = N, nrhs = NRHS, lda = N, ldb = N, info = 0;
-            sgetrs_(&trans, &n, &nrhs, A_f32, &lda, ipiv, work_f32, &ldb, &info);
+                R_host[(size_t)j * N + i] = B_orig[(size_t)i * NRHS + j];
+        char trans = 'T';
+        int n = N, nrhs = NRHS, lda = N, ldb = N, info = 0;
+        dgetrf_(&n, &n, A_host, &lda, ipiv, &info);
+        if (info == 0) dgetrs_(&trans, &n, &nrhs, A_host, &lda, ipiv, R_host, &ldb, &info);
+        if (info != 0) {
+            status = AB_ERROR_KERNEL_FAILED;  // A is singular in FP64 (dgetrf info > 0)
+            goto mpir_cleanup;
         }
-
-        // Update X = X + ΔX
         for (int i = 0; i < N; i++)
             for (int j = 0; j < NRHS; j++)
-                X_host[i * NRHS + j] += (double)work_f32[j * N + i];
+                X_host[(size_t)i * NRHS + j] = R_host[(size_t)j * N + i];
     }
 
     // Upload final solution to B's GPU buffer
