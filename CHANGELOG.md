@@ -90,6 +90,25 @@ All notable changes to this project will be documented in this file.
   (`ab_dgemm`, `ab_dgemm_scaled`, `ab_zgemm`) in `tests/test_blas_abi.c`,
   which fail on the previous build.
 
+### Changed
+- **Stage 2 of the exponent-range guard takes a fraction of the host time,
+  with the same decisions.** With the complex-parts fix above, nearly every
+  large Quantum ESPRESSO ZGEMM enters stage 2 (the projectors hold parts far
+  below their rows' largest), where per-line scans strided across op(A)'s
+  storage and a loop over every pair of lines cost more host time than
+  Accelerate takes for the whole call. Stage 2 now finds each line's largest
+  element in one pass over a contiguous line, or for lines strided across
+  the storage in one streaming sweep over it, works out the need's terms
+  once per line, gathers op(B)'s probe row once per group of rows that share
+  it, and passes a row by a bound (its probe element times that row's
+  smallest parts against its largest need) before it looks at the row's
+  pairs; a column's own probe element is found only when a pair needs it.
+  The DGEMM C check finds its probe elements the same way. Every decision is
+  the old loop's: `tests/test_range_guard.c` (new, host only) keeps the old
+  loops as the oracle and compares them on random and crafted data, real and
+  complex, every transpose combination, refusals included, and with the CPU
+  flushing subnormals to zero.
+
 ## [1.5.1] - 2026-11-01
 
 Documentation corrections and a new check (`make test-dd-bound`); results are

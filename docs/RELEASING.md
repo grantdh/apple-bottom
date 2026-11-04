@@ -23,7 +23,7 @@ make ci-local
 ```
 
 This will:
-- Run every test (precision, correctness, chaos, device-API, routing, BLAS-ABI, trace, staged path; `tests/README.md`, Coverage status, gives the counts and the counting rule) plus the golden-bits, ghost-detection, symbol and Fortran checks
+- Run every test (precision, correctness, chaos, device-API, routing, range guard, BLAS-ABI, trace, staged path; `tests/README.md`, Coverage status, gives the counts and the counting rule) plus the golden-bits, ghost-detection, symbol and Fortran checks
 - Run convergence study (V-2)
 - Generate `build/CI_REPORT.txt` with test results and convergence data hash
 
@@ -34,6 +34,7 @@ This will:
 ✓ test_chaos: PASS
 ✓ test_device_api: PASS
 ✓ test_dispatch: PASS
+✓ test_range_guard: PASS
 ✓ test_blas_abi: PASS
 ✓ test_trace: PASS
 ✓ test_qe_golden: PASS
@@ -73,7 +74,7 @@ Check that CI passed on the latest commit:
 
 **Check at:** `https://github.com/grantdh/apple-bottom/actions`
 
-**Note:** GitHub-hosted runners don't give jobs a usable Metal GPU, so CI runs only the checks that need none: `make version-check`, `make build-check`, `make lib`, `make test-symbols` and the routing unit tests (`build/test_dispatch`). The GPU suites and the convergence study run locally via `make ci-local` (step 2 above).
+**Note:** GitHub-hosted runners don't give jobs a usable Metal GPU, so CI runs only the checks that need none: `make version-check`, `make build-check`, `make lib`, `make test-symbols`, the routing unit tests (`build/test_dispatch`) and the range guard's stage-2 tests (`build/test_range_guard`). The GPU suites and the convergence study run locally via `make ci-local` (step 2 above).
 
 ### 4. Documentation Review
 

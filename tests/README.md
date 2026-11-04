@@ -44,8 +44,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 159, every test but
-the chaos ones, and `make ci-local` all 177 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 166, every test but
+the chaos ones, and `make ci-local` all 184 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -67,6 +67,8 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     operands of 2²⁰ elements, which it stages in chunks across cores
   - `tests/test_dispatch.c` — 9 tests of the BLAS-ABI routing, no GPU,
     see below
+  - `tests/test_range_guard.c` — 7 tests of the exponent-range guards'
+    stage 2 against the plain loops it replaced, no GPU, see below
   - `tests/test_blas_abi.c` — 33 suites (1091 cases), see below
   - `tests/test_trace.c` — 5 tests of `AB_TRACE` and
     `AB_TEST_FAIL_STAGE`, see below
@@ -352,6 +354,25 @@ also checks the precedence of `AB_MODE`, `AB_MIN_GPU_DIM` and
 `AB_CROSSOVER_FLOPS[_REAL]` over the table, the row bounds and TRANS
 classes (`'C'` is `'T'`), and the `AB_DISPATCH_TABLE` format: parsing,
 loading, malformed and missing files.
+
+## Range guard, stage 2
+
+`tests/test_range_guard.c` checks stage 2 of the BLAS ABI's exponent-range
+guards (`ab_range_guard`, and `ab_range_guard_c` for a DGEMM's C) on the
+host, without a GPU. Stage 2 finds each line's largest element by one-pass
+and sweeping scans, works out the need's terms once per line and passes
+rows by a bound before it looks at their pairs; the file keeps the plain
+loops it replaced (44873b6's, on the statistics of ed9a27b) as the oracle,
+and every decision must be the oracle's. The cases are random and crafted,
+real and complex, in every transpose combination, with padded leading
+dimensions whose padding would win any argmax that read it: entry-floor and
+product-floor cases, ties for a line's largest element (inside and across
+the scan's blocks), calls whose second probe decides, lines scaled out of
+the window, values below 2⁻¹⁰⁴² (lines made only of them too), zero lines
+and parts, and calls the guard refuses, plus QE-sized shapes and passes
+with the CPU flushing subnormals to zero (FPCR.FZ). Each suite also needs
+both outcomes in stage 2 often enough, and each crafted case its known
+outcome.
 
 ## Fortran binding probe
 

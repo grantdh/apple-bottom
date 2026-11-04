@@ -14,6 +14,9 @@
 #include <sys/param.h>
 #include <Accelerate/Accelerate.h>
 #include <stdio.h>
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 #include "ab_internal.h"
 #include "blas_trans.h"
@@ -313,11 +316,14 @@ static inline size_t op_at(const ab_op_view_t* v, int i, int k) {
     return v->trans ? (size_t)i * v->ld + k : (size_t)k * v->ld + i;
 }
 
+// |x[idx]|, or max(|Re|, |Im|) of the idx-th (re, im) pair if z.
+static inline double mag_at(const double* x, size_t idx, bool z) {
+    return z ? fmax(fabs(x[2 * idx]), fabs(x[2 * idx + 1])) : fabs(x[idx]);
+}
+
 // |op(X)_ik|, unscaled; max(|Re|, |Im|) for complex.
 static inline double op_mag(const ab_op_view_t* v, int i, int k) {
-    const size_t x = op_at(v, i, k);
-    if (!v->complex_pairs) return fabs(v->x[x]);
-    return fmax(fabs(v->x[2 * x]), fabs(v->x[2 * x + 1]));
+    return mag_at(v->x, op_at(v, i, k), v->complex_pairs);
 }
 
 // |Re op(X)_ik| and |Im op(X)_ik| (0 for real data), times 2^-e.
@@ -343,6 +349,186 @@ static int line_argmax(const ab_op_view_t* v, int l, bool by_row) {
 
 static inline int imax2(int a, int b) { return a > b ? a : b; }
 static inline int imin2(int a, int b) { return a < b ? a : b; }
+
+// -----------------------------------------------------------------------------
+// The guards' probe elements, fast
+// -----------------------------------------------------------------------------
+// Stage 2 of both guards looks through line_argmax's element of a line (its
+// probe element), held with its scaled parts in a line_probes_t. A line
+// stored contiguously is read in one pass (first_absmax); a line that runs
+// across the storage (a row of op(X) with trans false, a column with trans
+// true) is strided, so once at least 1/AB_SWEEP_SHARE of the lines are
+// wanted, one pass over the storage in order finds every line's
+// (sweep_argmax). Each picks the element line_argmax picks.
+#define AB_SWEEP_SHARE 8
+#define AB_ABSMAX_BLOCK 32      // doubles per block of first_absmax
+
+// The first t < n whose |x[t]| is the largest of x[0..n) (n > 0, no NaN):
+// one pass in blocks, keeping the first block whose largest beats every
+// block before it, then that block again for its first t. On (re, im)
+// pairs, t / 2 is the first element whose larger part is the largest: the
+// first largest op_mag. Comparisons and maxima treat |x| alike in every
+// floating-point mode, so this agrees with line_argmax under flush to zero
+// too.
+static size_t first_absmax(const double* x, size_t n) {
+    double best = -1.0;
+    size_t b0 = 0, b1 = 1, t = 0;
+#if defined(__aarch64__)
+    for (; t + AB_ABSMAX_BLOCK <= n; t += AB_ABSMAX_BLOCK) {
+        const double* p = x + t;
+        float64x2_t m0 = vabsq_f64(vld1q_f64(p)), m1 = vabsq_f64(vld1q_f64(p + 2));
+        float64x2_t m2 = vabsq_f64(vld1q_f64(p + 4)), m3 = vabsq_f64(vld1q_f64(p + 6));
+        for (int q = 8; q < AB_ABSMAX_BLOCK; q += 8) {
+            m0 = vmaxq_f64(m0, vabsq_f64(vld1q_f64(p + q)));
+            m1 = vmaxq_f64(m1, vabsq_f64(vld1q_f64(p + q + 2)));
+            m2 = vmaxq_f64(m2, vabsq_f64(vld1q_f64(p + q + 4)));
+            m3 = vmaxq_f64(m3, vabsq_f64(vld1q_f64(p + q + 6)));
+        }
+        double m = vmaxvq_f64(vmaxq_f64(vmaxq_f64(m0, m1), vmaxq_f64(m2, m3)));
+        if (m > best) { best = m; b0 = t; b1 = t + AB_ABSMAX_BLOCK; }
+    }
+#endif
+    for (; t < n; t++)
+        if (fabs(x[t]) > best) { best = fabs(x[t]); b0 = t; b1 = t + 1; }
+    for (t = b0; t + 1 < b1 && !(fabs(x[t]) == best); t++) {}
+    return t;
+}
+
+// line_argmax of a line stored contiguously: row l of op(X) if by_row (trans
+// true), else column l (trans false).
+static int contig_argmax(const ab_op_view_t* v, int l, bool by_row) {
+    const size_t w = v->complex_pairs ? 2 : 1;
+    const size_t len = (size_t)(by_row ? v->cols : v->rows);
+    return len ? (int)(first_absmax(v->x + w * (size_t)l * v->ld, w * len) / w) : 0;
+}
+
+#if defined(__aarch64__)
+// The magnitudes (mag_at) of the elements of lines j and j + 1 of a step,
+// p pointing at its first line's.
+static inline __attribute__((always_inline)) float64x2_t pair_mag(const double* p, int j, bool z) {
+    return z ? vpmaxq_f64(vabsq_f64(vld1q_f64(p + 2 * j)), vabsq_f64(vld1q_f64(p + 2 * j + 2)))
+             : vabsq_f64(vld1q_f64(p + j));
+}
+
+// One step of sweep_argmax: storage vectors k .. k + nq - 1 (nq <= 8; vector
+// q at v + q s) for lines l .. l + 7, whose largest so far and its k (a
+// double, exact) stay in registers across the vectors, taken in order of k
+// as the plain loop takes them. Four pairs of lines go side by side, so that
+// no step waits on another.
+static inline __attribute__((always_inline)) void sweep_step(const double* v, size_t s, int k,
+                                                            int nq, int l, bool z,
+                                                            double* restrict best,
+                                                            double* restrict at) {
+    const size_t w = z ? 2 : 1;
+    float64x2_t b0 = vld1q_f64(best + l), b1 = vld1q_f64(best + l + 2);
+    float64x2_t b2 = vld1q_f64(best + l + 4), b3 = vld1q_f64(best + l + 6);
+    float64x2_t a0 = vld1q_f64(at + l), a1 = vld1q_f64(at + l + 2);
+    float64x2_t a2 = vld1q_f64(at + l + 4), a3 = vld1q_f64(at + l + 6);
+    for (int q = 0; q < nq; q++) {
+        const double* p = v + q * s + w * (size_t)l;
+        const float64x2_t kq = vdupq_n_f64((double)(k + q));
+        const float64x2_t m0 = pair_mag(p, 0, z), m1 = pair_mag(p, 2, z);
+        const float64x2_t m2 = pair_mag(p, 4, z), m3 = pair_mag(p, 6, z);
+        const uint64x2_t g0 = vcgtq_f64(m0, b0), g1 = vcgtq_f64(m1, b1);
+        const uint64x2_t g2 = vcgtq_f64(m2, b2), g3 = vcgtq_f64(m3, b3);
+        b0 = vbslq_f64(g0, m0, b0); b1 = vbslq_f64(g1, m1, b1);
+        b2 = vbslq_f64(g2, m2, b2); b3 = vbslq_f64(g3, m3, b3);
+        a0 = vbslq_f64(g0, kq, a0); a1 = vbslq_f64(g1, kq, a1);
+        a2 = vbslq_f64(g2, kq, a2); a3 = vbslq_f64(g3, kq, a3);
+    }
+    vst1q_f64(best + l, b0); vst1q_f64(best + l + 2, b1);
+    vst1q_f64(best + l + 4, b2); vst1q_f64(best + l + 6, b3);
+    vst1q_f64(at + l, a0); vst1q_f64(at + l + 2, a1);
+    vst1q_f64(at + l + 4, a2); vst1q_f64(at + l + 6, a3);
+}
+#endif
+
+// arg[l] = line_argmax of every line l < L of an operand whose lines run
+// across its storage: element (l, k) at x[k ld + l] ((re, im) pairs if z),
+// k < len. One pass over the storage in order (8 vectors at a time), each
+// line keeping its first largest as line_argmax does. False if out of
+// memory.
+static bool sweep_argmax(const double* x, int ld, int L, int len, bool z, int* restrict arg) {
+    double* restrict best = malloc(2 * (size_t)L * sizeof *best);
+    if (!best) return false;
+    double* restrict at = best + L;
+    for (int l = 0; l < L; l++) { best[l] = -1.0; at[l] = 0.0; }
+    const size_t s = (z ? 2 : 1) * (size_t)ld;
+    for (int k = 0; k < len; k += 8) {
+        const int nq = imin2(8, len - k);       // storage vectors in this step
+        const double* v = x + (size_t)k * s;
+        int l = 0;
+#if defined(__aarch64__)
+        if (nq == 8 && z)
+            for (; l + 8 <= L; l += 8) sweep_step(v, s, k, 8, l, true, best, at);
+        else if (nq == 8)
+            for (; l + 8 <= L; l += 8) sweep_step(v, s, k, 8, l, false, best, at);
+        else if (z)
+            for (; l + 8 <= L; l += 8) sweep_step(v, s, k, nq, l, true, best, at);
+        else
+            for (; l + 8 <= L; l += 8) sweep_step(v, s, k, nq, l, false, best, at);
+#endif
+        for (; l < L; l++)
+            for (int q = 0; q < nq; q++) {
+                const double m = mag_at(v + q * s, (size_t)l, z);
+                if (m > best[l]) { best[l] = m; at[l] = k + q; }
+            }
+    }
+    for (int l = 0; l < L; l++) arg[l] = (int)at[l];
+    free(best);
+    return true;
+}
+
+// The probe elements of op(X)'s rows (by_row) or columns: each line's
+// line_argmax element and its parts scaled by the line's scale (op_parts),
+// found as they are asked for.
+typedef struct {
+    const ab_op_view_t* v;
+    const int* e;           // the lines' scale exponents
+    bool by_row, strided;
+    int n, len, asked;      // asked: lines asked for before their k was known
+    int* k;                 // line_argmax, -1 until found
+    double* part;           // its scaled (re, im); re -1 until worked out
+} line_probes_t;
+
+static bool probes_init(line_probes_t* p, const ab_op_view_t* v, const int* e, bool by_row) {
+    *p = (line_probes_t){.v = v, .e = e, .by_row = by_row, .strided = by_row != v->trans,
+                         .n = by_row ? v->rows : v->cols, .len = by_row ? v->cols : v->rows};
+    const size_t n1 = (size_t)imax2(p->n, 1);
+    p->k = malloc(n1 * sizeof *p->k);
+    p->part = malloc(2 * n1 * sizeof *p->part);
+    if (!p->k || !p->part) return false;
+    for (int l = 0; l < p->n; l++) { p->k[l] = -1; p->part[2 * l] = -1.0; }
+    return true;
+}
+
+static void probes_free(line_probes_t* p) { free(p->k); free(p->part); }
+
+// For strided lines, when `wanted` of them are or will be asked for: every
+// line's k by one sweep if that is at least 1/AB_SWEEP_SHARE of them.
+static void probes_expect(line_probes_t* p, int wanted) {
+    if (p->strided && (size_t)AB_SWEEP_SHARE * (size_t)wanted >= (size_t)p->n)
+        sweep_argmax(p->v->x, p->v->ld, p->n, p->len, p->v->complex_pairs, p->k);
+}
+
+// Line l's line_argmax.
+static int probe_k(line_probes_t* p, int l) {
+    if (p->k[l] < 0) probes_expect(p, ++p->asked);
+    if (p->k[l] < 0)
+        p->k[l] = p->strided ? line_argmax(p->v, l, p->by_row) : contig_argmax(p->v, l, p->by_row);
+    return p->k[l];
+}
+
+// The scaled parts (re, im) of line l's probe element.
+static const double* probe_parts(line_probes_t* p, int l) {
+    double* q = p->part + 2 * (size_t)l;
+    if (q[0] < 0.0) {
+        const int k = probe_k(p, l);
+        if (p->by_row) op_parts(p->v, l, k, p->e[l], &q[0], &q[1]);
+        else op_parts(p->v, k, l, p->e[l], &q[0], &q[1]);
+    }
+    return q;
+}
 
 // The exponents of the largest scaled |x| over s's lines (*hi; INT_MIN if all
 // are zero) and of the smallest nonzero one (*lo); false if a line has NaN or
@@ -404,16 +590,6 @@ ab_guard_t ab_range_guard_stage1(int K, const ab_line_stats_t* sa, const ab_line
            bmin >= AB_ENTRY_MIN_EXP ? AB_GUARD_CERTIFIED : AB_GUARD_STAGE2;
 }
 
-// Whether part re (else the imaginary part) of C_ij has products: it has none
-// where every part of row i and column j that it multiplies is zero, and is
-// then exactly zero. Real data has only the real part.
-static bool part_has_products(const ab_line_stats_t* sa, const ab_line_stats_t* sb, int i, int j,
-                              bool complex_pairs, bool re) {
-    if (!complex_pairs) return re;
-    const bool ar = sa->rmax[i], ai = sa->imax[i], br = sb->rmax[j], bi = sb->imax[j];
-    return re ? (ar && br) || (ai && bi) : (ar && bi) || (ai && br);
-}
-
 // The scales of C_ij's parts through one k, from the scaled parts of
 // op(A)_ik (ar, ai) and op(B)_kj (br, bi): |Ar||Br| + |Ai||Bi| (*re; for
 // real data the product's magnitude) and |Ar||Bi| + |Ai||Br| (*im).
@@ -423,16 +599,74 @@ static inline void k_part_scales(double ar, double ai, double br, double bi, dou
     *im = ar * bi + ai * br;
 }
 
-bool ab_range_guard(int K, const ab_line_stats_t* sa, const ab_line_stats_t* sb, int alpha_exp,
-                    const ab_op_view_t* a, const ab_op_view_t* b) {
-    ab_guard_t g = ab_range_guard_stage1(K, sa, sb, alpha_exp, a->complex_pairs);
-    if (g != AB_GUARD_STAGE2) return g == AB_GUARD_CERTIFIED;
+// A line's parts with nonzero values: bit 0 real, bit 1 imaginary (real
+// data has only the real part). A part of C_ij has products unless every
+// part of row i and column j that it multiplies is zero (it is then exactly
+// zero): the real part where rp & cp (parts_meet_re), the imaginary part
+// where rp meets cp's parts swapped (parts_meet_im).
+static inline unsigned line_parts(const ab_line_stats_t* s, int i, bool z) {
+    return z ? (unsigned)(s->rmax[i] != 0) | (unsigned)(s->imax[i] != 0) << 1 : 1u;
+}
+static inline bool parts_meet_re(unsigned rp, unsigned cp) { return (rp & cp) != 0; }
+static inline bool parts_meet_im(unsigned rp, unsigned cp) {
+    return (rp & ((cp & 1u) << 1 | (cp & 2u) >> 1)) != 0;
+}
 
-    // Stage 2, on the operands as scaled, for the rows and columns with a
-    // partner that stage 1 does not pass: the column of each such row's
-    // largest element and its parts, the row of each such column's, then the
-    // pairs.
-    const int M = sa->n, N = sb->n, lo = stage1_floor(alpha_exp);
+// A row bound passes only with this much to spare: whatever rounding (or
+// contraction) the pairs' sums take, theirs then reach it too.
+#define AB_ROW_BOUND_SLACK (1.0 - 0x1p-40)
+
+// A line's entry term of the need: K' 2^-78 times its largest scaled entry
+// (K' = K, or 2K for complex parts), which each pair of it with a line of
+// the other operand below the entry floor must reach (ab_scale2 rounds as
+// ldexp does, inline).
+static inline double entry_term(const ab_line_stats_t* s, int i, double entry_k) {
+    return ab_scale2(entry_k, AB_ENTRY_MIN_EXP + line_max_exp(s, i) + 1);
+}
+
+// What C_ij's sum must reach, from row i's and column j's smallest scaled
+// exponents (rm, cm) and entry terms: the product floor where rm + cm < lo,
+// and where a line is below the entry floor, the other line's entry term; 0
+// if neither. It falls as cm grows and grows with cterm, so over a set of
+// columns it is largest at their smallest cm and largest cterm.
+static inline double pair_need(int rm, int cm, double rterm, double cterm, int lo,
+                               double floor_ij) {
+    double need = rm + cm < lo ? floor_ij : 0.0;
+    if (rm < AB_ENTRY_MIN_EXP) need = fmax(need, cterm);
+    if (cm < AB_ENTRY_MIN_EXP) need = fmax(need, rterm);
+    return need;
+}
+
+// A row of op(A) and a column of op(B) of stage 2: the line, its smallest
+// scaled exponent, its parts (line_parts) and its entry term; for a row,
+// also its largest need over the columns.
+typedef struct {
+    int i, m;
+    unsigned parts;
+    double term, nmax;
+} stage2_row_t;
+
+typedef struct {
+    int j, m;
+    unsigned parts;
+    double term;
+} stage2_col_t;
+
+// Stage 2 of ab_range_guard; identical in its decision to the plain loop it
+// replaces: every pair (i, j) of a row and a column with a need checks each
+// part with products against that need through row i's line_argmax element
+// k, and where that falls short through column j's. Faster in three ways:
+// the probe elements come from first_absmax and sweep_argmax (column j's
+// only when a pair asks for it); the need's terms of each line are worked
+// out once; and the rows go in groups by k, so that op(B)'s row k (its
+// scaled parts in the columns) is gathered once per group, and a row whose
+// probe element times the smallest parts of that row clears the row's
+// largest need, with AB_ROW_BOUND_SLACK to spare, passes all its pairs
+// without looking at them (sums of products of nonnegative numbers grow
+// with each factor).
+static bool range_guard_stage2(int K, const ab_line_stats_t* sa, const ab_line_stats_t* sb,
+                               int alpha_exp, const ab_op_view_t* a, const ab_op_view_t* b) {
+    const int M = sa->n, N = sb->n, lo = stage1_floor(alpha_exp), E = AB_ENTRY_MIN_EXP;
     const bool z = a->complex_pairs;
     int amax, amin, bmax, bmin;
     lines_extremes(sa, &amax, &amin);
@@ -440,58 +674,108 @@ bool ab_range_guard(int K, const ab_line_stats_t* sa, const ab_line_stats_t* sb,
     const double floor_ij = fmax(ldexp((double)K, AB_PRODUCT_MIN_EXP),
                                  ldexp(1.0, AB_PRODUCT_MIN_EXP - alpha_exp));
     const double entry_k = (double)K * (z ? 2 : 1);
-    int *rows = malloc((size_t)M * sizeof *rows), *ka = malloc((size_t)M * sizeof *ka);
-    int *cols = malloc((size_t)N * sizeof *cols), *kb = malloc((size_t)N * sizeof *kb);
-    double *ap = malloc((size_t)M * 2 * sizeof *ap), *bp = malloc((size_t)N * 2 * sizeof *bp);
-    bool ok = rows && ka && cols && kb && ap && bp;
     // Lines with an entry below the entry floor pair with every line of the
     // other operand, so then every nonzero line is examined.
-    const bool entry_a = amin < AB_ENTRY_MIN_EXP, entry_b = bmin < AB_ENTRY_MIN_EXP;
-    int nr = 0, nc = 0;
-    for (int i = 0; ok && i < M; i++)
-        if (sa->max[i] != 0 && (entry_b || line_min_exp(sa, i) + bmin < lo ||
-                                line_min_exp(sa, i) < AB_ENTRY_MIN_EXP)) rows[nr++] = i;
-    for (int j = 0; ok && j < N; j++)
-        if (sb->max[j] != 0 && (entry_a || line_min_exp(sb, j) + amin < lo ||
-                                line_min_exp(sb, j) < AB_ENTRY_MIN_EXP)) cols[nc++] = j;
-    for (int r = 0; r < nr; r++) {
-        ka[r] = line_argmax(a, rows[r], true);
-        op_parts(a, rows[r], ka[r], sa->e[rows[r]], &ap[2 * r], &ap[2 * r + 1]);
+    const bool entry_a = amin < E, entry_b = bmin < E;
+    const size_t m1 = (size_t)imax2(M, 1), n1 = (size_t)imax2(N, 1);
+    stage2_row_t* rows = malloc(m1 * sizeof *rows);
+    stage2_col_t* cols = malloc(n1 * sizeof *cols);
+    int* order = malloc(m1 * sizeof *order);
+    int* first = calloc((size_t)K + 2, sizeof *first);
+    double* tab = malloc(2 * n1 * sizeof *tab);
+    line_probes_t pa = {0}, pb = {0};
+    bool ok = rows && cols && order && first && tab && probes_init(&pa, a, sa->e, true) &&
+              probes_init(&pb, b, sb->e, false);
+    if (!ok) goto done;
+
+    // The columns; over them, the smallest exponent, the largest entry term
+    // and the parts present.
+    int nc = 0, cmin = INT_MAX;
+    double cterm = 0.0;
+    unsigned cparts = 0;
+    for (int j = 0; j < N; j++) {
+        if (sb->max[j] == 0) continue;
+        const int m = line_min_exp(sb, j);
+        if (!(entry_a || m + amin < lo || m < E)) continue;
+        cols[nc] = (stage2_col_t){.j = j, .m = m, .parts = line_parts(sb, j, z),
+                                  .term = entry_term(sb, j, entry_k)};
+        cmin = imin2(cmin, m);
+        cterm = fmax(cterm, cols[nc].term);
+        cparts |= cols[nc].parts;
+        nc++;
     }
-    for (int c = 0; c < nc; c++) {
-        kb[c] = line_argmax(b, cols[c], false);
-        op_parts(b, kb[c], cols[c], sb->e[cols[c]], &bp[2 * c], &bp[2 * c + 1]);
+    // The rows with a pair that has a need.
+    int nr = 0;
+    for (int i = 0; nc > 0 && i < M; i++) {
+        if (sa->max[i] == 0) continue;
+        const int m = line_min_exp(sa, i);
+        if (!(entry_b || m + bmin < lo || m < E)) continue;
+        const double term = entry_term(sa, i, entry_k);
+        const double nmax = pair_need(m, cmin, term, cterm, lo, floor_ij);
+        if (nmax > 0.0)
+            rows[nr++] = (stage2_row_t){.i = i, .m = m, .parts = line_parts(sa, i, z),
+                                        .term = term, .nmax = nmax};
     }
-    for (int r = 0; ok && r < nr; r++) {
-        const int i = rows[r];
-        for (int c = 0; ok && c < nc; c++) {
-            const int j = cols[c];
-            // what the sum must reach: the product floor, and K 2^-78 times
-            // the other line's largest entry where a line is below the entry floor
-            double need = line_min_exp(sa, i) + line_min_exp(sb, j) < lo ? floor_ij : 0.0;
-            if (line_min_exp(sa, i) < AB_ENTRY_MIN_EXP)
-                need = fmax(need, ldexp(entry_k, AB_ENTRY_MIN_EXP + line_max_exp(sb, j) + 1));
-            if (line_min_exp(sb, j) < AB_ENTRY_MIN_EXP)
-                need = fmax(need, ldexp(entry_k, AB_ENTRY_MIN_EXP + line_max_exp(sa, i) + 1));
-            if (need == 0.0) continue;
-            // each part with products must reach it, through row i's largest
-            // element or, where that falls short, column j's
-            const double nre = part_has_products(sa, sb, i, j, z, true) ? need : 0.0;
-            const double nim = part_has_products(sa, sb, i, j, z, false) ? need : 0.0;
-            double ar, ai, br, bi, re, im, re2, im2;
-            op_parts(b, ka[r], j, sb->e[j], &br, &bi);
-            k_part_scales(ap[2 * r], ap[2 * r + 1], br, bi, &re, &im);
-            if (re < nre || im < nim) {
-                op_parts(a, i, kb[c], sa->e[i], &ar, &ai);
-                k_part_scales(ar, ai, bp[2 * c], bp[2 * c + 1], &re2, &im2);
-                re = fmax(re, re2);
-                im = fmax(im, im2);
+    // Each row's probe element, and the rows in groups by its k (a counting
+    // sort): first[k] .. first[k + 1] index group k's rows in order. Their
+    // parts are read in the groups, whose rows go in order of i: after a
+    // sweep, along the storage.
+    probes_expect(&pa, nr);
+    for (int r = 0; r < nr; r++) first[probe_k(&pa, rows[r].i) + 2]++;
+    for (int k = 0; k < K; k++) first[k + 2] += first[k + 1];
+    for (int r = 0; r < nr; r++) order[first[pa.k[rows[r].i] + 1]++] = r;
+
+    for (int k = 0; k < K; k++) {
+        if (first[k] == first[k + 1]) continue;
+        // op(B)'s row k in the columns, scaled, and its smallest parts
+        double tr = INFINITY, ti = INFINITY;
+        for (int c = 0; c < nc; c++) {
+            op_parts(b, k, cols[c].j, sb->e[cols[c].j], &tab[2 * c], &tab[2 * c + 1]);
+            tr = fmin(tr, tab[2 * c]);
+            ti = fmin(ti, tab[2 * c + 1]);
+        }
+        for (int q = first[k]; q < first[k + 1]; q++) {
+            const stage2_row_t* row = &rows[order[q]];
+            const double* ap = probe_parts(&pa, row->i);
+            double re, im;
+            k_part_scales(ap[0], ap[1], tr, ti, &re, &im);
+            if ((!parts_meet_re(row->parts, cparts) || re * AB_ROW_BOUND_SLACK >= row->nmax) &&
+                (!parts_meet_im(row->parts, cparts) || im * AB_ROW_BOUND_SLACK >= row->nmax))
+                continue;
+            for (int c = 0; c < nc; c++) {
+                const stage2_col_t* col = &cols[c];
+                const double need = pair_need(row->m, col->m, row->term, col->term, lo, floor_ij);
+                if (need == 0.0) continue;
+                // each part with products must reach it, through row i's
+                // largest element or, where that falls short, column j's
+                const double nre = parts_meet_re(row->parts, col->parts) ? need : 0.0;
+                const double nim = parts_meet_im(row->parts, col->parts) ? need : 0.0;
+                k_part_scales(ap[0], ap[1], tab[2 * c], tab[2 * c + 1], &re, &im);
+                if (re >= nre && im >= nim) continue;
+                const double* bp = probe_parts(&pb, col->j);
+                double ar, ai, re2, im2;
+                op_parts(a, row->i, pb.k[col->j], sa->e[row->i], &ar, &ai);
+                k_part_scales(ar, ai, bp[0], bp[1], &re2, &im2);
+                if (!(fmax(re, re2) >= nre && fmax(im, im2) >= nim)) {
+                    ok = false;
+                    goto done;
+                }
             }
-            ok = re >= nre && im >= nim;
         }
     }
-    free(rows); free(ka); free(cols); free(kb); free(ap); free(bp);
+done:
+    free(rows); free(cols); free(order); free(first); free(tab);
+    probes_free(&pa); probes_free(&pb);
     return ok;
+}
+
+bool ab_range_guard(int K, const ab_line_stats_t* sa, const ab_line_stats_t* sb, int alpha_exp,
+                    const ab_op_view_t* a, const ab_op_view_t* b) {
+    ab_guard_t g = ab_range_guard_stage1(K, sa, sb, alpha_exp, a->complex_pairs);
+    if (g != AB_GUARD_STAGE2) return g == AB_GUARD_CERTIFIED;
+    // Stage 2, on the operands as scaled, for the rows and columns with a
+    // partner that stage 1 does not pass.
+    return range_guard_stage2(K, sa, sb, alpha_exp, a, b);
 }
 
 // Whether a nonzero C' of exponent c_exp, times a beta' of exponent
@@ -532,11 +816,11 @@ bool ab_range_guard_c(const ab_line_stats_t* sa, const ab_line_stats_t* sb, ab_r
     if (g != AB_GUARD_STAGE2) return g == AB_GUARD_CERTIFIED;
     const int M = sa->n, N = sb->n, beta_exp = ilogb(beta);
     const double need = ldexp(fmax(1.0, fabs(beta)), AB_PRODUCT_MIN_EXP), al = fabs(alpha);
-    int *ka = malloc((size_t)M * sizeof *ka), *kb = malloc((size_t)N * sizeof *kb);
-    double *av = malloc((size_t)M * sizeof *av), *bv = malloc((size_t)N * sizeof *bv);
-    bool ok = ka && kb && av && bv;
-    for (int i = 0; ok && i < M; i++) ka[i] = -1;         // found as needed
-    for (int j = 0; ok && j < N; j++) kb[j] = -1;
+    // The probe elements, found as needed (probe_k sweeps once a share of
+    // strided lines has been asked for). The data are real, so a probe's
+    // scaled magnitude is its scaled real part.
+    line_probes_t pa = {0}, pb = {0};
+    bool ok = probes_init(&pa, a, sa->e, true) && probes_init(&pb, b, sb->e, false);
     for (int j = 0; ok && j < N; j++)
         for (int i = 0; ok && i < M; i++) {
             const double c = C[(size_t)j * ldC + i];
@@ -544,19 +828,14 @@ bool ab_range_guard_c(const ab_line_stats_t* sa, const ab_line_stats_t* sb, ab_r
             if (c == 0.0 || c_floors_hold(ab_hiword_ilogb(ab_abs_hiword(c)) - e, beta_exp))
                 continue;
             if (sa->max[i] == 0 || sb->max[j] == 0) { ok = false; break; }
-            if (ka[i] < 0) {
-                ka[i] = line_argmax(a, i, true);
-                av[i] = ab_scale2(op_mag(a, i, ka[i]), -sa->e[i]);
-            }
-            ok = al * av[i] * ab_scale2(op_mag(b, ka[i], j), -sb->e[j]) >= need;
+            const double av = probe_parts(&pa, i)[0];
+            ok = al * av * ab_scale2(op_mag(b, pa.k[i], j), -sb->e[j]) >= need;
             if (ok) continue;
-            if (kb[j] < 0) {
-                kb[j] = line_argmax(b, j, false);
-                bv[j] = ab_scale2(op_mag(b, kb[j], j), -sb->e[j]);
-            }
-            ok = al * ab_scale2(op_mag(a, i, kb[j]), -sa->e[i]) * bv[j] >= need;
+            const double bv = probe_parts(&pb, j)[0];
+            ok = al * ab_scale2(op_mag(a, i, pb.k[j]), -sa->e[i]) * bv >= need;
         }
-    free(ka); free(kb); free(av); free(bv);
+    probes_free(&pa);
+    probes_free(&pb);
     return ok;
 }
 

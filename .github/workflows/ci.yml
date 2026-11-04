@@ -2,8 +2,9 @@ name: CI
 
 # GitHub-hosted macOS runners do not give jobs a usable Metal GPU, so CI runs
 # every check that needs no GPU: version consistency, a compile of every
-# source file, both libraries, their exported BLAS symbols and the routing
-# unit tests. The GPU suites run locally with `make ci-local` before a release
+# source file, both libraries, their exported BLAS symbols, the routing unit
+# tests and the range guard's stage-2 tests. The GPU suites run locally with
+# `make ci-local` before a release
 # (docs/RELEASING.md). The two images carry different Xcode versions and SDKs;
 # the Toolchain step prints which one each job used. GitHub retires the
 # macos-14 image on November 2, 2026. Its job was the only one that built
@@ -54,3 +55,6 @@ jobs:
 
     - name: Routing unit tests (no GPU)
       run: make build/test_dispatch && ./build/test_dispatch
+
+    - name: Range guard stage-2 tests (no GPU)
+      run: make build/test_range_guard && ./build/test_range_guard
