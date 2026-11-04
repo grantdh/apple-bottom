@@ -180,6 +180,19 @@ typedef enum {
                         // (1 + 2^-29) loses its low word in DD (Accelerate)
     RANGE_C_NEAR,       // as RANGE_C_DISJOINT with op(B)_00 x 2^-40: C0_00's low word is far
                         // below the product beside it (the GPU must keep it)
+    // Magnitudes below 2^-1042, whose FP64 high words are 0 (the guard's
+    // statistics must still count them; the GPU reads them as zero):
+    RANGE_C_SUBNORMAL,  // row 0 of op(A) zero, row 0 of C0 x 2^-1050: beta C0 is all of C there
+                        // (Accelerate)
+    RANGE_C_SCALED_OUT, // row 0 of op(A) zero, column 0 of op(B) x 2^1000, C0_i0 x 2^970 for
+                        // i > 0 and C0_00 x 2^-100: C0_00 uploads, by column 0's scale, at
+                        // about 2^-1070 (Accelerate)
+    RANGE_A_SUBNORMAL,  // row 0 of op(A) x 2^-1050 and zero in C0, op(B) x 2^1000: row 0 is
+                        // not zero, and scaled by its own scale it runs on the GPU
+    RANGE_B_SUBNORMAL,  // column 0 of op(B) x 2^-1050 and zero in C0, op(A) x 2^1000 (the GPU)
+    RANGE_ENTRY_SUBNORMAL, // op(A)_ik x 1 for k = 0 and x 2^-1050 else, op(B)_kj x 0 for k = 0
+                        // and x 2^1000 else: every product is about 2^-50, through entries the
+                        // GPU reads as zero (Accelerate)
 } RangeData;
 
 static const char *const RANGE_TAG[] = {
@@ -191,6 +204,9 @@ static const char *const RANGE_TAG[] = {
     [RANGE_C_TINY] = "c-tiny", [RANGE_C_HUGE] = "c-huge", [RANGE_ENTRY_LOW_A] = "entry-low-a",
     [RANGE_ENTRY_LOW_B] = "entry-low-b", [RANGE_ENTRY_LOW_OK] = "entry-low-ok",
     [RANGE_C_FLOOR] = "c-floor", [RANGE_C_DISJOINT] = "c-disjoint", [RANGE_C_NEAR] = "c-near",
+    [RANGE_C_SUBNORMAL] = "c-subnormal", [RANGE_C_SCALED_OUT] = "c-scaled-out",
+    [RANGE_A_SUBNORMAL] = "a-subnormal", [RANGE_B_SUBNORMAL] = "b-subnormal",
+    [RANGE_ENTRY_SUBNORMAL] = "entry-subnormal",
 };
 
 typedef struct {
@@ -616,6 +632,14 @@ static void gen_range(const Suite *s) {
         {OP_DGEMM_SYM, 'N', 'N', RANGE_C_FLOOR, ROUTE_CPU},
         {OP_DGEMM_SYM, 'T', 'N', RANGE_C_DISJOINT, ROUTE_CPU},
         {OP_DGEMM_SYM, 'N', 'T', RANGE_C_NEAR, ROUTE_GPU},
+        {OP_DGEMM_SYM, 'T', 'N', RANGE_C_SUBNORMAL, ROUTE_CPU},
+        {OP_DGEMM_SYM, 'N', 'T', RANGE_C_SCALED_OUT, ROUTE_CPU},
+        {OP_DGEMM_SYM, 'N', 'N', RANGE_A_SUBNORMAL, ROUTE_GPU},
+        {OP_ZGEMM_SYM, 'C', 'N', RANGE_A_SUBNORMAL, ROUTE_GPU},
+        {OP_DGEMM_SYM, 'T', 'T', RANGE_B_SUBNORMAL, ROUTE_GPU},
+        {OP_ZGEMM_SYM, 'N', 'T', RANGE_B_SUBNORMAL, ROUTE_GPU},
+        {OP_DGEMM_SYM, 'T', 'N', RANGE_ENTRY_SUBNORMAL, ROUTE_CPU},
+        {OP_ZGEMM_SYM, 'N', 'C', RANGE_ENTRY_SUBNORMAL, ROUTE_CPU},
         {OP_DGEMM_SYM, 'N', 'N', RANGE_EXACT, ROUTE_GPU},
         {OP_DGEMM_SYM, 'T', 'T', RANGE_EXACT, ROUTE_GPU},
         {OP_ZGEMM_SYM, 'N', 'N', RANGE_EXACT, ROUTE_GPU},
@@ -652,6 +676,7 @@ static void gen_imbalance(const Suite *s) {
         {'N', 'T', IMAG_LARGE, ROUTE_GPU}, {'T', 'C', IMAG_LARGE, ROUTE_GPU},
         {'N', 'N', IMAG_LINES, ROUTE_GPU}, {'C', 'T', IMAG_LINES, ROUTE_GPU},
         {'N', 'C', IMAG_PART_LOW, ROUTE_CPU}, {'T', 'N', IMAG_PART_OK, ROUTE_GPU},
+        {'C', 'N', IMAG_PART_SUBNORMAL, ROUTE_CPU},
     };
     for (size_t i = 0; i < TEST_REGISTRY_SIZE(IMB); i++) {
         AbiCase *c = add_kind(s, KIND_IMAG, OP_ZGEMM_SYM, IMB[i].ta, IMB[i].tb, 96, 80, 72, 3,
@@ -1532,13 +1557,18 @@ static double range_a(RangeData d, int i, int k, int M) {
     case RANGE_COLS_HIGH:     return 0x1p30;
     case RANGE_UNIFORM_EXACT: return 0x1p90;
     case RANGE_C_ZERO_ROW:
-    case RANGE_C_TINY:        return i == 0 ? 0.0 : 1.0;
+    case RANGE_C_TINY:
+    case RANGE_C_SUBNORMAL:
+    case RANGE_C_SCALED_OUT:  return i == 0 ? 0.0 : 1.0;
     case RANGE_ENTRY_LOW_A:
     case RANGE_ENTRY_LOW_OK:  return k == 0 ? 1.0 : 0x1p-105;
     case RANGE_ENTRY_LOW_B:   return k == 0 ? 0.0 : 0x1p30;
     case RANGE_C_FLOOR:       return i == 0 ? 0.0 : 1.0;
     case RANGE_C_DISJOINT:
     case RANGE_C_NEAR:        return i == 0 && k != 0 ? 0.0 : 1.0;
+    case RANGE_A_SUBNORMAL:   return i == 0 ? F_SUBNORMAL : 1.0;
+    case RANGE_B_SUBNORMAL:   return 0x1p1000;
+    case RANGE_ENTRY_SUBNORMAL: return k == 0 ? 1.0 : F_SUBNORMAL;
     default:                  return 1.0;
     }
 }
@@ -1557,6 +1587,10 @@ static double range_b(RangeData d, int k, int j, int N) {
     case RANGE_ENTRY_LOW_B:   return k == 0 ? 1.0 : 0x1p-105;
     case RANGE_C_DISJOINT:    return j == 0 && k == 0 ? 0.0 : 1.0;
     case RANGE_C_NEAR:        return j == 0 && k == 0 ? 0x1p-40 : 1.0;
+    case RANGE_C_SCALED_OUT:  return j == 0 ? 0x1p1000 : 1.0;
+    case RANGE_A_SUBNORMAL:   return 0x1p1000;
+    case RANGE_B_SUBNORMAL:   return j == 0 ? F_SUBNORMAL : 1.0;
+    case RANGE_ENTRY_SUBNORMAL: return k == 0 ? 0.0 : 0x1p1000;
     default:                  return 1.0;
     }
 }
@@ -1573,6 +1607,10 @@ static double range_c(RangeData d, int i, int j, int M, int N) {
     case RANGE_C_FLOOR:       return i == 0 ? C_LOW : 1.0;
     case RANGE_C_DISJOINT:
     case RANGE_C_NEAR:        return i == 0 && j == 0 ? C_LOW : 1.0;
+    case RANGE_C_SUBNORMAL:   return i == 0 ? F_SUBNORMAL : 1.0;
+    case RANGE_C_SCALED_OUT:  return j != 0 ? 1.0 : i == 0 ? 0x1p-100 : 0x1p970;
+    case RANGE_A_SUBNORMAL:   return i == 0 ? 0.0 : 0x1p1000;
+    case RANGE_B_SUBNORMAL:   return j == 0 ? 0.0 : 0x1p1000;
     default:                  return range_a(d, i, 0, M) * range_b(d, 0, j, N);
     }
 }

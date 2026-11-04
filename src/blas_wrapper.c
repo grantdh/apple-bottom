@@ -90,9 +90,10 @@ const int* ab_line_scales(ab_line_stats_t* s) {
     return any ? s->e : NULL;
 }
 
-// The exponent of nonzero line i's smallest scaled |x|.
+// The exponent of nonzero line i's smallest scaled |x| (a lower bound:
+// ab_hiword_min_ilogb).
 static inline int line_min_exp(const ab_line_stats_t* s, int i) {
-    return ab_hiword_ilogb(s->min[i]) - s->e[i];
+    return ab_hiword_min_ilogb(s->min[i]) - s->e[i];
 }
 
 // The exponent of nonzero line i's largest scaled |x|.
@@ -157,9 +158,8 @@ static void pack_op_real_stats(enum CBLAS_TRANSPOSE t, const double* X, int ld,
                 const double* restrict x = X + j * l;
                 if (by_row && dst) {
                     for (size_t i = i0; i < i1; i++) {
-                        double v = x[i];
-                        dst[i * c + j] = v;
-                        AB_RANGE_ADD(v, mx[i], mn[i]);
+                        dst[i * c + j] = x[i];
+                        AB_RANGE_ADD(x[i], mx[i], mn[i]);
                     }
                 } else if (by_row) {
                     for (size_t i = i0; i < i1; i++) AB_RANGE_ADD(x[i], mx[i], mn[i]);
@@ -182,9 +182,8 @@ static void pack_op_real_stats(enum CBLAS_TRANSPOSE t, const double* X, int ld,
                 uint32_t lmx = mx[i], lmn = mn[i];
                 if (d) {
                     for (size_t j = 0; j < c; j++) {
-                        double v = x[j];
-                        d[j] = v;
-                        AB_RANGE_ADD(v, lmx, lmn);
+                        d[j] = x[j];
+                        AB_RANGE_ADD(x[j], lmx, lmn);
                     }
                 } else {
                     for (size_t j = 0; j < c; j++) AB_RANGE_ADD(x[j], lmx, lmn);
@@ -193,9 +192,8 @@ static void pack_op_real_stats(enum CBLAS_TRANSPOSE t, const double* X, int ld,
                 mn[i] = lmn;
             } else if (d) {
                 for (size_t j = 0; j < c; j++) {
-                    double v = x[j];
-                    d[j] = v;
-                    AB_RANGE_ADD(v, mx[j], mn[j]);
+                    d[j] = x[j];
+                    AB_RANGE_ADD(x[j], mx[j], mn[j]);
                 }
             } else {
                 for (size_t j = 0; j < c; j++) AB_RANGE_ADD(x[j], mx[j], mn[j]);
@@ -275,14 +273,15 @@ static void pack_op_complex_stats(enum CBLAS_TRANSPOSE t, const double complex* 
                 }
                 continue;
             }
+            // The statistics take the stored parts: the sign does not matter.
             double* restrict dr = re + i * c;
             double* restrict di = im + i * c;
             if (by_row) {
                 uint32_t lrx = rx[i], lix = ix[i], lmn = mn[i];
                 for (size_t j = 0; j < c; j++) {
-                    double vr = x[2 * j], vi = sign * x[2 * j + 1];
+                    double vr = x[2 * j], vi = x[2 * j + 1];
                     dr[j] = vr;
-                    di[j] = vi;
+                    di[j] = sign * vi;
                     LINE_ADD_COMPLEX(vr, vi, lrx, lix, lmn);
                 }
                 rx[i] = lrx;
@@ -290,9 +289,9 @@ static void pack_op_complex_stats(enum CBLAS_TRANSPOSE t, const double complex* 
                 mn[i] = lmn;
             } else {
                 for (size_t j = 0; j < c; j++) {
-                    double vr = x[2 * j], vi = sign * x[2 * j + 1];
+                    double vr = x[2 * j], vi = x[2 * j + 1];
                     dr[j] = vr;
-                    di[j] = vi;
+                    di[j] = sign * vi;
                     LINE_ADD_COMPLEX(vr, vi, rx[j], ix[j], mn[j]);
                 }
             }
@@ -354,7 +353,7 @@ static bool lines_extremes(const ab_line_stats_t* s, int* hi, int* lo) {
     for (int i = 0; i < s->n; i++) {
         if (s->max[i] >= AB_HIWORD_NONFINITE) return false;
         if (s->max[i] == 0) continue;
-        *hi = imax2(*hi, ab_hiword_ilogb(s->max[i]) - s->e[i]);
+        *hi = imax2(*hi, line_max_exp(s, i));
         *lo = imin2(*lo, line_min_exp(s, i));
     }
     return true;
@@ -514,8 +513,8 @@ ab_guard_t ab_range_guard_c_stage1(ab_range_t r, double beta) {
     const int beta_exp = ilogb(beta);
     // C' is stored in DD before beta' multiplies it, and beta' C' joins the sums.
     if (ab_hiword_ilogb(r.max) + imax2(beta_exp, 0) + 1 > AB_SUM_MAX_EXP) return AB_GUARD_REJECT;
-    return c_floors_hold(ab_hiword_ilogb(r.min), beta_exp) ? AB_GUARD_CERTIFIED
-                                                           : AB_GUARD_STAGE2;
+    return c_floors_hold(ab_hiword_min_ilogb(r.min), beta_exp) ? AB_GUARD_CERTIFIED
+                                                               : AB_GUARD_STAGE2;
 }
 
 // Stage 2: a C'_ij below the floors loses less than (|beta'| + 4) 2^-126 (its

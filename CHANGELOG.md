@@ -49,6 +49,38 @@ All notable changes to this project will be documented in this file.
   `range-c-disjoint` and `imag-part-low` (Accelerate; they fail on 1.5.1),
   and `range-c-near` and `imag-part-ok` (they must stay on the GPU), in
   `tests/test_blas_abi.c`.
+- **The guard's statistics now see magnitudes below 2⁻¹⁰⁴².** They are FP64
+  high words, and a nonzero value below 2⁻¹⁰⁴² has high word 0, as zero has.
+  Such a value in op(A), op(B) or DGEMM's C, or a C′ that the scaling took
+  below 2⁻¹⁰⁴² or to 0, passed stage 1 unseen, and a line made only of such
+  values read as a zero line and was not scaled. The GPU reads them as zero.
+  Confirmed on the GPU on the staged and the host path, every call reporting
+  success (M = N = 8, K = 2, α = 1):
+  - β = 1, row 0 of op(A) zero, C_00 = 2⁻ᵏ: C_00 came back as 0 for
+    k ≥ 1043 (up to k = 1042 the call went to Accelerate);
+  - the same with column 0 of op(B) at 2¹⁰⁰⁰ (scale 2⁻⁹⁷⁰), so that
+    C′_00 = 2⁻⁽ᵏ⁺⁹⁷⁰⁾: C_00 came back as 0 for every k tried from 73
+    (C′_00 = 2⁻¹⁰⁴³) to 110, k ≥ 105 included, where C′_00 underflows to 0;
+  - row 0 of op(A) = [2⁻ᵏ, 0] against a column of 2¹⁰⁰⁰: C_00 = 2¹⁰⁰⁰⁻ᵏ came
+    back as 0 for k ≥ 1043, through op(B) and for ZGEMM alike, and with every
+    element 1 + 2⁻ᵏ·i, Im C came back as 0.
+
+  The host pack, the C upload and the Metal pre-pass now count a nonzero
+  value whose high word (after its scale) is 0 as the smallest nonzero high
+  word. As a line's largest magnitude it reads as 2⁻¹⁰⁴², so a line of such
+  values is scaled (by 2¹⁰⁷²) and runs on the GPU, exactly in the probes; as
+  a smallest magnitude it reads as 2⁻¹⁰⁷⁴, below every floor, so stage 2
+  decides, and a C′ that is all of C_ij goes to Accelerate. Data without
+  values below 2⁻¹⁰⁴¹ is routed and computed as before (golden bits
+  unchanged; the word also stands for [2⁻¹⁰⁴², 2⁻¹⁰⁴¹), whose minima now read
+  low, conservatively). The native `ABMatrix` API chooses its scales as
+  before, so a native matrix made only of such values is still stored as
+  zeros. New cases `range-c-subnormal`,
+  `range-c-scaled-out`, `range-entry-subnormal` and `imag-part-subnormal`
+  (Accelerate) and `range-a-subnormal`, `range-b-subnormal` (GPU) in
+  `tests/test_blas_abi.c`, which all fail on the previous guard (errors from
+  2.8×10⁻⁹ to 1, Im 2.7×10⁷ u²); `subnormal` and `subnormalC` data in
+  `tests/test_staging.c` hold the host and GPU statistics to the same counts.
 
 ## [1.5.1] - 2026-11-01
 

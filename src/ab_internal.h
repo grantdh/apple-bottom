@@ -92,10 +92,46 @@ static inline uint32_t ab_abs_hiword(double x) {
 
 #define AB_HIWORD_NONFINITE 0x7FF00000u     // high words from here up: Inf or NaN
 
-// ilogb(|x|) for a finite |x| with high word h != 0; -1075 for h == 0 (|x| < 2^-1042).
+// A nonzero |x| below 2^-1042 has high word 0, as a zero has. The
+// exponent-range guard's statistics count it as AB_HIWORD_TINY, the smallest
+// nonzero high word (that of [2^-1042, 2^-1041)), so that a line or a C with
+// such values is not read as zero, or as without them.
+#define AB_HIWORD_TINY 1u
+
+// The high word the guard's statistics take for v, which is x or x times a
+// power of two: |v|'s, or AB_HIWORD_TINY where that is 0 and x is not (|v|
+// below 2^-1042, also where the scale took x to 0). It tests x on its 32-bit
+// words (low first: Apple silicon is little-endian), which vectorize better
+// than a 64-bit test and need no floating-point compare, which flush-to-zero
+// would change; as h >= 1 wherever h != 0, max(h, t) is the rule.
+static inline uint32_t ab_stat_hiword_scaled(double v, double x) {
+    uint32_t w[2];
+    memcpy(w, &x, sizeof w);
+    const uint32_t h = ab_abs_hiword(v), t = (w[0] | (w[1] & 0x7FFFFFFFu)) != 0;
+    return h > t ? h : t;
+}
+
+// The same for x itself, read where it is stored, so that a loop loads its
+// 32-bit halves.
+static inline uint32_t ab_stat_hiword(const double* x) {
+    uint32_t w[2];
+    memcpy(w, x, sizeof w);
+    const uint32_t h = w[1] & 0x7FFFFFFFu, t = w[0] != 0;
+    return h > t ? h : t;
+}
+
+// ilogb(|x|) for a finite |x| with high word h != 0; -1075 for h == 0 (|x| <
+// 2^-1042). For a statistic's AB_HIWORD_TINY it is -1042, the largest ilogb
+// that word stands for: what a largest |x| needs (scales, overflow).
 static inline int ab_hiword_ilogb(uint32_t h) {
     if (h >= 0x00100000u) return (int)(h >> 20) - 1023;
     return h ? (31 - __builtin_clz(h)) - 1042 : -1075;
+}
+
+// The same for a smallest |x|, whose floors need a lower bound: -1074 for
+// AB_HIWORD_TINY, which stands for every |x| below 2^-1041.
+static inline int ab_hiword_min_ilogb(uint32_t h) {
+    return h == AB_HIWORD_TINY ? -1074 : ab_hiword_ilogb(h);
 }
 
 // |x| truncated to its high word, as a double (within 2^-20 of |x|).
@@ -106,9 +142,10 @@ static inline double ab_hiword_value(uint32_t h) {
     return d;
 }
 
-// The magnitudes of some FP64 values, as high words: of the largest |x| (0 if
-// all are zero; AB_HIWORD_NONFINITE or more if any is NaN or Inf) and of the
-// smallest |x| with a nonzero high word (UINT32_MAX if none).
+// The magnitudes of some FP64 values, as high words (the guard's: AB_RANGE_ADD;
+// the native ab_matrix_upload's: plain ones): of the largest |x| (0 if all
+// are zero; AB_HIWORD_NONFINITE or more if any is NaN or Inf) and of the
+// smallest nonzero one (UINT32_MAX if none).
 typedef struct {
     uint32_t max, min;
 } ab_range_t;
@@ -133,7 +170,8 @@ static inline bool ab_range_nonfinite(ab_range_t r) { return r.max >= AB_HIWORD_
         AB_HIWORD_MAX(hw_, mx);                            \
         AB_HIWORD_MIN(hw_, mn);                            \
     } while (0)
-#define AB_RANGE_ADD(x, mx, mn) AB_HIWORD_ADD(ab_abs_hiword(x), mx, mn)
+// Adds |x|, x a stored FP64 value, to a range as the guard counts it.
+#define AB_RANGE_ADD(x, mx, mn) AB_HIWORD_ADD(ab_stat_hiword(&(x)), mx, mn)
 
 // =============================================================================
 // The BLAS ABI's exponent-range guard (blas_wrapper.c)
@@ -141,7 +179,9 @@ static inline bool ab_range_nonfinite(ab_range_t r) { return r.max >= AB_HIWORD_
 // For C = alpha op(A) op(B) + beta C, op(A) M x K and op(B) K x N, from the
 // caller's column-major operands:
 //   1. Statistics of each row of op(A) and column of op(B) (ab_line_stats_scan,
-//      or the pack that gathers the same).
+//      or the pack that gathers the same), as AB_RANGE_ADD counts them: a
+//      nonzero |x| below 2^-1042, or a C' scaled there or to 0, counts as
+//      AB_HIWORD_TINY (ab_stat_hiword_scaled; minima: ab_hiword_min_ilogb).
 //   2. Scales (ab_line_scales): a line whose largest |x| lies outside
 //      [2^-AB_SCALE_WINDOW, 2^AB_SCALE_WINDOW) is multiplied by 2^-e on its way
 //      to DD, e = ilogb(largest |x|) - AB_SCALE_TARGET; any other line by 1. A
@@ -186,7 +226,7 @@ typedef struct {
 } ab_op_view_t;
 
 // Statistics of the lines of op(X), its rows (op(A)) or columns (op(B)): per
-// line, the high words of its largest |x| (0 for a zero line;
+// line, the high words (ab_stat_hiword) of its largest |x| (0 for a zero line;
 // AB_HIWORD_NONFINITE or more if it has NaN or Inf) and of its smallest
 // nonzero |x| (UINT32_MAX for a zero line), for complex data the largest
 // max(|Re x|, |Im x|) and the smallest nonzero part (|Re x| or |Im x|); and
@@ -302,7 +342,7 @@ ABStatus ab_internal_zgemm(ABTranspose transA, ABTranspose transB, ABMatrix Ar, 
 // x * 2^-(row_exp[i] + col_exp[j] + shift) into m, whose power-of-two scale
 // becomes 0; NULL row_exp or col_exp counts as all zeros. Each scaled value is
 // rounded once, as ldexp rounds. If range is not NULL it receives the range of
-// the scaled values.
+// the scaled values, as the guard counts them (ab_stat_hiword_scaled).
 ABStatus ab_internal_upload_scaled(ABMatrix m, const double* data, const int* row_exp,
                                    const int* col_exp, int shift, ab_range_t* range);
 

@@ -67,14 +67,14 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     operands of 2²⁰ elements, which it stages in chunks across cores
   - `tests/test_dispatch.c` — 9 tests of the BLAS-ABI routing, no GPU,
     see below
-  - `tests/test_blas_abi.c` — 33 suites (1069 cases), see below
+  - `tests/test_blas_abi.c` — 33 suites (1088 cases), see below
   - `tests/test_trace.c` — 5 tests of `AB_TRACE` and
     `AB_TEST_FAIL_STAGE`, see below
 
 - **Not yet registry-based (one `main`, no ghost guard):**
   - `tests/test_precision.c` — 16 tests; needs decomposition strategy
   - `tests/test_qe_golden.c` — 32 golden-bits cases, see below
-  - `tests/test_staging.c` — 127 cases of the staged path against the
+  - `tests/test_staging.c` — 134 cases of the staged path against the
     host path, bit for bit, see below (its `TEST_STAGING` line is not
     part of the total either)
   - `tests/verification/test_convergence.c` — monolithic numerical
@@ -175,7 +175,13 @@ with random signs, so the pattern alone sets the span.
     row of C0 × 2⁻¹⁰⁰ (Accelerate must take it), and with the other rows
     × 2⁻¹⁰⁰ instead (the GPU must certify it);
   - DGEMM C0 × 2¹³⁵ with beta = 2⁻²⁰: beta·C0 fits FP32's range but C0 does
-    not, so Accelerate must take it.
+    not, so Accelerate must take it;
+  - magnitudes below 2⁻¹⁰⁴², whose FP64 high word is 0 (the guard's
+    statistics must still count them): a row of op(A) or a column of op(B)
+    made of them, which the guard must scale and keep on the GPU; such
+    entries beside large ones; and a DGEMM zero row whose C0 is that small,
+    or becomes so (or 0) when the guard scales it (Accelerate must take
+    those).
 
   These run with every TRANS kind of op(). Each must give C within 1e-11
   of cblas (Inf and NaN where cblas has them), on the route the case
@@ -192,7 +198,10 @@ nearly real A and B, nearly imaginary ones, and rows of op(A) and columns
 of op(B) that alternate between the two. Re(C) and Im(C) must each be
 within 8 u² of a Dot2 reference, relative to their own componentwise
 scales. Gauss's three-product form misses Im(C) by about 10⁶ u² there, so
-the call must run as four products.
+the call must run as four products. Three more cases hold the
+exponent-range guard to each part: imaginary parts of ±2⁻⁹⁸(1 + 2⁻²⁹) and
+of 2⁻¹⁰⁵⁰ times [0.5, 1) (Accelerate must take them), and of 2⁻⁶⁰ times
+[0.5, 1) (the GPU must keep it).
 
 Known failures live in the file's `XFAIL` table, each with a short tag
 naming the defect. An XFAIL that now passes (XPASS), or an entry that matches
@@ -271,8 +280,10 @@ scales, rows it certifies only on the operands (its second stage), complex
 parts imbalanced enough for 4M, a DGEMM alpha outside its window, K = 1
 products of random bit patterns (every conversion and epilogue rounding
 shows in C), signed zeros, tiny and subnormal C, cancelling C, NaN, Inf
-and overflow; and Quantum ESPRESSO shapes large enough that the copies run
-in pieces.
+and overflow, magnitudes below 2⁻¹⁰⁴² in lines of op(A) and op(B) and in
+a DGEMM's C as scaled (which the host and GPU statistics must count
+alike); and Quantum ESPRESSO shapes large enough that the copies run in
+pieces.
 
 The native ZGEMMs take their Gauss-3M or 4M temporaries from the same
 pool, so after the run the pool must hold buffers in the host child and
