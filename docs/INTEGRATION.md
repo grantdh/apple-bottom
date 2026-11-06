@@ -89,8 +89,8 @@ in-range data unchanged:
     that entry to about 2³⁰, and C back.
   - A DGEMM alpha or beta outside 2^±20 joins C's scale.
   - A call the scaled data still cannot keep in range runs on Accelerate.
-    So does a call with NaN or Inf in A or B (or in C, for DGEMM with
-    beta ≠ 0), which then gets IEEE results. `AB_REPORT` counts such calls
+    So does a call with NaN or Inf in A or B, or in C with beta ≠ 0,
+    which then gets IEEE results. `AB_REPORT` counts such calls
     as `range` fallbacks.
 - **Native `ABMatrix` API.**
   - `ab_matrix_upload` gives each matrix one power-of-two scale, and

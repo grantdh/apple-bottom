@@ -39,7 +39,7 @@ The library keeps data out of those limits with exact powers of two. A power of 
     - no sum can reach 2¹²²;
     - every nonzero product is at least 2⁻⁷⁸; or, failing that, for every C_ij one of two products through the largest entries of its row and column reaches K·2⁻⁷⁸;
     - C as scaled for the upload, and beta times it, stay below 2¹²², and beta·C keeps full precision wherever it is the whole of C_ij.
-  - Any other call runs on Accelerate, counted as a `range` fallback in `AB_REPORT`, as do calls with NaN or Inf in op(A) or op(B) (or in C with beta ≠ 0, for DGEMM). Those therefore get IEEE results instead of DD's NaN from Inf − Inf.
+  - Any other call runs on Accelerate, counted as a `range` fallback in `AB_REPORT`, as do calls with NaN or Inf in op(A) or op(B), or in C with beta ≠ 0. Those therefore get IEEE results instead of DD's NaN from Inf − Inf, and for ZGEMM instead of the (NaN, NaN) the epilogue's complex arithmetic would make of (Inf, y).
   - Rows and columns inside the window are not scaled, so ordinary data computes exactly as in 1.4. `tests/test_qe_golden.c` holds such calls to 1.4.0's bits. The exponent-range suite of `tests/test_blas_abi.c` checks scaled calls against cblas and, bit for bit, against the unscaled call times its power of two.
 - **Native `ABMatrix` API.** A matrix holds one power-of-two scale, chosen by `ab_matrix_upload`.
   - It is 0 when every nonzero magnitude lies in [2⁻³⁹, 2³⁹]; the products of two such matrices then stay in [2⁻⁷⁸, 2⁷⁸].

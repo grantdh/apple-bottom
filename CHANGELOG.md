@@ -227,6 +227,17 @@ All notable changes to this project will be documented in this file.
   and beta (7.33 → 5.73 ms) and 0.71× with alpha alone; 160 × 160 × 9140
   'C','N', whose C is small, is unchanged (0.99×).
 
+### Fixed
+- **A ZGEMM that reads a NaN or Inf in C runs on Accelerate**, on any route to
+  the GPU, as a DGEMM's has since 1.5.0. The epilogue's complex arithmetic,
+  which the GPU's follows bit for bit, made (NaN, NaN) of such an element: an
+  (Inf, y) lost its Inf, where Accelerate keeps it. Since 1.5.0. The calls count
+  as `range` fallbacks. Results on finite C keep their bits; a call with a
+  general alpha or beta scans C once on the host, the memory its epilogue reads
+  anyway, and one with beta = 0 does not read C. `test_blas_abi` adds four
+  cases, on the GPU epilogue's route and on the host epilogue's, and
+  `test_staging`'s NaN and Inf cases now expect Accelerate.
+
 ## [1.5.1] - 2026-11-01
 
 Documentation corrections and a new check (`make test-dd-bound`); results are

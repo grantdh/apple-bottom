@@ -138,7 +138,8 @@ static inline void blas_reference(bool cplx, char ta, char tb, int M, int N, int
         alpha = creal(alpha);
         beta = creal(beta);
     }
-    for (int j = 0; j < N; j++)
+    // For beta = 1 BLAS leaves C as it is, and complex 1 * (Inf, y) has a NaN.
+    for (int j = 0; beta != 1.0 && j < N; j++)
         for (int i = 0; i < M; i++) {
             size_t k = (size_t)j * ldc + i;
             if (cplx)

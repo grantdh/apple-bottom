@@ -446,7 +446,7 @@ without it the kernels give the bits of 1.4.0.
   - The BLAS ABI scales each row of op(A) and column of op(B) whose largest
     entry lies outside 2^±20 by an exact power of two, and undoes it in C.
     It runs on Accelerate whatever that cannot keep in range, and any call
-    with NaN or Inf in A or B (or in C, for DGEMM with beta ≠ 0).
+    with NaN or Inf in A or B, or in C with beta ≠ 0.
   - The native `ABMatrix` API keeps one power-of-two scale per matrix, so a
     matrix whose nonzero entries span more than about 2⁷⁸ (10²³) can still
     lose precision in its products there.

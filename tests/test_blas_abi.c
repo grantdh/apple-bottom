@@ -167,6 +167,9 @@ typedef enum {
     RANGE_C_TINY,       // row 0 of op(A) zero, the other rows of C0 x 2^-100: they only round
                         // away beside the products (the GPU must certify it)
     RANGE_C_HUGE,       // C0 x 2^135, beta = 2^-20: beta C0 fits FP32, C0 does not (Accelerate)
+    RANGE_C_INF,        // C0_00's real part +Inf, its imaginary part finite: C as cblas gives
+                        // it, not (NaN, NaN) from the epilogue's arithmetic (Accelerate)
+    RANGE_C_NAN,        // the same with a NaN
 } RangeData;
 
 static const char *const RANGE_TAG[] = {
@@ -175,7 +178,8 @@ static const char *const RANGE_TAG[] = {
     [RANGE_INF] = "inf", [RANGE_ALPHA_TINY] = "alpha-tiny", [RANGE_ALPHA_HUGE] = "alpha-huge",
     [RANGE_EXACT] = "exact", [RANGE_ROWS_LOW] = "rows-low", [RANGE_COLS_HIGH] = "cols-high",
     [RANGE_UNIFORM_EXACT] = "uniform-exact", [RANGE_C_ZERO_ROW] = "c-zero-row",
-    [RANGE_C_TINY] = "c-tiny", [RANGE_C_HUGE] = "c-huge",
+    [RANGE_C_TINY] = "c-tiny", [RANGE_C_HUGE] = "c-huge", [RANGE_C_INF] = "c-inf",
+    [RANGE_C_NAN] = "c-nan",
 };
 
 typedef struct {
@@ -612,6 +616,14 @@ static void gen_range(const Suite *s) {
     };
     for (size_t i = 0; i < TEST_REGISTRY_SIZE(R); i++)
         add_range(s, R[i].op, R[i].ta, R[i].tb, R[i].data, R[i].route);
+    // A ZGEMM reading a NaN or Inf in C: the staged path's GPU epilogue
+    // (alpha = beta = 1; the host path decides) and its host epilogue (general
+    // alpha and beta; decided before the GPU runs).
+    for (RangeData d = RANGE_C_INF; d <= RANGE_C_NAN; d++) {
+        AbiCase *c = add_range(s, OP_ZGEMM_SYM, 'N', 'N', d, ROUTE_CPU);
+        c->alpha = c->beta = 1.0;
+        add_range(s, OP_ZGEMM_SYM, 'C', 'N', d, ROUTE_CPU);
+    }
 }
 
 // Gauss-3M's imaginary part under Re/Im imbalance (audit K-P1-2): zgemm_
@@ -1593,6 +1605,8 @@ static void range_apply(Call *k, RangeData d, bool base) {
                 range_set(&C0[((size_t)j * k->lc.ld + i) * w + p], base,
                           range_c(d, i, j, c->M, c->N));
     if (!base && d == RANGE_INF) A[op_index(c->ta, k->la, 0, 0) * w] = INFINITY;
+    if (!base && d == RANGE_C_INF) C0[0] = INFINITY;
+    if (!base && d == RANGE_C_NAN) C0[0] = NAN;
 }
 
 // True if x is finite where r is, and else non-finite as r is: the same

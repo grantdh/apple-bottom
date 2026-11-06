@@ -73,7 +73,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     threads at once
   - `tests/test_dispatch.c` — 13 tests of the BLAS-ABI routing, no GPU,
     see below
-  - `tests/test_blas_abi.c` — 33 suites (1069 cases), see below
+  - `tests/test_blas_abi.c` — 33 suites (1073 cases), see below
   - `tests/test_trace.c` — 5 tests of `AB_TRACE` and
     `AB_TEST_FAIL_STAGE`, see below
   - `tests/test_blas2.c` — 19 tests (957 cases) of DGEMV, ZGEMV and

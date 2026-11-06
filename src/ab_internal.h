@@ -162,7 +162,8 @@ static inline ab_range_t ab_range_merge(ab_range_t a, ab_range_t b) {
 //      cb[j] + ea - eb), in the same way (ab_range_guard_c): NaN or Inf, or a
 //      C' or beta' C' that could reach 2^AB_SUM_MAX_EXP, go to Accelerate;
 //      where a row of op(A) or a column of op(B) is zero, beta' C' must be at
-//      least 2^AB_PRODUCT_MIN_EXP.
+//      least 2^AB_PRODUCT_MIN_EXP. A ZGEMM with beta != 0 and NaN or Inf in C
+//      goes to Accelerate too (zgemm_reads_nonfinite_c).
 // The unscale, bit for bit (dgemm_blas, zgemm_blas): each GPU result C'_ij
 // becomes FP64 as (double)hi + (double)lo, then is multiplied by
 // 2^(ra[i] + cb[j] + ea) (ea = 0 for ZGEMM) with ab_scale2, one rounding. A

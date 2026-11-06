@@ -679,6 +679,21 @@ static void zgemm_epilogue(int M, int N, double complex alpha, double complex be
     }
 }
 
+// Whether a ZGEMM with this beta reads a NaN or Inf in C's M x N block. Such a
+// call runs on Accelerate, as a DGEMM's does (ab_range_guard_c_stage1): the
+// epilogue's C[dst] = re + I * im, which the GPU's follows bit for bit, turns
+// (Inf, y) into (NaN, NaN).
+static bool zgemm_reads_nonfinite_c(double complex beta, const double complex *C, int ldC, int M,
+                                    int N) {
+    if (beta == 0.0) return false;
+    uint32_t mx = 0;
+    for (size_t j = 0; j < (size_t)N; j++) {
+        const double *x = (const double *)(C + j * ldC);
+        for (size_t i = 0; i < 2 * (size_t)M; i++) AB_HIWORD_MAX(ab_abs_hiword(x[i]), mx);
+    }
+    return mx >= AB_HIWORD_NONFINITE;
+}
+
 // =============================================================================
 // Staged path (gpu_stage.h)
 // =============================================================================
@@ -917,7 +932,11 @@ static bool zgemm_staged(CallProf *p, enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSP
         .c_in = gpu_epi && beta1, .split = !gpu_epi,
         .alpha = {creal(alpha), cimag(alpha)}, .beta = {creal(beta), cimag(beta)},
     };
-    ab_prof_staged_t why = run_staged(p, &g);
+    // C as the host epilogue would read it. The GPU epilogue flags a NaN or Inf
+    // itself, and that call comes back to the host path's check.
+    bool c_nonfinite = !gpu_epi && zgemm_reads_nonfinite_c(beta, C, ldC, M, N);
+    prof_stage(p, AB_PROF_STAGE_PACK);
+    ab_prof_staged_t why = c_nonfinite ? AB_PROF_STAGED_RANGE : run_staged(p, &g);
     // The guard's verdict on the same statistics is the host path's too.
     if (why == AB_PROF_STAGED_RANGE) {
         note_gpu_fallback(p, "zgemm", M, N, K, AB_PROF_FB_RANGE, AB_RANGE_WHY);
@@ -1033,7 +1052,8 @@ static void zgemm_blas(
 
     const ab_op_view_t va = {(const double*)A, ldA, M, K, ta != CblasNoTrans, true};
     const ab_op_view_t vb = {(const double*)B, ldB, K, N, tb != CblasNoTrans, true};
-    if (!ab_range_guard(K, &sa, &sb, 0, &va, &vb)) {
+    if (!ab_range_guard(K, &sa, &sb, 0, &va, &vb) ||
+        zgemm_reads_nonfinite_c(beta, C, ldC, M, N)) {
         fallback = AB_PROF_FB_RANGE;
         goto cleanup;
     }
