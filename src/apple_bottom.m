@@ -2914,6 +2914,14 @@ extern "C" const char* ab_internal_kernel_name(int kind) {
     return kind >= 0 && kind < AB_KERNEL_KINDS ? g_kernel_names[kind] : NULL;
 }
 
+// Dispatches of any *_pf kernel since the process started: what 1.5 exported,
+// kept so that the library still defines every symbol 1.5.1 did.
+extern "C" uint64_t ab_internal_prefetch_dispatches(void) {
+    uint64_t n = 0;
+    for (int kind = 0; kind < AB_KERNEL_KINDS; kind++) n += ab_internal_kernel_dispatches(kind, 1);
+    return n;
+}
+
 // The 64×64 kernels' prefetch limit: none in a concurrent encoder, whose
 // products share the GPU (see above)
 static uint32_t square_prefetch_max(id<MTLComputeCommandEncoder> encoder) {

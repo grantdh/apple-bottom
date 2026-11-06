@@ -2703,9 +2703,13 @@ static void test_prefetch_same_bits(void) {
     KernelCounts ran_on[N_PF_CASES], ran_off[N_PF_CASES];
 
     KernelCounts start = kernel_counts();
+    uint64_t pf_start = ab_internal_prefetch_dispatches();
     pf_run("1", on, n_on, ran_on);
     KernelCounts all_on = kernel_counts_since(&start);
+    uint64_t pf_all = ab_internal_prefetch_dispatches() - pf_start;
+    pf_start += pf_all;
     pf_run("0", off, n_off, ran_off);
+    uint64_t pf_none = ab_internal_prefetch_dispatches() - pf_start;
     if (keep) setenv("AB_PREFETCH", keep, 1); else unsetenv("AB_PREFETCH");
     free(keep);
 
@@ -2722,6 +2726,12 @@ static void test_prefetch_same_bits(void) {
     // Then every kernel's prefetch instance must have run in a case
     const char *missing = kernel_missing(&all_on, true, NULL);
     if (missing && !msg[0]) snprintf(msg, sizeof msg, "no case runs %s_pf", missing);
+    // 1.5's counter is the sum of the _pf instances', and has none of the plain ones
+    uint64_t pf_sum = 0;
+    for (int k = 0; k < all_on.kinds; k++) pf_sum += all_on.n[k][1];
+    if ((pf_all != pf_sum || pf_none) && !msg[0])
+        snprintf(msg, sizeof msg, "ab_internal_prefetch_dispatches counted %llu and %llu, not %llu and 0",
+                 (unsigned long long)pf_all, (unsigned long long)pf_none, (unsigned long long)pf_sum);
     for (int c = 0; c < N_PF_CASES; c++) { free(on[c]); free(off[c]); }
     if (msg[0]) FAIL(msg); else PASS();
 }

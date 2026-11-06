@@ -18,6 +18,7 @@
 // instance since the process started, and its name (NULL from the last kind on)
 uint64_t ab_internal_kernel_dispatches(int kind, int pf);
 const char *ab_internal_kernel_name(int kind);
+uint64_t ab_internal_prefetch_dispatches(void);   // every _pf instance's
 
 #define KERNEL_KINDS_MAX 16
 
