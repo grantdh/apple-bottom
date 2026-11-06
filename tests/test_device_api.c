@@ -11,7 +11,8 @@
 //   6. Stream create / sync / destroy doesn't crash
 // and the BLAS entry points: ab_dev_dgemm / ab_dev_zgemm against column-major
 // cblas, ab_dev_zgemm on imbalanced real and imaginary parts against Dot2,
-// both on the staging pool's reused buffers, plus the element-wise ops.
+// both on the staging pool's reused buffers and on registered, non-page-
+// aligned memory, plus the element-wise ops.
 //
 // Pass criteria: all assertions hold. Exits non-zero on first failure.
 // =============================================================================
@@ -277,13 +278,30 @@ static void gemm_data_free(GemmData* g) {
     free(g->A); free(g->B); free(g->C0);
 }
 
-// g's call by ab_dev_zgemm (complex) or ab_dev_dgemm, their _offset forms
-// for c.off != 0, on device copies of A (every double a NaN if nan_a), B
-// and C0; C, A and B as the call leaves them go into C, A1 and B1 where
-// not NULL.
-static ABStatus gemm_data_run(const GemmData* g, bool nan_a, double* C, double* A1, double* B1) {
+// g's call on buffers dA, dB and dC, by ab_dev_zgemm (complex) or
+// ab_dev_dgemm, their _offset forms for c.off != 0.
+static ABStatus gemm_data_call(const GemmData* g, ab_dev_buffer_t dA, ab_dev_buffer_t dB,
+                               ab_dev_buffer_t dC) {
     const GemmCase c = g->c;
     const int lda = g->oA.ld, ldb = g->oB.ld, ldc = g->oC.ld;
+    if (g->cplx) {
+        double alpha[2] = {creal(c.alpha), cimag(c.alpha)};
+        double beta[2]  = {creal(c.beta), cimag(c.beta)};
+        return c.off ? ab_dev_zgemm_offset(c.ta, c.tb, c.m, c.n, c.k, alpha,
+                                           dA, c.off, lda, dB, c.off, ldb, beta, dC, c.off, ldc)
+                     : ab_dev_zgemm(c.ta, c.tb, c.m, c.n, c.k, alpha,
+                                    dA, lda, dB, ldb, beta, dC, ldc);
+    }
+    return c.off ? ab_dev_dgemm_offset(c.ta, c.tb, c.m, c.n, c.k, creal(c.alpha),
+                                       dA, c.off, lda, dB, c.off, ldb,
+                                       creal(c.beta), dC, c.off, ldc)
+                 : ab_dev_dgemm(c.ta, c.tb, c.m, c.n, c.k, creal(c.alpha),
+                                dA, lda, dB, ldb, creal(c.beta), dC, ldc);
+}
+
+// g's call on device copies of A (every double a NaN if nan_a), B and C0; C,
+// A and B as the call leaves them go into C, A1 and B1 where not NULL.
+static ABStatus gemm_data_run(const GemmData* g, bool nan_a, double* C, double* A1, double* B1) {
     size_t bA = operand_bytes(g->oA), bB = operand_bytes(g->oB), bC = operand_bytes(g->oC);
     ab_dev_buffer_t dA = ab_dev_malloc(bA), dB = ab_dev_malloc(bB), dC = ab_dev_malloc(bC);
     assert(dA && dB && dC);
@@ -292,21 +310,7 @@ static ABStatus gemm_data_run(const GemmData* g, bool nan_a, double* C, double* 
     ab_dev_memcpy_h2d(dB, 0, g->B, bB);
     ab_dev_memcpy_h2d(dC, 0, g->C0, bC);
 
-    ABStatus s;
-    if (g->cplx) {
-        double alpha[2] = {creal(c.alpha), cimag(c.alpha)};
-        double beta[2]  = {creal(c.beta), cimag(c.beta)};
-        s = c.off ? ab_dev_zgemm_offset(c.ta, c.tb, c.m, c.n, c.k, alpha,
-                                        dA, c.off, lda, dB, c.off, ldb, beta, dC, c.off, ldc)
-                  : ab_dev_zgemm(c.ta, c.tb, c.m, c.n, c.k, alpha,
-                                 dA, lda, dB, ldb, beta, dC, ldc);
-    } else {
-        s = c.off ? ab_dev_dgemm_offset(c.ta, c.tb, c.m, c.n, c.k, creal(c.alpha),
-                                        dA, c.off, lda, dB, c.off, ldb,
-                                        creal(c.beta), dC, c.off, ldc)
-                  : ab_dev_dgemm(c.ta, c.tb, c.m, c.n, c.k, creal(c.alpha),
-                                 dA, lda, dB, ldb, creal(c.beta), dC, ldc);
-    }
+    ABStatus s = gemm_data_call(g, dA, dB, dC);
     if (C)  ab_dev_memcpy_d2h(C, dC, 0, bC);
     if (A1) ab_dev_memcpy_d2h(A1, dA, 0, bA);
     if (B1) ab_dev_memcpy_d2h(B1, dB, 0, bB);
@@ -753,6 +757,96 @@ static void test_gemm_pool(void) {
     }
 }
 
+// ---- GEMM on registered memory ----------------------------------------------
+//
+// ab_dev_register() wraps the pages around the caller's memory and keeps the
+// distance to it as the buffer's base, which every host read or write of the
+// buffer must add (dev_data() in src/device_api.m). Each operand here starts
+// `misalign` bytes past a page, with whole pages of sentinels on both sides, so
+// that a pointer missing the base lands in a sentinel or leaves C wrong. The
+// result must be bitwise that of the same call on ab_dev_malloc() buffers,
+// which check_gemm holds to cblas.
+
+#define REG_PAD 4096                // sentinel doubles on each side: 2 pages of 16 KB
+#define REG_SENTINEL (-123.456)
+
+// bytes of x at `misalign` bytes past a page, between sentinels; *raw is to free().
+static double* reg_block(const double* x, size_t bytes, size_t misalign, void** raw) {
+    size_t n = bytes / sizeof(double);
+    int rc = posix_memalign(raw, 16384, (n + 2 * REG_PAD) * sizeof(double) + misalign);
+    assert(rc == 0);
+    (void)rc;
+    double* p = (double*)((char*)*raw + misalign);
+    for (size_t i = 0; i < n + 2 * REG_PAD; i++) p[i] = REG_SENTINEL;
+    memcpy(p + REG_PAD, x, bytes);
+    return p + REG_PAD;
+}
+
+static bool reg_sentinels_intact(const double* x, size_t bytes) {
+    size_t n = bytes / sizeof(double);
+    for (size_t i = 0; i < REG_PAD; i++)
+        if (x[n + i] != REG_SENTINEL || (x - REG_PAD)[i] != REG_SENTINEL) return false;
+    return true;
+}
+
+// Whether g's call on registered memory gives the bits of the call on allocated
+// buffers, with A, B and every sentinel left alone.
+static bool reg_call_same(const GemmData* g, size_t misalign) {
+    size_t bA = operand_bytes(g->oA), bB = operand_bytes(g->oB), bC = operand_bytes(g->oC);
+    double* ref = (double*)malloc(bC);
+    assert(ref);
+    bool ok = gemm_data_run(g, false, ref, NULL, NULL) == AB_OK;
+    void *ra, *rb, *rc;
+    double* A = reg_block(g->A, bA, misalign, &ra);
+    double* B = reg_block(g->B, bB, misalign, &rb);
+    double* C = reg_block(g->C0, bC, misalign, &rc);
+    ab_dev_buffer_t dA = ab_dev_register(A, bA), dB = ab_dev_register(B, bB),
+                    dC = ab_dev_register(C, bC);
+    ok = ok && dA && dB && dC && gemm_data_call(g, dA, dB, dC) == AB_OK;
+    ab_dev_free(dA); ab_dev_free(dB); ab_dev_free(dC);
+    ok = ok && !memcmp(C, ref, bC) && !memcmp(A, g->A, bA) && !memcmp(B, g->B, bB) &&
+         reg_sentinels_intact(A, bA) && reg_sentinels_intact(B, bB) && reg_sentinels_intact(C, bC);
+    free(ra); free(rb); free(rc); free(ref);
+    return ok;
+}
+
+static void test_gemm_registered(void) {
+    printf("[GEMM-12] device GEMM on registered, non-page-aligned memory\n");
+    static const size_t MISALIGN[] = {8, 24, 4088, 12344};
+    static const struct { const char* name; double complex alpha, beta; } SC[] = {
+        {"alpha 1, beta 0", 1.0, 0.0},
+        {"real alpha and beta", 0.75, -2.0},
+        {"complex alpha and beta", CMPLX(0.3, -1.1), CMPLX(0.25, 0.5)},
+    };
+    int calls = 0;
+    for (int z = 0; z < 2; z++)
+        for (int s = 0; s < 2 + z; s++) {           // a real GEMM has no complex scalars
+            int bad = 0, n = 0;
+            for (int i = 0; i < 3; i++)
+                for (int j = 0; j < 3; j++)
+                    for (size_t off = 0; off <= 13; off += 13) {
+                        GemmData g;
+                        gemm_data_init(&g, z, (GemmCase){ALL_TRANS[i], ALL_TRANS[j], 97, 65, 129, 7,
+                                                         off, SC[s].alpha, SC[s].beta});
+                        bad += !reg_call_same(&g, MISALIGN[calls++ % 4]);
+                        n++;
+                        gemm_data_free(&g);
+                    }
+            char msg[128];
+            snprintf(msg, sizeof msg, "%s, %s: %d calls, every trans pair, with and without offsets",
+                     z ? "zgemm" : "dgemm", SC[s].name, n);
+            CHECK(!bad, msg);
+        }
+    // A tall-skinny C, whose kernel and epilogue the shape above does not reach
+    for (int z = 0; z < 2; z++) {
+        GemmData g;
+        gemm_data_init(&g, z, (GemmCase){AB_NO_TRANS, AB_NO_TRANS, 1024, 40, 4608, 7, 13,
+                                         SC[1 + z].alpha, SC[1 + z].beta});
+        CHECK(reg_call_same(&g, MISALIGN[z]), z ? "zgemm 1024x40x4608" : "dgemm 1024x40x4608");
+        gemm_data_free(&g);
+    }
+}
+
 // Test element-wise operations
 static void test_elementwise(void) {
     printf("[BLAS-3] element-wise ops\n");
@@ -813,6 +907,7 @@ static const TestCase TESTS[] = {
     {"test_gemm_matches_host_api",    test_gemm_matches_host_api},
     {"test_zgemm_imbalance",          test_zgemm_imbalance},
     {"test_gemm_pool",                test_gemm_pool},
+    {"test_gemm_registered",          test_gemm_registered},
     {"test_elementwise",              test_elementwise},
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);

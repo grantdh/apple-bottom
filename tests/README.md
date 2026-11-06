@@ -45,8 +45,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 209, every test but
-the chaos ones, and `make ci-local` all 227 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 210, every test but
+the chaos ones, and `make ci-local` all 228 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -57,11 +57,13 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     runs every register-prefetch kernel (`AB_PREFETCH=1`) against the
     plain ones (`AB_PREFETCH=0`) and requires bitwise-equal results
   - `tests/test_chaos.c` — 18 tests
-  - `tests/test_device_api.c` — 18 tests (192 `CHECK`s); the GEMM
+  - `tests/test_device_api.c` — 19 tests (199 `CHECK`s); the GEMM
     tests compare `ab_dev_dgemm` / `ab_dev_zgemm` with column-major
     cblas over all trans pairs, non-square and tall-skinny shapes,
     `ld > rows`, buffer offsets and a C of 2²⁰ elements, and check that
     the device path is bitwise the host API on the transposed operands;
+    `test_gemm_registered` runs them on `ab_dev_register` memory that is
+    not page-aligned, bitwise against allocated buffers, between sentinels;
     `test_zgemm_imbalance` holds `ab_dev_zgemm_offset` to the Dot2 check
     of the BLAS ABI's `test_zgemm_imbalance` (below, `tests/test_dot2.h`)
     on both its alpha/beta paths, every way it gathers a line's parts, and
