@@ -290,11 +290,11 @@ as `ab_internal_last_staged()` reports it: the staged result stands
 exactly where the exponent-range guard certifies the call, its lines
 scaled or not and a ZGEMM by Gauss-3M or 4M (the test asks the guard's own
 functions, `src/ab_internal.h`), a DGEMM's alpha and beta lie in their
-window, and no Inf or NaN reaches the GPU epilogue; every other call is
+window, and no Inf or NaN reaches an epilogue; every other call is
 made on the host path. It must run on the GPU and hash the
 whole C array (padding included) the same in all four children, unless the
-guard sends it to Accelerate (NaN or Inf in A, B or a DGEMM's C, a range
-the scaling cannot keep), which it must then do in every child. The
+guard sends it to Accelerate (NaN or Inf in A or B, or in C with beta ≠ 0,
+or a range the scaling cannot keep), which it must then do in every child. The
 registered child also checks how many operands were used in place and
 `ab_register_host_memory()`'s refusals. The cases: zgemm and dgemm for
 every TRANS pair in {N,T,C}², alpha 1 or not, beta 0, 1 or neither; both

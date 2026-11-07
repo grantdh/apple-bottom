@@ -65,14 +65,15 @@ All notable changes to this project will be documented in this file.
     `benchmarks/results/2026-10-19-ba345df-gemv/` and, for ZHEMV,
     `2026-10-19-1bc503a-zhemv/`). Smaller calls, DGEMV `'T'`/`'C'`
     (0.94–1.40×), ZGEMV `'T'`/`'C'` and calls beyond the measured sizes
-    stay on Accelerate. Counted in `AB_REPORT` and `AB_PROFILE`; not
-    traced.
+    stay on Accelerate. Counted in `AB_REPORT` and `AB_PROFILE`, with no
+    `staged=` field; not traced.
   - A range guard computed by the kernels from the FP64 exponents, at no
-    extra memory traffic: a call whose data leave double-float's
-    full-precision range (FP32's exponents, subnormals flushed on the GPU),
-    or that involves NaN or Inf, runs on Accelerate instead, before y is
-    written (counted as a `range` fallback; an A that cannot be mapped for
-    the GPU counts as `other`).
+    extra memory traffic. A call it refuses runs on Accelerate, before y is
+    written, counted as a `range` fallback (an A that cannot be mapped for
+    the GPU counts as `other`). It reads a complex element by its larger
+    part, so a part far below the other can lose bits, or all of its value,
+    with no fallback. Rule and limits:
+    [Exponent range](docs/vv/LIMITATIONS.md#exponent-range).
   - `tests/test_blas2.c` (19 tests, 957 cases; in `make test` and
     `make ci-local`, including a check of the `AB_MODE=auto` rule against
     its measurements and of the kernels' FP64-to-double-float conversion,
@@ -119,9 +120,9 @@ All notable changes to this project will be documented in this file.
   and the componentwise error 1.4–2.8× the default's; its new last case
   re-initializes in fast mode, runs every case again and fails one above 4×.
   The proven error bounds (`docs/vv/PRECISION_ENVELOPE.md` §1.2) cover the
-  default kernels only; none is proven for this mode. Measured on an M2 Max
-  on the kernels before register prefetch (d1a10ff), 1.05–1.11× faster for
-  DGEMM and ZGEMM of N = 2048–4096. `ab_precision_mode()` returns the mode,
+  default kernels only; none is proven for this mode. On an M2 Max, 1.05–1.08×
+  faster for DGEMM and ZGEMM of N = 2048 and 4096
+  ([data](benchmarks/results/2026-11-06-8b48826-pretag/README.md#ab_precisionfast)). `ab_precision_mode()` returns the mode,
   the `AB_REPORT`, `AB_PROFILE` and `AB_TRACE` headers add
   `AB_PRECISION=fast` in fast mode, and `make calibrate` refuses it. The
   default kernels are compiled as before and keep the 1.4.0 bits
@@ -154,34 +155,44 @@ All notable changes to this project will be documented in this file.
     classical componentwise bound, the library's own GEMM uses bitwise
     unchanged, and routing through every path above;
     `benchmarks/bench_strassen.c` measures speed and accuracy.
-  - Measured on an M2 Max at 274e778, before this port and on 1.4.0's
-    kernels (`benchmarks/results/2026-10-20-274e778-strassen/`): resident
-    DGEMMs ran 1.08× faster at N = 4096, 1.12× at 8192 and 0.94× at 2048,
-    ZGEMMs 1.10–1.16×, with about 10% less energy per product. The normwise
-    error was 1.9× the classical GEMM's on mixed-sign data and half of it on
-    positive data; with rows of A and columns of B scaled by 2^±16 the
-    componentwise error (relative to |A||B|) rose from 1.5×10⁻¹⁴ to
-    2–7×10⁴. Not yet measured on 1.6.0.
+  - Measured on an M2 Max at 8b48826
+    (`benchmarks/results/2026-11-06-8b48826-pretag/strassen/`): resident DGEMMs run
+    1.07× faster at N = 4096, 1.13× at 8192 and 0.93× at 2048, ZGEMMs
+    1.06–1.13× from 4096 up and 0.89× at 2048. Through the BLAS ABI with
+    `AB_MODE=gpu`, DGEMM gains 1.05–1.09× and ZGEMM 1.04×. The normwise error
+    is 1.9× the classical GEMM's on mixed-sign data and half of it on positive
+    data; with rows of A and columns of B scaled by 2^±16 the componentwise
+    error (relative to |A||B|) rises from 1.5×10⁻¹⁴ to 2–7×10⁴. At 274e778,
+    before this port and on 1.4.0's kernels, it used about 10% less energy per
+    product (`benchmarks/results/2026-10-20-274e778-strassen/`); that was not
+    repeated.
 
 ### Changed
 - **32 × 32 tiles are chosen by grid size, not output size**
   (`use_narrow_tiles` in `src/apple_bottom.m`). In 1.5.0 they took every C of
-  at most 480 × 480 elements. Alone on the GPU, a grid's time rises in steps
+  at most 480 × 480 elements, a tall C on a stricter test. Alone on the GPU, a
+  grid's time rises in steps
   of about 33 threadgroups for every kernel, and a step of 32 × 32
   threadgroups costs 0.29× a 64 × 64 step, so the finer tiles win while a
   grid takes few steps. They now take grids of up to 1024 of their
-  threadgroups alone on the GPU, 441 for ZGEMM's concurrent products. The
-  64 × 64 kernels keep grids of at most 64 threadgroups, where they
-  prefetch, unless the 32 × 32 grid has at most 239. A tall C (M ≥ 4N) moves
+  threadgroups alone on the GPU, 441 for ZGEMM's concurrent products. Alone on
+  the GPU, the 64 × 64 kernels keep grids of at most 64 threadgroups, where
+  they prefetch, unless the 32 × 32 grid has at most 239. In ZGEMM's concurrent
+  products they do not prefetch and keep no such grid. A tall C (M ≥ 4N) moves
   off the tall-skinny kernel while the 32 × 32 grid takes at most twice as
   many steps. Kernel GPU time on M2 Max against the 1.5.0 rule: 1.04–1.46×
   on most squares from 544 × 544 to 1024 × 1024 (0.92–0.98× at 832 × 832 and
-  896 × 896), 1.41× on 600 × 600 × 9140, 1.26× on 1024 × 40 × 4608, and down
+  896 × 896), 1.41× on 600 × 600 × 9140 and 1.26× on 1024 × 40 × 4608 as one
+  product alone (1.07× and 1.08× as ZGEMM's three concurrent products), and down
   to 0.88× on some concurrent tall-skinny products with tiny grids. Over all
   482 measured lines the geometric mean is 1.043×; the 228 that change
   kernel run 1.093× faster (194 faster, 34 slower). Results are bitwise
   unchanged. Measurements:
-  `benchmarks/results/2026-10-25-2825d2a-narrow-tiles/`. The coverage cases
+  `benchmarks/results/2026-10-25-2825d2a-narrow-tiles/`. Those are kernel
+  times, and a whole call also converts its operands and C: through `dgemm_`
+  and `zgemm_` with the GPU forced, against 1.5.1, the five calls measured take
+  0.85–1.05× the time, with DGEMM 832² slower and ZGEMM 500 × 500 × 9140 'C','N'
+  level ([whole calls](benchmarks/results/2026-11-06-8b48826-pretag/README.md#narrow-tiles-in-whole-calls)). The coverage cases
   move to shapes that still reach each kernel: 1100 × 1000 for the 64 × 64
   prefetch instances, 4000 × 40 for tall-skinny.
 - **The device-buffer API converts its operands where they lie, across
@@ -226,17 +237,93 @@ All notable changes to this project will be documented in this file.
   9140 × 160 × 160 'N','N' call takes 0.78× the time with general alpha
   and beta (7.33 → 5.73 ms) and 0.71× with alpha alone; 160 × 160 × 9140
   'C','N', whose C is small, is unchanged (0.99×).
+- **A program that links apple-bottom ahead of its BLAS now gets apple-bottom's
+  `dgemv_`, `zgemv_` and `zhemv_`**, which 1.5 did not export. On the M2 Max
+  the large calls listed above go to the GPU, the rest to Accelerate, and on
+  any other chip all of them go to Accelerate. `AB_MODE=cpu` sends them all to
+  Accelerate; only link order restores another BLAS. Relinked with this
+  library, Quantum ESPRESSO's `dgemv_` and `zgemv_` move from OpenBLAS to
+  apple-bottom; its si64 energies, bands and forces do not change.
+- **An illegal argument to `dgemv_`, `zgemv_` or `zhemv_` ends the process**
+  with status 255: Accelerate's cblas names the argument and exits, as it has
+  for `dgemm_` and `zgemm_`, and the program's XERBLA is not called. With
+  apple-bottom linked first, the error-exit parts of Netlib's `dblat2` and
+  `zblat2` stop there, as those of `dblat3` and `zblat3` already did.
 
 ### Fixed
-- **A ZGEMM that reads a NaN or Inf in C runs on Accelerate**, on any route to
-  the GPU, as a DGEMM's has since 1.5.0. The epilogue's complex arithmetic,
+- **A ZGEMM through the BLAS ABI that reads a NaN or Inf in C runs on
+  Accelerate**, whether its epilogue would run on the GPU or on the host, as a
+  DGEMM's has since 1.5.0. The epilogue's complex arithmetic,
   which the GPU's follows bit for bit, made (NaN, NaN) of such an element: an
-  (Inf, y) lost its Inf, where Accelerate keeps it. Since 1.5.0. The calls count
+  (Inf, y) lost its Inf, where Accelerate keeps it. The host epilogue has
+  computed it this way since at least 1.3.0, and 1.5.0's GPU epilogue copied it.
+  `ab_dev_zgemm` has no Accelerate fallback and still applies its epilogue to
+  such a C. The calls count
   as `range` fallbacks. Results on finite C keep their bits; a call with a
   general alpha or beta scans C once on the host, the memory its epilogue reads
   anyway, and one with beta = 0 does not read C. `test_blas_abi` adds four
   cases, on the GPU epilogue's route and on the host epilogue's, and
   `test_staging`'s NaN and Inf cases now expect Accelerate.
+
+### Corrected claims
+- **"No silent errors outside FP32's exponent range" and "every product keeps
+  DD precision" (1.5.0).** Too strong. Some data passes the range guard and
+  loses accuracy with no fallback
+  ([what the guard misses](docs/vv/LIMITATIONS.md#what-the-guard-misses)). And a
+  product may lose bits where a larger product carries the element, which the
+  guard accepts because the loss stays at that element's rounding level.
+- **"ZGEMM keeps its imaginary part's accuracy" (1.5.0), and "3M's imaginary
+  part stays within 8 u²" (`docs/vv/LIMITATIONS.md`).** Too strong. The rule
+  between 3M and 4M reads each line's largest parts, not each element. Data
+  whose magnitudes spread widely within a line stays on 3M, and its imaginary
+  part reaches 26–887 u² depending on the call and route, against about 2 u² on
+  uniform data at those calls
+  ([Complex products](docs/vv/LIMITATIONS.md#complex-products)). Parts that leave
+  FP32's range are lost under either form.
+- **"A split inside the library is planned for 1.6.0" (README, roadmap, split
+  benchmark docs).** 1.6.0 has no such split: `dgemm_` and `zgemm_` make each
+  call on one engine, and the split stays in user code
+  (`benchmarks/bench_split.c`).
+
+### Known issues
+- **Some data passes the range guard and loses accuracy, with no fallback**
+  (since 1.5.0 for GEMM). On an M2 Max at 8b48826:
+  - imaginary parts far below the real parts, on the default routing for large
+    `zgemm_`, `zgemv_` and `zhemv_` calls: up to 3.7×10⁵ u² of the part's own
+    scale at 2⁻¹⁰⁰ of the real parts, where uniform data gives at most 2.3 u²,
+    and zero at 2⁻¹³⁰;
+  - in GEMM, values near 2⁻¹⁰⁶⁰ with products in range, which come back zero, on
+    the default routing for `zgemm_` 'T','T' 4096³;
+  - under `AB_MODE=gpu AB_MIN_GPU_DIM=0`, a DGEMM's small C with beta ≠ 0 in
+    elements with no products.
+
+  `AB_MODE=cpu` keeps every case within 2 u². Triggers, reasons and each call's
+  error: [What the guard misses](docs/vv/LIMITATIONS.md#what-the-guard-misses);
+  `benchmarks/probe_guard_gaps.c` runs these calls.
+- **`AB_MODE=gpu AB_MIN_GPU_DIM=0` now fails more of Netlib's and LAPACK's
+  tests than in 1.5.1**, because it now sends BLAS-2 calls of every size to the
+  GPU, at double-float accuracy. DGEMV and ZHEMV now exceed Netlib's limit of 16,
+  as DGEMM and ZGEMM already did, and LAPACK's test suite counts 4365 failed tests
+  against 3134. With `AB_MODE` unset every Netlib routine passes and LAPACK fails
+  1 test of about 2.04 million, against 2 in 1.5.1 and 0 with Netlib's own BLAS
+  ([runs and attribution](benchmarks/results/2026-11-06-8b48826-pretag/README.md#netlib-and-lapack)).
+- **The staged path is not calibrated.** `AB_MODE=auto` routes by 1.4.0's
+  table, measured on the host path. Forced calls now beat Accelerate on some
+  shapes the table keeps there: DGEMM 'N','N' 4096³ 200 ms against 225,
+  ZGEMM 'N','N' 4096³ 601 ms against 881. `make calibrate` measures the staged
+  path on your machine and writes a table for it.
+- **Forcing the GPU in Quantum ESPRESSO is not faster than Accelerate** on an M2
+  Max. On si64 at 8b48826, `AB_MODE=gpu` takes 1.04× the time of `AB_MODE=cpu` on
+  input B at 8 ranks, 1.06× at 1 rank and 1.09× on input A at 8 ranks (two runs
+  each), with the same energies. It takes 0.99–1.01× 1.5.1's time in the same runs.
+- **Special values follow Accelerate.** A ZGEMM through the BLAS ABI that reads a
+  NaN or Inf in C runs there, and Accelerate and Netlib differ on the other part
+  of some such elements ([Exponent range](docs/vv/LIMITATIONS.md#exponent-range)).
+- **macOS can stop a long GPU command buffer** while the display needs the GPU,
+  as under 1.5.0's Known issues. BLAS-ABI calls and the device BLAS-2 calls then
+  finish on the host path or on Accelerate, with a correct result. Other native
+  and device calls return `AB_ERROR_KERNEL_FAILED`, and some do not check and
+  return `AB_OK`: [the list](docs/vv/LIMITATIONS.md#command-buffers-stopped-by-macos).
 
 ## [1.5.1] - 2026-11-01
 
@@ -282,11 +369,11 @@ those of 1.5.0.
   `AB_HOST_PACK=1` keeps.
 - **No silent errors outside FP32's exponent range.** Rows and columns far
   from 1 are scaled by powers of two, and what the range guard cannot
-  certify runs on Accelerate.
+  certify runs on Accelerate. (Too strong; see Corrected claims under 1.6.0.)
 - **ZGEMM keeps its imaginary part's accuracy** when real and imaginary
   parts are imbalanced, by taking four real products instead of Gauss's
   three, decided per row and column in the BLAS ABI and the device-buffer
-  API.
+  API. (Too strong; see Corrected claims under 1.6.0.)
 - **Faster kernels with unchanged bits**: float4 tile loads, 32 × 32 tiles
   for small outputs, register prefetch on small grids, concurrent Gauss-3M
   products and pooled ZGEMM temporaries.
@@ -526,7 +613,8 @@ those of 1.5.0.
       of smaller entries and the sums; C is scaled back. A DGEMM alpha or
       beta outside 2^±20 joins C's scale.
     - A guard certifies from the scaled data that no sum can overflow and
-      every product keeps DD precision. Calls it cannot certify run on
+      every product keeps DD precision (too strong; see Corrected claims
+      under 1.6.0). Calls it cannot certify run on
       Accelerate, as do calls with NaN or Inf in A or B (or in C for DGEMM
       with beta ≠ 0). They are counted as a new fallback reason, `range`;
       the `AB_REPORT` fallback line ends `other=… range=…`.
@@ -547,7 +635,8 @@ those of 1.5.0.
     whose real and imaginary parts get different scales. Limits:
     `docs/vv/LIMITATIONS.md`, "Exponent range".
 - **ZGEMM's imaginary part keeps DD accuracy when real and imaginary parts
-  are imbalanced** (audit K-P1-2). Gauss's three-multiplication form
+  are imbalanced** (audit K-P1-2; too strong, see Corrected claims under 1.6.0).
+  Gauss's three-multiplication form
   computes Im(C) as (Ar+Ai)(Br+Bi) − ArBr − AiBi, whose rounding errors
   follow the larger real products. With imaginary parts 10⁻⁶ of the real
   ones, Im(C) missed its componentwise scale by about 10⁶ u², against about

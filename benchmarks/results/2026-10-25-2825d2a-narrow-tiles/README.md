@@ -94,7 +94,8 @@ predict each 2-D measurement (log ratio measured/predicted):
 | this validation | −3.5% to +1.0%, sd 2.0–3.7% | +2% to +15% |
 
 The lookup alone picks within 0.3% (mean) of the faster kernel on the 252
-prefetch-era lines. The rule replaces it with a few comparisons:
+lines of the prefetch-era calibration files (`kernel_sq_1x`, `kernel_sq_3x`,
+`kernel_rect`, `kernel_ts`). The rule replaces it with a few comparisons:
 - **Squares and rectangles:** thresholds. A step-ratio rule misjudges large
   64×64 grids, whose real steps drift from multiples of 33.
 - **Tall-skinny:** the step ratio, which no threshold on Gts matches.
@@ -120,6 +121,7 @@ time over the faster of the two kernels.
 | prefetch-era `kernel_sq_3x.txt` | 81 | 18 | 1.013 (0.987–1.179) | 1.6% / 18% | 0.2% / 3.9% |
 | prefetch-era `kernel_rect.txt` | 30 | 24 | 1.158 (0.987–1.460) | 17% / 46% | 0.1% / 1.4% |
 | prefetch-era `kernel_ts.txt` | 60 | 36 | 1.015 (0.884–1.259) | 2.5% / 26% | 0.9% / 13% |
+| prefetch-era `kernel_qe.txt` | 20 | 7 | 1.026 (1.000–1.314) | 2.8% / 31% | 0.0% / 0.0% |
 
 All 482 lines: 1.043×. The 228 rerouted lines run 1.093× faster: 194
 faster, 34 slower.
@@ -240,4 +242,4 @@ still hold at that clock.
 | `kernel_sq_rect.txt`, `kernel_ts.txt`, `kernel_np4.txt`, `kernel_gap20.txt`, `kernel_qe.txt` | Validation runs; shape lists in `shapes/`. |
 | `abbits_2825d2a.txt` | The 510-case harness hashes of 2825d2a, equal to dce55b5's. |
 
-Reproduce the tables: `python3 narrow_rule.py score kernel_*.txt ../2026-10-24-15ef7b9-prefetch/kernel_{sq_1x,sq_3x,rect,ts}.txt`; `python3 narrow_rule.py steps`; `python3 narrow_rule.py predict <files>`.
+Reproduce the tables: `python3 narrow_rule.py score kernel_*.txt ../2026-10-24-15ef7b9-prefetch/kernel_{sq_1x,sq_3x,rect,ts,qe}.txt`; `python3 narrow_rule.py steps`; `python3 narrow_rule.py predict <files>`.

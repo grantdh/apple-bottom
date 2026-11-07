@@ -254,9 +254,12 @@ bool ab_range_guard_c(const ab_line_stats_t* sa, const ab_line_stats_t* sb, ab_r
 //     rho(p, q) = (1 + p)(1 + q) / (p + q),  p = |Ai|/|Ar|, q = |Bi|/|Br|:
 // 2 for balanced parts, about 1/(2p) when p = q << 1 (or p = q >> 1). A ZGEMM
 // whose parts give rho above AB_GAUSS3M_MAX_RHO runs as 4M (docs/vv/
-// LIMITATIONS.md, "Complex products"): measured on M2 Max, 3M's imaginary
-// part stays within 8 u^2 of its componentwise scale up to rho = 4 (6.9 u^2
-// at K = 2048) and grows as about 2.3 rho u^2 above; 4M's stays near 1 u^2.
+// LIMITATIONS.md, "Complex products"): measured on M2 Max at M = N = 96 with
+// p = q, 3M's imaginary part stays within 8 u^2 of its componentwise scale up
+// to rho = 4 (6.9 u^2 at K = 2048) and grows as about 2.3 rho u^2 above; 4M's
+// stays near 1 u^2. The rule reads the largest parts of a line (of a matrix on
+// the native API), not of each element, so data spread within a line stays on
+// 3M and goes further (same section).
 #define AB_GAUSS3M_MAX_RHO 4.0
 
 static inline double ab_gauss3m_rho(double p, double q) {

@@ -8,8 +8,8 @@
 //   - normwise, the bound of one level of Winograd's variant (Higham, Accuracy
 //     and Stability of Numerical Algorithms, 2nd ed., Thm 23.3 with n0 = K/2):
 //       max|Ĉ - C| <= (4.5 K^2 + 48 K) u max|A| max|B|,  u = 2^-45;
-//   - and, as a result rounded to FP32 could meet that worst case on random
-//     data for K >~ 4096, the Frobenius error relative to |A||B| against
+//   - and, as a result rounded to FP32 can meet that worst case on uniform
+//     data from K around 8192, the Frobenius error relative to |A||B| against
 //     FRO_TOL, which any loss of the DD low words would exceed.
 // The classical GEMM is checked against its componentwise bound
 // |Ĉ - C| <= (K + 2) u |A||B| on the same data, the bound Strassen does not

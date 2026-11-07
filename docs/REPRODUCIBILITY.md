@@ -14,6 +14,9 @@ library build they came from:
 | Quantum ESPRESSO, 1.5.0 release check (the 1.5.0 candidate before the staged-path fix, and 1.4.0, on one QE build) | `benchmarks/qe/run_campaign.sh` with the folder's `plans/` | `benchmarks/results/2026-10-28-415cb5d-qe-si64-release-check/` |
 | One GEMM split between Accelerate and the GPU | `make build/bench_split`, then `benchmarks/split/run.sh <out>` (about 35 minutes; see `benchmarks/split/README.md`) | `benchmarks/results/2026-10-28-415cb5d-hybrid-split/` |
 | Quantum ESPRESSO, why GPU calls left the staged path and the fix | `benchmarks/qe/run_campaign.sh` with the folder's `plans/` and `tools/` | `benchmarks/results/2026-10-29-351d56c-staged-refusals/` |
+| Strassen-Winograd on 1.6.0: speed and accuracy | `make build/bench_strassen`, then the commands in `docs/STRASSEN.md` | `benchmarks/results/2026-11-06-8b48826-pretag/` (`strassen/`) |
+| Data the range guard lets through | `make build/probe_guard_gaps`, then the three runs in its header | `benchmarks/results/2026-11-06-8b48826-pretag/` (`guard-gaps/`) |
+| 1.6.0 against 1.5.1: result bits, Netlib, LAPACK, Quantum ESPRESSO, narrow tiles in paired runs | a harness kept outside this repository; the folder's README describes each run | `benchmarks/results/2026-11-06-8b48826-pretag/` (`comparison/`, `narrow/`, `narrow2/`, `narrow-summary.txt`) |
 
 Environment of the 2026-10-14 runs: MacBook Pro (Mac14,6), Apple M2 Max, 38-core
 GPU, 8P+4E CPU cores, 64 GB; macOS 27.0.1 (26A434); macOS SDK 26.0, Apple

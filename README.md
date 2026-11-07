@@ -32,9 +32,10 @@ There is also a [double-float FFT](#double-float-fft): batched 1D, 2D and
 It depends on where the matrices live.
 
 - **Matrices kept on the GPU** (C API): for large GEMMs, yes, modestly.
-  On an M2 Max the GPU overtakes Accelerate from about N = 1,500 for DGEMM
-  and N = 1,000 for ZGEMM, and from N = 2,048 runs at 1.10–1.16×
-  Accelerate's speed for DGEMM and 1.37–1.39× for ZGEMM.
+  On an M2 Max, for square products, the GPU overtook Accelerate from about
+  N = 1,500 for DGEMM and N = 1,000 for ZGEMM at 3253a22, before 1.4.0, and at
+  8b48826, from N = 2,048 to 8,192, it runs at 1.05–1.17× Accelerate's speed for
+  DGEMM and 1.38–1.53× for ZGEMM ([tables](#performance)).
 - **One BLAS call at a time from host memory** (`dgemm_`/`zgemm_`): not by
   default. Since 1.5.0 a call routed to the GPU copies its operands into
   GPU buffers the library reuses, and the GPU converts them from FP64 to DD
@@ -42,8 +43,11 @@ It depends on where the matrices live.
   default routing (`AB_MODE=auto`) still follows 1.4.0's measurement, in
   which Accelerate was faster for every DGEMM and every Quantum ESPRESSO
   shape, and keeps those calls on Accelerate. Forced onto the GPU, Quantum
-  ESPRESSO takes 1.01–1.06× its time on Accelerate (1.4.0: 1.06–1.43×).
-  Linking apple-bottom is safe but, on this hardware, not a speed-up yet.
+  ESPRESSO takes 1.04–1.09× its time on Accelerate ([Performance](#performance)).
+  On this hardware linking apple-bottom is not a speed-up yet. In the release
+  check below, Quantum ESPRESSO's si64 energies are the same in every mode, but
+  some other data that reaches the GPU by default loses accuracy with no
+  fallback ([what the guard misses](docs/vv/LIMITATIONS.md#what-the-guard-misses)).
 - **Accelerate and the GPU together** (in user code for now): splitting one
   GEMM between them finished 1.5–1.9× sooner than the faster engine alone
   in all 20 well-scaled cases of the
@@ -52,8 +56,8 @@ It depends on where the matrices live.
   80 s of back-to-back work, where the power limit slows the GPU. The split
   keeps no more CPU cores busy than Accelerate alone
   ([CPU use](benchmarks/results/2026-10-28-415cb5d-hybrid-split/cpu-use/)).
-  `dgemm_` and `zgemm_` do not split calls in 1.5.0; a split inside the
-  library is planned for 1.6.0.
+  `dgemm_` and `zgemm_` make each call on one engine; a split inside the library
+  is on the [roadmap](docs/ROADMAP.md#next).
 - **Matrix-vector products** (DGEMV, ZGEMV, ZHEMV) **on a matrix kept on the
   GPU**: yes, by a lot. They are bound by memory bandwidth, not arithmetic,
   and at 8192²–16384² the GPU runs them at 260–360 GB/s, 2.8–36× Accelerate's
@@ -104,9 +108,19 @@ ZGEMM rates count 8N³ operations for both; the GPU uses Gauss's
 three-multiplication form, which performs 25% fewer. Normwise relative
 error of the GPU result: 1.8×10⁻¹⁴ at N = 512 to 5.1×10⁻¹⁴ at N = 4096.
 
+At 8b48826, on 1.6.0's kernels, wall time per call, Accelerate time ÷ GPU time,
+second of two passes
+([data](benchmarks/results/2026-11-06-8b48826-pretag/strassen/),
+[setup](docs/STRASSEN.md#speed)):
+
+| N | 2048 | 3072 | 4096 | 6144 | 8192 |
+|---|---:|---:|---:|---:|---:|
+| DGEMM | 1.13× | 1.09× | 1.17× | 1.13× | 1.05× |
+| ZGEMM | 1.53× | 1.51× | 1.44× | 1.38× | 1.50× |
+
 **Through the BLAS ABI, on 1.4.0's host path** (`ab_*gemm_blas`, i.e.
 `dgemm_`/`zgemm_`, with packing and conversion on the CPU and transfer
-included; `AB_HOST_PACK=1` selects that path in 1.5.0), Accelerate time ÷
+included; `AB_HOST_PACK=1` selects that path since 1.5.0), Accelerate time ÷
 GPU time, median of 7 after 3 warm-ups, measured at 52f1880
 ([data](benchmarks/results/2026-10-14-52f1880-calibrate/)):
 
@@ -127,7 +141,7 @@ the staged path, and files the result as your chip's table
 request with it adds your chip for everyone), or point `AB_DISPATCH_TABLE` at
 its `dispatch_table.txt`.
 
-The staged path, the default in 1.5.0, has not been calibrated on the M2
+The staged path, the default since 1.5.0, has not been calibrated on the M2
 Max yet. With registered, well-scaled operands it ran large squares faster
 than Accelerate in the
 [split benchmark](benchmarks/results/2026-10-28-415cb5d-hybrid-split/)
@@ -148,12 +162,13 @@ earlier runs with QE compiled `-O0`):
   SCF iterations.
 - `AB_MODE=auto` keeps all of QE's GEMMs on Accelerate; its wall time is
   within −1.1% to +0.6% of `cpu` mode's.
-- Forcing the GPU (`AB_MODE=gpu`) is not faster than Accelerate. With the
-  fix, 1.5.0 takes 1.01–1.06× the `cpu` time (mean of two `gpu` runs
-  against one `cpu` run): input B at 1 rank 191.3 s against 182.5 s, A at
-  8 ranks 102.4 s against 96.6 s, B at 8 ranks 54.6 s against 54.3 s. The
-  release check's build before the fix took 1.17–1.20× in all four
-  configurations, and 1.4.0 on the same QE build 1.06–1.43×.
+- Forcing the GPU (`AB_MODE=gpu`) is not faster than Accelerate. At 8b48826, on
+  QE develop c7587f9, the mean of two runs against two `cpu` runs takes 1.04× on
+  B at 8 ranks, 1.06× on B at 1 rank and 1.09× on A at 8 ranks, and 1.5.1 in the
+  same runs 1.02×, 1.05× and 1.09×
+  ([data](benchmarks/results/2026-11-06-8b48826-pretag/README.md#quantum-espresso)).
+  On the build above, 1.5.0 with the fix took 1.01–1.06×, the release check's
+  build before the fix 1.17–1.20×, and 1.4.0 1.06–1.43×.
 
 ## BLAS-2: matrix-vector products
 
@@ -207,9 +222,12 @@ five runs ([data](benchmarks/results/2026-10-19-ba345df-gemv/), ZHEMV
 - **Accuracy:** 2.5×10⁻¹⁶ to 1×10⁻¹⁵ relative to |A||x| on these matrices,
   against 2×10⁻¹⁷ to 2×10⁻¹⁶ for Accelerate: double-float level, about ten
   times FP64's error. The kernels also track the FP64 exponents of every
-  product, at no extra memory traffic, and a call whose data fall outside
-  double-float's full-precision range (FP32's exponents), or that involves
-  NaN or Inf, runs on Accelerate instead, before y is written.
+  product, at no extra memory traffic, and a call whose data leave
+  double-float's range, or whose sums of products, x, alpha or beta are not
+  finite, runs on Accelerate instead, before y is written
+  ([rule](docs/vv/LIMITATIONS.md#exponent-range)). A part of a complex element
+  far below the other can lose bits with no fallback
+  ([what the guard misses](docs/vv/LIMITATIONS.md#what-the-guard-misses)).
 - **One-shot calls** (`dgemv_`, `zgemv_`, `zhemv_`, `ab_*gemv_blas`) map A
   for the GPU on every call, at 10–22 ms/GB. On the M2 Max (38-core GPU),
   where this was measured, `AB_MODE=auto` sends one to the GPU only where it
@@ -384,10 +402,11 @@ error at most 13u²|ab| + 3u²|c|, so a GEMM with inner dimension K is within
   current one. Every variant computes each output the same way. Long dot
   products are renormalized every 128 terms.
 - ZGEMM uses Gauss's three-multiplication form, three real DD GEMMs
-  instead of four, unless its real and imaginary parts are imbalanced
-  enough to cost the imaginary part its accuracy; then it takes four. The
-  BLAS ABI and the device-buffer API decide per row of op(A) and column of
-  op(B), the native API per matrix
+  instead of four, unless the largest real and imaginary parts it reads are
+  imbalanced past a measured threshold; then it takes four. The BLAS ABI
+  and the device-buffer API read them per row of op(A) and column of op(B),
+  the native API per matrix. Data whose imbalance those largest parts do not
+  show stays on three products, and its imaginary part can lose accuracy
   ([details](docs/vv/LIMITATIONS.md#complex-products)).
 - Opt-in, one level of Strassen-Winograd replaces each large real product
   by seven half-size ones and 15 block additions, an eighth fewer
@@ -451,6 +470,12 @@ without it the kernels give the bits of 1.4.0.
     matrix whose nonzero entries span more than about 2⁷⁸ (10²³) can still
     lose precision in its products there.
   - Data inside those windows computes exactly as before.
+  - Some data passes the guard and loses accuracy with no fallback: imaginary
+    parts far below the real parts, values below 2⁻¹⁰⁴², and a small C with
+    beta ≠ 0 that has no products to carry it. Through the BLAS ABI
+    `AB_MODE=cpu` avoids all of them; the device API does not read it.
+    [What the guard misses](docs/vv/LIMITATIONS.md#what-the-guard-misses)
+    gives the triggers and measured errors.
   - [Details](docs/vv/LIMITATIONS.md#exponent-range).
 - **Per-call overhead.** Through 1.4.0's BLAS ABI, which packed and
   converted on the CPU, every measured shape was slower than Accelerate
@@ -460,9 +485,9 @@ without it the kernels give the bits of 1.4.0.
   on the GPU only with the matrix resident, or for the large one-shot shapes
   listed under [BLAS-2](#blas-2-matrix-vector-products).
 - **BLAS-2 range.** A DGEMV/ZGEMV/ZHEMV row whose largest |a_ij x_j| is below
-  about 10⁻¹⁸ max |x| (or above 10³³), or a product that loses bits to
-  FP32's range and matters at double-float precision, sends the call to
-  Accelerate: a matrix scaled far outside 10⁻¹⁸–10³³ always runs there.
+  about 10⁻¹⁸ max |x| (or above 10³³ max |x|) sends the call to Accelerate, so a
+  matrix scaled far outside 10⁻¹⁸–10³³ always runs there.
+  [The full rule and what it misses](docs/vv/LIMITATIONS.md#exponent-range).
 - **Threads.** Calls on different matrices may come from different
   threads; one matrix, pool or session must not be used by two threads at
   once. All work shares one Metal command queue.

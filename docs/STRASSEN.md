@@ -7,11 +7,11 @@ multiplies two matrices with 7 products of half-size blocks instead of 8,
 plus 15 additions of blocks. That removes an eighth of the multiplications,
 at the price of a weaker error bound: it is normwise, not componentwise.
 
-Measured on an M2 Max at 274e778 (October 20, 2026, on 1.4.0's kernels), it
-made resident DGEMMs 1.08× faster at N = 4096 and 1.12× at 8192, and ZGEMMs
-1.10–1.16×, with about 10% less energy per product. Those runs predate its
-port to 1.6.0 and have not been repeated on it ([Speed](#speed)). On data of
-uniform scale and mixed sign the error is 1.9× the classical DD GEMM's.
+Measured on an M2 Max at 8b48826 (November 6, 2026), it makes resident DGEMMs
+1.07× faster at N = 4096 and 1.13× at 8192, and ZGEMMs 1.06–1.13× from 4096 up.
+At 2048 it loses, 0.93× and 0.89× ([Speed](#speed)). At 274e778, on 1.4.0's
+kernels, it used about 10% less energy per product; that was not repeated. On
+data of uniform scale and mixed sign the error is 1.9× the classical DD GEMM's.
 Where rows or columns differ widely in scale, the small elements of C have no
 correct digits.
 
@@ -113,95 +113,104 @@ compiled without fast math as the library's shaders are.
 
 ## Speed
 
-These runs are from October 20, 2026, at 274e778: before the port, on 1.4.0's
-kernels and its BLAS ABI. Since then 1.5.0 made the kernels faster with the
-same bits (float4 tile loads, 32 × 32 tiles for small grids, register
-prefetch, concurrent Gauss-3M products), kept the classical ZGEMM's
-temporaries between calls, and moved the BLAS ABI's conversions to the GPU
-(the staged path). All three change the comparison, so the tables below are
-not 1.6.0's; they are to be repeated on 1.6.0 before its release.
-
 **Setup.**
-- Machine and power: M2 Max (38-core GPU), macOS 27.0.1, AC power.
-- Build: `bench_strassen speed` at 274e778.
+- Machine and power: M2 Max (38-core GPU), macOS 27.0.1, AC power from a 140 W
+  adapter.
+- Build: `bench_strassen speed` at 8b48826.
 - Method: matrices resident on the GPU (native API, no conversion or
   transfer timed); median of 5 calls (3 for ZGEMM 8192) after a 0.5 s
   warm-up of each method. Classical and Strassen calls alternate back to
   back; Accelerate (`cblas_*gemm`, FP64, all CPU cores) runs on its own.
-- Passes: two, ten minutes apart. The tables give the second; the
-  first's speedup is in brackets where it was also on AC
-  ([data](../benchmarks/results/2026-10-20-274e778-strassen/)).
+- Passes: two for the squares. The tables give the second, with the first's
+  speedup in brackets. The first pass of DGEMM 6144 and 8192 is left out:
+  something else on the machine slowed it, and Accelerate's 8192 median read
+  2742 ms against 1772 ms. The rectangular shapes ran one pass.
+- [Data](../benchmarks/results/2026-11-06-8b48826-pretag/strassen/). The runs at
+  274e778, on 1.4.0's kernels and BLAS ABI, are in
+  [its folder](../benchmarks/results/2026-10-20-274e778-strassen/).
 
 DGEMM, square, wall time per call:
 
 | N | classical DD | Strassen | Strassen speedup | Accelerate | Strassen vs Accelerate |
 |---:|---:|---:|---:|---:|---:|
-| 2048 | 25.9 ms | 27.5 ms | 0.94× (0.94×) | 28.9 ms | 1.05× |
-| 2560 | 49.9 ms | 47.0 ms | 1.06× (1.05×) | 55.7 ms | 1.19× |
-| 3072 | 85.7 ms | 80.5 ms | 1.06× (1.06×) | 90.8 ms | 1.13× |
-| 3584 | 134.2 ms | 127.9 ms | 1.05× (1.04×) | 147.0 ms | 1.15× |
-| 4096 | 200.0 ms | 185.3 ms | **1.08×** (1.08×) | 222.8 ms | 1.20× |
-| 6144 | 674.6 ms | 612.1 ms | **1.10×** (1.10×) | 729.6 ms | 1.19× |
-| 8192 | 1645 ms | 1468 ms | **1.12×** | 1762 ms | 1.20× |
+| 2048 | 25.1 ms | 26.9 ms | 0.93× (0.93×) | 28.5 ms | 1.06× |
+| 2560 | 48.1 ms | 45.6 ms | 1.05× (1.05×) | 52.8 ms | 1.16× |
+| 3072 | 83.0 ms | 78.3 ms | 1.06× (1.06×) | 90.5 ms | 1.16× |
+| 3584 | 128.5 ms | 124.3 ms | 1.03× (1.04×) | 142.7 ms | 1.15× |
+| 4096 | 191.8 ms | 178.9 ms | **1.07×** (1.07×) | 224.6 ms | 1.26× |
+| 6144 | 643.1 ms | 590.6 ms | **1.09×** | 726.7 ms | 1.23× |
+| 8192 | 1695 ms | 1505 ms | **1.13×** | 1772 ms | 1.18× |
 
-At 8192 the classical DD GEMM runs at 668 GFLOP/s. Strassen's effective rate
-there (2N³ per call) is 749 GFLOP/s. The ceiling is 8/7 = 1.143×.
+At 8192 the classical DD GEMM runs at 649 GFLOP/s. Strassen's effective rate
+there (2N³ per call) is 731 GFLOP/s. The ceiling is 8/7 = 1.143×.
 
 DGEMM, rectangular and odd, M × K × N:
 
 | shape | classical DD | Strassen | Strassen speedup | Accelerate |
 |---|---:|---:|---:|---:|
-| 8192 × 4096 × 8192 | 830.8 ms | 742.4 ms | 1.12× | 876.4 ms |
-| 4096 × 8192 × 4096 | 420.4 ms | 380.2 ms | 1.11× | 456.0 ms |
-| 8192 × 2048 × 8192 | 431.8 ms | 383.6 ms | 1.13× | 429.6 ms |
-| 16384 × 4096 × 4096 (tall-skinny kernel) | 965.3 ms | 852.1 ms | 1.13× | 859.3 ms |
-| 4096 × 4096 × 16384 | 840.2 ms | 747.3 ms | 1.12× | 907.7 ms |
-| 4097³ | 207.9 ms | 201.2 ms | 1.03× | 255.3 ms |
-| 2048 × 32768 × 2048 | 419.3 ms | 446.1 ms | **0.94×** | 477.6 ms |
+| 8192 × 4096 × 8192 | 757.8 ms | 685.5 ms | 1.11× | 875.0 ms |
+| 4096 × 8192 × 4096 | 382.9 ms | 358.4 ms | 1.07× | 457.1 ms |
+| 8192 × 2048 × 8192 | 378.5 ms | 345.9 ms | 1.09× | 432.9 ms |
+| 16384 × 4096 × 4096 (tall-skinny kernel) | 896.3 ms | 802.6 ms | 1.12× | 845.5 ms |
+| 4096 × 4096 × 16384 | 798.2 ms | 702.3 ms | 1.14× | 904.2 ms |
+| 4097³ | 198.6 ms | 194.1 ms | 1.02× | 245.0 ms |
+| 2048 × 32768 × 2048 | 412.4 ms | 423.0 ms | **0.97×** | 466.1 ms |
+
+The classical median at 4096 × 4096 × 16384 sits above its fastest call
+(758.2 ms). Fastest against fastest (Strassen 688.1 ms) gives 1.10×.
 
 ZGEMM, square, wall time per call and the speedup in command-buffer GPU time
 alone:
 
 | N | classical DD | Strassen | speedup, wall | speedup, GPU time | Accelerate | Strassen vs Accelerate |
 |---:|---:|---:|---:|---:|---:|---:|
-| 2048 | 82.6 ms | 83.4 ms | 0.99× (0.99×) | 0.95× | 111.4 ms | 1.34× |
-| 3072 | 269.6 ms | 244.6 ms | 1.10× (1.11×) | 1.06× | 366.0 ms | 1.50× |
-| 4096 | 622.0 ms | 563.4 ms | 1.10× (1.11×) | 1.08× | 877.3 ms | 1.56× |
-| 6144 | 2212.6 ms | 1932.0 ms | 1.15× (1.14×) | 1.11× | 2935.8 ms | 1.52× |
-| 8192 | 5266 ms | 4529 ms | 1.16× (1.14×) | 1.13× | 6987 ms | 1.54× |
+| 2048 | 73.1 ms | 81.7 ms | 0.89× (0.89×) | 0.90× | 111.6 ms | 1.37× |
+| 3072 | 244.9 ms | 236.8 ms | 1.03× (1.03×) | 1.03× | 368.7 ms | 1.56× |
+| 4096 | 612.2 ms | 542.2 ms | 1.13× (1.06×) | 1.13× | 881.1 ms | 1.63× |
+| 6144 | 2116.3 ms | 1891.6 ms | 1.12× (1.10×) | 1.13× | 2919.7 ms | 1.54× |
+| 8192 | 4616 ms | 4166 ms | 1.11× (1.12×) | 1.11× | 6933 ms | 1.66× |
 
-At 274e778 the classical ZGEMM allocated its four Gauss-3M temporaries afresh
-on every call. Their first use cost 3–150 ms between commit and the GPU
-starting, while Strassen's were kept in its workspace. That is why the
-wall-time speedup exceeds the GPU-time one. Since 1.5.0 the classical ZGEMM
-keeps its temporaries too (pooled ZGEMM temporaries), so on 1.6.0 the
-wall-time speedup should fall toward the GPU-time column.
+- **4096.** The second pass's classical calls ran in two states (median
+  612.2 ms, fastest 574.5 ms). The first pass's 1.06× is the steadier figure.
+- **Wall against GPU time.** At 274e778 the classical ZGEMM allocated its
+  temporaries afresh on every call and its wall-time speedup ran ahead of the
+  GPU-time one (1.15× against 1.11× at 6144). Since 1.5.0 it keeps them, and
+  the two columns agree.
+- **8192.** Neither method's buffers fit the default pool, so a call shows
+  56–84 ms between commit and the GPU starting. With `AB_STAGING_MB=4000` that
+  falls to 0.2 ms for the classical product and 11 ms for Strassen. The speedup
+  is then 1.12×, and the two passes differ by more than the time saved.
 
 **Through the BLAS ABI** (`ab_*gemm_blas`, column-major FP64 in and out,
-`AB_MODE=gpu`; at 274e778 the host path, which converted on the CPU):
-Strassen speeds up the whole call less than the native one. Packing,
-FP64 ⇄ DD conversion and the epilogue take the same time as before.
+`AB_MODE=gpu`, the staged path; median of 5 calls for DGEMM and 3 for ZGEMM):
+the speedup is smaller than the native one in the tables above, except at DGEMM
+4096. Outside DGEMM 4096 the time saved per call shrinks too (DGEMM 8192:
+138–149 ms against 190 ms; ZGEMM 6144: 88 ms against 173–225 ms), so a fixed
+conversion cost does not explain the difference. A Strassen call on this path also
+runs one more command buffer and takes its workspace from a second pool slot. These
+runs record no stage times, so the difference is not apportioned. DGEMM ran twice.
 
-| call | GPU | GPU with `AB_STRASSEN=1` | speedup |
-|---|---:|---:|---:|
-| DGEMM 4096³ | 490.7 ms | 476.2 ms | 1.03× |
-| DGEMM 6144³ | 1344.1 ms | 1259.4 ms | 1.07× |
-| DGEMM 8192³ | 2749.8 ms | 2600.3 ms | 1.06× |
-| ZGEMM 4096³ | 1193.3 ms | 1139.7 ms | 1.05× |
-| ZGEMM 6144³ | 3363.7 ms | 3169.8 ms | 1.06× |
+| call | GPU | GPU with `AB_STRASSEN=1` | speedup | Accelerate, above |
+|---|---:|---:|---:|---:|
+| DGEMM 4096³ | 200.4, 201.7 ms | 188.7, 188.5 ms | 1.06×, 1.07× | 224.6 ms |
+| DGEMM 6144³ | 670.0, 697.2 ms | 638.9, 656.1 ms | 1.05×, 1.06× | 726.7 ms |
+| DGEMM 8192³ | 1660, 1756 ms | 1522, 1606 ms | 1.09×, 1.09× | 1772 ms |
+| ZGEMM 4096³ | 601.3 ms | 579.0 ms | 1.04× | 881.1 ms |
+| ZGEMM 6144³ | 2108.6 ms | 2020.3 ms | 1.04× | 2919.7 ms |
 
-These 'N','N' shapes stay slower than Accelerate (DGEMM 4096: 230.0 ms),
-which is why `AB_MODE=auto` keeps them there.
+These 'N','N' calls are faster on the GPU than on Accelerate even without
+Strassen. `AB_MODE=auto` still sends them to Accelerate, because its table was
+measured on 1.4.0's host path and the staged path has not been calibrated.
 
 ### Where the time goes
 
-At 4096 the classical product takes 199.7 ms of GPU time and Strassen
-185.0 ms; 7/8 of the classical time would be 174.7 ms. The 10 ms difference
-comes in two halves of about 5 ms each:
-- **Half-size products** run a little less efficiently. Seven 2048³ products
-  take 7 × 25.7 = 179.6 ms, at 670 GFLOP/s against 690 for 4096³.
+Measured at 274e778 and not repeated. The classical product took 199.7 ms of
+GPU time at 4096 and Strassen 185.0 ms; 7/8 of the classical time would be
+174.7 ms. The 10 ms difference came in two halves of about 5 ms each:
+- **Half-size products** ran a little less efficiently. Seven 2048³ products
+  took 7 × 25.7 = 179.6 ms, at 670 GFLOP/s against 690 for 4096³.
 - **Block passes.** On their own (measured with the products left out) they
-  take 6.0 ms. They move about 2.1 GB at ~350 GB/s, close to the memory
+  took 6.0 ms. They move about 1.9 GB at ~320 GB/s, close to the memory
   bandwidth, so a faster addition kernel would not help.
 
 Things that were tried or ruled out:
@@ -219,34 +228,41 @@ Things that were tried or ruled out:
 Both mean new kernels, and this path deliberately uses the existing ones.
 
 Odd dimensions cost a little. 4097³ splits into 2049³ products, each with a
-65th mostly empty tile row and column, so it gains only 1.03×. Shapes whose
-half-size products fill the GPU poorly lose: 2048 × 32768 × 2048 has
-1024 × 1024 outputs per product, 256 threadgroups.
+33rd mostly empty tile row and column, so it gains only 1.02×.
+
+A small M and N with a long K loses: 2048 × 32768 × 2048 has 1024 × 1024 outputs
+per product, which take the 32 × 32 tiles. A product then has 1024 threadgroups,
+as the classical GEMM has. At the same K a 32 × 32 threadgroup costs about 0.29× a
+64 × 64 one (kernel times at 2825d2a), so by those times seven products at half K
+cost about as much as the classical product, and the block passes come on top.
 
 Strassen's first call for a shape grows the workspace (now the pool's
-buffers): 31 ms more than a later call at 4096 and 48 ms at 8192. The first call in a process also
-compiles its kernel, about 20 ms. From about 2.5 GB of buffers per command
-buffer (DGEMM 8192, ZGEMM ≥ 6144), each Strassen call shows 12–50 ms
+buffers): 25–28 ms more than a later call for DGEMM 4096 and 42–46 ms for ZGEMM
+4096. The first call in a process
+also compiles its kernel (about 20 ms at 274e778). From about 2.5 GB of buffers
+per command buffer (DGEMM 8192, ZGEMM ≥ 6144), each Strassen call shows 11–59 ms
 between commit and the GPU starting, about 1% of the call. Shared and private
-storage for the workspace measured the same.
+storage for the workspace measured the same at 274e778.
 
 ### Threshold
 
 `AB_STRASSEN_MIN` applies to M, N and K together. The default, 4096, is where
 every measured shape gained:
-- square from 1.08×;
-- rectangular 1.11–1.13×;
-- the odd 4097³ 1.03×.
+- square DGEMM 1.07–1.13×, square ZGEMM 1.06–1.13×;
+- rectangular 1.07–1.14×;
+- the odd 4097³ 1.02×.
 
-Square sizes from 2560 to 3584 gain 1.04–1.06×, and 2048 loses (0.94×). A
-small M and N loses even with a long K. To use Strassen below 4096, set
+Square DGEMMs from 2560 to 3584 gain 1.03–1.06× and ZGEMM 3072 gains 1.03×;
+2048 loses (0.93×, ZGEMM 0.89×). A small M and N loses even with a long K
+(0.97×). To use Strassen below 4096, set
 `AB_STRASSEN_MIN` after timing your own shapes. For example, 2560 suits
 square-ish products of that size.
 
 ## Energy
 
-Energy per product, from a no-sudo probe (IOReport "GPU Energy" and SMC
-power, the library called in a loop for 30 s, in 10 s windows;
+Measured at 274e778, on 1.4.0's kernels, and not repeated. Energy per product,
+from a no-sudo probe (IOReport "GPU Energy" and SMC power, the library called
+in a loop for 30 s, in 10 s windows;
 [output](../benchmarks/results/2026-10-20-274e778-strassen/)).
 The charger was recharging the battery during the run, so the DC input
 (PDTR) is not usable. The system figures are the SMC system total (PSTR)
@@ -265,10 +281,11 @@ Accelerate still uses less than half.
 
 ### The bounds
 
-Write u for the unit roundoff of the DD arithmetic. The library's precision
-analysis ([precision envelope](vv/PRECISION_ENVELOPE.md)) uses a conservative
-u = 8u₃₂² = 2⁻⁴⁵ (u₃₂ = 2⁻²⁴) for the GEMM inner loop's fused multiply-add;
-DD addition and multiplication are tighter (3u₃₂² and 5u₃₂²). For C = AB with
+Write u = 8u₃₂² = 2⁻⁴⁵ (u₃₂ = 2⁻²⁴), a round figure for the DD arithmetic. The
+[precision envelope](vv/PRECISION_ENVELOPE.md) proves `dd_mul` ≤ 6.000001u₃₂²,
+`dd_fma` ≤ 13u₃₂²|ab| + 3u₃₂²|c| to first order and GEMM ≤ (3K + 13)u₃₂²|A||B|,
+which K u covers for K ≥ 3. It states no bound for `dd_add`; the
+Strassen-Winograd row below takes its error to be at most u. For C = AB with
 inner dimension K, ‖X‖ the largest |x_ij| and |A||B| the product of the
 elementwise absolute values:
 
@@ -294,21 +311,23 @@ ones. When rows of A or columns of B differ widely in scale, the small ones
 lose relative accuracy. Data of uniform scale does not notice.
 
 Both bounds are worst cases, and actual errors are far smaller. The
-Strassen-Winograd one is loose: at K = 4096 it allows 2.1 × 10⁻⁶ ‖A‖ ‖B‖,
-which a result rounded to FP32 would meet on random data. That is why
-`tests/test_strassen.c` also holds Strassen to a Frobenius error of 2⁻⁴⁰
-relative to ‖ |A||B| ‖_F: losing the DD low words would exceed it.
+Strassen-Winograd one is loose. For entries uniform in [−1, 1), rounding the
+exact result to FP32 leaves a largest error of 3.8 × 10⁻⁶ ‖A‖ ‖B‖ at 4096³,
+where the bound allows 2.2 × 10⁻⁶, and 7.6 × 10⁻⁶ at 8192³, where it allows
+8.6 × 10⁻⁶. So from about K = 8192 the bound does not rule out a result with no
+DD low words. That is why `tests/test_strassen.c` also holds Strassen to a
+Frobenius error of 2⁻⁴⁰ relative to ‖ |A||B| ‖_F: losing the DD low words would
+exceed it.
 
 ### Measured
 
 Errors against a Dot2 reference of all of C (compensated FP64, as accurate
-as twice FP64 precision), `bench_strassen accuracy` at 274e778
-([data](../benchmarks/results/2026-10-20-274e778-strassen/)). The algorithm
-is unchanged by the port, and 1.5.0's kernel changes keep every product's
-bits, so these errors are expected to hold on 1.6.0 for the default
-precision; they are to be measured again with the speed runs. Under
-`AB_PRECISION=fast` the products use its accumulation, a combination that
-has not been measured. The three kinds of data are:
+as twice FP64 precision), `bench_strassen accuracy` at 8b48826, for DGEMM
+([data](../benchmarks/results/2026-11-06-8b48826-pretag/strassen/accuracy_175832.csv)).
+They equal the runs at 274e778 to every digit shown here, as they should: the port leaves the algorithm as it was, and 1.5.0's
+kernel changes keep every product's bits. ZGEMM's are checked by the tests
+below. Under `AB_PRECISION=fast` the products use its accumulation, a
+combination that has not been measured. The three kinds of data are:
 
 - **uniform**: entries uniform in [−1, 1);
 - **positive**: entries in [0, 1), so there is no cancellation and |C| = |A||B|;
@@ -325,7 +344,7 @@ Normwise error, ‖Ĉ − C‖_F / ‖C‖_F:
 | 4096³ | positive | 3.75e−14 | 1.90e−14 | 0.51 | 1.57e−15 |
 | 6144³ | positive | 5.23e−14 | 2.62e−14 | 0.50 | 2.19e−15 |
 | 8192³ | positive | 5.29e−14 | 2.67e−14 | 0.50 | 2.22e−15 |
-| 4096³ | scaled | 5.11e−14 | 9.58e−14 | 1.87 | 2.14e−15 |
+| 4096³ | scaled | 5.11e−14 | 9.58e−14 | 1.88 | 2.14e−15 |
 | 8192³ | scaled | 7.19e−14 | 1.35e−13 | 1.87 | 3.01e−15 |
 | 4097³ | uniform | 5.09e−14 | 9.51e−14 | 1.87 | 1.07e−15 |
 | 8192 × 4096 × 8192 | uniform | 5.09e−14 | 9.52e−14 | 1.87 | 2.14e−15 |
@@ -346,22 +365,27 @@ Componentwise error, max_ij |Ĉ − C|_ij / (|A||B|)_ij:
 
 What this shows:
 
-- **Uniform scale, mixed signs.** Strassen's error is 1.87× the classical
-  one at every size and shape, a little under one bit. Both grow like √K;
-  against Accelerate's FP64 error the classical one is 24× larger,
-  Strassen's 45×.
+- **Uniform scale, mixed signs.** Strassen's normwise error is 1.87× the
+  classical one at every size and shape, a little under one bit; its
+  componentwise error is 1.5–2.0×. Both normwise errors grow like √K. Against
+  Accelerate's normwise FP64 error the classical one is 24× larger and
+  Strassen's 45×, except at 4097³, where Accelerate's error is half its 4096³
+  value and the factors are 47× and 89×.
 - **Positive data.** Strassen's error is half the classical one. With no
   cancellation, the error is dominated by the long accumulation in each
   product, and Strassen's products are half as long. (The March 2026 probes
   that reported Strassen "gaining bits" used data in [0, 1).) This is a
   property of the data, not of the algorithm.
-- **Scaled rows and columns.** The normwise error is unchanged (1.87×), but
-  componentwise Strassen fails. The error in the small elements is 10⁴ times
-  the size of their own terms, so they have no correct digits; their error
-  relative to |C_ij| reaches 6 × 10⁹. The classical GEMM keeps 1.5 × 10⁻¹⁴ on
-  the same data, as its componentwise bound promises.
-- The normwise errors are about 10⁵ below the worst-case bound: max|Ĉ − C|
-  is 2.7 × 10⁻¹¹ ‖A‖ ‖B‖ at 4096³, against 2.1 × 10⁻⁶ allowed.
+- **Scaled rows and columns.** The normwise error is unchanged (1.87–1.88×), but
+  componentwise Strassen fails. The error in the small elements reaches 2–7 × 10⁴
+  times the size of their own terms, depending on the shape, so they have no
+  correct digits; their error relative to |C_ij| reaches 6 × 10⁹. On the same
+  data the classical GEMM's error stays within 1.6 × 10⁻¹⁴ of its own terms, as
+  its componentwise bound promises, and reaches 7.5 × 10⁻⁶ relative to |C_ij|.
+- The normwise errors are 2 × 10⁴ to 4 × 10⁵ below the worst-case bound across
+  the six shapes, with the smallest margin on positive data. At 4096³, max|Ĉ − C|
+  is 2.7 × 10⁻¹¹ ‖A‖ ‖B‖ on uniform data and 1.1 × 10⁻¹⁰ on positive data,
+  against 2.2 × 10⁻⁶ allowed.
 
 Use it for well-scaled problems where a normwise error of ~10⁻¹³ is enough.
 Don't use it where small elements of C must be accurate relative to their own

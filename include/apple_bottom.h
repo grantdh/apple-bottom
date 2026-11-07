@@ -44,13 +44,12 @@
 //   DGEMM through N=6144 and every Quantum ESPRESSO si64 shape is slower on the GPU
 //   (0.06-0.84x); other ZGEMMs reach at most 1.02x (6144, one operand transposed).
 //   Anchor: benchmarks/results/2026-10-14-52f1880-calibrate/
-//   (`make calibrate`, which on 1.5.0 measures the staged path). AB_MODE=auto, the
+//   (`make calibrate`, which since 1.5.0 measures the staged path). AB_MODE=auto, the
 //   default, follows that measurement (src/dispatch_table.h): a call goes to the GPU
 //   only where the GPU was >= 1.10x faster. DSYRK/ZHERK end-to-end behavior expected
 //   to be similar to GEMM (same conversion path); not directly measured.
-//   Quantum ESPRESSO si64 forced onto the staged path (AB_MODE=gpu) takes 1.01-1.06x
-//   its time on Accelerate, with the same energies:
-//   benchmarks/results/2026-10-29-351d56c-staged-refusals/.
+//   Quantum ESPRESSO si64 forced onto the staged path (AB_MODE=gpu) is not faster than
+//   Accelerate, with the same energies: README.md, Performance.
 //
 // API Limits:
 //   - Matrix size: rows * cols <= AB_MAX_MATRIX_ELEMENTS (2^31 - 1) and the DD
@@ -67,7 +66,8 @@
 //     operations carry and ab_matrix_download removes; a matrix spanning
 //     more keeps FP32's range relative to its scale. The BLAS ABI scales
 //     rows of op(A) and columns of op(B) instead, and runs on Accelerate
-//     what that cannot keep in range (docs/vv/LIMITATIONS.md, Exponent range).
+//     what its guard refuses; some data passes the guard and loses accuracy
+//     (docs/vv/LIMITATIONS.md, Exponent range and What the guard misses).
 // =============================================================================
 #ifndef APPLE_BOTTOM_H
 #define APPLE_BOTTOM_H

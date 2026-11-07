@@ -148,8 +148,7 @@ than on Accelerate (0.09–0.76×,
 [`benchmarks/results/2026-10-14-52f1880-calibrate/`](../../benchmarks/results/2026-10-14-52f1880-calibrate/)),
 and `AB_MODE=auto` keeps those calls on Accelerate. 1.5.0's staged path
 converts on the GPU and has not been calibrated yet; QE forced onto it
-takes 1.01–1.06× its time on Accelerate
-([`benchmarks/results/2026-10-29-351d56c-staged-refusals/`](../../benchmarks/results/2026-10-29-351d56c-staged-refusals/)).
+is not faster than Accelerate ([README](../../README.md#performance)).
 The tall-skinny kernel still matters for `AB_MODE=gpu` and for callers
 that keep matrices resident on the GPU.
 
