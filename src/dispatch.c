@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <locale.h>
 #include <math.h>
 #include <pthread.h>
 #include <stddef.h>
@@ -15,6 +16,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/sysctl.h>
+#include <xlocale.h>
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
@@ -345,10 +347,19 @@ static bool parse_range(const char *s, int *lo, int *hi) {
     return *hi == 0 || *hi >= *lo;
 }
 
+// The C locale, made once: a table reads the same whatever locale the host set.
+static locale_t g_c_locale;
+static pthread_once_t g_c_locale_once = PTHREAD_ONCE_INIT;
+static void make_c_locale(void) { g_c_locale = newlocale(LC_ALL_MASK, "C", NULL); }
+
+// A value of a split row: ASCII digits with an optional point and exponent
+// (scripts/ingest_split.py's NUMBER), finite and not negative.
 static bool parse_double(const char *s, double *out) {
+    if (!*s || *s == '-' || strspn(s, "0123456789+.eE") != strlen(s)) return false;
+    pthread_once(&g_c_locale_once, make_c_locale);
     char *end;
     errno = 0;
-    double v = strtod(s, &end);
+    double v = strtod_l(s, &end, g_c_locale);
     if (errno || *end || end == s || !isfinite(v) || v < 0) return false;
     *out = v;
     return true;
@@ -520,28 +531,30 @@ static void split_config_from_env(ab_dispatch_config_t *c) {
 
     const char *table = getenv("AB_SPLIT_TABLE");
     char err[200];
-    if (table && *table) {
-        if (!ab_split_load_table(c, table, err, sizeof err)) {
-            fprintf(stderr, "apple-bottom: AB_SPLIT_TABLE=%s: %s; keeping %s\n", table, err,
-                    c->split_table);
-        } else {
-            snprintf(c->split_table, sizeof c->split_table, "file:%s", table);
-            bool other_chip = c->split_table_chip[0] && c->chip[0] &&
-                              strcasecmp(c->split_table_chip, c->chip);
-            bool other_cores = c->split_table_gpu_cores && c->gpu_cores &&
-                               c->split_table_gpu_cores != c->gpu_cores;
-            if (other_chip || other_cores) {
-                char tc[40], hc[40];
-                fprintf(stderr, "apple-bottom: AB_SPLIT_TABLE=%s was measured on %s with %s; this "
-                                "machine is %s with %s; using it anyway\n",
-                        table, c->split_table_chip, cores_text(c->split_table_gpu_cores, tc, sizeof tc),
-                        c->chip[0] ? c->chip : "an unknown chip", cores_text(c->gpu_cores, hc, sizeof hc));
-            }
+    bool named = table && *table;
+    if (named && strlen(table) + sizeof "file:" > sizeof c->split_table) {
+        // The label names the file in every report: one cut short would not.
+        fprintf(stderr, "apple-bottom: AB_SPLIT_TABLE=%s: path longer than %zu bytes; keeping %s\n", table,
+                sizeof c->split_table - sizeof "file:", c->split_table);
+    } else if (named && !ab_split_load_table(c, table, err, sizeof err)) {
+        fprintf(stderr, "apple-bottom: AB_SPLIT_TABLE=%s: %s; keeping %s\n", table, err, c->split_table);
+    } else if (named) {
+        snprintf(c->split_table, sizeof c->split_table, "file:%s", table);
+        bool other_chip = c->split_table_chip[0] && c->chip[0] && strcasecmp(c->split_table_chip, c->chip);
+        bool other_cores = c->split_table_gpu_cores && c->gpu_cores &&
+                           c->split_table_gpu_cores != c->gpu_cores;
+        if (other_chip || other_cores) {
+            char tc[40], hc[40];
+            fprintf(stderr, "apple-bottom: AB_SPLIT_TABLE=%s was measured on %s with %s; this "
+                            "machine is %s with %s; using it anyway\n",
+                    table, c->split_table_chip, cores_text(c->split_table_gpu_cores, tc, sizeof tc),
+                    c->chip[0] ? c->chip : "an unknown chip", cores_text(c->gpu_cores, hc, sizeof hc));
         }
     }
     if (!strncmp(c->split_table, "none:", 5))
-        fprintf(stderr, "apple-bottom: AB_SPLIT=1, but %s has no split table and AB_SPLIT_TABLE names "
-                        "none; nothing is split\n", c->chip[0] ? c->chip : "this chip (unknown)");
+        fprintf(stderr, "apple-bottom: AB_SPLIT=1, but %s has no split table and %s; nothing is split\n",
+                c->chip[0] ? c->chip : "this chip (unknown)",
+                named ? "the AB_SPLIT_TABLE file could not be used" : "AB_SPLIT_TABLE names none");
 }
 
 void ab_dispatch_config_from_env(ab_dispatch_config_t *c) {

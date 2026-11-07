@@ -29,6 +29,7 @@
 #include <Accelerate/Accelerate.h>
 #include <complex.h>
 #include <limits.h>
+#include <locale.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -679,7 +680,7 @@ static void test_config_from_env(void) {
 // AB_SPLIT: rows, plan, cut and slices, tables and their evidence
 // =============================================================================
 
-// The provisional M2 Max rows of benchmarks/split/start_table.txt.
+// The provisional M2 Max rows of benchmarks/split/start_M2-Max-38c.txt.
 static const char *const START_ROWS =
     "zgemm N N N m=2048: n=2048: k=2048: ratio=2 gf=0.5 scalars=z f=0.60;"   // 0 squares
     "dgemm N N N m=2048: n=2048: k=2048: ratio=2 gf=0.5 scalars=z f=0.55;"   // 1 squares
@@ -1000,10 +1001,30 @@ static void test_split_load_table(void) {
     expect(write_temp("# no rows: nothing is split\n", path, sizeof path), "mkstemp");
     expect(ab_split_load_table(&c, path, err, sizeof err) && c.split_nrows == 0, "a file without rows is valid");
     unlink(path);
-    // The provisional table loads with its five rows.
+    // The M2 Max's starting values: the rows of START_ROWS, with its identity.
+    ab_dispatch_config_t start = with_split_rows(AB_DISPATCH_AUTO, START_ROWS);
+    expect(ab_split_load_table(&c, AB_SOURCE_ROOT "/benchmarks/split/start_M2-Max-38c.txt", err, sizeof err) &&
+           c.split_nrows == 5 && !memcmp(c.split_rows, start.split_rows, 5 * sizeof c.split_rows[0]) &&
+           !strcmp(c.split_table_chip, "Apple M2 Max") && c.split_table_gpu_cores == 38,
+           "benchmarks/split/start_M2-Max-38c.txt: %s", err);
+    // The table for trying a chip: the same shapes at f = 0.50, naming no chip.
     expect(ab_split_load_table(&c, AB_SOURCE_ROOT "/benchmarks/split/start_table.txt", err, sizeof err) &&
-           c.split_nrows == 5 && !strcmp(c.split_table_chip, "Apple M2 Max") && c.split_table_gpu_cores == 38,
+           c.split_nrows == 5 && !c.split_table_chip[0] && !c.split_table_gpu_cores,
            "benchmarks/split/start_table.txt: %s", err);
+    for (int i = 0; i < c.split_nrows && i < 5; i++) {
+        start.split_rows[i].share = 0.5;
+        expect(!memcmp(&c.split_rows[i], &start.split_rows[i], sizeof c.split_rows[i]),
+               "start_table.txt row %d is not the M2 Max's shape at f = 0.50", i);
+    }
+    // A number reads the same in a locale with a decimal comma.
+    ab_split_row_t r;
+    if (setlocale(LC_NUMERIC, "de_DE.UTF-8") || setlocale(LC_NUMERIC, "fr_FR.UTF-8")) {
+        expect(ab_split_parse_row("zgemm N N N gf=0.5 f=0.52", &r) == 1 && r.share == 0.52 && r.min_gf == 0.5,
+               "in a comma locale, f=0.52 read as %g", r.share);
+        setlocale(LC_NUMERIC, "C");
+    }
+    expect(ab_split_parse_row("zgemm N N N f=0x1p-1", &r) == -1 && ab_split_parse_row("zgemm N N N f=-0", &r) == -1,
+           "hex and negative shares must be malformed");
     finish();
 }
 
@@ -1054,6 +1075,16 @@ static void test_split_config_from_env(void) {
     ab_dispatch_config_from_env(&c);
     expect(c.split_on && !c.split_nrows && !strcmp(c.split_table, "none:uncalibrated-chip"),
            "an unreadable AB_SPLIT_TABLE keeps the chip's (no) table: %s", c.split_table);
+    // A path the label cannot hold whole is refused, not cut short.
+    char longpath[AB_DISPATCH_LABEL_LEN + 16];
+    memset(longpath, 'x', sizeof longpath - 1);
+    longpath[0] = '/';
+    longpath[sizeof longpath - 1] = '\0';
+    setenv("AB_SPLIT_TABLE", longpath, 1);
+    fprintf(stderr, "(expected notes follow) ");
+    ab_dispatch_config_from_env(&c);
+    expect(c.split_on && !c.split_nrows && !strcmp(c.split_table, "none:uncalibrated-chip"),
+           "an AB_SPLIT_TABLE path longer than the label must be refused: %s", c.split_table);
     // The split leaves the routing table alone.
     ab_dispatch_config_t off = builtin_auto();
     setenv("AB_SPLIT", "1", 1);

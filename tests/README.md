@@ -511,7 +511,7 @@ classes (`'C'` is `'T'`), and the `AB_DISPATCH_TABLE` format: parsing,
 loading, malformed and missing files.
 
 For `AB_SPLIT` it checks the split table's row format and file loading
-(`AB_SPLIT_TABLE`, and `benchmarks/split/start_table.txt`), the plan of a
+(`AB_SPLIT_TABLE`, `benchmarks/split/start_table.txt` and `start_M2-Max-38c.txt`), the plan of a
 call (window edges, exact TRANS, scalar classes, GFLOP and ratio limits,
 the code's K limits, first match, the cut, its clamps and floors, huge
 shapes), that `AB_MODE=cpu` and `AB_MIN_GPU_DIM` come before it and
