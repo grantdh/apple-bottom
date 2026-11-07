@@ -1,0 +1,47 @@
+program                               ref-auto                      old-auto                      new-auto                       old-gpu                       new-gpu                   noblas2-gpu
+dtest.out          rc=0 11s p=392085 f=0 ill=0    rc=0 7s p=392085 f=0 ill=0    rc=0 4s p=392085 f=0 ill=0rc=0 367s p=391531 f=585 ill=0rc=0 785s p=391417 f=699 ill=0rc=0 372s p=391531 f=585 ill=0
+ztest.out          rc=0 17s p=404768 f=0 ill=0   rc=0 11s p=404768 f=0 ill=0    rc=0 8s p=404768 f=0 ill=0rc=0 445s p=403270 f=1639 ill=0rc=0 965s p=402661 f=2242 ill=0rc=0 532s p=403270 f=1639 ill=0
+dtest_rfp.out        rc=0 1s p=13128 f=0 ill=0     rc=0 1s p=13128 f=0 ill=0     rc=0 0s p=13128 f=0 ill=0     rc=0 4s p=13126 f=2 ill=0    rc=0 19s p=13126 f=2 ill=0     rc=0 3s p=13126 f=2 ill=0
+ztest_rfp.out        rc=0 1s p=13144 f=0 ill=0     rc=0 2s p=13144 f=0 ill=0     rc=0 1s p=13144 f=0 ill=0     rc=0 5s p=13140 f=4 ill=0    rc=0 23s p=13140 f=4 ill=0     rc=0 3s p=13140 f=4 ill=0
+dnep.out              rc=0 0s p=8886 f=0 ill=0      rc=0 0s p=8886 f=0 ill=0      rc=0 0s p=8886 f=0 ill=0    rc=0 37s p=8805 f=81 ill=0    rc=0 57s p=8796 f=90 ill=0    rc=0 46s p=8805 f=81 ill=0
+dsep.out             rc=0 0s p=89729 f=0 ill=0     rc=0 0s p=89729 f=0 ill=0     rc=0 0s p=89729 f=0 ill=0    rc=0 10s p=89729 f=0 ill=0    rc=0 53s p=89729 f=0 ill=0    rc=0 14s p=89729 f=0 ill=0
+dse2.out             rc=0 1s p=89729 f=0 ill=0     rc=0 1s p=89729 f=0 ill=0     rc=0 0s p=89729 f=0 ill=0    rc=0 23s p=89723 f=6 ill=0   rc=0 86s p=89714 f=15 ill=0    rc=0 29s p=89723 f=6 ill=0
+dsvd.out           rc=0 11s p=117903 f=0 ill=0   rc=0 11s p=117903 f=0 ill=0    rc=0 6s p=117903 f=0 ill=0  rc=0 169s p=117903 f=0 ill=0  rc=0 933s p=117903 f=0 ill=0  rc=0 150s p=117903 f=0 ill=0
+dec.out             rc=0 0s p=501286 f=0 ill=0    rc=0 0s p=501286 f=0 ill=0    rc=0 0s p=501286 f=0 ill=0       rc=0 46s p=35 f=0 ill=0       rc=0 80s p=35 f=0 ill=0       rc=0 57s p=35 f=0 ill=0
+ded.out              rc=0 0s p=13013 f=0 ill=0     rc=0 0s p=13013 f=0 ill=0     rc=0 0s p=13013 f=0 ill=0     rc=0 4s p=13005 f=8 ill=0   rc=0 18s p=13000 f=13 ill=0     rc=0 5s p=13005 f=8 ill=0
+dgg.out               rc=0 0s p=8772 f=0 ill=0      rc=0 0s p=8772 f=0 ill=0      rc=0 0s p=8772 f=0 ill=0      rc=0 2s p=8772 f=0 ill=0    rc=0 13s p=8760 f=12 ill=0      rc=0 3s p=8772 f=0 ill=0
+dgd.out              rc=0 0s p=11130 f=0 ill=0     rc=0 0s p=11130 f=0 ill=0     rc=0 0s p=11130 f=0 ill=0  rc=0 76s p=10660 f=401 ill=0 rc=0 117s p=10420 f=641 ill=0  rc=0 92s p=10660 f=401 ill=0
+dsb.out                rc=0 0s p=885 f=0 ill=0       rc=0 0s p=885 f=0 ill=0       rc=0 0s p=885 f=0 ill=0       rc=0 0s p=885 f=0 ill=0       rc=0 0s p=885 f=0 ill=0       rc=0 0s p=885 f=0 ill=0
+dsg.out              rc=0 0s p=33516 f=0 ill=0     rc=0 1s p=33516 f=0 ill=0     rc=0 0s p=33516 f=0 ill=0    rc=0 10s p=33514 f=2 ill=0    rc=0 40s p=33512 f=4 ill=0    rc=0 12s p=33514 f=2 ill=0
+dbak.out                 rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0
+dgbal.out                rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0
+dgbak.out                rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0
+dbb.out               rc=0 0s p=6000 f=0 ill=0      rc=0 0s p=6000 f=0 ill=0      rc=0 0s p=6000 f=0 ill=0      rc=0 0s p=6000 f=0 ill=0      rc=0 4s p=6000 f=0 ill=0      rc=0 0s p=6000 f=0 ill=0
+dglm.out                rc=0 0s p=56 f=0 ill=0        rc=0 0s p=56 f=0 ill=0        rc=0 0s p=56 f=0 ill=0        rc=0 0s p=56 f=0 ill=0        rc=0 1s p=56 f=0 ill=0        rc=0 0s p=56 f=0 ill=0
+dgqr.out              rc=0 0s p=1740 f=0 ill=0      rc=0 0s p=1740 f=0 ill=0      rc=0 0s p=1740 f=0 ill=0      rc=0 0s p=1740 f=0 ill=0      rc=0 2s p=1739 f=1 ill=0      rc=0 0s p=1740 f=0 ill=0
+dgsv.out               rc=0 0s p=417 f=0 ill=0       rc=0 0s p=417 f=0 ill=0       rc=0 0s p=417 f=0 ill=0       rc=0 0s p=417 f=0 ill=0       rc=0 2s p=417 f=0 ill=0       rc=0 0s p=417 f=0 ill=0
+dcsd.out               rc=0 0s p=608 f=0 ill=0       rc=0 0s p=608 f=0 ill=0       rc=0 0s p=608 f=0 ill=0       rc=0 0s p=608 f=0 ill=0       rc=0 2s p=608 f=0 ill=0       rc=0 0s p=608 f=0 ill=0
+dlse.out               rc=0 0s p=104 f=0 ill=0       rc=0 0s p=104 f=0 ill=0       rc=0 0s p=104 f=0 ill=0       rc=0 0s p=103 f=1 ill=0       rc=0 1s p=100 f=4 ill=0       rc=0 0s p=103 f=1 ill=0
+dbal.out                 rc=2 0s p=0 f=0 ill=0         rc=2 0s p=0 f=0 ill=0         rc=2 0s p=0 f=0 ill=0         rc=2 0s p=0 f=0 ill=0         rc=2 0s p=0 f=0 ill=0         rc=2 0s p=0 f=0 ill=0
+znep.out              rc=0 0s p=8886 f=0 ill=0      rc=0 0s p=8884 f=2 ill=0      rc=0 0s p=8885 f=1 ill=0   rc=0 44s p=8746 f=140 ill=0   rc=0 52s p=8730 f=156 ill=0   rc=0 47s p=8746 f=140 ill=0
+zsep.out             rc=0 1s p=77456 f=0 ill=0     rc=0 1s p=77456 f=0 ill=0     rc=0 0s p=77456 f=0 ill=0    rc=0 16s p=77456 f=0 ill=0    rc=0 58s p=77456 f=0 ill=0    rc=0 14s p=77456 f=0 ill=0
+zse2.out             rc=0 1s p=77456 f=0 ill=0     rc=0 1s p=77456 f=0 ill=0     rc=0 0s p=77456 f=0 ill=0    rc=0 38s p=77456 f=0 ill=0    rc=0 73s p=77448 f=8 ill=0    rc=0 32s p=77456 f=0 ill=0
+zsvd.out            rc=0 14s p=84608 f=0 ill=0    rc=0 10s p=84608 f=0 ill=0     rc=0 9s p=84608 f=0 ill=0   rc=0 217s p=84608 f=0 ill=0   rc=0 749s p=84604 f=4 ill=0   rc=0 200s p=84608 f=0 ill=0
+zec.out               rc=0 0s p=5999 f=0 ill=0      rc=0 0s p=5999 f=0 ill=0      rc=0 0s p=5999 f=0 ill=0        rc=0 5s p=33 f=0 ill=0        rc=0 5s p=33 f=0 ill=0        rc=0 4s p=33 f=0 ill=0
+zed.out              rc=0 0s p=12808 f=0 ill=0     rc=0 0s p=12808 f=0 ill=0     rc=0 0s p=12808 f=0 ill=0    rc=0 4s p=12778 f=30 ill=0   rc=0 20s p=12771 f=37 ill=0    rc=0 4s p=12778 f=30 ill=0
+zgg.out               rc=0 0s p=8772 f=0 ill=0      rc=0 0s p=8772 f=0 ill=0      rc=0 0s p=8772 f=0 ill=0      rc=0 7s p=8768 f=4 ill=0    rc=0 13s p=8731 f=41 ill=0      rc=0 4s p=8768 f=4 ill=0
+zgd.out              rc=0 0s p=11118 f=0 ill=0     rc=0 0s p=11118 f=0 ill=0     rc=0 0s p=11118 f=0 ill=0  rc=0 83s p=10932 f=177 ill=0 rc=0 116s p=10818 f=302 ill=0  rc=0 77s p=10932 f=177 ill=0
+zsb.out                rc=0 0s p=890 f=0 ill=0       rc=0 0s p=890 f=0 ill=0       rc=0 0s p=890 f=0 ill=0       rc=0 0s p=890 f=0 ill=0       rc=0 1s p=890 f=0 ill=0       rc=0 0s p=890 f=0 ill=0
+zsg.out              rc=0 1s p=33516 f=0 ill=0     rc=0 1s p=33516 f=0 ill=0     rc=0 1s p=33516 f=0 ill=0   rc=0 12s p=33465 f=51 ill=0   rc=0 45s p=33443 f=73 ill=0   rc=0 16s p=33465 f=51 ill=0
+zbal.out                 rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0
+zbak.out                 rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0
+zgbal.out                rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0
+zgbak.out                rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0         rc=0 0s p=0 f=0 ill=0
+zbb.out               rc=0 0s p=6000 f=0 ill=0      rc=0 0s p=6000 f=0 ill=0      rc=0 0s p=6000 f=0 ill=0      rc=0 0s p=6000 f=0 ill=0      rc=0 2s p=6000 f=0 ill=0      rc=0 0s p=6000 f=0 ill=0
+zglm.out                rc=0 0s p=56 f=0 ill=0        rc=0 0s p=56 f=0 ill=0        rc=0 0s p=56 f=0 ill=0        rc=0 0s p=56 f=0 ill=0        rc=0 1s p=56 f=0 ill=0        rc=0 0s p=56 f=0 ill=0
+zgqr.out              rc=0 0s p=1740 f=0 ill=0      rc=0 0s p=1740 f=0 ill=0      rc=0 0s p=1740 f=0 ill=0      rc=0 0s p=1740 f=0 ill=0      rc=0 2s p=1739 f=1 ill=0      rc=0 0s p=1740 f=0 ill=0
+zgsv.out               rc=0 0s p=417 f=0 ill=0       rc=0 0s p=417 f=0 ill=0       rc=0 0s p=417 f=0 ill=0       rc=0 0s p=417 f=0 ill=0       rc=0 1s p=416 f=1 ill=0       rc=0 0s p=417 f=0 ill=0
+zcsd.out               rc=0 0s p=608 f=0 ill=0       rc=0 0s p=608 f=0 ill=0       rc=0 0s p=608 f=0 ill=0       rc=0 0s p=608 f=0 ill=0       rc=0 1s p=608 f=0 ill=0       rc=0 0s p=608 f=0 ill=0
+zlse.out               rc=0 0s p=104 f=0 ill=0       rc=0 0s p=104 f=0 ill=0       rc=0 0s p=104 f=0 ill=0       rc=0 0s p=101 f=3 ill=0       rc=0 1s p=89 f=15 ill=0       rc=0 0s p=101 f=3 ill=0
+TOTAL p/f/ill/info: {'ref-auto': [2037333, 0, 0, 0], 'old-auto': [2037331, 2, 0, 0], 'new-auto': [2037332, 1, 0, 0], 'old-gpu': [1527076, 3134, 0, 10], 'new-gpu': [1525850, 4365, 0, 10], 'noblas2-gpu': [1527076, 3134, 0, 10]}
+programs whose rc or failure count differs across these runs: ['dtest.out', 'ztest.out', 'dtest_rfp.out', 'ztest_rfp.out', 'dnep.out', 'dse2.out', 'ded.out', 'dgg.out', 'dgd.out', 'dsg.out', 'dgqr.out', 'dlse.out', 'znep.out', 'zse2.out', 'zsvd.out', 'zed.out', 'zgg.out', 'zgd.out', 'zsg.out', 'zgqr.out', 'zgsv.out', 'zlse.out']

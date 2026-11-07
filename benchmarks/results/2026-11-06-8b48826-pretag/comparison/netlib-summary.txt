@@ -1,0 +1,71 @@
+===== dblat2
+routine                  ref            old.auto            new.auto             old.gpu             new.gpu
+DGEMV                   PASS                PASS                PASS                PASS      SUSPECT(36.72)
+DGBMV                   PASS                PASS                PASS                PASS                PASS
+DSYMV                   PASS                PASS                PASS                PASS                PASS
+DSBMV                   PASS                PASS                PASS                PASS                PASS
+DSPMV                   PASS                PASS                PASS                PASS                PASS
+DTRMV                   PASS                PASS                PASS                PASS                PASS
+DTBMV                   PASS                PASS                PASS                PASS                PASS
+DTPMV                   PASS                PASS                PASS                PASS                PASS
+DTRSV                   PASS                PASS                PASS                PASS                PASS
+DTBSV                   PASS                PASS                PASS                PASS                PASS
+DTPSV                   PASS                PASS                PASS                PASS                PASS
+DSYR2                   PASS                PASS                PASS                PASS                PASS
+DSPR2                   PASS                PASS                PASS                PASS                PASS
+rc/fatal/half: {'ref.errF': ('0', 0, 0), 'old.auto.errF': ('0', 0, 0), 'new.auto.errF': ('0', 0, 0), 'old.gpu.errF': ('0', 0, 0), 'new.gpu.errF': ('0', 0, 0)}
+error-exit runs:
+  ref.errT       rc=0 routines_with_errx_result=13 computational_rows=13 last: [' DSPR2  PASSED THE TESTS OF ERROR-EXITS', ' DSPR2  PASSED THE COMPUTATIONAL TESTS (   481 CALLS)']
+  old.auto.errT  rc=0 routines_with_errx_result=13 computational_rows=13 last: [' DSPR2  PASSED THE TESTS OF ERROR-EXITS', ' DSPR2  PASSED THE COMPUTATIONAL TESTS (   481 CALLS)']
+  new.auto.errT  rc=255 routines_with_errx_result=0 computational_rows=0 last: ['   FOR BETA              0.0   1.0   0.9', ' ROUTINES PASS COMPUTATIONAL TESTS IF TEST RATIO IS LESS THAN   16.00']
+===== dblat3
+routine                  ref            old.auto            new.auto             old.gpu             new.gpu
+DGEMM                   PASS                PASS                PASS      SUSPECT(42.52)      SUSPECT(42.52)
+DSYMM                   PASS                PASS                PASS                PASS                PASS
+DTRMM                   PASS                PASS                PASS                PASS                PASS
+DTRSM                   PASS                PASS                PASS                PASS                PASS
+DSYRK                   PASS                PASS                PASS                PASS                PASS
+DSYR2K                  PASS                PASS                PASS                PASS                PASS
+rc/fatal/half: {'ref.errF': ('0', 0, 0), 'old.auto.errF': ('0', 0, 0), 'new.auto.errF': ('0', 0, 0), 'old.gpu.errF': ('0', 0, 0), 'new.gpu.errF': ('0', 0, 0)}
+error-exit runs:
+  ref.errT       rc=0 routines_with_errx_result=6 computational_rows=6 last: [' DSYR2K PASSED THE TESTS OF ERROR-EXITS', ' DSYR2K PASSED THE COMPUTATIONAL TESTS (  1944 CALLS)']
+  old.auto.errT  rc=255 routines_with_errx_result=0 computational_rows=0 last: ['   FOR BETA              0.0   1.0   1.3', ' ROUTINES PASS COMPUTATIONAL TESTS IF TEST RATIO IS LESS THAN   16.00']
+  new.auto.errT  rc=255 routines_with_errx_result=0 computational_rows=0 last: ['   FOR BETA              0.0   1.0   1.3', ' ROUTINES PASS COMPUTATIONAL TESTS IF TEST RATIO IS LESS THAN   16.00']
+===== zblat2
+routine                  ref            old.auto            new.auto             old.gpu             new.gpu
+ZGEMV                   PASS                PASS                PASS                PASS                PASS
+ZGBMV                   PASS                PASS                PASS                PASS                PASS
+ZHEMV                   PASS                PASS                PASS                PASS      SUSPECT(27.79)
+ZHBMV                   PASS                PASS                PASS                PASS                PASS
+ZHPMV                   PASS                PASS                PASS                PASS                PASS
+ZTRMV                   PASS                PASS                PASS                PASS                PASS
+ZTBMV                   PASS                PASS                PASS                PASS                PASS
+ZTPMV                   PASS                PASS                PASS                PASS                PASS
+ZTRSV                   PASS                PASS                PASS                PASS                PASS
+ZTBSV                   PASS                PASS                PASS                PASS                PASS
+ZTPSV                   PASS                PASS                PASS                PASS                PASS
+ZGERC                   PASS                PASS                PASS                PASS                PASS
+ZGERU                   PASS                PASS                PASS                PASS                PASS
+ZHER2                   PASS                PASS                PASS                PASS                PASS
+ZHPR2                   PASS                PASS                PASS                PASS                PASS
+rc/fatal/half: {'ref.errF': ('0', 0, 0), 'old.auto.errF': ('0', 0, 0), 'new.auto.errF': ('0', 0, 0), 'old.gpu.errF': ('0', 0, 0), 'new.gpu.errF': ('0', 0, 0)}
+error-exit runs:
+  ref.errT       rc=0 routines_with_errx_result=15 computational_rows=15 last: [' ZHPR2  PASSED THE TESTS OF ERROR-EXITS', ' ZHPR2  PASSED THE COMPUTATIONAL TESTS (   481 CALLS)']
+  old.auto.errT  rc=0 routines_with_errx_result=15 computational_rows=15 last: [' ZHPR2  PASSED THE TESTS OF ERROR-EXITS', ' ZHPR2  PASSED THE COMPUTATIONAL TESTS (   481 CALLS)']
+  new.auto.errT  rc=255 routines_with_errx_result=0 computational_rows=0 last: ['   FOR BETA           ( 0.0, 0.0)  ( 1.0, 0.0)  ( 1.3,-1.1)  ', ' ROUTINES PASS COMPUTATIONAL TESTS IF TEST RATIO IS LESS THAN   16.00']
+===== zblat3
+routine                  ref            old.auto            new.auto             old.gpu             new.gpu
+ZGEMM                   PASS                PASS                PASS      SUSPECT(39.89)      SUSPECT(39.89)
+ZHEMM                   PASS                PASS                PASS                PASS                PASS
+ZSYMM                   PASS                PASS                PASS                PASS                PASS
+ZTRMM                   PASS                PASS                PASS                PASS                PASS
+ZTRSM                   PASS                PASS                PASS                PASS                PASS
+ZHERK                   PASS                PASS                PASS                PASS                PASS
+ZSYRK                   PASS                PASS                PASS                PASS                PASS
+ZHER2K                  PASS                PASS                PASS                PASS                PASS
+ZSYR2K                  PASS                PASS                PASS                PASS                PASS
+rc/fatal/half: {'ref.errF': ('0', 0, 0), 'old.auto.errF': ('0', 0, 0), 'new.auto.errF': ('0', 0, 0), 'old.gpu.errF': ('0', 0, 0), 'new.gpu.errF': ('0', 0, 0)}
+error-exit runs:
+  ref.errT       rc=0 routines_with_errx_result=9 computational_rows=9 last: [' ZSYR2K PASSED THE TESTS OF ERROR-EXITS', ' ZSYR2K PASSED THE COMPUTATIONAL TESTS (  1296 CALLS)']
+  old.auto.errT  rc=255 routines_with_errx_result=0 computational_rows=0 last: ['   FOR BETA           ( 0.0, 0.0)  ( 1.0, 0.0)  ( 1.3,-1.1)  ', ' ROUTINES PASS COMPUTATIONAL TESTS IF TEST RATIO IS LESS THAN   16.00']
+  new.auto.errT  rc=255 routines_with_errx_result=0 computational_rows=0 last: ['   FOR BETA           ( 0.0, 0.0)  ( 1.0, 0.0)  ( 1.3,-1.1)  ', ' ROUTINES PASS COMPUTATIONAL TESTS IF TEST RATIO IS LESS THAN   16.00']

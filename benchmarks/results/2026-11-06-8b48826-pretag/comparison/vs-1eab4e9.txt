@@ -1,0 +1,7 @@
+new-auto common 6714 only-1eab 0 only-8b48 0 diff 0 [] []
+new-gpu common 6714 only-1eab 0 only-8b48 0 diff 68 [('nanC', 34), ('infC', 34)] [(('gpu', 'cpu'), 68)]
+new-cpu common 2933 only-1eab 0 only-8b48 0 diff 0 [] []
+new-gpu-big common 72 only-1eab 0 only-8b48 0 diff 0 [] []
+new-fast common 517 only-1eab 0 only-8b48 0 diff 0 [] []
+new-strassen common 517 only-1eab 0 only-8b48 0 diff 0 [] []
+new-chip common 1384 only-1eab 0 only-8b48 0 diff 0 [] []
