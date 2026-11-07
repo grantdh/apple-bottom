@@ -891,6 +891,7 @@ typedef struct {
     ab_prof_staged_t staged;                   // whether it kept the staged result, or why not
     bool trace;                                // AB_TRACE: write the call's trace line
     ab_trace_call_t call;                      // its arguments, hashes and kernel split
+    ab_prof_split_t split;                     // AB_SPLIT: the call's row and split (row -1: none)
 } CallProf;
 
 static CallProf *prof_begin(CallProf *p) {
@@ -898,6 +899,7 @@ static CallProf *prof_begin(CallProf *p) {
     memset(p, 0, sizeof *p);
     p->fallback = AB_PROF_FB_NONE;
     p->staged = AB_PROF_STAGED_NONE;
+    p->split.row = -1;
     p->trace = ab_trace_enabled();
     p->t0 = p->mark = ab_prof_now_ticks();
     (void)ab_internal_take_gpu_seconds(NULL); // drop GPU time of earlier native-API calls
@@ -920,17 +922,27 @@ static void prof_kernel(CallProf *p) {
 }
 
 // Records the finished call; under AB_PROFILE also prints the stages of a GPU
-// call, under AB_TRACE writes its trace line.
+// call, under AB_TRACE writes its trace line. A call an AB_SPLIT row covered
+// is also recorded by its row; a split call whose GPU part stood is recorded
+// as a split call only, one whose GPU part was made again on Accelerate as a
+// CPU call with that fallback.
 static void prof_end(CallProf *p, const char *routine, int M, int N, int K) {
     if (!p) return;
     uint64_t ns = ab_prof_ticks_to_ns(ab_prof_now_ticks() - p->t0);
     bool gpu = !strcmp(_ab_last_path, "gpu");
-    ab_prof_record(routine, ns, M > 0 ? (size_t)M : 0, N > 0 ? (size_t)N : 0,
-                   K > 0 ? (size_t)K : 0, gpu, gpu ? p->stage_ns : NULL, p->fallback, p->staged);
-    if (p->trace)
+    const ab_prof_split_t *s = p->split.row >= 0 ? &p->split : NULL;
+    size_t m = M > 0 ? (size_t)M : 0, n = N > 0 ? (size_t)N : 0, k = K > 0 ? (size_t)K : 0;
+    if (!s || !s->kept)
+        ab_prof_record(routine, ns, m, n, k, gpu, gpu ? p->stage_ns : NULL, p->fallback, p->staged);
+    if (s) ab_prof_record_split(routine, ns, m, n, k, s);
+    if (p->trace && s)
+        ab_trace_record_split(&p->call, ab_prof_ticks_to_ns(p->t0), ns, gpu ? p->stage_ns : NULL,
+                              p->fallback, p->staged, s);
+    else if (p->trace)
         ab_trace_record(&p->call, ab_prof_ticks_to_ns(p->t0), ns, gpu ? p->stage_ns : NULL,
                         p->fallback, p->staged);
     if (gpu) ab_prof_print_gpu_call(routine, M, N, K, ns, p->stage_ns, p->staged);
+    if (s && s->split) ab_prof_print_split_call(routine, M, N, K, ns, s);
 }
 
 // A GPU-routed call that has to run on cblas instead. The path record says
@@ -1448,6 +1460,8 @@ typedef struct {
     bool scales;                        // line scales unlike the host's
     int in_place;                       // operands the staged run used in place
     uint64_t t0, t1;                    // ticks: the tail's start and end
+    bool prof_on;                       // the call is profiled: so is the tail's staged run
+    CallProf prof;                      // ... its stages, on this thread's GPU time
 } split_job_t;
 
 // AB_TEST_FAIL_STAGE=split_fpcr (test-only): this thread flushes subnormals
@@ -1468,11 +1482,13 @@ static void split_run_gpu(split_job_t *j) {
     split_test_fpcr();
     j->why = staged_why();              // this thread's own floating-point control
     if (j->why != AB_PROF_STAGED_NONE) return;
+    CallProf *p = j->prof_on ? prof_begin(&j->prof) : NULL;
+    if (p) p->trace = false;            // the caller writes the call's one line
     t_last_stage.in_place = 0;
-    j->why = run_staged(NULL, &j->g);
+    j->why = run_staged(p, &j->g);
     if (j->why == AB_PROF_STAGED_GPU_FAILED && t_stage_cb_failed) {
         j->retries = 1;
-        j->why = run_staged(NULL, &j->g);
+        j->why = run_staged(p, &j->g);
         j->retry_kept = staged_kept(j->why);
     }
     j->scales = j->why == AB_PROF_STAGED_GPU_FAILED && !t_stage_cb_failed;
@@ -1502,12 +1518,25 @@ static ab_split_outcome_t split_declined(ab_split_record_t *rec, ab_prof_split_d
     return rec->outcome = AB_SPLIT_DECLINED;
 }
 
+// A profiled call's split stage: the time since its last mark, into field.
+#define SPLIT_MARK(p, field) do {                                     \
+        if (p) {                                                      \
+            uint64_t now_ = ab_prof_now_ticks();                      \
+            (p)->split.field += ab_prof_ticks_to_ns(now_ - (p)->mark); \
+            (p)->mark = now_;                                         \
+        }                                                             \
+    } while (0)
+
+static double part_gflop(const gemm_part_t *q) {
+    return (q->routine == 'z' ? 8.0 : 2.0) * q->M * (double)q->N * q->K / 1e9;
+}
+
 // The call w cut at g (0 < g <= L) on axis: the head on Accelerate here, the
 // tail on a thread of its own by the staged path (engine 0) or by cblas
 // (engine 1), in the order asked for (split_slice.h). A declined call is not
-// touched. Fills *rec.
-static ab_split_outcome_t split_run(const gemm_part_t *w, char axis, int g, int order, int engine,
-                                    ab_split_record_t *rec) {
+// touched. Fills *rec, and for a profiled call (p) the stages of p->split.
+static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis, int g, int order,
+                                    int engine, ab_split_record_t *rec) {
     *rec = (ab_split_record_t){.outcome = AB_SPLIT_DECLINED, .declined = AB_PROF_SPLIT_DECLINE_NONE,
                                .staged = AB_PROF_STAGED_NONE, .row = rec->row, .axis = axis, .g = g,
                                .L = axis == 'N' ? w->N : axis == 'M' ? w->M : w->K};
@@ -1519,7 +1548,8 @@ static ab_split_outcome_t split_run(const gemm_part_t *w, char axis, int g, int 
     head.M = hc.M;
     head.N = hc.N;
     head.K = hc.K;
-    split_job_t j = {.tail = *w, .engine = engine, .order = order, .why = AB_PROF_STAGED_NONE};
+    split_job_t j = {.tail = *w, .engine = engine, .order = order, .why = AB_PROF_STAGED_NONE,
+                     .prof_on = p != NULL};
     gemm_part_t *tail = &j.tail;
     tail->M = tc.M;
     tail->N = tc.N;
@@ -1574,16 +1604,37 @@ static ab_split_outcome_t split_run(const gemm_part_t *w, char axis, int g, int 
         return split_declined(rec, AB_PROF_SPLIT_DECLINE_THREAD);
     }
 
+    SPLIT_MARK(p, init_ns);
+
     // The head, before or after the tail as asked; the join.
     bool joined = !run_tail;
     if (order == 2 && !joined) {
         pthread_join(worker, NULL);
         joined = true;
+        SPLIT_MARK(p, join_ns);
     }
     part_cblas(&head);
+    SPLIT_MARK(p, cpu_part_ns);
+    uint64_t head_end = p ? p->mark : 0;
     if (j.head_done) dispatch_semaphore_signal(j.head_done);
-    if (!joined) pthread_join(worker, NULL);
+    if (!joined) {
+        pthread_join(worker, NULL);
+        if (p) {
+            uint64_t before = p->split.join_ns;
+            SPLIT_MARK(p, join_ns);
+            p->split.wait_cpu_ns = p->split.join_ns - before;
+        }
+    }
     if (j.head_done) dispatch_release(j.head_done);
+    if (p && run_tail) {
+        p->split.gpu_wall_ns = ab_prof_ticks_to_ns(j.t1 - j.t0);
+        p->split.wait_gpu_ns = head_end > j.t1 ? ab_prof_ticks_to_ns(head_end - j.t1) : 0;
+        if (j.prof.t0) memcpy(p->split.gpu_stage_ns, j.prof.stage_ns, sizeof j.prof.stage_ns);
+    }
+    if (p) {
+        p->split.gf_cpu = part_gflop(&head);
+        p->split.gf_gpu = part_gflop(tail);
+    }
 
     // A tail not kept is made again here, on Accelerate: on the K axis into C
     // with beta 1, P ignored. A kept one on the K axis is added to C in FP64.
@@ -1595,16 +1646,19 @@ static ab_split_outcome_t split_run(const gemm_part_t *w, char axis, int g, int 
     }
     if (!kept) {
         part_cblas(tail);
+        SPLIT_MARK(p, redo_ns);
     } else if (P && w->routine == 'z') {
-        const double complex *p = P;
+        const double complex *pz = P;
         double complex *c = w->C;
         for (size_t col = 0; col < (size_t)w->N; col++)
-            for (size_t i = 0; i < (size_t)w->M; i++) c[col * w->ldC + i] += p[col * w->M + i];
+            for (size_t i = 0; i < (size_t)w->M; i++) c[col * w->ldC + i] += pz[col * w->M + i];
+        SPLIT_MARK(p, sum_ns);
     } else if (P) {
-        const double *p = P;
+        const double *pd = P;
         double *c = w->C;
         for (size_t col = 0; col < (size_t)w->N; col++)
-            for (size_t i = 0; i < (size_t)w->M; i++) c[col * w->ldC + i] += p[col * w->M + i];
+            for (size_t i = 0; i < (size_t)w->M; i++) c[col * w->ldC + i] += pd[col * w->M + i];
+        SPLIT_MARK(p, sum_ns);
     }
     free(P);
     rec->staged = engine == 0 ? j.why : AB_PROF_STAGED_NONE;
@@ -1646,7 +1700,7 @@ static int split_seam(const ab_split_forced_t *f, const gemm_part_t *w) {
         *rec = (ab_split_record_t){.outcome = AB_SPLIT_CPU, .declined = AB_PROF_SPLIT_DECLINE_NONE,
                                    .staged = AB_PROF_STAGED_NONE, .row = -1, .axis = f->axis, .L = L};
         part_cblas(w);
-    } else if (split_run(w, f->axis, f->g, f->order, f->engine, rec) == AB_SPLIT_DECLINED) {
+    } else if (split_run(NULL, w, f->axis, f->g, f->order, f->engine, rec) == AB_SPLIT_DECLINED) {
         part_cblas(w);
     }
     t_last_split_valid = true;
@@ -1659,7 +1713,6 @@ static int split_seam(const ab_split_forced_t *f, const gemm_part_t *w) {
 // with AB_SPLIT unset's bits: no row, a row that does not cut it (attributed
 // to the row), or a declined call.
 static bool gemm_split(CallProf *p, char transA, char transB, const gemm_part_t *w) {
-    (void)p;
     t_last_split_valid = false;
     if (!ab_blas_args_valid(w->ta, w->tb, w->M, w->N, w->K, w->ldA, w->ldB, w->ldC) ||
         w->alpha == 0.0)
@@ -1673,6 +1726,14 @@ static bool gemm_split(CallProf *p, char transA, char transB, const gemm_part_t 
         return false;
     ab_split_record_t *rec = &t_last_split;
     t_last_split_valid = true;
+    if (p) {   // the reports attribute the call to its row whatever becomes of it
+        p->split.row = plan.row;
+        p->split.axis = plan.axis;
+        p->split.L = plan.L;
+        p->split.g = plan.g;
+        p->split.declined = AB_PROF_SPLIT_DECLINE_NONE;
+        p->split.staged = AB_PROF_STAGED_NONE;
+    }
     if (plan.g == 0) {
         *rec = (ab_split_record_t){.outcome = AB_SPLIT_NOT_CUT, .declined = AB_PROF_SPLIT_DECLINE_NONE,
                                    .staged = AB_PROF_STAGED_NONE, .row = plan.row, .axis = plan.axis,
@@ -1680,7 +1741,22 @@ static bool gemm_split(CallProf *p, char transA, char transB, const gemm_part_t 
         return false;
     }
     rec->row = plan.row;
-    if (split_run(w, plan.axis, plan.g, 0, 0, rec) == AB_SPLIT_DECLINED) return false;
+    ab_split_outcome_t o = split_run(p, w, plan.axis, plan.g, 0, 0, rec);
+    if (o == AB_SPLIT_DECLINED) {
+        if (p) p->split.declined = rec->declined;
+        return false;
+    }
+    if (p) {
+        p->split.split = true;
+        p->split.kept = o == AB_SPLIT_KEPT || o == AB_SPLIT_KEPT_4M;
+        p->split.staged = rec->staged;
+        p->split.scales = rec->scales;
+        p->split.retries = rec->retries;
+        p->split.retry_kept = rec->retry_kept;
+        // A tail made again on Accelerate: a CPU call, with its reason.
+        if (!p->split.kept)
+            p->fallback = o == AB_SPLIT_RANGE ? AB_PROF_FB_RANGE : AB_PROF_FB_GPU_FAILED;
+    }
     split_note_path(rec);
     return true;
 }
