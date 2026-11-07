@@ -919,8 +919,6 @@ static void child_other(void) {
     free(a); free(b); free(c); free(y);
 }
 
-// Child: the bytes in use after 60 more split calls of every axis, once
-// the pool has grown (MallocNanoZone pinned by the parent).
 // Child: a K tail refused after its run (NaN in it) under split_poison, for
 // DGEMM with beta 0.75 and ZGEMM with a complex beta: C must be the cblas
 // parts, the head with beta then the tail with beta 1.
@@ -940,6 +938,8 @@ static void child_k_refused(void) {
     }
 }
 
+// Child: the bytes in use after 60 more split calls of every axis, once
+// the pool has grown (MallocNanoZone pinned by the parent).
 static void child_memory(void) {
     malloc_statistics_t s0, s1;
     for (int pass = 0; pass < 2; pass++) {
