@@ -139,15 +139,19 @@ static void expect_routes(const ab_dispatch_config_t *c, bool want_gpu,
         expect_routes(c, gpu, calls_, TEST_REGISTRY_SIZE(calls_), what); \
     } while (0)
 
-static bool write_temp(const char *content, char *path, size_t len) {
-    const char *tmp = getenv("TMPDIR");
-    snprintf(path, len, "%s/test_dispatch.XXXXXX", tmp && *tmp ? tmp : "/tmp");
+static bool write_temp_in(const char *dir, const char *content, char *path, size_t len) {
+    snprintf(path, len, "%s/test_dispatch.XXXXXX", dir);
     int fd = mkstemp(path);
     if (fd < 0) return false;
     size_t n = strlen(content);
     bool ok = write(fd, content, n) == (ssize_t)n;
     close(fd);
     return ok;
+}
+
+static bool write_temp(const char *content, char *path, size_t len) {
+    const char *tmp = getenv("TMPDIR");
+    return write_temp_in(tmp && *tmp ? tmp : "/tmp", content, path, len);
 }
 
 // =============================================================================
@@ -1026,6 +1030,8 @@ static void test_split_load_table(void) {
     }
     expect(ab_split_parse_row("zgemm N N N f=0x1p-1", &r) == -1 && ab_split_parse_row("zgemm N N N f=-0", &r) == -1,
            "hex and negative shares must be malformed");
+    expect(ab_split_parse_row("zgemm N N N gf=1e-3 mn=2.5e-1:+4E+2 f=5e-1", &r) == 1 && r.min_gf == 1e-3 &&
+           r.min_mn == 0.25 && r.max_mn == 400 && r.share == 0.5, "signed exponents must parse");
     finish();
 }
 
@@ -1076,16 +1082,28 @@ static void test_split_config_from_env(void) {
     ab_dispatch_config_from_env(&c);
     expect(c.split_on && !c.split_nrows && !strcmp(c.split_table, "none:uncalibrated-chip"),
            "an unreadable AB_SPLIT_TABLE keeps the chip's (no) table: %s", c.split_table);
-    // A path the label cannot hold whole is refused, not cut short.
-    char longpath[AB_DISPATCH_LABEL_LEN + 16];
-    memset(longpath, 'x', sizeof longpath - 1);
-    longpath[0] = '/';
-    longpath[sizeof longpath - 1] = '\0';
-    setenv("AB_SPLIT_TABLE", longpath, 1);
-    fprintf(stderr, "(expected notes follow) ");
-    ab_dispatch_config_from_env(&c);
-    expect(c.split_on && !c.split_nrows && !strcmp(c.split_table, "none:uncalibrated-chip"),
-           "an AB_SPLIT_TABLE path longer than the label must be refused: %s", c.split_table);
+    // A path the label cannot hold whole is refused, not cut short: an existing
+    // table reached through AB_SPLIT_PATH_MAX + 1 bytes (padded with "/." and
+    // "//"), and through exactly AB_SPLIT_PATH_MAX, which loads. The table is
+    // in /tmp, so that neither TMPDIR nor the tree's path can be too long.
+    expect(write_temp_in("/tmp", "zgemm N N N m=8192: scalars=u f=0.45\n", path, sizeof path), "mkstemp in /tmp");
+    for (int extra = 1; extra >= 0; extra--) {
+        const char *file = path + strlen("/tmp");
+        char padded[AB_DISPATCH_LABEL_LEN + 16], want_label[AB_DISPATCH_LABEL_LEN + 8];
+        size_t want = AB_SPLIT_PATH_MAX + (size_t)extra, n = strlen("/tmp"), tail = strlen(file);
+        memcpy(padded, path, n);
+        for (; n + tail + 2 <= want; n += 2) memcpy(padded + n, "/.", 2);
+        if (n + tail < want) padded[n++] = '/';
+        memcpy(padded + n, file, tail + 1);
+        setenv("AB_SPLIT_TABLE", padded, 1);
+        if (extra) fprintf(stderr, "(expected notes follow) ");
+        ab_dispatch_config_from_env(&c);
+        snprintf(want_label, sizeof want_label, "file:%s", padded);
+        expect(strlen(padded) == want && (extra ? c.split_nrows == 0 && !strcmp(c.split_table, "none:uncalibrated-chip")
+                                                : c.split_nrows == 1 && !strcmp(c.split_table, want_label)),
+               "AB_SPLIT_TABLE through %zu bytes: %d rows, label %s", strlen(padded), c.split_nrows, c.split_table);
+    }
+    unlink(path);
     // The split leaves the routing table alone.
     ab_dispatch_config_t off = builtin_auto();
     setenv("AB_SPLIT", "1", 1);

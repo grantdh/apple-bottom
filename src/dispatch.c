@@ -352,10 +352,11 @@ static locale_t g_c_locale;
 static pthread_once_t g_c_locale_once = PTHREAD_ONCE_INIT;
 static void make_c_locale(void) { g_c_locale = newlocale(LC_ALL_MASK, "C", NULL); }
 
-// A value of a split row: ASCII digits with an optional point and exponent
-// (scripts/ingest_split.py's NUMBER), finite and not negative.
+// A value of a split row: ASCII digits with an optional point, an optional
+// exponent with its sign and an optional leading '+' (scripts/ingest_split.py's
+// NUMBER), finite and not negative: no leading '-'.
 static bool parse_double(const char *s, double *out) {
-    if (!*s || *s == '-' || strspn(s, "0123456789+.eE") != strlen(s)) return false;
+    if (!*s || *s == '-' || strspn(s, "0123456789+-.eE") != strlen(s)) return false;
     pthread_once(&g_c_locale_once, make_c_locale);
     char *end;
     errno = 0;
@@ -532,10 +533,10 @@ static void split_config_from_env(ab_dispatch_config_t *c) {
     const char *table = getenv("AB_SPLIT_TABLE");
     char err[200];
     bool named = table && *table;
-    if (named && strlen(table) + sizeof "file:" > sizeof c->split_table) {
+    if (named && strlen(table) > AB_SPLIT_PATH_MAX) {
         // The label names the file in every report: one cut short would not.
         fprintf(stderr, "apple-bottom: AB_SPLIT_TABLE=%s: path longer than %zu bytes; keeping %s\n", table,
-                sizeof c->split_table - sizeof "file:", c->split_table);
+                (size_t)AB_SPLIT_PATH_MAX, c->split_table);
     } else if (named && !ab_split_load_table(c, table, err, sizeof err)) {
         fprintf(stderr, "apple-bottom: AB_SPLIT_TABLE=%s: %s; keeping %s\n", table, err, c->split_table);
     } else if (named) {
