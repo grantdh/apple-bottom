@@ -510,12 +510,14 @@ uninstall:
 
 # =============================================================================
 # Sanitizer builds (for local debugging)
-.PHONY: test-asan test-ubsan test-tsan
+.PHONY: test-asan test-ubsan
 
 # Sanitizer builds: the whole library, test_correctness and test_split, built
 # by the normal rules with the sanitizer's flags into their own directory (so
-# they never mix with the normal objects). test-tsan builds and runs
-# test_split alone: AB_SPLIT's thread per call is what it is for.
+# they never mix with the normal objects). There is no ThreadSanitizer
+# target: built with -fsanitize=thread (macOS 27.0.1, Apple clang 17.0.0),
+# test_staging, which has no AB_SPLIT code, crashes at start as test_split
+# does, so the crash says nothing of the split; test_split is left out.
 SAN_TARGET = $(MAKE) --no-print-directory BUILD=$(BUILD)/$(1) \
 	CFLAGS="$(CFLAGS) -fsanitize=$(2) -g" OBJCFLAGS="$(OBJCFLAGS) -fsanitize=$(2) -g" \
 	LDFLAGS="$(LDFLAGS) -fsanitize=$(2)" DYLIB_LDFLAGS="$(DYLIB_LDFLAGS) -fsanitize=$(2)" \
@@ -534,12 +536,6 @@ test-ubsan:
 	@echo "Running tests with UBSan..."
 	UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./$(BUILD)/ubsan/test_correctness
 	UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./$(BUILD)/ubsan/test_split
-
-test-tsan:
-	@echo "Building with ThreadSanitizer..."
-	+$(call SAN_TARGET,tsan,thread,$(BUILD)/tsan/test_split)
-	@echo "Running test_split with TSan..."
-	TSAN_OPTIONS=halt_on_error=1 ./$(BUILD)/tsan/test_split
 
 $(BUILD)/bench_dsyrk: benchmarks/bench_dsyrk.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
