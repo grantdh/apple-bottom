@@ -218,6 +218,9 @@ ABStatus ab_dsyrk(ABMatrix A, ABMatrix C);
 // where A is triangular. Result overwrites B.
 // Uses blocked forward/back-substitution with DGEMM for the panel updates.
 // GPU-efficient for N >= 1024 (panel solves are CPU-bound for small blocks).
+// A panel update whose GPU step fails (a GPU buffer, a conversion, the
+// command buffer) runs on Accelerate in FP64 instead, as dgemm_ runs a call
+// whose GPU step fails, so AB_OK means B holds X either way.
 //
 // Parameters:
 //   side:   AB_LEFT  → op(A) * X = alpha * B
@@ -234,7 +237,25 @@ ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
 // Mixed-Precision Iterative Refinement: solves A * X = B
 // Uses FP32 LU factorization (Accelerate LAPACK) + DD-DGEMM residual correction.
 // Avoids explicit inversion (κ² error) and bespoke DD-DTRSM shaders.
-// Converges to DD precision (~10⁻¹⁵) in 1-3 iterations for well-conditioned A.
+// Refinement stops when ||B - A·X||_F < 10⁻¹⁴·||B||_F, after 2-3 corrections
+// for a well-conditioned A. It also stops when a correction does not at least
+// halve the worst column's ||r_j||∞ / ||x_j||∞, or after 10 residuals, and
+// then keeps X if every column passes LAPACK dsgesv's test,
+// ||r_j||∞ <= √N · 2⁻⁴⁸ · ||A||∞ · ||x_j||∞ (DD's unit roundoff 2⁻⁴⁸ in place
+// of FP64's 2⁻⁵³): the DD residual of a dense A levels off above 10⁻¹⁴·||B||_F
+// from N ≈ 150. Otherwise, or where FP32 cannot solve the system (A or B
+// outside FP32's range, a singular FP32 factorization), X is solved in FP64
+// instead, by dgetrf and dgetrs on the host copies, as dsgesv falls back; FP32
+// refinement stops converging near κ(A) ≈ 10⁷-10⁸. AB_PROFILE=1 prints a line
+// for such a solve (`AB_PROFILE ab_dgesv_mpir N=… NRHS=…  FP64 LU fallback:
+// <why>`). AB_OK thus means X passed one of the two tests or is FP64 LU's.
+// A residual whose GPU step fails is computed on Accelerate in FP64 instead.
+// The residual is a native GEMM, with one power-of-two scale per matrix (API
+// Limits): entries of A, X or B far below the largest of their matrix lose
+// precision there, which the test cannot see.
+//
+// Returns AB_ERROR_KERNEL_FAILED, B unchanged, if A is singular in FP64
+// (dgetrf info > 0).
 //
 // Parameters:
 //   A: N×N coefficient matrix (not modified)

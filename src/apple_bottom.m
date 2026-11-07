@@ -22,6 +22,7 @@
 #import <os/lock.h>
 #include <atomic>
 #include <fenv.h>
+#include <float.h>
 #include <limits.h>
 #include <math.h>
 #include <mach/mach.h>
@@ -3777,9 +3778,64 @@ ABStatus ab_dsyrk(ABMatrix A, ABMatrix C) {
 //   3. Repeat until all columns/rows are solved
 // This gives FP64-class accuracy via the DD-DGEMM updates while keeping
 // the small triangular solves on the fast AMX coprocessor.
+// An update whose GPU step fails runs on cblas instead, in FP64, as the BLAS
+// interface runs a call whose GPU step fails (blas_wrapper.c).
 // =============================================================================
 
 #define DTRSM_BLOCK_SIZE 64
+
+// C = C0 - A*X by DD-DGEMM on the GPU, for the solvers' row-major host arrays
+// (A m x k, X k x n, C0 and C m x n; C may be C0). False if any GPU step
+// fails; C is then as it was, since only the last step, the download, writes
+// it, and a download fails only on its arguments, before writing.
+static bool gpu_sub_product(const double* A, const double* X, const double* C0, double* C,
+                            int m, int n, int k) {
+    ABMatrix mA = ab_matrix_create(m, k);
+    ABMatrix mX = ab_matrix_create(k, n);
+    ABMatrix mC = ab_matrix_create(m, n);
+    bool ok = mA && mX && mC &&
+              ab_matrix_upload(mA, A, true) == AB_OK &&
+              ab_matrix_upload(mX, X, true) == AB_OK &&
+              ab_matrix_upload(mC, C0, true) == AB_OK &&
+              dgemm_scaled(-1.0, mA, mX, 1.0, mC, AB_PRODUCTS_CLASSICAL) == AB_OK &&
+              ab_matrix_download(mC, C, true) == AB_OK;
+    ab_matrix_destroy(mA);
+    ab_matrix_destroy(mX);
+    ab_matrix_destroy(mC);
+    return ok;
+}
+
+// Under AB_PROFILE, the line blas_wrapper.c prints for a call that falls back
+// to cblas, for an m x n x k GEMM step of a solver that did.
+static void note_solver_fallback(const char* routine, int m, int n, int k) {
+    if (ab_prof_verbose())
+        fprintf(stderr, "AB_PROFILE %s M=%d N=%d K=%d  GPU fallback to cblas: GPU step failed\n",
+                routine, m, n, k);
+}
+
+// One panel update of the left solve, on the row-major host copies of A
+// (N x N) and B (N x NRHS): rows [r0, r0+rows) of B less op(A)'s block in
+// those rows and columns [jb, jb+nb) times the solved panel, rows [jb, jb+nb)
+// of B.
+static void dtrsm_panel_update(const double* A_host, int N, bool no_trans, int jb, int nb,
+                               int r0, int rows, double* B_host, int NRHS) {
+    // op(A)'s block as stored: A[r0.., jb..], or A[jb.., r0..] to transpose
+    const double* A_blk = no_trans ? &A_host[(size_t)r0 * N + jb] : &A_host[(size_t)jb * N + r0];
+    const double* X = &B_host[(size_t)jb * NRHS];
+    double* B_rows = &B_host[(size_t)r0 * NRHS];
+    double* A_off = (double*)malloc((size_t)rows * nb * sizeof(double));  // op(A)'s block, packed
+    if (A_off)
+        for (size_t r = 0; r < (size_t)rows; r++)
+            for (size_t c = 0; c < (size_t)nb; c++)
+                A_off[r * nb + c] = no_trans ? A_blk[r * N + c] : A_blk[c * N + r];
+    bool ok = A_off && gpu_sub_product(A_off, X, B_rows, B_rows, rows, NRHS, nb);
+    free(A_off);
+    if (!ok) {
+        note_solver_fallback("ab_dtrsm", rows, NRHS, nb);
+        cblas_dgemm(CblasRowMajor, no_trans ? CblasNoTrans : CblasTrans, CblasNoTrans,
+                    rows, NRHS, nb, -1.0, A_blk, N, X, NRHS, 1.0, B_rows, NRHS);
+    }
+}
 
 ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
                   double alpha, ABMatrix A, ABMatrix B) {
@@ -3802,17 +3858,16 @@ ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
 
     int NB = DTRSM_BLOCK_SIZE;
 
-    // Download B to host (row-major) for the blocked solve
+    // Download B (for the blocked solve) and A to host (row-major)
     size_t B_count = (size_t)M * NRHS;
-    double* B_host = (double*)malloc(B_count * sizeof(double));
-    if (!B_host) return AB_ERROR_ALLOC_FAILED;
-    ab_matrix_download(B, B_host, true);
-
-    // Download A to host (row-major)
     size_t A_count = (size_t)N * N;
+    double* B_host = (double*)malloc(B_count * sizeof(double));
     double* A_host = (double*)malloc(A_count * sizeof(double));
-    if (!A_host) { free(B_host); return AB_ERROR_ALLOC_FAILED; }
-    ab_matrix_download(A, A_host, true);
+    double* A_col = (double*)malloc(A_count * sizeof(double));
+    ABStatus status = B_host && A_host && A_col ? AB_OK : AB_ERROR_ALLOC_FAILED;
+    if (status == AB_OK) status = ab_matrix_download(B, B_host, true);
+    if (status == AB_OK) status = ab_matrix_download(A, A_host, true);
+    if (status != AB_OK) goto dtrsm_cleanup;
 
     // Apply alpha scaling to B
     if (alpha != 1.0) {
@@ -3821,13 +3876,9 @@ ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
     }
 
     // Convert A to column-major for cblas_dtrsm
-    double* A_col = (double*)malloc(A_count * sizeof(double));
-    if (!A_col) { free(B_host); free(A_host); return AB_ERROR_ALLOC_FAILED; }
     for (int j = 0; j < N; j++)
         for (int i = 0; i < N; i++)
             A_col[j * N + i] = A_host[i * N + j];
-
-    ABStatus status = AB_OK;
 
     // Blocked triangular solve: LEFT side, op(A) * X = B
     // Process NB columns at a time
@@ -3865,62 +3916,10 @@ ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
                         B_host[(jb + r) * NRHS + c] = B_panel_col[c * nb + r];
                 free(B_panel_col);
 
-                // GPU DGEMM update: B_remaining -= A_off * X_solved
+                // DGEMM update: B_remaining -= A_off * X_solved
                 int remaining = N - jb - nb;
-                if (remaining > 0) {
-                    // Upload solved panel X (nb × NRHS, row-major)
-                    ABMatrix mX = ab_matrix_create(nb, NRHS);
-                    // Upload the off-diagonal block
-                    ABMatrix mA_off = ab_matrix_create(remaining, nb);
-                    ABMatrix mUpdate = ab_matrix_create(remaining, NRHS);
-                    if (!mX || !mA_off || !mUpdate) {
-                        if (mX) ab_matrix_destroy(mX);
-                        if (mA_off) ab_matrix_destroy(mA_off);
-                        if (mUpdate) ab_matrix_destroy(mUpdate);
-                        status = AB_ERROR_ALLOC_FAILED;
-                        goto dtrsm_cleanup;
-                    }
-
-                    ab_matrix_upload(mX, &B_host[jb * NRHS], true);
-
-                    // Extract off-diagonal block from A_host (row-major)
-                    int off_start = jb + nb;
-                    double* A_off_data = (double*)malloc((size_t)remaining * nb * sizeof(double));
-                    if (!A_off_data) {
-                        ab_matrix_destroy(mX);
-                        ab_matrix_destroy(mA_off);
-                        ab_matrix_destroy(mUpdate);
-                        status = AB_ERROR_ALLOC_FAILED;
-                        goto dtrsm_cleanup;
-                    }
-
-                    // Get the correct off-diagonal block based on transpose
-                    if (no_trans) {
-                        // A[off_start:N, jb:jb+nb] in row-major
-                        for (int r = 0; r < remaining; r++)
-                            for (int c = 0; c < nb; c++)
-                                A_off_data[r * nb + c] = A_host[(off_start + r) * N + jb + c];
-                    } else {
-                        // A^T[off_start:N, jb:jb+nb] = A[jb:jb+nb, off_start:N]^T
-                        for (int r = 0; r < remaining; r++)
-                            for (int c = 0; c < nb; c++)
-                                A_off_data[r * nb + c] = A_host[(jb + c) * N + off_start + r];
-                    }
-                    ab_matrix_upload(mA_off, A_off_data, true);
-                    free(A_off_data);
-
-                    // B_remaining -= A_off * X_solved  (via GPU: alpha=-1, beta=1)
-                    // First upload current B_remaining
-                    ab_matrix_upload(mUpdate, &B_host[off_start * NRHS], true);
-                    dgemm_scaled(-1.0, mA_off, mX, 1.0, mUpdate, AB_PRODUCTS_CLASSICAL);
-
-                    // Download updated B_remaining
-                    ab_matrix_download(mUpdate, &B_host[off_start * NRHS], true);
-
-                    ab_matrix_destroy(mX);
-                    ab_matrix_destroy(mA_off);
-                    ab_matrix_destroy(mUpdate);
-                }
+                if (remaining > 0)
+                    dtrsm_panel_update(A_host, N, no_trans, jb, nb, jb + nb, remaining, B_host, NRHS);
             }
         } else {
             // Backward substitution: blocks N-NB, N-2*NB, ..., 0
@@ -3944,52 +3943,9 @@ ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
                         B_host[(jb + r) * NRHS + c] = B_panel_col[c * nb + r];
                 free(B_panel_col);
 
-                // GPU DGEMM update: B_above -= A_off * X_solved
-                if (jb > 0) {
-                    ABMatrix mX = ab_matrix_create(nb, NRHS);
-                    ABMatrix mA_off = ab_matrix_create(jb, nb);
-                    ABMatrix mUpdate = ab_matrix_create(jb, NRHS);
-                    if (!mX || !mA_off || !mUpdate) {
-                        if (mX) ab_matrix_destroy(mX);
-                        if (mA_off) ab_matrix_destroy(mA_off);
-                        if (mUpdate) ab_matrix_destroy(mUpdate);
-                        status = AB_ERROR_ALLOC_FAILED;
-                        goto dtrsm_cleanup;
-                    }
-
-                    ab_matrix_upload(mX, &B_host[jb * NRHS], true);
-
-                    double* A_off_data = (double*)malloc((size_t)jb * nb * sizeof(double));
-                    if (!A_off_data) {
-                        ab_matrix_destroy(mX);
-                        ab_matrix_destroy(mA_off);
-                        ab_matrix_destroy(mUpdate);
-                        status = AB_ERROR_ALLOC_FAILED;
-                        goto dtrsm_cleanup;
-                    }
-
-                    if (no_trans) {
-                        // A[0:jb, jb:jb+nb] in row-major
-                        for (int r = 0; r < jb; r++)
-                            for (int c = 0; c < nb; c++)
-                                A_off_data[r * nb + c] = A_host[r * N + jb + c];
-                    } else {
-                        // A^T[0:jb, jb:jb+nb] = A[jb:jb+nb, 0:jb]^T
-                        for (int r = 0; r < jb; r++)
-                            for (int c = 0; c < nb; c++)
-                                A_off_data[r * nb + c] = A_host[(jb + c) * N + r];
-                    }
-                    ab_matrix_upload(mA_off, A_off_data, true);
-                    free(A_off_data);
-
-                    ab_matrix_upload(mUpdate, B_host, true);
-                    dgemm_scaled(-1.0, mA_off, mX, 1.0, mUpdate, AB_PRODUCTS_CLASSICAL);
-                    ab_matrix_download(mUpdate, B_host, true);
-
-                    ab_matrix_destroy(mX);
-                    ab_matrix_destroy(mA_off);
-                    ab_matrix_destroy(mUpdate);
-                }
+                // DGEMM update: B_above -= A_off * X_solved
+                if (jb > 0)
+                    dtrsm_panel_update(A_host, N, no_trans, jb, nb, 0, jb, B_host, NRHS);
             }
         }
     } else {
@@ -4016,7 +3972,7 @@ ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
     }
 
     // Upload solved B back to GPU
-    ab_matrix_upload(B, B_host, true);
+    status = ab_matrix_upload(B, B_host, true);
 
 dtrsm_cleanup:
     free(B_host);
@@ -4030,18 +3986,73 @@ dtrsm_cleanup:
 // =============================================================================
 // Solves A * X = B where A is N×N, B is N×NRHS. B is overwritten with X.
 //
-// Algorithm (adapted from Trilinos/Belos for Apple Silicon):
+// Algorithm (adapted from Trilinos/Belos for Apple Silicon; the FP64 fallback
+// and its test are LAPACK dsgesv's):
 //   1. LU factorize A in FP32 via Accelerate LAPACK (O(N³) at full speed)
 //   2. Initial solve X₀ = LU⁻¹ B in FP32
-//   3. Compute residual R = B - A*X₀ using DD-DGEMM (10⁻¹⁵ fidelity)
-//   4. Solve correction ΔX = LU⁻¹ R in FP32
-//   5. Update X = X + ΔX
-//   6. Repeat 3-5 until ||R||/||B|| < 10⁻¹⁴
+//   3. Compute residual R = B - A*X using DD-DGEMM
+//   4. Stop if ||R||_F / ||B||_F < 10⁻¹⁴
+//   5. If the last correction did not at least halve the worst column's
+//      ||r_j||∞ / ||x_j||∞, or MPIR_MAX_RESIDUALS residuals are done, stop:
+//      keep X if every column has ||r_j||∞ <= √N · 2⁻⁴⁸ · ||A||∞ · ||x_j||∞,
+//      else solve in FP64 instead
+//   6. Solve correction ΔX = LU⁻¹ R in FP32, update X = X + ΔX, back to 3
+//
+// Step 5 lets refinement end at the level where a DD residual stops falling
+// (A and X are rounded to DD for it, so it levels off near 2⁻⁴⁸·|A||X|),
+// which lies above step 4's 10⁻¹⁴ for dense A from N ≈ 150. Its test is
+// dsgesv's with DD's unit roundoff, 2⁻⁴⁸, in place of FP64's 2⁻⁵³.
+//
+// Where FP32 cannot solve the system, X is solved in FP64 instead, by dgetrf
+// and dgetrs on the host copies, as dsgesv does: A or B beyond FP32's range,
+// a singular FP32 factor, or refinement that fails step 5's test, which for
+// FP32 LU sets in near κ(A) ≈ 10⁷-10⁸. AB_PROFILE=1 prints a line saying why.
 //
 // This avoids the need for a bespoke DD-DTRSM shader and the catastrophic
 // κ(A)² error amplification of explicit inversion (Paper §6).
-// Convergence: 1-3 iterations for well-conditioned DFT matrices.
+// Convergence: 2-4 corrections for well-conditioned matrices.
+// A residual whose GPU step fails is computed by cblas instead, in FP64, as
+// a DTRSM panel update is.
 // =============================================================================
+
+// Most residuals one solve computes (step 5).
+#define MPIR_MAX_RESIDUALS 10
+
+// The largest ||r_j||∞ / ||x_j||∞ over the columns of the row-major N×NRHS
+// residual R and solution X: 0 for a column where r_j = 0, +inf where only
+// x_j = 0, NaN if R or X holds a NaN or inf.
+static double mpir_worst_column(const double* R, const double* X, int N, int NRHS) {
+    double worst = 0.0;
+    for (size_t j = 0; j < (size_t)NRHS; j++) {
+        double r_max = 0.0, x_max = 0.0;
+        for (size_t i = 0; i < (size_t)N; i++) {
+            double r = fabs(R[i * NRHS + j]), x = fabs(X[i * NRHS + j]);
+            if (!isfinite(r) || !isfinite(x)) return NAN;
+            r_max = fmax(r_max, r);
+            x_max = fmax(x_max, x);
+        }
+        if (r_max > 0.0) worst = fmax(worst, r_max / x_max);
+    }
+    return worst;
+}
+
+// X = LU⁻¹ S in FP32, or X += LU⁻¹ S if add, for row-major N×NRHS S and X
+// (W: N×NRHS floats, column-major workspace). False if sgetrs reports an
+// error (it reports only an illegal argument).
+static bool mpir_solve_f32(int N, int NRHS, const float* LU, const int* ipiv, const double* S,
+                           float* W, double* X, bool add) {
+    for (size_t i = 0; i < (size_t)N; i++)
+        for (size_t j = 0; j < (size_t)NRHS; j++)
+            W[j * N + i] = (float)S[i * NRHS + j];
+    char trans = 'N';
+    int n = N, nrhs = NRHS, lda = N, ldb = N, info = 0;
+    sgetrs_(&trans, &n, &nrhs, LU, &lda, ipiv, W, &ldb, &info);
+    if (info != 0) return false;
+    for (size_t i = 0; i < (size_t)N; i++)
+        for (size_t j = 0; j < (size_t)NRHS; j++)
+            X[i * NRHS + j] = add ? X[i * NRHS + j] + (double)W[j * N + i] : (double)W[j * N + i];
+    return true;
+}
 
 ABStatus ab_dgesv_mpir(ABMatrix A, ABMatrix B) {
     if (!A || !B) return AB_ERROR_INVALID_ARG;
@@ -4051,10 +4062,7 @@ ABStatus ab_dgesv_mpir(ABMatrix A, ABMatrix B) {
     int N = A->rows;
     int NRHS = B->cols;
     ABStatus status = AB_OK;
-
-    // MPIR parameters
-    int max_iter = 10;
-    double tol = 1e-14;  // Target DD-level precision
+    char why[160] = "";  // why X is solved in FP64 instead; empty if refinement converged
 
     // Host arrays
     size_t A_count = (size_t)N * N;
@@ -4082,100 +4090,124 @@ ABStatus ab_dgesv_mpir(ABMatrix A, ABMatrix B) {
     }
 
     // Download A and B from GPU (row-major doubles)
-    ab_matrix_download(A, A_host, true);
-    ab_matrix_download(B, B_orig, true);
+    status = ab_matrix_download(A, A_host, true);
+    if (status == AB_OK) status = ab_matrix_download(B, B_orig, true);
+    if (status != AB_OK) goto mpir_cleanup;
 
     // --- Step 1: FP32 LU factorization ---
     // Convert A to FP32 column-major for LAPACK
-    for (int i = 0; i < N; i++)
-        for (int j = 0; j < N; j++)
-            A_f32[j * N + i] = (float)A_host[i * N + j];
-
+    {
+        bool out_of_range = false;
+        for (int i = 0; i < N; i++)
+            for (int j = 0; j < N; j++) {
+                double a = A_host[(size_t)i * N + j];
+                out_of_range |= fabs(a) > FLT_MAX;
+                A_f32[(size_t)j * N + i] = (float)a;
+            }
+        if (out_of_range) {
+            snprintf(why, sizeof why, "A outside FP32's range");
+            goto mpir_fp64;
+        }
+    }
     {
         int n = N, lda = N, info = 0;
         sgetrf_(&n, &n, A_f32, &lda, ipiv, &info);
-        if (info != 0) {
-            status = AB_ERROR_KERNEL_FAILED;  // Singular matrix
-            goto mpir_cleanup;
-        }
-    }
-
-    // --- Step 2: Initial solve X₀ in FP32 ---
-    // Convert B to FP32 column-major
-    for (int i = 0; i < N; i++)
-        for (int j = 0; j < NRHS; j++)
-            work_f32[j * N + i] = (float)B_orig[i * NRHS + j];
-
-    {
-        char trans = 'N';
-        int n = N, nrhs = NRHS, lda = N, ldb = N, info = 0;
-        sgetrs_(&trans, &n, &nrhs, A_f32, &lda, ipiv, work_f32, &ldb, &info);
-        if (info != 0) {
+        if (info < 0) {
             status = AB_ERROR_KERNEL_FAILED;
             goto mpir_cleanup;
         }
+        if (info > 0) {
+            snprintf(why, sizeof why, "FP32 LU singular (sgetrf info=%d)", info);
+            goto mpir_fp64;
+        }
     }
 
-    // Convert X₀ back to double row-major
-    for (int i = 0; i < N; i++)
-        for (int j = 0; j < NRHS; j++)
-            X_host[i * NRHS + j] = (double)work_f32[j * N + i];
+    // --- Step 2: Initial solve X₀ = LU⁻¹ B in FP32 ---
+    for (size_t i = 0; i < B_count; i++)
+        if (fabs(B_orig[i]) > FLT_MAX) {
+            snprintf(why, sizeof why, "B outside FP32's range");
+            goto mpir_fp64;
+        }
+    if (!mpir_solve_f32(N, NRHS, A_f32, ipiv, B_orig, work_f32, X_host, false)) {
+        status = AB_ERROR_KERNEL_FAILED;
+        goto mpir_cleanup;
+    }
 
     // --- Steps 3-6: Iterative refinement ---
-    for (int iter = 0; iter < max_iter; iter++) {
-        // Residual R = B - A*X via DD-DGEMM on GPU
-        ABMatrix mA_gpu = ab_matrix_create(N, N);
-        ABMatrix mX_gpu = ab_matrix_create(N, NRHS);
-        ABMatrix mR_gpu = ab_matrix_create(N, NRHS);
+    {
+        double b_norm_sq = 0.0;
+        for (size_t i = 0; i < B_count; i++) b_norm_sq += B_orig[i] * B_orig[i];
+        double a_norm = 0.0;  // ||A||∞
+        for (int i = 0; i < N; i++)
+            a_norm = fmax(a_norm, cblas_dasum(N, &A_host[(size_t)i * N], 1));
+        // dsgesv's bound on ||r_j||∞ / ||x_j||∞, with DD's unit roundoff 2⁻⁴⁸
+        const double cte = sqrt((double)N) * ldexp(1.0, -48) * a_norm;
+        double prev = INFINITY;
+        for (int k = 1;; k++) {
+            // Residual R = B - A*X via DD-DGEMM on GPU, or on cblas if that fails
+            if (!gpu_sub_product(A_host, X_host, B_orig, R_host, N, NRHS, N)) {
+                note_solver_fallback("ab_dgesv_mpir", N, NRHS, N);
+                memcpy(R_host, B_orig, B_count * sizeof(double));
+                cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, N, NRHS, N, -1.0, A_host, N,
+                            X_host, NRHS, 1.0, R_host, NRHS);
+            }
 
-        if (!mA_gpu || !mX_gpu || !mR_gpu) {
-            if (mA_gpu) ab_matrix_destroy(mA_gpu);
-            if (mX_gpu) ab_matrix_destroy(mX_gpu);
-            if (mR_gpu) ab_matrix_destroy(mR_gpu);
-            status = AB_ERROR_ALLOC_FAILED;
+            // Converged: ||R||_F / ||B||_F < 10⁻¹⁴ (or R = 0)
+            double r_norm_sq = 0.0;
+            for (size_t i = 0; i < B_count; i++) r_norm_sq += R_host[i] * R_host[i];
+            if (r_norm_sq == 0.0 || (b_norm_sq > 0.0 && sqrt(r_norm_sq / b_norm_sq) < 1e-14))
+                break;
+
+            // Stopped improving, or out of residuals: X stays if every column
+            // passes dsgesv's test (R has reached its floor), else FP64
+            double worst = mpir_worst_column(R_host, X_host, N, NRHS);
+            bool stalled = !isfinite(worst) || !(worst <= 0.5 * prev);
+            if (stalled || k == MPIR_MAX_RESIDUALS) {
+                if (worst <= cte) break;
+                snprintf(why, sizeof why,
+                         stalled ? "refinement stopped improving at residual %d (backward error "
+                                   "%.2e, needs <= %.2e)"
+                                 : "refinement did not converge in %d residuals (backward error "
+                                   "%.2e, needs <= %.2e)",
+                         k, worst / a_norm, cte / a_norm);
+                goto mpir_fp64;
+            }
+            prev = worst;
+
+            // Correction ΔX = LU⁻¹ R in FP32, then X = X + ΔX
+            if (!mpir_solve_f32(N, NRHS, A_f32, ipiv, R_host, work_f32, X_host, true)) {
+                status = AB_ERROR_KERNEL_FAILED;
+                goto mpir_cleanup;
+            }
+        }
+    }
+
+    // --- FP64 fallback, as dsgesv: dgetrf + dgetrs ---
+    // LAPACK reads the row-major A_host as Aᵀ, so dgetrs('T') solves A X = B;
+    // B goes column-major into R_host.
+mpir_fp64:
+    if (why[0]) {
+        if (ab_prof_verbose())
+            fprintf(stderr, "AB_PROFILE ab_dgesv_mpir N=%d NRHS=%d  FP64 LU fallback: %s\n", N,
+                    NRHS, why);
+        for (int i = 0; i < N; i++)
+            for (int j = 0; j < NRHS; j++)
+                R_host[(size_t)j * N + i] = B_orig[(size_t)i * NRHS + j];
+        char trans = 'T';
+        int n = N, nrhs = NRHS, lda = N, ldb = N, info = 0;
+        dgetrf_(&n, &n, A_host, &lda, ipiv, &info);
+        if (info == 0) dgetrs_(&trans, &n, &nrhs, A_host, &lda, ipiv, R_host, &ldb, &info);
+        if (info != 0) {
+            status = AB_ERROR_KERNEL_FAILED;  // A is singular in FP64 (dgetrf info > 0)
             goto mpir_cleanup;
         }
-
-        ab_matrix_upload(mA_gpu, A_host, true);
-        ab_matrix_upload(mX_gpu, X_host, true);
-        ab_matrix_upload(mR_gpu, B_orig, true);  // R starts as B
-
-        // R = B - A*X = -1.0 * A * X + 1.0 * B
-        dgemm_scaled(-1.0, mA_gpu, mX_gpu, 1.0, mR_gpu, AB_PRODUCTS_CLASSICAL);
-
-        ab_matrix_download(mR_gpu, R_host, true);
-        ab_matrix_destroy(mA_gpu);
-        ab_matrix_destroy(mX_gpu);
-        ab_matrix_destroy(mR_gpu);
-
-        // Check convergence: ||R||_F / ||B||_F
-        double r_norm_sq = 0, b_norm_sq = 0;
-        for (size_t i = 0; i < B_count; i++) {
-            r_norm_sq += R_host[i] * R_host[i];
-            b_norm_sq += B_orig[i] * B_orig[i];
-        }
-        if (b_norm_sq > 0 && sqrt(r_norm_sq / b_norm_sq) < tol)
-            break;  // Converged
-
-        // Solve correction ΔX = LU⁻¹ R in FP32
         for (int i = 0; i < N; i++)
             for (int j = 0; j < NRHS; j++)
-                work_f32[j * N + i] = (float)R_host[i * NRHS + j];
-
-        {
-            char trans = 'N';
-            int n = N, nrhs = NRHS, lda = N, ldb = N, info = 0;
-            sgetrs_(&trans, &n, &nrhs, A_f32, &lda, ipiv, work_f32, &ldb, &info);
-        }
-
-        // Update X = X + ΔX
-        for (int i = 0; i < N; i++)
-            for (int j = 0; j < NRHS; j++)
-                X_host[i * NRHS + j] += (double)work_f32[j * N + i];
+                X_host[(size_t)i * NRHS + j] = R_host[(size_t)j * N + i];
     }
 
     // Upload final solution to B's GPU buffer
-    ab_matrix_upload(B, X_host, true);
+    status = ab_matrix_upload(B, X_host, true);
 
 mpir_cleanup:
     free(A_host);

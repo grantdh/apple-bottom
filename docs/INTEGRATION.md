@@ -741,7 +741,14 @@ the dimension histogram of the routine with the most time. During the run it
 prints an `AB_PROFILE <routine> M=… N=… K=…` line with the stages of each GPU
 call and, for a call that reached the staged path, its outcome
 (`staged=kept`, or the first reason it took the host path), and one for each
-fallback, with its reason.
+fallback, with its reason. The native solvers
+`ab_dtrsm` and `ab_dgesv_mpir` print the same fallback line (`AB_PROFILE
+ab_dtrsm M=… N=… K=…  GPU fallback to cblas: GPU step failed`) for each
+panel update or residual whose GPU step failed and that ran on Accelerate
+instead; they are not in the tables. `ab_dgesv_mpir` also prints
+`AB_PROFILE ab_dgesv_mpir N=… NRHS=…  FP64 LU fallback: <why>` for a solve
+it did in FP64 instead (refinement that did not converge, a singular FP32
+factorization, A or B outside FP32's range; `include/apple_bottom.h`).
 
 ### Per-call trace (AB_TRACE)
 

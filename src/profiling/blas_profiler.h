@@ -13,6 +13,8 @@
 //   AB_REPORT=1                             concise summary on stderr at exit
 //   AB_PROFILE=1                            detailed table on stderr at exit,
 //                                           plus a line per GPU call / fallback
+//                                           (also per GEMM step of ab_dtrsm and
+//                                           ab_dgesv_mpir that falls back)
 //   AB_PROFILE_JSON=/path/to/profile.json   with AB_PROFILE: also dump JSON
 //   AB_PROFILE_THRESHOLD_NS=1000            count only calls above threshold
 //   AB_TRACE=/path/to/trace                 a line per call in /path/to/trace.<pid>

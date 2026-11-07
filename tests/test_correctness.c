@@ -1523,6 +1523,115 @@ static void test_mpir_non_square(void) {
     if (s == AB_ERROR_INVALID_ARG) PASS(); else FAIL("expected INVALID_ARG");
 }
 
+static double frob_rel_err_rect(const double* X, const double* Xref, int rows, int cols);
+
+// Row-major n x n A = U diag(s) Vᵀ, U and V orthogonal (QR of random
+// matrices), s geometric from 1 down to 1/kappa: condition number kappa.
+static double* mpir_kappa_matrix(int n, double kappa, long seed) {
+    double* Q[2] = {malloc((size_t)n * n * sizeof(double)), malloc((size_t)n * n * sizeof(double))};
+    double* tau = malloc((size_t)n * sizeof(double));
+    int lwork = 64 * n, info = 0;
+    double* work = malloc((size_t)lwork * sizeof(double));
+    srand48(seed);
+    for (int q = 0; q < 2; q++) {  // column-major U, then V
+        for (size_t i = 0; i < (size_t)n * n; i++) Q[q][i] = drand48() * 2 - 1;
+        dgeqrf_(&n, &n, Q[q], &n, tau, work, &lwork, &info);
+        dorgqr_(&n, &n, &n, Q[q], &n, tau, work, &lwork, &info);
+    }
+    for (int k = 0; k < n; k++)  // U = U diag(s)
+        for (int i = 0; i < n; i++) Q[0][(size_t)k * n + i] *= pow(kappa, -(double)k / (n - 1));
+    // Column-major V (U diag(s))ᵀ = Aᵀ, which is A row-major
+    double* A = malloc((size_t)n * n * sizeof(double));
+    cblas_dgemm(CblasColMajor, CblasNoTrans, CblasTrans, n, n, n, 1.0, Q[1], n, Q[0], n, 0.0,
+                A, n);
+    free(Q[0]); free(Q[1]); free(tau); free(work);
+    return A;
+}
+
+// κ = 1e10 is far past what FP32 LU can refine (near 1e7-1e8): the residual
+// stalls or grows, and the solve must fall back to FP64 LU (dgetrf/dgetrs),
+// as LAPACK dsgesv does. Before that fallback, ab_dgesv_mpir returned AB_OK
+// after 10 iterations with a relative error near 50 and a backward error near
+// 4e-9; FP64 LU gives about 1e-7 and 1e-16.
+static void test_mpir_ill_conditioned(void) {
+    TEST("MPIR: κ = 1e10 falls back to FP64 (N=64)");
+    ab_init();
+    int N = 64, NRHS = 4;
+    size_t B_count = (size_t)N * NRHS;
+
+    double* A_data = mpir_kappa_matrix(N, 1e10, 2026);
+    double* X_true = malloc(B_count * sizeof(double));
+    double* B_data = malloc(B_count * sizeof(double));
+    double* X_sol = malloc(B_count * sizeof(double));
+    double* R = malloc(B_count * sizeof(double));
+    srand48(7);
+    for (size_t i = 0; i < B_count; i++) X_true[i] = drand48() * 2 - 1;
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                N, NRHS, N, 1.0, A_data, N, X_true, NRHS, 0.0, B_data, NRHS);
+
+    ABMatrix mA = ab_matrix_create(N, N);
+    ABMatrix mB = ab_matrix_create(N, NRHS);
+    ab_matrix_upload(mA, A_data, true);
+    ab_matrix_upload(mB, B_data, true);
+    ABStatus s = ab_dgesv_mpir(mA, mB);
+    ab_matrix_download(mB, X_sol, true);
+
+    // Backward error ||B - A X||_F / (||A||_F ||X||_F + ||B||_F), and forward error
+    memcpy(R, B_data, B_count * sizeof(double));
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                N, NRHS, N, -1.0, A_data, N, X_sol, NRHS, 1.0, R, NRHS);
+    int nb = (int)B_count;
+    double bwd = cblas_dnrm2(nb, R, 1) / (cblas_dnrm2(N * N, A_data, 1) * cblas_dnrm2(nb, X_sol, 1) +
+                                          cblas_dnrm2(nb, B_data, 1));
+    double fwd = frob_rel_err_rect(X_sol, X_true, N, NRHS);
+
+    ab_matrix_destroy(mA);
+    ab_matrix_destroy(mB);
+    ab_shutdown();
+    free(A_data); free(X_true); free(B_data); free(X_sol); free(R);
+
+    if (s == AB_OK && bwd <= 1e-14 && fwd <= 1e-4) PASS();
+    else { char buf[80]; snprintf(buf, 80, "s=%d bwd=%.2e fwd=%.2e", s, bwd, fwd); FAIL(buf); }
+}
+
+// 1 + 2^-30 rounds to 1 in FP32, so [[1, 1], [1, 1 + 2^-30]] is singular to
+// sgetrf but not to FP64, which solves it exactly: AB_OK with X = (1, 2)
+// (before, AB_ERROR_KERNEL_FAILED). A singular in FP64 too, [[1, 2], [2, 4]],
+// still gives AB_ERROR_KERNEL_FAILED, with B left as it was.
+static void test_mpir_fp32_singular(void) {
+    TEST("MPIR: FP32-singular A solved in FP64");
+    ab_init();
+    const double A_data[4] = {1.0, 1.0, 1.0, 1.0 + ldexp(1.0, -30)};
+    const double B_data[2] = {3.0, 3.0 + ldexp(1.0, -29)};
+    const double S_data[4] = {1.0, 2.0, 2.0, 4.0};
+    const double C_data[2] = {1.0, 2.0};
+    double X[2] = {0.0, 0.0}, Y[2] = {0.0, 0.0};
+
+    ABMatrix mA = ab_matrix_create(2, 2), mB = ab_matrix_create(2, 1);
+    ABMatrix mS = ab_matrix_create(2, 2), mC = ab_matrix_create(2, 1);
+    ab_matrix_upload(mA, A_data, false);
+    ab_matrix_upload(mB, B_data, false);
+    ab_matrix_upload(mS, S_data, false);
+    ab_matrix_upload(mC, C_data, false);
+    ABStatus s1 = ab_dgesv_mpir(mA, mB);
+    ABStatus s2 = ab_dgesv_mpir(mS, mC);
+    ab_matrix_download(mB, X, false);
+    ab_matrix_download(mC, Y, false);
+
+    ab_matrix_destroy(mA); ab_matrix_destroy(mB);
+    ab_matrix_destroy(mS); ab_matrix_destroy(mC);
+    ab_shutdown();
+
+    bool solved = s1 == AB_OK && fabs(X[0] - 1.0) <= 1e-6 && fabs(X[1] - 2.0) <= 2e-6;
+    bool singular = s2 == AB_ERROR_KERNEL_FAILED && Y[0] == 1.0 && Y[1] == 2.0;
+    if (solved && singular) PASS();
+    else {
+        char buf[96];
+        snprintf(buf, 96, "s1=%d X=(%.3g, %.3g) s2=%d", s1, X[0], X[1], s2);
+        FAIL(buf);
+    }
+}
+
 // =============================================================================
 // Batch API Tests
 // =============================================================================
@@ -2829,6 +2938,8 @@ static const TestCase TESTS[] = {
     {"test_mpir_null_safety",                 test_mpir_null_safety},
     {"test_mpir_dimension_mismatch",          test_mpir_dimension_mismatch},
     {"test_mpir_non_square",                  test_mpir_non_square},
+    {"test_mpir_ill_conditioned",             test_mpir_ill_conditioned},
+    {"test_mpir_fp32_singular",               test_mpir_fp32_singular},
     {"test_batch_basic_dgemm",                test_batch_basic_dgemm},
     {"test_batch_multiple_dgemm",             test_batch_multiple_dgemm},
     {"test_batch_barrier",                    test_batch_barrier},

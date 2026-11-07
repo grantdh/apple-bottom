@@ -45,17 +45,22 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 217, every test but
-the chaos ones, and `make ci-local` all 235 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 221, every test but
+the chaos ones, and `make ci-local` all 239 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
 (its `TEST_QE_GOLDEN` line says `PASS`, or `SKIP` on another device).
 
 - **Registry-based (ghost-guarded):**
-  - `tests/test_correctness.c` — 79 tests; `test_prefetch_same_bits`
+  - `tests/test_correctness.c` — 81 tests; `test_prefetch_same_bits`
     runs every register-prefetch kernel (`AB_PREFETCH=1`) against the
-    plain ones (`AB_PREFETCH=0`) and requires bitwise-equal results
+    plain ones (`AB_PREFETCH=0`) and requires bitwise-equal results;
+    `test_mpir_ill_conditioned` (κ = 10¹⁰) and `test_mpir_fp32_singular`
+    (A singular only once rounded to FP32) give `ab_dgesv_mpir` systems
+    that FP32 refinement cannot solve, which it must solve in FP64 and
+    return `AB_OK` (an A singular in FP64 too: `AB_ERROR_KERNEL_FAILED`,
+    B unchanged)
   - `tests/test_chaos.c` — 18 tests
   - `tests/test_device_api.c` — 19 tests (199 `CHECK`s); the GEMM
     tests compare `ab_dev_dgemm` / `ab_dev_zgemm` with column-major
@@ -78,8 +83,8 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
   - `tests/test_range_guard.c` — 7 tests of the exponent-range guards'
     stage 2 against the plain loops it replaced, no GPU, see below
   - `tests/test_blas_abi.c` — 33 suites (1095 cases), see below
-  - `tests/test_trace.c` — 5 tests of `AB_TRACE` and
-    `AB_TEST_FAIL_STAGE`, see below
+  - `tests/test_trace.c` — 7 tests of `AB_TRACE`, `AB_TEST_FAIL_STAGE`
+    and the solvers' `AB_PROFILE` fallback lines, see below
   - `tests/test_blas2.c` — 19 tests (957 cases) of DGEMV, ZGEMV and
     ZHEMV, see below
   - `tests/test_fft.c` — 14 tests of the double-float FFT, see below
@@ -373,6 +378,26 @@ kernels of the GPU work before the failure (none for `alloc`; for
 `kernel` the uploads, and the ZGEMM, which counts its kernel before it
 reports the failure), `AB_REPORT` must count each as a `gpu_failed`
 fallback and the trace must say `fallback:gpu_failed`.
+`test_fail_stage_solvers` runs `ab_dtrsm`'s four left solves (forward and
+backward, op(A)'s blocks as stored and transposed; A is 200 × 200, so each
+solve makes several 64-row panel updates) and `ab_dgesv_mpir` with
+`AB_PROFILE=1`, then again with `AB_TEST_FAIL_STAGE=kernel`. Each solve must
+return `AB_OK` with X within 10⁻¹² of `cblas_dtrsm`'s solution (for MPIR, of
+the X that B was made from). The first time the GPU must run the GEMM steps
+and none may fall back. Under the hook, which fails each GEMM after the GPU
+ran it, so that a solve using its result anyway would still be accurate,
+none may count as run, and each step must be reported as an `AB_PROFILE`
+fallback to cblas: for `ab_dtrsm` as many as the GPU ran the first time, for
+`ab_dgesv_mpir` one per residual.
+`test_mpir_fallback_lines` runs three `ab_dgesv_mpir` solves in one child
+with `AB_PROFILE=1`, each of which must return `AB_OK` with a backward error
+‖B − AX‖_F / (‖A‖_F ‖X‖_F + ‖B‖_F) below 10⁻¹⁴. A dense 256 × 256 A,
+whose DD residual levels off above 10⁻¹⁴·‖B‖_F, must keep its refined X
+once refinement stops improving, after 3 to 5 GPU residuals (it used to run
+all ten), and print no fallback line. The 8 × 8
+Hilbert matrix (κ ≈ 1.5×10¹⁰), on which FP32 refinement fails, and
+[[1, 1], [1, 1 + 2⁻³⁰]], singular once rounded to FP32, must each be
+solved in FP64 with one `FP64 LU fallback` line giving that reason.
 
 ## BLAS-2 (GEMV, HEMV)
 
