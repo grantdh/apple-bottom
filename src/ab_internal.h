@@ -30,6 +30,9 @@ extern "C" {
 // and sums overflow at 2^128 (measured on an M2 Max; docs/vv/LIMITATIONS.md,
 // "Exponent range"). The power-of-two scaling of both APIs keeps data inside.
 #define AB_PRODUCT_MIN_EXP (-78)    // products from 2^-78 up keep full DD precision
+// An entry's FP32 low part below 2^-126 is read as zero on the GPU; from 2^-78
+// up that loses at most 2^-48 of the entry, DD's rounding level.
+#define AB_ENTRY_MIN_EXP (-78)
 #define AB_SUM_MAX_EXP 122          // sums up to 2^122 stay clear of FP32's 2^128
 // A native matrix whose nonzero magnitudes all lie in 2^±AB_NATIVE_WINDOW
 // gives products of at least 2^AB_PRODUCT_MIN_EXP with any other such matrix.
@@ -90,10 +93,46 @@ static inline uint32_t ab_abs_hiword(double x) {
 
 #define AB_HIWORD_NONFINITE 0x7FF00000u     // high words from here up: Inf or NaN
 
-// ilogb(|x|) for a finite |x| with high word h != 0; -1075 for h == 0 (|x| < 2^-1042).
+// A nonzero |x| below 2^-1042 has high word 0, as a zero has. The
+// exponent-range guard's statistics count it as AB_HIWORD_TINY, the smallest
+// nonzero high word (that of [2^-1042, 2^-1041)), so that a line or a C with
+// such values is not read as zero, or as without them.
+#define AB_HIWORD_TINY 1u
+
+// The high word the guard's statistics take for v, which is x or x times a
+// power of two: |v|'s, or AB_HIWORD_TINY where that is 0 and x is not (|v|
+// below 2^-1042, also where the scale took x to 0). It tests x on its 32-bit
+// words (low first: Apple silicon is little-endian), which vectorize better
+// than a 64-bit test and need no floating-point compare, which flush-to-zero
+// would change; as h >= 1 wherever h != 0, max(h, t) is the rule.
+static inline uint32_t ab_stat_hiword_scaled(double v, double x) {
+    uint32_t w[2];
+    memcpy(w, &x, sizeof w);
+    const uint32_t h = ab_abs_hiword(v), t = (w[0] | (w[1] & 0x7FFFFFFFu)) != 0;
+    return h > t ? h : t;
+}
+
+// The same for x itself, read where it is stored, so that a loop loads its
+// 32-bit halves.
+static inline uint32_t ab_stat_hiword(const double* x) {
+    uint32_t w[2];
+    memcpy(w, x, sizeof w);
+    const uint32_t h = w[1] & 0x7FFFFFFFu, t = w[0] != 0;
+    return h > t ? h : t;
+}
+
+// ilogb(|x|) for a finite |x| with high word h != 0; -1075 for h == 0 (|x| <
+// 2^-1042). For a statistic's AB_HIWORD_TINY it is -1042, the largest ilogb
+// that word stands for: what a largest |x| needs (scales, overflow).
 static inline int ab_hiword_ilogb(uint32_t h) {
     if (h >= 0x00100000u) return (int)(h >> 20) - 1023;
     return h ? (31 - __builtin_clz(h)) - 1042 : -1075;
+}
+
+// The same for a smallest |x|, whose floors need a lower bound: -1074 for
+// AB_HIWORD_TINY, which stands for every |x| below 2^-1041.
+static inline int ab_hiword_min_ilogb(uint32_t h) {
+    return h == AB_HIWORD_TINY ? -1074 : ab_hiword_ilogb(h);
 }
 
 // |x| truncated to its high word, as a double (within 2^-20 of |x|).
@@ -104,9 +143,10 @@ static inline double ab_hiword_value(uint32_t h) {
     return d;
 }
 
-// The magnitudes of some FP64 values, as high words: of the largest |x| (0 if
-// all are zero; AB_HIWORD_NONFINITE or more if any is NaN or Inf) and of the
-// smallest |x| with a nonzero high word (UINT32_MAX if none).
+// The magnitudes of some FP64 values, as high words (the guard's: AB_RANGE_ADD;
+// the native ab_matrix_upload's: MEASURE_NATIVE in apple_bottom.m): of the
+// largest |x| (0 if all are zero; AB_HIWORD_NONFINITE or more if any is NaN
+// or Inf) and of the smallest nonzero one (UINT32_MAX if none).
 typedef struct {
     uint32_t max, min;
 } ab_range_t;
@@ -137,7 +177,8 @@ static inline ab_range_t ab_range_merge(ab_range_t a, ab_range_t b) {
         AB_HIWORD_MAX(hw_, mx);                            \
         AB_HIWORD_MIN(hw_, mn);                            \
     } while (0)
-#define AB_RANGE_ADD(x, mx, mn) AB_HIWORD_ADD(ab_abs_hiword(x), mx, mn)
+// Adds |x|, x a stored FP64 value, to a range as the guard counts it.
+#define AB_RANGE_ADD(x, mx, mn) AB_HIWORD_ADD(ab_stat_hiword(&(x)), mx, mn)
 
 // =============================================================================
 // The BLAS ABI's exponent-range guard (blas_wrapper.c)
@@ -145,7 +186,9 @@ static inline ab_range_t ab_range_merge(ab_range_t a, ab_range_t b) {
 // For C = alpha op(A) op(B) + beta C, op(A) M x K and op(B) K x N, from the
 // caller's column-major operands:
 //   1. Statistics of each row of op(A) and column of op(B) (ab_line_stats_scan,
-//      or the pack that gathers the same).
+//      or the pack that gathers the same), as AB_RANGE_ADD counts them: a
+//      nonzero |x| below 2^-1042, or a C' scaled there or to 0, counts as
+//      AB_HIWORD_TINY (ab_stat_hiword_scaled; minima: ab_hiword_min_ilogb).
 //   2. Scales (ab_line_scales): a line whose largest |x| lies outside
 //      [2^-AB_SCALE_WINDOW, 2^AB_SCALE_WINDOW) is multiplied by 2^-e on its way
 //      to DD, e = ilogb(largest |x|) - AB_SCALE_TARGET; any other line by 1. A
@@ -155,15 +198,23 @@ static inline ab_range_t ab_range_merge(ab_range_t a, ab_range_t b) {
 //      Accelerate (the "range" fallback) if a line has NaN or Inf, or if the
 //      scaled sums could reach 2^AB_SUM_MAX_EXP. It is certified if every
 //      nonzero scaled product, times alpha's scale when that is below 1, is at
-//      least 2^AB_PRODUCT_MIN_EXP (stage 1). Otherwise stage 2 checks, for each
-//      C_ij of a row and column that stage 1 leaves open, the products through
-//      the largest elements of that row and that column, on the operands.
+//      least 2^AB_PRODUCT_MIN_EXP and every nonzero scaled entry at least
+//      2^AB_ENTRY_MIN_EXP (stage 1; for complex data, every part). Otherwise
+//      stage 2 checks, for each C_ij of a row and column that stage 1 leaves
+//      open, the products through the largest elements of that row and that
+//      column, on the operands (for complex data, in each part of C_ij).
 //   4. A DGEMM with beta != 0 checks C as it uploads, C' = C_ij 2^-(ra[i] +
 //      cb[j] + ea - eb), in the same way (ab_range_guard_c): NaN or Inf, or a
-//      C' or beta' C' that could reach 2^AB_SUM_MAX_EXP, go to Accelerate;
-//      where a row of op(A) or a column of op(B) is zero, beta' C' must be at
-//      least 2^AB_PRODUCT_MIN_EXP. A ZGEMM with beta != 0 and NaN or Inf in C
-//      goes to Accelerate too (zgemm_reads_nonfinite_c).
+//      C' or beta' C' that could reach 2^AB_SUM_MAX_EXP, go to Accelerate. It
+//      is certified if every nonzero C' is at least 2^AB_ENTRY_MIN_EXP and
+//      beta' C' at least 2^AB_PRODUCT_MIN_EXP (stage 1). Otherwise every C'_ij
+//      below those floors needs a product in its own entry, through the
+//      largest element of row i or of column j, that alpha' brings to
+//      2^AB_PRODUCT_MIN_EXP max(1, |beta'|) (stage 2): in a zero line, or
+//      where row i's and column j's supports miss each other, beta' C'_ij is
+//      all of C_ij. Without such a product the call goes to Accelerate. A ZGEMM
+//      with beta != 0 and NaN or Inf in C goes to Accelerate too
+//      (zgemm_reads_nonfinite_c).
 // The unscale, bit for bit (dgemm_blas, zgemm_blas): each GPU result C'_ij
 // becomes FP64 as (double)hi + (double)lo, then is multiplied by
 // 2^(ra[i] + cb[j] + ea) (ea = 0 for ZGEMM) with ab_scale2, one rounding. A
@@ -184,10 +235,11 @@ typedef struct {
 } ab_op_view_t;
 
 // Statistics of the lines of op(X), its rows (op(A)) or columns (op(B)): per
-// line, the high words of its largest |x| (0 for a zero line;
+// line, the high words (ab_stat_hiword) of its largest |x| (0 for a zero line;
 // AB_HIWORD_NONFINITE or more if it has NaN or Inf) and of its smallest
-// nonzero |x| (UINT32_MAX for a zero line), with |x| = max(|Re x|, |Im x|)
-// for complex; and the exponent of its scale (ab_line_scales). Complex
+// nonzero |x| (UINT32_MAX for a zero line), for complex data the largest
+// max(|Re x|, |Im x|) and the smallest nonzero part (|Re x| or |Im x|); and
+// the exponent of its scale (ab_line_scales). Complex
 // statistics also hold the high words of each line's largest |Re x| and
 // largest |Im x| (rmax, imax), from which ab_lines_rho chooses between
 // Gauss-3M and 4M. The arrays are plain pointers a caller may set (a GPU
@@ -234,15 +286,17 @@ bool ab_range_guard(int K, const ab_line_stats_t* sa, const ab_line_stats_t* sb,
                     const ab_op_view_t* a, const ab_op_view_t* b);
 
 // Step 4 without its entrywise part: r is the range of C as uploaded
-// (C itself when nothing is scaled and ea == eb), beta_exp ilogb of the
-// scalar the GPU multiplies it by (beta 2^-eb).
-ab_guard_t ab_range_guard_c_stage1(const ab_line_stats_t* sa, const ab_line_stats_t* sb,
-                                   ab_range_t r, int beta_exp);
+// (C itself when nothing is scaled and ea == eb), beta the nonzero scalar the
+// GPU multiplies it by (beta 2^-eb).
+ab_guard_t ab_range_guard_c_stage1(ab_range_t r, double beta);
 
 // Step 4: true if the GPU may take C. C is the caller's M x N C (leading
-// dimension ldC), uploaded as C_ij 2^-(ra[i] + cb[j] + shift), shift = ea - eb.
+// dimension ldC), uploaded as C_ij 2^-(ra[i] + cb[j] + shift), shift = ea - eb;
+// alpha is the scalar the GPU multiplies the product by (alpha 2^-ea), and a
+// and b are the operands sa and sb describe.
 bool ab_range_guard_c(const ab_line_stats_t* sa, const ab_line_stats_t* sb, ab_range_t r,
-                      int beta_exp, const double* C, int ldC, int shift);
+                      double alpha, double beta, const double* C, int ldC, int shift,
+                      const ab_op_view_t* a, const ab_op_view_t* b);
 
 // =============================================================================
 // Complex products: Gauss-3M or 4M
@@ -324,7 +378,7 @@ ABStatus ab_internal_zgemm(ABTranspose transA, ABTranspose transB, ABMatrix Ar, 
 // x * 2^-(row_exp[i] + col_exp[j] + shift) into m, whose power-of-two scale
 // becomes 0; NULL row_exp or col_exp counts as all zeros. Each scaled value is
 // rounded once, as ldexp rounds. If range is not NULL it receives the range of
-// the scaled values.
+// the scaled values, as the guard counts them (ab_stat_hiword_scaled).
 ABStatus ab_internal_upload_scaled(ABMatrix m, const double* data, const int* row_exp,
                                    const int* col_exp, int shift, ab_range_t* range);
 

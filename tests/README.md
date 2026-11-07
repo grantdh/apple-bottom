@@ -45,8 +45,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 210, every test but
-the chaos ones, and `make ci-local` all 228 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 217, every test but
+the chaos ones, and `make ci-local` all 235 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -75,7 +75,9 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     threads at once
   - `tests/test_dispatch.c` — 13 tests of the BLAS-ABI routing, no GPU,
     see below
-  - `tests/test_blas_abi.c` — 33 suites (1073 cases), see below
+  - `tests/test_range_guard.c` — 7 tests of the exponent-range guards'
+    stage 2 against the plain loops it replaced, no GPU, see below
+  - `tests/test_blas_abi.c` — 33 suites (1095 cases), see below
   - `tests/test_trace.c` — 5 tests of `AB_TRACE` and
     `AB_TEST_FAIL_STAGE`, see below
   - `tests/test_blas2.c` — 19 tests (957 cases) of DGEMV, ZGEMV and
@@ -106,7 +108,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
   - `tests/test_precision.c` — 17 tests (the last compares
     `AB_PRECISION=fast` with the default mode); needs decomposition strategy
   - `tests/test_qe_golden.c` — 32 golden-bits cases, see below
-  - `tests/test_staging.c` — 127 cases of the staged path against the
+  - `tests/test_staging.c` — 134 cases of the staged path against the
     host path, bit for bit, see below (its `TEST_STAGING` line is not
     part of the total either)
   - `tests/verification/test_convergence.c` — monolithic numerical
@@ -208,7 +210,13 @@ with random signs, so the pattern alone sets the span.
     row of C0 × 2⁻¹⁰⁰ (Accelerate must take it), and with the other rows
     × 2⁻¹⁰⁰ instead (the GPU must certify it);
   - DGEMM C0 × 2¹³⁵ with beta = 2⁻²⁰: beta·C0 fits FP32's range but C0 does
-    not, so Accelerate must take it.
+    not, so Accelerate must take it;
+  - magnitudes below 2⁻¹⁰⁴², whose FP64 high word is 0 (the guard's
+    statistics must still count them): a row of op(A) or a column of op(B)
+    made of them, which the guard must scale and keep on the GPU; such
+    entries beside large ones; and a DGEMM zero row whose C0 is that small,
+    or becomes so (or 0) when the guard scales it (Accelerate must take
+    those).
 
   These run with every TRANS kind of op(). Each must give C within 1e-11
   of cblas (Inf and NaN where cblas has them), on the route the case
@@ -216,8 +224,9 @@ with random signs, so the pattern alone sets the span.
 - **Exactness**: C of data scaled by 2^{-100, 0, 100} per row and column
   must be bit for bit that power of two times C of the unscaled data.
 - **Native `ab_dgemm`, `ab_dgemm_scaled` and `ab_zgemm`**: the same 1e±25
-  data, rows spread over 2⁻¹⁰⁰…2⁻⁶⁰, columns over 2⁶⁰…2¹⁰⁰, and an
-  exactness case (A and B × 2⁹⁰).
+  data, rows spread over 2⁻¹⁰⁰…2⁻⁶⁰, columns over 2⁶⁰…2¹⁰⁰, an exactness
+  case (A and B × 2⁹⁰), and an A made only of values below 2⁻¹⁰⁴², which
+  must get a scale, not be stored as zeros.
 
 `test_zgemm_imbalance` gives `zgemm_` (`AB_MODE=gpu`, alpha = 1, beta = 0,
 every TRANS kind) data whose real and imaginary parts are 10⁻⁶ apart:
@@ -225,7 +234,10 @@ nearly real A and B, nearly imaginary ones, and rows of op(A) and columns
 of op(B) that alternate between the two. Re(C) and Im(C) must each be
 within 8 u² of a Dot2 reference, relative to their own componentwise
 scales. Gauss's three-product form misses Im(C) by about 10⁶ u² there, so
-the call must run as four products.
+the call must run as four products. Three more cases hold the
+exponent-range guard to each part: imaginary parts of ±2⁻⁹⁸(1 + 2⁻²⁹) and
+of 2⁻¹⁰⁵⁰ times [0.5, 1) (Accelerate must take them), and of 2⁻⁶⁰ times
+[0.5, 1) (the GPU must keep it).
 
 Known failures live in the file's `XFAIL` table, each with a short tag
 naming the defect. An XFAIL that now passes (XPASS), or an entry that matches
@@ -304,8 +316,10 @@ scales, rows it certifies only on the operands (its second stage), complex
 parts imbalanced enough for 4M, a DGEMM alpha outside its window, K = 1
 products of random bit patterns (every conversion and epilogue rounding
 shows in C), signed zeros, tiny and subnormal C, cancelling C, NaN, Inf
-and overflow; and Quantum ESPRESSO shapes large enough that the copies run
-in pieces.
+and overflow, magnitudes below 2⁻¹⁰⁴² in lines of op(A) and op(B) and in
+a DGEMM's C as scaled (which the host and GPU statistics must count
+alike); and Quantum ESPRESSO shapes large enough that the copies run in
+pieces.
 
 The native ZGEMMs take their Gauss-3M or 4M temporaries from the same
 pool, so after the run the pool must hold buffers in the host child and
@@ -442,6 +456,25 @@ It also checks the precedence of `AB_MODE`, `AB_MIN_GPU_DIM` and
 `AB_CROSSOVER_FLOPS[_REAL]` over the table, the row bounds and TRANS
 classes (`'C'` is `'T'`), and the `AB_DISPATCH_TABLE` format: parsing,
 loading, malformed and missing files.
+
+## Range guard, stage 2
+
+`tests/test_range_guard.c` checks stage 2 of the BLAS ABI's exponent-range
+guards (`ab_range_guard`, and `ab_range_guard_c` for a DGEMM's C) on the
+host, without a GPU. Stage 2 finds each line's largest element by one-pass
+and sweeping scans, works out the need's terms once per line and passes
+rows by a bound before it looks at their pairs; the file keeps the plain
+loops it replaced (44873b6's, on the statistics of ed9a27b) as the oracle,
+and every decision must be the oracle's. The cases are random and crafted,
+real and complex, in every transpose combination, with padded leading
+dimensions whose padding would win any argmax that read it: entry-floor and
+product-floor cases, ties for a line's largest element (inside and across
+the scan's blocks), calls whose second probe decides, lines scaled out of
+the window, values below 2⁻¹⁰⁴² (lines made only of them too), zero lines
+and parts, and calls the guard refuses, plus QE-sized shapes and passes
+with the CPU flushing subnormals to zero (FPCR.FZ). Each suite also needs
+both outcomes in stage 2 often enough, and each crafted case its known
+outcome.
 
 ## Fortran binding probe
 

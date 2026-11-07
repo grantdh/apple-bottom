@@ -168,6 +168,23 @@ All notable changes to this project will be documented in this file.
     repeated.
 
 ### Changed
+- **Stage 2 of the exponent-range guard takes a fraction of the host time,
+  with the same decisions.** With the complex-parts fix above, nearly every
+  large Quantum ESPRESSO ZGEMM enters stage 2 (the projectors hold parts far
+  below their rows' largest), where per-line scans strided across op(A)'s
+  storage and a loop over every pair of lines cost more host time than
+  Accelerate takes for the whole call. Stage 2 now finds each line's largest
+  element in one pass over a contiguous line, or for lines strided across
+  the storage in one streaming sweep over it, works out the need's terms
+  once per line, gathers op(B)'s probe row once per group of rows that share
+  it, and passes a row by a bound (its probe element times that row's
+  smallest parts against its largest need) before it looks at the row's
+  pairs; a column's own probe element is found only when a pair needs it.
+  The DGEMM C check finds its probe elements the same way. Every decision is
+  the old loop's: `tests/test_range_guard.c` (new, host only) keeps the old
+  loops as the oracle and compares them on random and crafted data, real and
+  complex, every transpose combination, refusals included, and with the CPU
+  flushing subnormals to zero.
 - **32 × 32 tiles are chosen by grid size, not output size**
   (`use_narrow_tiles` in `src/apple_bottom.m`). In 1.5.0 they took every C of
   at most 480 × 480 elements, a tall C on a stricter test. Alone on the GPU, a
@@ -251,6 +268,90 @@ All notable changes to this project will be documented in this file.
   `zblat2` stop there, as those of `dblat3` and `zblat3` already did.
 
 ### Fixed
+- **The exponent-range guard now has an entry floor.** In 1.5.1 it certified
+  a call when every product of scaled entries reached 2⁻⁷⁸, with no floor on
+  single entries. An entry below about 2⁻¹⁰² in a row (or column) that needs
+  no scaling has a subnormal FP32 low part, which the GPU reads as zero, so
+  such products kept only FP32 accuracy: `dgemm_` with a row [1, 2⁻¹⁰⁵(1+¾·2⁻²⁴)]
+  of A and a column [0, 2³⁰] of B returned a relative error of 4.5×10⁻⁸ on
+  the GPU and reported success. Stage 1 now also requires every nonzero
+  scaled entry to be at least 2⁻⁷⁸; stage 2 accepts smaller entries where the
+  sum through the largest entries covers K·2⁻⁷⁸ times the other line's
+  largest entry (the most such entries can lose), and Accelerate takes the
+  rest. Data whose scaled entries all reach 2⁻⁷⁸ is routed and computed as
+  before. New cases `range-entry-low-*` in `tests/test_blas_abi.c`.
+- **The guard's floors now hold for DGEMM's C and for each complex part.**
+  Three more gaps of the same kind, each confirmed on the GPU in 1.5.1, every
+  call reporting success:
+  - For DGEMM with beta ≠ 0 the guard checked C′ (C as scaled for the upload)
+    only through |β′C′| ≥ 2⁻⁷⁸, so with β = 2²⁰ a C′ down to 2⁻⁹⁸ passed,
+    whose FP32 low word is subnormal: a zero row of op(A) with
+    c = 2⁻⁹⁸(1+2⁻²⁹) came back with relative error 2⁻²⁹. Stage 1 now also
+    requires every nonzero C′ to be at least 2⁻⁷⁸.
+  - Below that floor it checked C only in zero rows of op(A) and zero columns
+    of op(B), not where a row and a column have disjoint supports, which also
+    leaves C_ij's product part zero: with β = 1, row [1, 0] and column [0, 1],
+    c = 2⁻ᵏ(1+2⁻²⁹) lost its low word for k ≥ 98 and came back as zero for
+    k ≥ 127. Now each C′_ij below the floors needs a product in its own
+    entry, through the largest element of its row or of its column, that α′
+    brings to 2⁻⁷⁸·max(1, |β′|), so that what C′_ij can lose stays below u²
+    of it; without one (a zero line, or supports that miss each other) the
+    call runs on Accelerate.
+  - Complex statistics measured an element by its larger part, so a small
+    part went unchecked: with every element of A and B 1 + t·i, Im C (by 4M)
+    lost 2⁻²⁹ of itself for t below 2⁻⁹⁷ and came back as zero below 2⁻¹²⁶.
+    The floors now apply to every nonzero real and imaginary part, and stage 2
+    checks each part of C_ij in its own scale (|Ar||Br| + |Ai||Bi| for the
+    real part, |Ar||Bi| + |Ai||Br| for the imaginary part).
+
+  Calls whose scaled entries (for ZGEMM, every nonzero part and every product
+  of two parts) and whose C′ and β′C′ reach 2⁻⁷⁸ are routed and computed as
+  before (golden bits unchanged). ZGEMMs with smaller parts or products of
+  parts now go through stage 2, which reads the operands on the host, and
+  some of them to Accelerate. New cases `range-c-floor`,
+  `range-c-disjoint` and `imag-part-low` (Accelerate; they fail on 1.5.1),
+  and `range-c-near` and `imag-part-ok` (they must stay on the GPU), in
+  `tests/test_blas_abi.c`.
+- **The guard's statistics now see magnitudes below 2⁻¹⁰⁴².** They are FP64
+  high words, and a nonzero value below 2⁻¹⁰⁴² has high word 0, as zero has.
+  Such a value in op(A), op(B) or DGEMM's C, or a C′ that the scaling took
+  below 2⁻¹⁰⁴² or to 0, passed stage 1 unseen, and a line made only of such
+  values read as a zero line and was not scaled. The GPU reads them as zero.
+  Confirmed on the GPU on the staged and the host path, every call reporting
+  success (M = N = 8, K = 2, α = 1):
+  - β = 1, row 0 of op(A) zero, C_00 = 2⁻ᵏ: C_00 came back as 0 for
+    k ≥ 1043 (up to k = 1042 the call went to Accelerate);
+  - the same with column 0 of op(B) at 2¹⁰⁰⁰ (scale 2⁻⁹⁷⁰), so that
+    C′_00 = 2⁻⁽ᵏ⁺⁹⁷⁰⁾: C_00 came back as 0 for every k tried from 73
+    (C′_00 = 2⁻¹⁰⁴³) to 110, k ≥ 105 included, where C′_00 underflows to 0;
+  - row 0 of op(A) = [2⁻ᵏ, 0] against a column of 2¹⁰⁰⁰: C_00 = 2¹⁰⁰⁰⁻ᵏ came
+    back as 0 for k ≥ 1043, through op(B) and for ZGEMM alike, and with every
+    element 1 + 2⁻ᵏ·i, Im C came back as 0.
+
+  The host pack, the C upload and the Metal pre-pass now count a nonzero
+  value whose high word (after its scale) is 0 as the smallest nonzero high
+  word. As a line's largest magnitude it reads as 2⁻¹⁰⁴², so a line of such
+  values is scaled (by 2¹⁰⁷²) and runs on the GPU, exactly in the probes; as
+  a smallest magnitude it reads as 2⁻¹⁰⁷⁴, below every floor, so stage 2
+  decides, and a C′ that is all of C_ij goes to Accelerate. Data without
+  values below 2⁻¹⁰⁴¹ is routed and computed as before (golden bits
+  unchanged; the word also stands for [2⁻¹⁰⁴², 2⁻¹⁰⁴¹), whose minima now read
+  low, conservatively). New cases `range-c-subnormal`,
+  `range-c-scaled-out`, `range-entry-subnormal` and `imag-part-subnormal`
+  (Accelerate) and `range-a-subnormal`, `range-b-subnormal` (GPU) in
+  `tests/test_blas_abi.c`, which all fail on the previous guard (errors from
+  2.8×10⁻⁹ to 1, Im 2.7×10⁷ u²); `subnormal` and `subnormalC` data in
+  `tests/test_staging.c` hold the host and GPU statistics to the same counts.
+- **The native API now scales a matrix made only of values below 2⁻¹⁰⁴².**
+  `ab_matrix_upload` measured such a matrix as zero and stored it as zeros:
+  `ab_dgemm` and `ab_zgemm` with every entry of A at 2⁻ᵏ against B at 2¹⁰⁰⁰
+  returned 0 for k ≥ 1043 (confirmed on the GPU, through A and through B).
+  It now counts such values in a matrix's largest magnitude only, so a
+  matrix made only of them is scaled as if they spanned [2⁻¹⁰⁷⁴, 2⁻¹⁰⁴²] (the
+  probes are exact for every k up to 1074), and a matrix that also holds
+  larger values keeps its scale. New cases `range-all-subnormal`
+  (`ab_dgemm`, `ab_dgemm_scaled`, `ab_zgemm`) in `tests/test_blas_abi.c`,
+  which fail on the previous build.
 - **A ZGEMM through the BLAS ABI that reads a NaN or Inf in C runs on
   Accelerate**, whether its epilogue would run on the GPU or on the host, as a
   DGEMM's has since 1.5.0. The epilogue's complex arithmetic,

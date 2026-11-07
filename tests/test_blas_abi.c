@@ -170,6 +170,35 @@ typedef enum {
     RANGE_C_INF,        // C0_00's real part +Inf, its imaginary part finite: C as cblas gives
                         // it, not (NaN, NaN) from the epilogue's arithmetic (Accelerate)
     RANGE_C_NAN,        // the same with a NaN
+    RANGE_ENTRY_LOW_A,  // op(A)_ik x 1 for k = 0 and x 2^-105 else, op(B)_kj x 0 for k = 0 and
+                        // x 2^30 else: every product is about 2^-75, but the small entries'
+                        // FP32 low parts are subnormal, which the GPU reads as zero (Accelerate)
+    RANGE_ENTRY_LOW_B,  // the same with op(A) and op(B) swapped (Accelerate)
+    RANGE_ENTRY_LOW_OK, // op(A) as RANGE_ENTRY_LOW_A, op(B) x 1: the k = 0 products dominate
+                        // C, so the small entries' low parts round away (the GPU must keep it)
+    RANGE_C_FLOOR,      // row 0 of op(A) zero, row 0 of C0 = 2^-98 (1 + 2^-29), beta = 2^20
+                        // (in the scalar window): beta C0 is 2^-78, but C0's FP32 low word
+                        // 2^-127 is subnormal, which the GPU reads as zero (Accelerate)
+    RANGE_C_DISJOINT,   // row 0 of op(A) nonzero only at k = 0, column 0 of op(B) zero there:
+                        // C_00's product part is zero with no zero line, and C0_00 = 2^-98
+                        // (1 + 2^-29) loses its low word in DD (Accelerate)
+    RANGE_C_NEAR,       // as RANGE_C_DISJOINT with op(B)_00 x 2^-40: C0_00's low word is far
+                        // below the product beside it (the GPU must keep it)
+    // Magnitudes below 2^-1042, whose FP64 high words are 0 (the guard's
+    // statistics must still count them; the GPU reads them as zero):
+    RANGE_C_SUBNORMAL,  // row 0 of op(A) zero, row 0 of C0 x 2^-1050: beta C0 is all of C there
+                        // (Accelerate)
+    RANGE_C_SCALED_OUT, // row 0 of op(A) zero, column 0 of op(B) x 2^1000, C0_i0 x 2^970 for
+                        // i > 0 and C0_00 x 2^-100: C0_00 uploads, by column 0's scale, at
+                        // about 2^-1070 (Accelerate)
+    RANGE_A_SUBNORMAL,  // row 0 of op(A) x 2^-1050 and zero in C0, op(B) x 2^1000: row 0 is
+                        // not zero, and scaled by its own scale it runs on the GPU
+    RANGE_B_SUBNORMAL,  // column 0 of op(B) x 2^-1050 and zero in C0, op(A) x 2^1000 (the GPU)
+    RANGE_ENTRY_SUBNORMAL, // op(A)_ik x 1 for k = 0 and x 2^-1050 else, op(B)_kj x 0 for k = 0
+                        // and x 2^1000 else: every product is about 2^-50, through entries the
+                        // GPU reads as zero (Accelerate)
+    RANGE_ALL_SUBNORMAL, // native: A x 2^-1050 (all of it), B x 2^1000: A must get a scale, not be
+                        // stored as zeros
 } RangeData;
 
 static const char *const RANGE_TAG[] = {
@@ -179,7 +208,12 @@ static const char *const RANGE_TAG[] = {
     [RANGE_EXACT] = "exact", [RANGE_ROWS_LOW] = "rows-low", [RANGE_COLS_HIGH] = "cols-high",
     [RANGE_UNIFORM_EXACT] = "uniform-exact", [RANGE_C_ZERO_ROW] = "c-zero-row",
     [RANGE_C_TINY] = "c-tiny", [RANGE_C_HUGE] = "c-huge", [RANGE_C_INF] = "c-inf",
-    [RANGE_C_NAN] = "c-nan",
+    [RANGE_C_NAN] = "c-nan", [RANGE_ENTRY_LOW_A] = "entry-low-a",
+    [RANGE_ENTRY_LOW_B] = "entry-low-b", [RANGE_ENTRY_LOW_OK] = "entry-low-ok",
+    [RANGE_C_FLOOR] = "c-floor", [RANGE_C_DISJOINT] = "c-disjoint", [RANGE_C_NEAR] = "c-near",
+    [RANGE_C_SUBNORMAL] = "c-subnormal", [RANGE_C_SCALED_OUT] = "c-scaled-out",
+    [RANGE_A_SUBNORMAL] = "a-subnormal", [RANGE_B_SUBNORMAL] = "b-subnormal",
+    [RANGE_ENTRY_SUBNORMAL] = "entry-subnormal", [RANGE_ALL_SUBNORMAL] = "all-subnormal",
 };
 
 typedef struct {
@@ -545,7 +579,8 @@ static void gen_memory(const Suite *s) {
 
 // Exponent range. DD has FP32's exponent range: entries or products below
 // about 2^-126 flush to zero, low parts below about 2^-78 times the result
-// are lost, and above about 2^128 they overflow, silently in 1.4.
+// are lost (an entry's own low part is subnormal from about 2^-102 down, the
+// guard's entry floor), and above about 2^128 they overflow, silently in 1.4.
 //   - Through dgemm_ / zgemm_ (AB_MODE=gpu, no ab_init()), each call must
 //     run on the GPU where power-of-two scaling of op(A)'s rows and op(B)'s
 //     columns puts every product back in range (ROUTE_GPU), and on Accelerate
@@ -565,6 +600,7 @@ static AbiCase *add_range(const Suite *s, Op op, char ta, char tb, RangeData dat
         c->beta = 0.0;
     }
     if (data == RANGE_C_HUGE) c->beta = 0x1p-20;
+    if (data == RANGE_C_FLOOR) c->beta = 0x1p20;
     if (op == OP_DGEMM || op == OP_DGEMM_SCALED || op == OP_ZGEMM) {
         c->pad = 0;
         snprintf(c->name, sizeof c->name, "%s/%dx%dx%d/range-%s", OP_NAME[op], M, N, K,
@@ -597,6 +633,22 @@ static void gen_range(const Suite *s) {
         {OP_DGEMM_SYM, 'N', 'N', RANGE_C_ZERO_ROW, ROUTE_CPU},
         {OP_DGEMM_SYM, 'T', 'T', RANGE_C_TINY, ROUTE_GPU},
         {OP_DGEMM_SYM, 'N', 'T', RANGE_C_HUGE, ROUTE_CPU},
+        {OP_DGEMM_SYM, 'N', 'N', RANGE_ENTRY_LOW_A, ROUTE_CPU},
+        {OP_DGEMM_SYM, 'T', 'N', RANGE_ENTRY_LOW_B, ROUTE_CPU},
+        {OP_ZGEMM_SYM, 'N', 'C', RANGE_ENTRY_LOW_A, ROUTE_CPU},
+        {OP_DGEMM_SYM, 'N', 'T', RANGE_ENTRY_LOW_OK, ROUTE_GPU},
+        {OP_ZGEMM_SYM, 'T', 'N', RANGE_ENTRY_LOW_OK, ROUTE_GPU},
+        {OP_DGEMM_SYM, 'N', 'N', RANGE_C_FLOOR, ROUTE_CPU},
+        {OP_DGEMM_SYM, 'T', 'N', RANGE_C_DISJOINT, ROUTE_CPU},
+        {OP_DGEMM_SYM, 'N', 'T', RANGE_C_NEAR, ROUTE_GPU},
+        {OP_DGEMM_SYM, 'T', 'N', RANGE_C_SUBNORMAL, ROUTE_CPU},
+        {OP_DGEMM_SYM, 'N', 'T', RANGE_C_SCALED_OUT, ROUTE_CPU},
+        {OP_DGEMM_SYM, 'N', 'N', RANGE_A_SUBNORMAL, ROUTE_GPU},
+        {OP_ZGEMM_SYM, 'C', 'N', RANGE_A_SUBNORMAL, ROUTE_GPU},
+        {OP_DGEMM_SYM, 'T', 'T', RANGE_B_SUBNORMAL, ROUTE_GPU},
+        {OP_ZGEMM_SYM, 'N', 'T', RANGE_B_SUBNORMAL, ROUTE_GPU},
+        {OP_DGEMM_SYM, 'T', 'N', RANGE_ENTRY_SUBNORMAL, ROUTE_CPU},
+        {OP_ZGEMM_SYM, 'N', 'C', RANGE_ENTRY_SUBNORMAL, ROUTE_CPU},
         {OP_DGEMM_SYM, 'N', 'N', RANGE_EXACT, ROUTE_GPU},
         {OP_DGEMM_SYM, 'T', 'T', RANGE_EXACT, ROUTE_GPU},
         {OP_ZGEMM_SYM, 'N', 'N', RANGE_EXACT, ROUTE_GPU},
@@ -613,6 +665,9 @@ static void gen_range(const Suite *s) {
         {OP_ZGEMM, 'N', 'N', RANGE_COLS_HIGH, ROUTE_GPU},
         {OP_DGEMM, 'N', 'N', RANGE_UNIFORM_EXACT, ROUTE_GPU},
         {OP_ZGEMM, 'N', 'N', RANGE_UNIFORM_EXACT, ROUTE_GPU},
+        {OP_DGEMM, 'N', 'N', RANGE_ALL_SUBNORMAL, ROUTE_GPU},
+        {OP_DGEMM_SCALED, 'N', 'N', RANGE_ALL_SUBNORMAL, ROUTE_GPU},
+        {OP_ZGEMM, 'N', 'N', RANGE_ALL_SUBNORMAL, ROUTE_GPU},
     };
     for (size_t i = 0; i < TEST_REGISTRY_SIZE(R); i++)
         add_range(s, R[i].op, R[i].ta, R[i].tb, R[i].data, R[i].route);
@@ -631,16 +686,23 @@ static void gen_range(const Suite *s) {
 // Im(C) must each be within IMAG_BOUND u² of a Dot2 reference, relative to
 // their own componentwise scales |Ar||Br| + |Ai||Bi| and |Ar||Bi| + |Ai||Br|;
 // 3M misses Im by about 1/(2 IMAG_RATIO) of them. IMAG_LINES needs the
-// row- and column-wise check: A's and B's largest parts are balanced.
+// row- and column-wise check: A's and B's largest parts are balanced. The
+// IMAG_PART_* data hold the exponent-range guard to each part: its floors
+// must send IMAG_PART_LOW to Accelerate (on the GPU Im(C) lost 2^-29 of its
+// scale before they did), and keep IMAG_PART_OK on the GPU.
 static void gen_imbalance(const Suite *s) {
-    static const struct { char ta, tb; ImagData d; } IMB[] = {
-        {'N', 'N', IMAG_SMALL}, {'C', 'N', IMAG_SMALL}, {'N', 'T', IMAG_LARGE},
-        {'T', 'C', IMAG_LARGE}, {'N', 'N', IMAG_LINES}, {'C', 'T', IMAG_LINES},
+    static const struct { char ta, tb; ImagData d; Route route; } IMB[] = {
+        {'N', 'N', IMAG_SMALL, ROUTE_GPU}, {'C', 'N', IMAG_SMALL, ROUTE_GPU},
+        {'N', 'T', IMAG_LARGE, ROUTE_GPU}, {'T', 'C', IMAG_LARGE, ROUTE_GPU},
+        {'N', 'N', IMAG_LINES, ROUTE_GPU}, {'C', 'T', IMAG_LINES, ROUTE_GPU},
+        {'N', 'C', IMAG_PART_LOW, ROUTE_CPU}, {'T', 'N', IMAG_PART_OK, ROUTE_GPU},
+        {'C', 'N', IMAG_PART_SUBNORMAL, ROUTE_CPU},
     };
     for (size_t i = 0; i < TEST_REGISTRY_SIZE(IMB); i++) {
         AbiCase *c = add_kind(s, KIND_IMAG, OP_ZGEMM_SYM, IMB[i].ta, IMB[i].tb, 96, 80, 72, 3,
                               SC_A1B0);
         c->imag = IMB[i].d;
+        c->route = IMB[i].route;
         snprintf(c->name, sizeof c->name, "zgemm_/%s/%c%c/96x80x72/imag-%s", s->label,
                  IMB[i].ta, IMB[i].tb, imag_tag(IMB[i].d));
     }
@@ -847,6 +909,13 @@ static bool profile_ok(const AbiCase *c, uint64_t gpu_gemms) {
     return ok;
 }
 
+// "" if a call that did (gpu) or did not use the GPU meets c's routing
+// expectation, else what it missed.
+static const char *route_miss(const AbiCase *c, bool gpu) {
+    return c->route == ROUTE_GPU && !gpu ? " [GPU path not taken]"
+         : c->route == ROUTE_CPU && gpu  ? " [GPU used, expected cblas]" : "";
+}
+
 static bool blas_verdict(const AbiCase *c, double err, bool inputs_ok, bool outside_ok,
                          uint64_t gpu_gemms, char *detail, size_t n) {
     const char *path = ab_get_last_dispatch_path();
@@ -858,17 +927,14 @@ static bool blas_verdict(const AbiCase *c, double err, bool inputs_ok, bool outs
     }
     bool path_ok = !strcmp(path, gpu_gemms > 0 ? "gpu" : "cpu");
     bool prof_ok = profile_ok(c, gpu_gemms);
-    bool routed = c->route == ROUTE_ANY ||
-                  (c->route == ROUTE_GPU && gpu_gemms > 0) ||
-                  (c->route == ROUTE_CPU && gpu_gemms == 0);
+    const char *miss = route_miss(c, gpu_gemms > 0);
+    bool routed = !*miss;
     snprintf(detail, n, "err=%.1e path=%s gpu_gemms=%llu%s%s%s%s%s", err, path,
              (unsigned long long)gpu_gemms,
              inputs_ok ? "" : " [A or B modified]",
              outside_ok ? "" : " [C outside MxN modified]",
              path_ok ? "" : " [path record does not match]",
-             prof_ok ? "" : " [AB_PROFILE counts do not match]",
-             routed ? "" : c->route == ROUTE_GPU ? " [GPU path not taken]"
-                                                 : " [GPU used, expected cblas]");
+             prof_ok ? "" : " [AB_PROFILE counts do not match]", miss);
     return err <= TOL && inputs_ok && outside_ok && path_ok && prof_ok && routed;
 }
 
@@ -1548,7 +1614,19 @@ static double range_a(RangeData d, int i, int k, int M) {
     case RANGE_COLS_HIGH:     return 0x1p30;
     case RANGE_UNIFORM_EXACT: return 0x1p90;
     case RANGE_C_ZERO_ROW:
-    case RANGE_C_TINY:        return i == 0 ? 0.0 : 1.0;
+    case RANGE_C_TINY:
+    case RANGE_C_SUBNORMAL:
+    case RANGE_C_SCALED_OUT:  return i == 0 ? 0.0 : 1.0;
+    case RANGE_ENTRY_LOW_A:
+    case RANGE_ENTRY_LOW_OK:  return k == 0 ? 1.0 : 0x1p-105;
+    case RANGE_ENTRY_LOW_B:   return k == 0 ? 0.0 : 0x1p30;
+    case RANGE_C_FLOOR:       return i == 0 ? 0.0 : 1.0;
+    case RANGE_C_DISJOINT:
+    case RANGE_C_NEAR:        return i == 0 && k != 0 ? 0.0 : 1.0;
+    case RANGE_A_SUBNORMAL:   return i == 0 ? F_SUBNORMAL : 1.0;
+    case RANGE_B_SUBNORMAL:   return 0x1p1000;
+    case RANGE_ENTRY_SUBNORMAL: return k == 0 ? 1.0 : F_SUBNORMAL;
+    case RANGE_ALL_SUBNORMAL: return F_SUBNORMAL;
     default:                  return 1.0;
     }
 }
@@ -1563,6 +1641,15 @@ static double range_b(RangeData d, int k, int j, int N) {
     case RANGE_EXACT:         return ldexp(1.0, exact_col_exp(j));
     case RANGE_COLS_HIGH:     return ldexp(1.0, spread(j, N, 60, 100));
     case RANGE_UNIFORM_EXACT: return 0x1p90;
+    case RANGE_ENTRY_LOW_A:   return k == 0 ? 0.0 : 0x1p30;
+    case RANGE_ENTRY_LOW_B:   return k == 0 ? 1.0 : 0x1p-105;
+    case RANGE_C_DISJOINT:    return j == 0 && k == 0 ? 0.0 : 1.0;
+    case RANGE_C_NEAR:        return j == 0 && k == 0 ? 0x1p-40 : 1.0;
+    case RANGE_C_SCALED_OUT:  return j == 0 ? 0x1p1000 : 1.0;
+    case RANGE_A_SUBNORMAL:   return 0x1p1000;
+    case RANGE_B_SUBNORMAL:   return j == 0 ? F_SUBNORMAL : 1.0;
+    case RANGE_ENTRY_SUBNORMAL: return k == 0 ? 0.0 : 0x1p1000;
+    case RANGE_ALL_SUBNORMAL: return 0x1p1000;
     default:                  return 1.0;
     }
 }
@@ -1576,12 +1663,20 @@ static double range_c(RangeData d, int i, int j, int M, int N) {
     case RANGE_C_ZERO_ROW:    return i == 0 ? 0x1p-100 : 1.0;
     case RANGE_C_TINY:        return i == 0 ? 1.0 : 0x1p-100;
     case RANGE_C_HUGE:        return 0x1p135;
+    case RANGE_C_FLOOR:       return i == 0 ? C_LOW : 1.0;
+    case RANGE_C_DISJOINT:
+    case RANGE_C_NEAR:        return i == 0 && j == 0 ? C_LOW : 1.0;
+    case RANGE_C_SUBNORMAL:   return i == 0 ? F_SUBNORMAL : 1.0;
+    case RANGE_C_SCALED_OUT:  return j != 0 ? 1.0 : i == 0 ? 0x1p-100 : 0x1p970;
+    case RANGE_A_SUBNORMAL:   return i == 0 ? 0.0 : 0x1p1000;
+    case RANGE_B_SUBNORMAL:   return j == 0 ? 0.0 : 0x1p1000;
     default:                  return range_a(d, i, 0, M) * range_b(d, 0, j, N);
     }
 }
 
+// A factor of C_LOW (test_dot2.h) sets the magnitude C_LOW exactly.
 static inline void range_set(double *x, bool base, double f) {
-    *x = base ? half_to_one(*x) : *x * f;
+    *x = base ? half_to_one(*x) : f == C_LOW ? copysign(C_LOW, *x) : *x * f;
 }
 
 // Makes the magnitudes of a Call's data [0.5, 1) (base: the M x K, K x N and
@@ -1827,11 +1922,15 @@ static void imag_apply(Call *k, ImagData d) {
     const AbiCase *c = &k->c;
     double *A = k->A, *B = k->B;
     for (int i = 0; i < c->M; i++)
-        for (int kk = 0; kk < c->K; kk++)
-            A[op_index(c->ta, k->la, i, kk) * 2 + !imag_small_re(d, i)] *= IMAG_RATIO;
+        for (int kk = 0; kk < c->K; kk++) {
+            double *x = &A[op_index(c->ta, k->la, i, kk) * 2 + !imag_small_re(d, i)];
+            *x = imag_small(d, *x);
+        }
     for (int kk = 0; kk < c->K; kk++)
-        for (int j = 0; j < c->N; j++)
-            B[op_index(c->tb, k->lb, kk, j) * 2 + !imag_small_re(d, j)] *= IMAG_RATIO;
+        for (int j = 0; j < c->N; j++) {
+            double *x = &B[op_index(c->tb, k->lb, kk, j) * 2 + !imag_small_re(d, j)];
+            *x = imag_small(d, *x);
+        }
 }
 
 static bool run_imag(const AbiCase *c, char *detail, size_t n) {
@@ -1842,7 +1941,7 @@ static bool run_imag(const AbiCase *c, char *detail, size_t n) {
     imag_apply(&k, c->imag);
     void *C = malloc(k.nc * k.es);
     uint64_t g0 = gpu_gemm_count();
-    bool gpu = call_run(&k, C) && gpu_gemm_count() > g0;
+    const char *miss = route_miss(c, call_run(&k, C) && gpu_gemm_count() > g0);
 
     const size_t na = (size_t)M * K, nb = (size_t)K * N;
     double *Ar = malloc(na * sizeof *Ar), *Ai = malloc(na * sizeof *Ai);
@@ -1854,12 +1953,12 @@ static bool run_imag(const AbiCase *c, char *detail, size_t n) {
     free(Ar); free(Ai); free(Br); free(Bi);
     bool outside_ok = outside_block_unchanged(C, k.C0, k.nc, k.lc, k.es);
     snprintf(detail, n, "Re err=%.2f u² Im err=%.2f u² (bound %.0f u²) path=%s%s%s", err[0] / U2,
-             err[1] / U2, IMAG_BOUND, ab_get_last_dispatch_path(),
-             gpu ? "" : " [GPU path not taken]", outside_ok ? "" : " [C outside MxN modified]");
+             err[1] / U2, IMAG_BOUND, ab_get_last_dispatch_path(), miss,
+             outside_ok ? "" : " [C outside MxN modified]");
 
     free(C);
     call_free(&k);
-    return gpu && outside_ok && err[0] <= IMAG_BOUND * U2 && err[1] <= IMAG_BOUND * U2;
+    return !*miss && outside_ok && err[0] <= IMAG_BOUND * U2 && err[1] <= IMAG_BOUND * U2;
 }
 
 // =============================================================================

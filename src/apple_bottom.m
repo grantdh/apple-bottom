@@ -1313,10 +1313,11 @@ struct ABStage { uint rows, cols, ld, k, stat, fix, ecol; };
 // their dd_add, which Gauss-3M multiplies (the T3 = Ar + Ai of ab_zgemm).
 //
 // It also gathers the exponent-range guard's statistics (ab_internal.h,
-// ab_line_stats_scan): per line of op(X), the high words of its largest |x|
+// ab_line_stats_scan): per line of op(X), the high words (as
+// ab_stat_hiword_scaled counts them) of its largest |x|
 // (complex: of its largest |Re x| into smax and |Im x| into simax, the
-// statistics' rmax and imax) and of its smallest nonzero |x| (complex: of
-// max(|Re x|, |Im x|)), by integer max and min, which every order of
+// statistics' rmax and imax) and of its smallest nonzero |x| (complex: its
+// smallest nonzero part), by integer max and min, which every order of
 // reduction gives exactly. smax and simax start at 0, smin at 0xFFFFFFFF,
 // and an element outside op(X) counts as 0. stat picks the lines: the rows
 // of op(X), its columns, or all of it as line 0.
@@ -1326,16 +1327,22 @@ struct ABStage { uint rows, cols, ld, k, stat, fix, ecol; };
 
 static uint ab_hiword(uint hi32) { return hi32 & 0x7FFFFFFFu; }
 
+// The host's ab_stat_hiword_scaled (ab_internal.h) on FP64 words: v is x,
+// or x times a power of two.
+static uint ab_stat_hiword_scaled(uint2 v, uint2 x) {
+    return max(ab_hiword(v.y), uint((x.x | ab_hiword(x.y)) != 0u));
+}
+
 // An element's high words h: of |x| (h.y = 0), or of |Re x| and |Im x|. A
 // line's statistics so far: their largest, mx, and the smallest nonzero high
-// word of max(|Re x|, |Im x|), mn, gathered into the arrays of an
-// ABLineStats. A real pre-pass has no simax and never writes it (mx.y is 0).
+// word of its parts, mn, gathered into the arrays of an ABLineStats. A real
+// pre-pass has no simax and never writes it (mx.y is 0).
 struct ABLineStats { device atomic_uint* smax; device atomic_uint* simax; device atomic_uint* smin; };
 
-// An element's part in its line's smallest nonzero high word.
+// An element's part in its line's smallest nonzero high word: that of its
+// smaller nonzero part.
 static uint ab_stat_min(uint2 h) {
-    uint m = max(h.x, h.y);
-    return m ? m : 0xFFFFFFFFu;
+    return min(h.x ? h.x : 0xFFFFFFFFu, h.y ? h.y : 0xFFFFFFFFu);
 }
 
 static void ab_stat_add(ABLineStats st, uint line, uint2 mx, uint mn) {
@@ -1496,9 +1503,9 @@ kernel void ab_prep_d_n(device const uint2* X [[buffer(0)]], device uint2* out [
         uint r = r0 + lt.x, c = c0 + j, h = 0;
         int x;
         if (r < p.rows && c < p.cols && ab_fix(p, es, r, c, x)) {
-            uint2 v = ab_scale_words(X[ulong(c) * p.ld + r], x);
+            uint2 u = X[ulong(c) * p.ld + r], v = ab_scale_words(u, x);
             t[j][lt.x] = ab_f64_to_dd(v.x, v.y);
-            h = ab_hiword(v.y);
+            h = ab_stat_hiword_scaled(v, u);
         }
         ab_tile_stat(p.stat, c, uint2(h, 0), mx, mn, st);
     }
@@ -1535,7 +1542,7 @@ kernel void ab_prep_z_n(device const uint4* X [[buffer(0)]], device uint2* re [[
             uint4 v = X[ulong(c) * p.ld + r];
             uint2 a = ab_scale_words(v.xy, x), b = ab_scale_words(v.zw, x);
             t[j][lt.x] = uint4(ab_f64_to_dd(a.x, a.y), ab_f64_to_dd(b.x, b.y));
-            h = uint2(ab_hiword(a.y), ab_hiword(b.y));
+            h = uint2(ab_stat_hiword_scaled(a, v.xy), ab_stat_hiword_scaled(b, v.zw));
         }
         ab_tile_stat(p.stat, c, h, mx, mn, st);
     }
@@ -1567,9 +1574,9 @@ kernel void ab_prep_d_t(device const uint2* X [[buffer(0)]], device uint2* out [
     uint c = tg.x * 32 + lt.x, r = tg.y * 8 + lt.y, h = 0;
     int x;
     if (c < p.cols && r < p.rows && ab_fix(p, es, r, c, x)) {
-        uint2 v = ab_scale_words(X[ulong(r) * p.ld + c], x);
+        uint2 u = X[ulong(r) * p.ld + c], v = ab_scale_words(u, x);
         out[r * p.cols + c] = ab_f64_to_dd(v.x, v.y);
-        h = ab_hiword(v.y);
+        h = ab_stat_hiword_scaled(v, u);
     }
     ab_direct_stat(p.stat, r, c, uint2(h, 0), lt, sm, sn, ABLineStats{smax, smax, smin});
 }
@@ -1593,7 +1600,7 @@ kernel void ab_prep_z_t(device const uint4* X [[buffer(0)]], device uint2* re [[
         uint2 a = ab_scale_words(v.xy, x), b = ab_scale_words(v.zw, x);
         ab_store_z(re, im, sum, r * p.cols + c, ab_f64_to_dd(a.x, a.y),
                    ab_f64_to_dd(b.x, b.y ^ (p.k ? 0x80000000u : 0u)));
-        h = uint2(ab_hiword(a.y), ab_hiword(b.y));
+        h = uint2(ab_stat_hiword_scaled(a, v.xy), ab_stat_hiword_scaled(b, v.zw));
     }
     ab_direct_stat(p.stat, r, c, h, lt, sm, sn, ABLineStats{smax, simax, smin});
 }
@@ -1960,41 +1967,51 @@ static parts_range_t for_each_chunk_parts(size_t count, size_t work,
     return r;
 }
 
-// src[i * S] * 2^-e to dst[i] in DD, each value rounded once; with range, also
-// returns the range of the converted values (in the same vectorized loop;
-// AB_RANGE_EMPTY without).
-template <size_t S = 1>
+// What convert_fp64_to_dd measures of the values it converts: nothing, the
+// range the exponent-range guard reads (MEASURE_GUARD: ab_stat_hiword_scaled,
+// which counts a nonzero |x| below 2^-1042 as AB_HIWORD_TINY), or the native
+// scale's (MEASURE_NATIVE, native_scale_exp): such an |x| there counts in the
+// largest magnitude only, so that a matrix made only of such values is not
+// read as zero, and one with larger values keeps the scale they give it.
+typedef enum { MEASURE_NONE, MEASURE_NATIVE, MEASURE_GUARD } Measure;
+
+// Adds v, the value x converts to, to the range (mx, mn) as M measures it.
+template <Measure M>
+static inline void measure_add(double v, double x, uint32_t& mx, uint32_t& mn) {
+    if (M == MEASURE_GUARD) AB_HIWORD_ADD(ab_stat_hiword_scaled(v, x), mx, mn);
+    if (M == MEASURE_NATIVE) {
+        AB_HIWORD_MAX(ab_stat_hiword_scaled(v, x), mx);
+        AB_HIWORD_MIN(ab_abs_hiword(v), mn);
+    }
+}
+
+// src[i * S] * 2^-e to dst[i] in DD, each value rounded once; also returns the
+// range of the converted values as M measures it (in the same vectorized loop;
+// AB_RANGE_EMPTY for MEASURE_NONE).
+template <Measure M, size_t S = 1>
 static ab_range_t convert_fp64_to_dd(const double* __restrict src, DDFloat* __restrict dst,
-                                     size_t count, int e, bool range) {
+                                     size_t count, int e) {
     uint32_t mx = 0, mn = UINT32_MAX;
     if (e < -1023 || e > 1022) {                // 2^-e is not a normal double
         for (size_t i = 0; i < count; i++) {
             double v = ldexp(src[i * S], -e);
-            if (range) AB_RANGE_ADD(v, mx, mn);
+            measure_add<M>(v, src[i * S], mx, mn);
             dst[i] = fp64_to_dd(v);
         }
     } else if (e == 0) {
-        if (range) {
-            for (size_t i = 0; i < count; i++) {
-                AB_RANGE_ADD(src[i * S], mx, mn);
-                dst[i] = fp64_to_dd(src[i * S]);
-            }
-        } else {
-            for (size_t i = 0; i < count; i++) dst[i] = fp64_to_dd(src[i * S]);
+        for (size_t i = 0; i < count; i++) {
+            measure_add<M>(src[i * S], src[i * S], mx, mn);
+            dst[i] = fp64_to_dd(src[i * S]);
         }
     } else {
         double f = ab_pow2(-e);
-        if (range) {
-            for (size_t i = 0; i < count; i++) {
-                double v = src[i * S] * f;
-                AB_RANGE_ADD(v, mx, mn);
-                dst[i] = fp64_to_dd(v);
-            }
-        } else {
-            for (size_t i = 0; i < count; i++) dst[i] = fp64_to_dd(src[i * S] * f);
+        for (size_t i = 0; i < count; i++) {
+            double v = src[i * S] * f;
+            measure_add<M>(v, src[i * S], mx, mn);
+            dst[i] = fp64_to_dd(v);
         }
     }
-    return range ? (ab_range_t){mx, mn} : AB_RANGE_EMPTY;
+    return M == MEASURE_NONE ? AB_RANGE_EMPTY : (ab_range_t){mx, mn};
 }
 
 // src * 2^e to FP64.
@@ -2005,10 +2022,11 @@ static void convert_dd_to_fp64(const DDFloat* src, double* dst, size_t count, in
         for (size_t i = 0; i < count; i++) dst[i] = ab_scale2(dd_to_fp64(src[i]), e);
 }
 
+template <Measure M>
 static ab_range_t convert_fp64_to_dd_parallel(const double* src, DDFloat* dst, size_t count,
-                                              int e, bool range) {
+                                              int e) {
     return for_each_chunk(count, 1, ^(size_t offset, size_t n) {
-        return convert_fp64_to_dd(src + offset, dst + offset, n, e, range);
+        return convert_fp64_to_dd<M>(src + offset, dst + offset, n, e);
     });
 }
 
@@ -2040,7 +2058,7 @@ struct ABMatrix_s {
     size_t capacity;  // elements the buffer holds (>= count after pool reuse)
     bool uploaded;
     int exp2;         // power-of-two scale: element = DD * 2^exp2
-    uint32_t maxhw;   // high word of the largest |element| (ab_internal.h), or AB_MAXHW_UNKNOWN
+    uint32_t maxhw;   // high word of the largest |element| (MEASURE_NATIVE), or AB_MAXHW_UNKNOWN
 };
 
 #define AB_MAXHW_UNKNOWN UINT32_MAX     // above the high word of any |x|, NaN included
@@ -2059,8 +2077,10 @@ static inline int floor_to(int s, int q) { return s >= 0 ? s / q * q : -((q - 1 
 #define AB_STORE_MIN_EXP (-100)
 #define AB_STORE_MAX_EXP 120
 
-// The power-of-two scale e for a matrix whose entries have range r; it stores
-// value * 2^-e. The scales that bring every nonzero magnitude into
+// The power-of-two scale e for a matrix whose entries have range r (as
+// MEASURE_NATIVE measures them: a range with a largest magnitude but no
+// smallest holds only values below 2^-1042, read as [2^-1074, 2^-1042]); it
+// stores value * 2^-e. The scales that bring every nonzero magnitude into
 // 2^±AB_NATIVE_WINDOW are [hi - W, lo + W] (none if the span exceeds 2W):
 //   - 0 if it is one of them (data inside the window, as before), or if an
 //     entry is NaN or Inf (which no scale helps);
@@ -2071,7 +2091,8 @@ static inline int floor_to(int s, int q) { return s >= 0 ? s / q * q : -((q - 1 
 //     when FP32 can hold it at all, else keeps its top at 2^AB_STORE_MAX_EXP.
 static int native_scale_exp(ab_range_t r) {
     if (r.max == 0 || ab_range_nonfinite(r)) return 0;
-    int hi = ab_hiword_ilogb(r.max), lo = ab_hiword_ilogb(r.min);
+    int hi = ab_hiword_ilogb(r.max);
+    int lo = r.min != UINT32_MAX ? ab_hiword_ilogb(r.min) : ab_hiword_min_ilogb(r.max);
     int centre = floor_to(lo + hi, 2) / 2;
     if (hi - lo <= 2 * AB_NATIVE_WINDOW) {
         int elo = hi - AB_NATIVE_WINDOW, ehi = lo + AB_NATIVE_WINDOW;
@@ -2265,14 +2286,15 @@ ABStatus ab_matrix_upload(ABMatrix m, const double* data, bool parallel) {
     if (!m || !data) return AB_ERROR_INVALID_ARG;
     double t0 = get_time_ms();
     DDFloat* dst = (DDFloat*)m->buffer.contents;
-    ab_range_t range = parallel ? convert_fp64_to_dd_parallel(data, dst, m->count, 0, true)
-                                : convert_fp64_to_dd(data, dst, m->count, 0, true);
+    ab_range_t range =
+        parallel ? convert_fp64_to_dd_parallel<MEASURE_NATIVE>(data, dst, m->count, 0)
+                 : convert_fp64_to_dd<MEASURE_NATIVE>(data, dst, m->count, 0);
     set_scale_measured(m, range);
     if (m->exp2 != 0) {
         if (parallel)
-            convert_fp64_to_dd_parallel(data, dst, m->count, m->exp2, false);
+            convert_fp64_to_dd_parallel<MEASURE_NONE>(data, dst, m->count, m->exp2);
         else
-            convert_fp64_to_dd(data, dst, m->count, m->exp2, false);
+            convert_fp64_to_dd<MEASURE_NONE>(data, dst, m->count, m->exp2);
     }
     m->uploaded = true;
     stats_add_upload(get_time_ms() - t0, m->count);
@@ -2291,6 +2313,31 @@ ABStatus ab_matrix_download(ABMatrix m, double* data, bool parallel) {
     return AB_OK;
 }
 
+// A row's values x[j] * 2^-(ei + col_exp[j]) to DD, each rounded once, as M
+// measures them: by a multiply with 2^-ei times colf[j] = 2^-col_exp[j]
+// (exact: all of them normal doubles), else by ldexp.
+template <Measure M>
+static ab_range_t convert_row_scaled(const double* __restrict x, DDFloat* __restrict d,
+                                     size_t cols, int ei, const int* col_exp, const double* colf,
+                                     bool exact) {
+    uint32_t mx = 0, mn = UINT32_MAX;
+    if (exact) {
+        const double rf = ab_pow2(-ei);
+        for (size_t j = 0; j < cols; j++) {
+            double v = x[j] * (rf * colf[j]);
+            measure_add<M>(v, x[j], mx, mn);
+            d[j] = fp64_to_dd(v);
+        }
+    } else {
+        for (size_t j = 0; j < cols; j++) {
+            double v = ldexp(x[j], -(ei + col_exp[j]));
+            measure_add<M>(v, x[j], mx, mn);
+            d[j] = fp64_to_dd(v);
+        }
+    }
+    return M == MEASURE_NONE ? AB_RANGE_EMPTY : (ab_range_t){mx, mn};
+}
+
 // Without exponents this is a flat (parallel) conversion. With row exponents,
 // each row is converted as a whole at its exponent. With column exponents
 // each element has its own: 2^-(row's + column's) is formed from the
@@ -2302,7 +2349,6 @@ extern "C" ABStatus ab_internal_upload_scaled(ABMatrix m, const double* data, co
     double t0 = get_time_ms();
     DDFloat* dst = (DDFloat*)m->buffer.contents;
     const size_t rows = (size_t)m->rows, cols = (size_t)m->cols;
-    const bool want = range != NULL;
     double* colf = NULL;
     int cmin = 0, cmax = 0;
     if (col_exp) {
@@ -2316,7 +2362,8 @@ extern "C" ABStatus ab_internal_upload_scaled(ABMatrix m, const double* data, co
     }
     ab_range_t r;
     if (!row_exp && !col_exp) {
-        r = convert_fp64_to_dd_parallel(data, dst, m->count, shift, want);
+        r = range ? convert_fp64_to_dd_parallel<MEASURE_GUARD>(data, dst, m->count, shift)
+                  : convert_fp64_to_dd_parallel<MEASURE_NONE>(data, dst, m->count, shift);
     } else {
         r = for_each_chunk(rows, cols, ^(size_t r0, size_t nr) {
             ab_range_t part = AB_RANGE_EMPTY;
@@ -2326,18 +2373,14 @@ extern "C" ABStatus ab_internal_upload_scaled(ABMatrix m, const double* data, co
                 int ei = (row_exp ? row_exp[i] : 0) + shift;
                 ab_range_t ri;
                 if (!col_exp) {
-                    ri = convert_fp64_to_dd(x, d, cols, ei, want);
+                    ri = range ? convert_fp64_to_dd<MEASURE_GUARD>(x, d, cols, ei)
+                               : convert_fp64_to_dd<MEASURE_NONE>(x, d, cols, ei);
                 } else {
-                    uint32_t mx = 0, mn = UINT32_MAX;
                     bool exact = ei >= -1023 && ei <= 1022 && cmin >= -1023 && cmax <= 1022 &&
                                  ei + cmin >= -1023 && ei + cmax <= 1022;
-                    double rf = exact ? ab_pow2(-ei) : 0.0;
-                    for (size_t j = 0; j < cols; j++) {
-                        double v = exact ? x[j] * (rf * colf[j]) : ldexp(x[j], -(ei + col_exp[j]));
-                        if (want) AB_RANGE_ADD(v, mx, mn);
-                        d[j] = fp64_to_dd(v);
-                    }
-                    ri = (ab_range_t){mx, mn};
+                    ri = range
+                        ? convert_row_scaled<MEASURE_GUARD>(x, d, cols, ei, col_exp, colf, exact)
+                        : convert_row_scaled<MEASURE_NONE>(x, d, cols, ei, col_exp, colf, exact);
                 }
                 part = ab_range_merge(part, ri);
             }
@@ -2361,8 +2404,9 @@ extern "C" ABStatus ab_internal_upload_scaled(ABMatrix m, const double* data, co
 // ab_matrix_upload gives an array of it.
 
 // Interleaved pairs x[2i], x[2i+1] to DD re[i] and im[i], unscaled, as
-// convert_fp64_to_dd converts each, with the parts' ranges in *rr and *ri;
-// with COLS, also adds their magnitudes to rmax[i] and imax[i].
+// convert_fp64_to_dd<MEASURE_NATIVE> converts and measures each, with the parts'
+// ranges in *rr and *ri; with COLS, also adds their magnitudes to rmax[i] and
+// imax[i].
 template <bool COLS>
 static void convert_pairs_to_dd(const double* __restrict x, DDFloat* __restrict re,
                                 DDFloat* __restrict im, size_t n, ab_range_t* rr, ab_range_t* ri,
@@ -2370,12 +2414,11 @@ static void convert_pairs_to_dd(const double* __restrict x, DDFloat* __restrict 
     uint32_t mxr = 0, mnr = UINT32_MAX, mxi = 0, mni = UINT32_MAX;
     for (size_t i = 0; i < n; i++) {
         double vr = x[2 * i], vi = x[2 * i + 1];
-        uint32_t hr = ab_abs_hiword(vr), hm = ab_abs_hiword(vi);
-        AB_HIWORD_ADD(hr, mxr, mnr);
-        AB_HIWORD_ADD(hm, mxi, mni);
+        measure_add<MEASURE_NATIVE>(vr, vr, mxr, mnr);
+        measure_add<MEASURE_NATIVE>(vi, vi, mxi, mni);
         if (COLS) {
-            AB_HIWORD_MAX(hr, rmax[i]);
-            AB_HIWORD_MAX(hm, imax[i]);
+            AB_HIWORD_MAX(ab_stat_hiword_scaled(vr, vr), rmax[i]);
+            AB_HIWORD_MAX(ab_stat_hiword_scaled(vi, vi), imax[i]);
         }
         re[i] = fp64_to_dd(vr);
         im[i] = fp64_to_dd(vi);
@@ -2402,11 +2445,12 @@ static void convert_dd_to_pairs(const DDFloat* __restrict re, const DDFloat* __r
 }
 
 // Rows [r0, r0 + nr) of the matrix whose element (i, j) is x[j * ld + i] to
-// DD at 2^-e, as convert_fp64_to_dd converts each value (with range, also
-// returning their range), through tiles of 16 rows (a 128-byte line of each
-// column) by 128 columns transposed in L1.
+// DD at 2^-e, as convert_fp64_to_dd<M> converts and measures each value, through
+// tiles of 16 rows (a 128-byte line of each column) by 128 columns transposed in
+// L1.
+template <Measure M>
 static ab_range_t convert_cols_to_dd(const double* x, size_t ld, DDFloat* dst, size_t cols,
-                                     size_t r0, size_t nr, int e, bool range) {
+                                     size_t r0, size_t nr, int e) {
     enum { TILE_ROWS = 16, TILE_COLS = 128 };
     double tile[TILE_ROWS * TILE_COLS];
     ab_range_t r = AB_RANGE_EMPTY;
@@ -2418,8 +2462,8 @@ static ab_range_t convert_cols_to_dd(const double* x, size_t ld, DDFloat* dst, s
                 for (size_t i = 0; i < h; i++)
                     tile[i * TILE_COLS + j] = x[(j0 + j) * ld + b + i];
             for (size_t i = 0; i < h; i++)
-                r = ab_range_merge(r, convert_fp64_to_dd(tile + i * TILE_COLS,
-                                                         dst + (b + i) * cols + j0, w, e, range));
+                r = ab_range_merge(r, convert_fp64_to_dd<M>(tile + i * TILE_COLS,
+                                                            dst + (b + i) * cols + j0, w, e));
         }
     }
     return r;
@@ -2438,7 +2482,7 @@ static void upload_rows_rescale(ABMatrix m, ab_range_t r, const double* x, size_
     DDFloat* dst = (DDFloat*)m->buffer.contents;
     ab_internal_for_each_chunk((size_t)m->rows, cols, ^(size_t, size_t r0, size_t nr) {
         for (size_t i = r0; i < r0 + nr; i++)
-            convert_fp64_to_dd<S>(x + i * stride, dst + i * cols, cols, e, false);
+            convert_fp64_to_dd<MEASURE_NONE, S>(x + i * stride, dst + i * cols, cols, e);
     });
 }
 
@@ -2467,7 +2511,7 @@ extern "C" ABStatus ab_internal_upload_rows(ABMatrix re, ABMatrix im, const doub
             const double* xi = x + i * stride;
             ab_range_t ra = AB_RANGE_EMPTY, rb = AB_RANGE_EMPTY;
             if (!im)
-                ra = convert_fp64_to_dd(xi, dr + i * cols, cols, 0, true);
+                ra = convert_fp64_to_dd<MEASURE_NATIVE>(xi, dr + i * cols, cols, 0);
             else if (pr)
                 convert_pairs_to_dd<true>(xi, dr + i * cols, di + i * cols, cols, &ra, &rb, pr, pr + cols);
             else
@@ -2504,13 +2548,13 @@ extern "C" ABStatus ab_internal_upload_cols(ABMatrix m, const double* x, size_t 
     const size_t rows = (size_t)m->rows, cols = (size_t)m->cols;
     DDFloat* dst = (DDFloat*)m->buffer.contents;
     ab_range_t r = for_each_chunk(rows, cols, ^(size_t r0, size_t nr) {
-        return convert_cols_to_dd(x, ld, dst, cols, r0, nr, 0, true);
+        return convert_cols_to_dd<MEASURE_NATIVE>(x, ld, dst, cols, r0, nr, 0);
     });
     set_scale_measured(m, r);
     if (m->exp2 != 0) {
         const int e = m->exp2;
         for_each_chunk(rows, cols, ^(size_t r0, size_t nr) {
-            return convert_cols_to_dd(x, ld, dst, cols, r0, nr, e, false);
+            return convert_cols_to_dd<MEASURE_NONE>(x, ld, dst, cols, r0, nr, e);
         });
     }
     m->uploaded = true;
@@ -2603,8 +2647,8 @@ static parts_range_t epilogue_rows(const zgemm_epilogue_t& p, size_t r0, size_t 
             double new_i = (ar * ti + ai * tr) + (br * ci + bi * cr);
             c[2 * j] = new_r;
             c[2 * j + 1] = new_i;
-            AB_RANGE_ADD(new_r, mxr, mnr);
-            AB_RANGE_ADD(new_i, mxi, mni);
+            measure_add<MEASURE_NATIVE>(new_r, new_r, mxr, mnr);
+            measure_add<MEASURE_NATIVE>(new_i, new_i, mxi, mni);
         }
     }
     return {{mxr, mnr}, {mxi, mni}};
@@ -2640,8 +2684,8 @@ extern "C" ABStatus ab_internal_zgemm_epilogue(ABMatrix tr, ABMatrix ti, double*
             for (size_t i = r0; i < r0 + nr; i++) {
                 const double* c = x + 2 * i * ld;
                 for (size_t j = 0; j < cols; j++) {
-                    AB_RANGE_ADD(c[2 * j], mxr, mnr);
-                    AB_RANGE_ADD(c[2 * j + 1], mxi, mni);
+                    measure_add<MEASURE_NATIVE>(c[2 * j], c[2 * j], mxr, mnr);
+                    measure_add<MEASURE_NATIVE>(c[2 * j + 1], c[2 * j + 1], mxi, mni);
                 }
             }
             return (parts_range_t){{mxr, mnr}, {mxi, mni}};
