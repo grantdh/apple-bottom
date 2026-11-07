@@ -17,12 +17,15 @@ tests/test_dispatch.c on the built-in tables):
   1. every row has evidence, all of it from the table's library and at the row's share;
   2. every evidence line has ratio_lo >= 1.00;
   3. each row's pooled ratio (sum of base_s / sum of split_s) is at least 1.10;
-  4. every row without a ratio= bound (not a square row) has pw.x evidence for inputs A and B at
-     8x1, whatever else it has; a square row has bench_split evidence at 1x8 and 4x2 (well-scaled
-     synthetic data, which the generated header labels as such); a row with pw.x evidence has it for
-     both A and B at 8x1, and one with bench_split evidence has both layouts; no other source counts;
+  4. a square row (a ratio= bound of at most 2) has bench_split evidence at 1x8 and 4x2 (well-scaled
+     synthetic data, which the generated header labels as such), and pw.x evidence alone does not do
+     for it; every other row has pw.x evidence for inputs A and B at 8x1, whatever else it has; a row
+     with pw.x evidence has it for both A and B at 8x1, and one with bench_split evidence has both
+     layouts; no other source counts;
   5. no row has scalars=a (or leaves scalars out).
-Every number must be finite, in ASCII digits, and every line of the CSV must have its 17 fields.
+Counts must be ASCII digits and every other number finite in NUMBER's grammar. Each line of the CSV is
+split on every ',' (no quoting: a '"' is refused), ends in \n or \r\n (no other '\r'), is at most
+MAX_LINE characters and has the 17 fields; tests/test_dispatch.c reads it the same way.
 A table without rows passes. A table is filed under benchmarks/split/tables/<slug>/ (the chip without
 "Apple " plus the GPU core count: M2-Max-38c), and src/split_table.h is regenerated from every filed
 directory, in slug order. Commit both. A chip's earlier table is replaced only with --force; nothing
@@ -37,7 +40,6 @@ Python 3.9, standard library only.
 from __future__ import annotations
 
 import argparse
-import csv
 import math
 import os
 import re
@@ -52,6 +54,7 @@ HEADER = os.path.join(REPO, "src", "split_table.h")
 
 MIN_LO = 1.00               # rule 2
 MIN_POOLED = 1.10           # rule 3
+SQUARE_RATIO = 2.0          # rule 4: a row with ratio <= this is square
 KEYS = ("chip", "gpu_cores", "cpu_matrix", "library", "date", "method")
 COLUMNS = ("row,source,input,layout,library,share,pairs,split_s,base_s,ratio,ratio_lo,ratio_hi,"
            "calls,kept,kept_4m,range,gpu_failed").split(",")
@@ -77,9 +80,22 @@ def split_trans(routine, t):
 
 
 DIGITS = re.compile(r"[0-9]+", re.ASCII)
-# A number as dispatch.c's parse_double() takes it in the C locale: ASCII digits, an optional point
-# and exponent; finite.
-NUMBER = re.compile(r"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?", re.ASCII)
+# A number in a split row or the evidence: ASCII digits, an optional point, an optional exponent with
+# its sign, and an optional leading '+'; finite. dispatch.c's parse_double() takes the same (strtod_l
+# in the C locale over the characters 0-9 + - . e E, no leading '-') and tests/test_dispatch.c's
+# checker the same characters; table values must also not be negative (parse_number).
+NUMBER = re.compile(r"\+?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?", re.ASCII)
+MAX_LINE = 1000          # characters of a CSV line, its end aside (tests/test_dispatch.c: the same)
+
+
+def csv_fields(line, where):
+    """A line of split_evidence.csv split as tests/test_dispatch.c splits it: on every ','. A line end
+    may be "\\r\\n"; any other '\\r', a '"' (no quoting) or a line over MAX_LINE is refused."""
+    if line.endswith("\r"):
+        line = line[:-1]
+    if "\r" in line or '"' in line or len(line) > MAX_LINE:
+        raise Ingest(f"{where}: a quote, a bare carriage return or more than {MAX_LINE} characters")
+    return line.split(",")
 
 
 def parse_int_range(v):
@@ -219,18 +235,20 @@ class Table:
         if self.library == "none" and self.rows:
             raise Ingest(f"{self.txt}: rows need the library commit they were measured on")
         self.slug = chip_slug(self.chip, self.gpu_cores)
-        # As strict as tests/test_dispatch.c's reader: the header, then lines of exactly 17 fields.
         self.evidence = []
         with open(self.csv, encoding="utf-8", newline="") as f:
-            reader = csv.reader(f)
-            if next(reader, None) != COLUMNS:
-                raise Ingest(f"{self.csv}: the first line must be {','.join(COLUMNS)}")
-            for fields in reader:
-                if len(fields) != len(COLUMNS):
-                    raise Ingest(f"{self.csv}:{reader.line_num}: {len(fields)} fields, expected {len(COLUMNS)}")
-                e = dict(zip(COLUMNS, fields))
-                e["line"] = reader.line_num
-                self.evidence.append(e)
+            text = f.read()
+        for n, line in enumerate(text.split("\n")[:-1] if text.endswith("\n") else text.split("\n"), 1):
+            fields = csv_fields(line, f"{self.csv}:{n}")
+            if n == 1:
+                if fields != COLUMNS:
+                    raise Ingest(f"{self.csv}: the first line must be {','.join(COLUMNS)}")
+                continue
+            if len(fields) != len(COLUMNS):
+                raise Ingest(f"{self.csv}:{n}: {len(fields)} fields, expected {len(COLUMNS)}")
+            e = dict(zip(COLUMNS, fields))
+            e["line"] = n
+            self.evidence.append(e)
 
     def validate(self):
         """Rules 1-5 of the docstring."""
@@ -238,14 +256,14 @@ class Table:
         self.pooled, self.label = {}, {}
         for e in self.evidence:
             where = f"{self.csv}:{e['line']}"
-            try:
-                for k in ("row", "pairs", "calls", "kept", "kept_4m", "range", "gpu_failed"):
-                    if not DIGITS.fullmatch(e[k]):
-                        raise ValueError(k)
-                for k in ("share", "split_s", "base_s", "ratio", "ratio_lo", "ratio_hi"):
+            for k in ("row", "pairs", "calls", "kept", "kept_4m", "range", "gpu_failed"):
+                if not DIGITS.fullmatch(e[k]):
+                    raise Ingest(f"{where}: {k} = {e[k]!r} is not a count (ASCII digits)")
+            for k in ("share", "split_s", "base_s", "ratio", "ratio_lo", "ratio_hi"):
+                try:
                     finite(e[k])
-            except ValueError as bad:
-                raise Ingest(f"{where}: {bad} is not a finite number (counts: digits only)")
+                except ValueError:
+                    raise Ingest(f"{where}: {k} = {e[k]!r} is not a finite number")
             i = int(e["row"])
             share, lo = float(e["share"]), float(e["ratio_lo"])
             split_s, base_s = float(e["split_s"]), float(e["base_s"])
@@ -272,7 +290,7 @@ class Table:
                 raise Ingest(f"{self.txt}: {name}: pooled ratio {pooled:.3f} < {MIN_POOLED:.2f} (rule 3)")
             have = {(e["source"], e["input"], e["layout"]) for e in lines}
             sources = {e["source"] for e in lines}
-            square = r["ratio"] > 0
+            square = 0 < r["ratio"] <= SQUARE_RATIO
             if "pw.x" in sources or not square:
                 for inp in ("A", "B"):
                     if ("pw.x", inp, "8x1") not in have:
@@ -415,43 +433,92 @@ def ingest(directory, force):
 
 
 def self_test():
-    """The rules on tables made to keep or break them (tests/test_dispatch.c checks the same cases in C).
-    Returns the number of wrong verdicts."""
-    head = ("# chip: Apple M2 Max\n# gpu_cores: 38\n# cpu_matrix: AMX\n# library: abc1234\n# date: x\n"
-            "# method: self-test\nzgemm N N N m=8192: scalars=u f=0.45\nzgemm N N N m=2048: ratio=2 scalars=z f=0.6\n")
+    """Files made-up tables and checks each verdict: filed, or refused for the expected reason (a
+    substring of the error). tests/test_dispatch.c's split_evidence_why() runs the same cases in C.
+    Also checks generate()'s evidence labels. Returns the number of wrong verdicts."""
+    def head(r0="scalars=u f=0.45", r1="ratio=2 scalars=z f=0.6"):
+        return ("# chip: Apple M2 Max\n# gpu_cores: 38\n# cpu_matrix: AMX\n# library: abc1234\n# date: x\n"
+                f"# method: self-test\nzgemm N N N m=8192: {r0}\nzgemm N N N m=2048: {r1}\n")
     pw = ("0,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n"
           "0,pw.x,B,8x1,abc1234,0.45,6,70,80,1.14,1.08,1.20,100,99,0,1,0\n")
     sq = ("1,bench_split,sq,1x8,abc1234,0.6,20,1.0,1.3,1.3,1.2,1.4,20,20,0,0,0\n"
           "1,bench_split,sq,4x2,abc1234,0.6,20,1.0,1.2,1.2,1.1,1.3,20,20,0,0,0\n")
-    qe_bench = ("0,bench_split,qe,1x8,abc1234,0.45,20,1.0,1.3,1.3,1.2,1.4,20,20,0,0,0\n"
-                "0,bench_split,qe,4x2,abc1234,0.45,20,1.0,1.2,1.2,1.1,1.3,20,20,0,0,0\n")
-    cases = [  # (what, evidence after the header line, filed)
-        ("pw.x for the QE row, bench_split for the square", pw + sq, True),
-        ("a QE-shaped row on bench_split alone", qe_bench + sq, False),
-        ("a QE-shaped row with pw.x A only", qe_bench + pw.splitlines(True)[0] + sq, False),
-        ("a NaN share", pw.replace("0.45,6,80", "nan,6,80") + sq, False),
-        ("a NaN ratio_lo", pw.replace("1.12", "nan") + sq, False),
-        ("an infinite split_s", pw.replace(",80,95,", ",inf,95,") + sq, False),
-        ("an overflowing base_s", pw.replace(",80,95,", ",80,1e999,") + sq, False),
-        ("a hex float", pw.replace(",80,95,", ",80,0x5f,") + sq, False),
-        ("a short line", pw + sq.replace(",0,0,0\n", ",0,0\n", 1), False),
-        ("a blank line", "\n" + pw + sq, False),
+    pw1 = pw.replace("0,pw.x", "1,pw.x").replace("0.45", "0.6")      # pw.x evidence for row 1
+    qe_bench = sq.replace("1,bench", "0,bench").replace("0.6", "0.45")
+    a_line = pw.splitlines(True)[0]
+    cases = [  # (what, table, evidence after the header line, None if filed, else the reason)
+        ("pw.x for the QE row, bench_split for the square", head(), pw + sq, None),
+        ("CRLF line ends", head(), (pw + sq).replace("\n", "\r\n"), None),
+        ("the square also with pw.x", head(), pw + sq + pw1, None),
+        ("rule 1: a row without evidence", head(), pw, "row 1"),
+        ("rule 1: another library", head(), pw.replace("abc1234", "abc9999", 1) + sq, "library"),
+        ("rule 1: another share", head(), pw.replace("0.45", "0.50", 1) + sq, "share"),
+        ("rule 2: ratio_lo below 1", head(), pw.replace("1.12", "0.99") + sq, "rule 2"),
+        ("rule 3: pooled below 1.10", head(), pw.replace(",80,95,", ",80,84,") + sq, "rule 3"),
+        ("rule 3: pooled overflows", head(), pw.replace(",80,95,", ",80,1e308,").replace(",70,80,", ",70,1e308,") + sq,
+         "rule 3"),
+        ("rule 3: subnormal split_s", head(), pw.replace(",80,95,", ",1e-310,95,").replace(",70,80,", ",1e-310,80,") + sq,
+         "rule 3"),
+        ("rule 4: a QE-shaped row on bench_split alone", head(), qe_bench + sq, "no pw.x evidence on input A"),
+        ("rule 4: a QE-shaped row with pw.x A only", head(), qe_bench + a_line + sq, "no pw.x evidence on input B"),
+        ("rule 4: ratio=300 is not square", head(r1="ratio=300 scalars=z f=0.6"), pw + sq,
+         "no pw.x evidence on input A"),
+        ("rule 4: a square on pw.x alone", head(), pw + pw1, "no bench_split evidence at 1x8"),
+        ("rule 4: another source", head(), pw.replace("pw.x,A", "replay,A") + sq, "source"),
+        ("rule 5: scalars=a", head(r0="f=0.45"), pw + sq, "rule 5"),
+        ("a NaN share", head(), pw.replace("0.45,6,80", "nan,6,80") + sq, "share"),
+        ("a NaN split_s", head(), pw.replace(",80,95,", ",nan,95,") + sq, "split_s"),
+        ("a NaN base_s", head(), pw.replace(",80,95,", ",80,nan,") + sq, "base_s"),
+        ("a NaN ratio_lo", head(), pw.replace("1.12", "nan") + sq, "ratio_lo"),
+        ("an infinite split_s", head(), pw.replace(",80,95,", ",inf,95,") + sq, "split_s"),
+        ("an overflowing base_s", head(), pw.replace(",80,95,", ",80,1e999,") + sq, "base_s"),
+        ("a hex float", head(), pw.replace(",80,95,", ",80,0x5f,") + sq, "base_s"),
+        ("a negative base_s", head(), pw.replace(",80,95,", ",80,-95,") + sq, "base_s"),
+        ("a non-ASCII digit in a number", head(), pw.replace(",80,95,", ",80,9٥,") + sq, "base_s"),
+        ("a non-ASCII digit in a count", head(), pw.replace(",100,100,", ",100,1٠٠,", 1) + sq, "kept"),
+        ("a count with a point", head(), pw.replace(",6,80,", ",6.0,80,") + sq, "pairs"),
+        ("a row index beyond int", head(), pw.replace("0,pw.x,A", "2147483648,pw.x,A") + sq, "the table has"),
+        ("a short line", head(), pw + sq.replace(",0,0,0\n", ",0,0\n", 1), "fields, expected 17"),
+        ("a blank line", head(), "\n" + pw + sq, "fields, expected 17"),
+        ("a quoted field", head(), pw.replace("pw.x,A", '"pw.x",A') + sq, "quote"),
+        ("a bare carriage return", head(), pw.replace("pw.x,A", "pw.x\r,A") + sq, "carriage return"),
+        ("a line over the limit", head(), pw.replace(",A,", "," + "A" * 1100 + ",") + sq, "characters"),
     ]
     wrong = 0
+    # the row grammar of dispatch.c's ab_split_parse_row(): signed exponents, no '-' value, no hex
+    r = parse_row("zgemm N N N gf=1e-3 mn=2.5e-1:+4E+2 f=5e-1")
+    if (r["gf"], r["mn"], r["f"]) != (1e-3, (0.25, 400.0), 0.5):
+        wrong += 1
+        print(f"ingest_split self-test: signed exponents read as {r}")
+    for bad in ("zgemm N N N f=-0", "zgemm N N N f=0x1p-1", "zgemm N N N f=nan", "zgemm N N N gf=1e999 f=0.5"):
+        try:
+            parse_row(bad)
+            wrong += 1
+            print(f"ingest_split self-test: '{bad}' parsed")
+        except ValueError:
+            pass
     with tempfile.TemporaryDirectory() as d:
-        for what, body, filed in cases:
+        for what, table, body, reason in cases:
             with open(os.path.join(d, "split_table.txt"), "w") as f:
-                f.write(head)
-            with open(os.path.join(d, "split_evidence.csv"), "w") as f:
-                f.write(",".join(COLUMNS) + "\n" + body)
+                f.write(table)
+            with open(os.path.join(d, "split_evidence.csv"), "w", newline="") as f:
+                f.write(",".join(COLUMNS) + ("\r\n" if "\r\n" in body else "\n") + body)
             try:
-                Table(d).validate()
-                got, why = True, ""
+                t = Table(d)
+                t.validate()
+                why = None
             except Ingest as e:
-                got, why = False, str(e)
-            if got != filed:
+                why = str(e)
+            if (reason is None) != (why is None) or (reason and reason not in why):
                 wrong += 1
-                print(f"ingest_split self-test: {what}: {'filed' if got else 'refused'} ({why})")
+                print(f"ingest_split self-test: {what}: {'filed' if why is None else 'refused: ' + why}"
+                      f" (expected {'filing' if reason is None else 'refusal: ' + reason})")
+            elif why is None and what.startswith("pw.x for"):
+                text = generate([t])
+                for label in ("pw.x A/B 8x1, pooled", "bench_split only: well-scaled synthetic data, pooled"):
+                    if label not in text:
+                        wrong += 1
+                        print(f"ingest_split self-test: generate() does not label a row '{label}'")
     return wrong
 
 

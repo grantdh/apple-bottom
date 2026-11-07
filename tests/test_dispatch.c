@@ -28,6 +28,7 @@
 
 #include <Accelerate/Accelerate.h>
 #include <complex.h>
+#include <errno.h>
 #include <limits.h>
 #include <locale.h>
 #include <math.h>
@@ -1129,15 +1130,33 @@ static const char *split_evidence_why(const ab_split_row_t *rows, int nrows, con
     double base[AB_SPLIT_MAX_ROWS] = {0}, split[AB_SPLIT_MAX_ROWS] = {0};
     int lines[AB_SPLIT_MAX_ROWS] = {0};
     unsigned have[AB_SPLIT_MAX_ROWS] = {0};      // bits: pw.x A 8x1, pw.x B 8x1, bench 1x8, bench 4x2, pw.x, bench
-    bool ok = fgets(line, sizeof line, f) && !strncmp(line, HEADER, sizeof HEADER - 1) &&
-              strchr("\r\n", line[sizeof HEADER - 1]);
-    if (!ok) snprintf(why, len, "%s: the columns are not %s", csv_path, HEADER);
-    for (int n = 2; ok && fgets(line, sizeof line, f); n++) {
+    bool ok = true, header = false;
+    // Lines as scripts/ingest_split.py's csv_fields() reads them: a "\n" or
+    // "\r\n" end, no other '\r', no '"', at most 1000 characters, split on
+    // every ','.
+    for (int n = 1; ok && fgets(line, sizeof line, f); n++) {
+        size_t m = strlen(line);
+        bool ended = m && line[m - 1] == '\n';
+        if (ended) line[--m] = '\0';
+        if (m && line[m - 1] == '\r') line[--m] = '\0';
+        if ((!ended && !feof(f)) || m > 1000 || strchr(line, '\r') || strchr(line, '"')) {
+            snprintf(why, len, "%s:%d: a quote, a bare carriage return or more than 1000 characters", csv_path, n);
+            ok = false;
+            break;
+        }
+        if (!header) {
+            header = true;
+            if (strcmp(line, HEADER)) {
+                snprintf(why, len, "%s: the columns are not %s", csv_path, HEADER);
+                ok = false;
+            }
+            continue;
+        }
         char *field[18], *p = line;
         int k = 0;
-        line[strcspn(line, "\r\n")] = '\0';
         for (char *t = strsep(&p, ","); t && k < 18; t = strsep(&p, ",")) field[k++] = t;
-        // counts in digits; share, split_s, base_s, ratio, ratio_lo, ratio_hi finite
+        // counts in ASCII digits; share, split_s, base_s, ratio, ratio_lo,
+        // ratio_hi finite, in the characters of ingest_split.py's NUMBER
         static const int COUNT[] = {0, 6, 12, 13, 14, 15, 16}, REAL[] = {5, 7, 8, 9, 10, 11};
         double x[17] = {0};
         bool numbers = k == 17;
@@ -1147,12 +1166,16 @@ static const char *split_evidence_why(const ab_split_row_t *rows, int nrows, con
             char *end;
             const char *s = field[REAL[c]];
             x[REAL[c]] = strtod(s, &end);
-            numbers = *s && !*end && strspn(s, "0123456789+-.eE") == strlen(s) && isfinite(x[REAL[c]]);
+            numbers = *s && *s != '-' && !*end && strspn(s, "0123456789+-.eE") == strlen(s) &&
+                      isfinite(x[REAL[c]]);
         }
-        int row = numbers ? atoi(field[0]) : -1;
-        if (k != 17 || !numbers || row >= nrows) {
-            snprintf(why, len, "%s:%d: not a line of 17 fields with finite numbers for one of the %d rows",
-                     csv_path, n, nrows);
+        errno = 0;
+        long row = numbers ? strtol(field[0], NULL, 10) : -1;
+        if (k != 17 || !numbers) {
+            snprintf(why, len, "%s:%d: not a line of 17 fields with finite numbers", csv_path, n);
+            ok = false;
+        } else if (errno || row >= nrows) {
+            snprintf(why, len, "%s:%d: row %s is not one of the table's %d rows", csv_path, n, field[0], nrows);
             ok = false;
         } else if (strcmp(field[4], library) || fabs(x[5] - rows[row].share) > 1e-9) {
             snprintf(why, len, "%s:%d: library %s share %s, the table's are %s and %g (rule 1)", csv_path, n,
@@ -1180,10 +1203,15 @@ static const char *split_evidence_why(const ab_split_row_t *rows, int nrows, con
         }
     }
     fclose(f);
+    if (ok && !header) {
+        snprintf(why, len, "%s: the columns are not %s", csv_path, HEADER);
+        ok = false;
+    }
     for (int i = 0; ok && i < nrows; i++) {
-        bool square = rows[i].ratio > 0;    // squares may stand on bench_split's synthetic data alone
+        // squares (ratio <= 2) may stand on bench_split's synthetic data alone
+        bool square = rows[i].ratio > 0 && rows[i].ratio <= 2.0;
         if (!lines[i]) snprintf(why, len, "row %d has no evidence (rule 1)", i);
-        else if (!(base[i] / split[i] >= 1.10))
+        else if (!(isfinite(base[i] / split[i]) && base[i] / split[i] >= 1.10))
             snprintf(why, len, "row %d: pooled ratio %.3f < 1.10 (rule 3)", i, base[i] / split[i]);
         else if ((!square || (have[i] & 16)) && (have[i] & 3) != 3)
             snprintf(why, len, "row %d: no pw.x evidence on A and B at 8x1 (rule 4)", i);
@@ -1253,6 +1281,24 @@ static void test_split_builtin_matches_evidence(void) {
         {"0,pw.x,A,8x1,abc1234,0.45,six,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "finite"},
         {"0,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0\n", "finite"},
         {"\n0,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "finite"},
+        {"0,pw.x,A,8x1,abc1234,0.45,6,nan,95,1.19,1.12,1.25,100,100,0,0,0\n", "finite"},       // split_s
+        {"0,pw.x,A,8x1,abc1234,0.45,6,80,nan,1.19,1.12,1.25,100,100,0,0,0\n", "finite"},       // base_s
+        {"0,pw.x,A,8x1,abc1234,0.45,6,80,-95,1.19,1.12,1.25,100,100,0,0,0\n", "finite"},
+        {"0,pw.x,A,8x1,abc1234,0.45,6,80,9\xd9\xa5,1.19,1.12,1.25,100,100,0,0,0\n", "finite"},  // U+0665
+        {"0,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,1\xd9\xa0\xd9\xa0,0,0,0\n", "finite"},
+        {"0,pw.x,A,8x1,abc1234,0.45,6.0,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "finite"},      // a count
+        // the pooled ratio overflows: base_s near the top, or every split_s subnormal
+        {"0,pw.x,A,8x1,abc1234,0.45,6,80,1e308,1.19,1.12,1.25,100,100,0,0,0\n"
+         "0,pw.x,B,8x1,abc1234,0.45,6,70,1e308,1.14,1.08,1.20,100,99,0,1,0\n", "rule 3"},
+        {"0,pw.x,A,8x1,abc1234,0.45,6,1e-310,95,1.19,1.12,1.25,100,100,0,0,0\n"
+         "0,pw.x,B,8x1,abc1234,0.45,6,1e-310,80,1.14,1.08,1.20,100,99,0,1,0\n", "rule 3"},
+        // row indices beyond int, and beyond long
+        {"2147483648,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "rows"},
+        {"4294967295,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "rows"},
+        {"99999999999999999999,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "rows"},
+        // quoting, carriage returns, long lines: refused, not split or cut
+        {"0,\"pw.x\",A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "quote"},
+        {"0,pw.x\r,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "carriage"},
     };
     char doc[2048];
     snprintf(doc, sizeof doc, "%s%s", H, GOOD);
@@ -1274,6 +1320,44 @@ static void test_split_builtin_matches_evidence(void) {
                w ? w : "a pass");
         unlink(path);
     }
+    // A line longer than 1000 characters is refused, not cut.
+    char longdoc[2048];
+    int at = snprintf(longdoc, sizeof longdoc, "%s0,pw.x,", H);
+    memset(longdoc + at, 'A', 1100);
+    snprintf(longdoc + at + 1100, sizeof longdoc - (size_t)at - 1100,
+             ",8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n");
+    expect(write_temp(longdoc, path, sizeof path), "mkstemp");
+    const char *w0 = split_evidence_why(c.split_rows, 2, "abc1234", path, why, sizeof why);
+    expect(w0 && strstr(w0, "characters"), "a line of 1100 characters: %s", w0 ? w0 : "a pass");
+    unlink(path);
+    // Line ends in "\r\n" read as "\n".
+    snprintf(doc, sizeof doc, "row,source,input,layout,library,share,pairs,split_s,base_s,ratio,ratio_lo,"
+                              "ratio_hi,calls,kept,kept_4m,range,gpu_failed\r\n%s", GOOD);
+    for (char *q = strchr(doc + 160, '\n'); q; q = strchr(q + 2, '\n')) {
+        memmove(q + 1, q, strlen(q) + 1);
+        *q = '\r';
+    }
+    expect(write_temp(doc, path, sizeof path), "mkstemp");
+    expect(!split_evidence_why(c.split_rows, 2, "abc1234", path, why, sizeof why), "CRLF evidence: %s", why);
+    unlink(path);
+    // Square means a ratio bound of at most 2: ratio=300 is a QE shape and needs
+    // pw.x; a square on pw.x alone is refused.
+    snprintf(doc, sizeof doc, "%s%s", H, GOOD);
+    expect(write_temp(doc, path, sizeof path), "mkstemp");
+    c.split_rows[1].ratio = 300;
+    const char *w = split_evidence_why(c.split_rows, 2, "abc1234", path, why, sizeof why);
+    expect(w && strstr(w, "row 1: no pw.x evidence"), "ratio=300 on bench_split alone: %s", w ? w : "a pass");
+    c.split_rows[1].ratio = 2;
+    unlink(path);
+    snprintf(doc, sizeof doc, "%s%s"
+             "1,pw.x,A,8x1,abc1234,0.6,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n"
+             "1,pw.x,B,8x1,abc1234,0.6,6,70,80,1.14,1.08,1.20,100,99,0,1,0\n", H,
+             "0,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n"
+             "0,pw.x,B,8x1,abc1234,0.45,6,70,80,1.14,1.08,1.20,100,99,0,1,0\n");
+    expect(write_temp(doc, path, sizeof path), "mkstemp");
+    w = split_evidence_why(c.split_rows, 2, "abc1234", path, why, sizeof why);
+    expect(w && strstr(w, "row 1: no bench_split evidence"), "a square on pw.x alone: %s", w ? w : "a pass");
+    unlink(path);
     // A table without rows needs no evidence.
     expect(write_temp(H, path, sizeof path), "mkstemp");
     expect(!split_evidence_why(c.split_rows, 0, "none", path, why, sizeof why), "an empty table: %s", why);
