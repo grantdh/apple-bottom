@@ -198,7 +198,7 @@ static void compose_case(const Call *c, char axis, int g) {
 // =============================================================================
 
 // The axes this tree's executor cuts.
-static const char AXES[] = "N";
+static const char AXES[] = "NMK";
 
 #define ONE {1, 0}
 #define ZERO {0, 0}

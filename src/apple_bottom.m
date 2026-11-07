@@ -4998,14 +4998,14 @@ static size_t slot_bytes(const struct ab_stage_s* s) {
 // Where each operand of g lives during the call: in place, with its own
 // leading dimension, if it lies in registered memory (C only when the GPU
 // writes it without reading it, so that the host path can still redo a call
-// the guard does not let stand); else packed (ld = rows) in its staging
-// buffer.
+// the guard does not let stand, and g does not ask for C staged); else packed
+// (ld = rows) in its staging buffer.
 static void stage_layout(struct ab_stage_s* s, const ab_stage_gemm_t* g) {
     size_t elem = g->routine == 'z' ? 2 * sizeof(double) : sizeof(double);
     for (int i = 0; i < 3; i++) {
         const ab_stage_matrix_t* x = &g->x[i];
         size_t r = (size_t)x->rows, c = (size_t)x->cols;
-        s->ext[i] = i < 2 || !(g->split || g->c_in)
+        s->ext[i] = i < 2 || !(g->split || g->c_in || g->c_staged)
                   ? registered(x->ptr, ((c - 1) * x->ld + r) * elem, elem, &s->ext_off[i]) : nil;
         s->ld[i] = s->ext[i] ? x->ld : x->rows;
         s->elems[i] = s->ext[i] ? 0 : r * c;

@@ -1332,7 +1332,7 @@ static void t2_case(char r, char axis, char ta, char tb, int M, int N, int K, in
 }
 
 // The axes this tree's executor cuts.
-static const char T2_AXES[] = "N";
+static const char T2_AXES[] = "NMK";
 
 static void test_split_slices_cblas(void) {
     static const double SCALARS[][4] = {{1, 0, 0, 0}, {1, 0, 1, 0}, {-1.7, 0.6, 0.3, -0.45}};

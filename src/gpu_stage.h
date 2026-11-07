@@ -81,6 +81,8 @@ typedef struct {
     bool split;                   // ZGEMM with other alpha or beta: the host epilogue
     bool classical;               // classical products even where AB_STRASSEN routes the shape
                                   // (AB_SPLIT's parts: Strassen's bound is normwise only)
+    bool c_staged;                // C staged even in registered memory (AB_SPLIT's M axis,
+                                  // whose C rows in place were never measured)
     double alpha[2], beta[2];     // real, imaginary; a DGEMM's applied in DD by the GEMM kernel
 } ab_stage_gemm_t;
 

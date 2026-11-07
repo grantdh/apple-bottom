@@ -1501,6 +1501,13 @@ static ab_split_outcome_t split_run(const gemm_part_t *w, char axis, int g, int 
     tail->A = (const char *)w->A + tc.a * e;
     tail->B = (const char *)w->B + tc.b * e;
     tail->C = (char *)w->C + tc.c * e;
+    // The K axis's tail writes its product into P (M x N, ld M, beta 0), which
+    // is made below once the staged path takes the tail; it reads no C.
+    if (tc.into_p) {
+        tail->C = NULL;
+        tail->ldC = w->M;
+        tail->beta = 0.0;
+    }
 
     // The staged path takes the tail, or the whole call takes its own route.
     bool run_tail = true;
@@ -1516,16 +1523,25 @@ static ab_split_outcome_t split_run(const gemm_part_t *w, char axis, int g, int 
         why = part_stage_begin(&j.g, tail);
         if (why == AB_PROF_STAGED_SCALAR) return split_declined(rec, AB_PROF_SPLIT_DECLINE_SCALAR);
         j.g.classical = true;
+        j.g.c_staged = axis == 'M';
         // A ZGEMM tail reading NaN or Inf in C goes to Accelerate without a run.
         if (why == AB_PROF_STAGED_RANGE) {
             j.why = why;
             run_tail = false;
         }
     }
+    void *P = NULL;
+    if (tc.into_p) {
+        P = malloc((size_t)w->M * w->N * e);
+        if (!P) return split_declined(rec, AB_PROF_SPLIT_DECLINE_SCRATCH);
+        tail->C = P;
+        j.g.x[AB_STAGE_C].ptr = P;
+    }
     pthread_t worker = NULL;
     j.head_done = run_tail && order == 1 ? dispatch_semaphore_create(0) : NULL;
     if (run_tail && pthread_create(&worker, NULL, split_worker, &j) != 0) {
         if (j.head_done) dispatch_release(j.head_done);
+        free(P);
         return split_declined(rec, AB_PROF_SPLIT_DECLINE_THREAD);
     }
 
@@ -1540,9 +1556,28 @@ static ab_split_outcome_t split_run(const gemm_part_t *w, char axis, int g, int 
     if (!joined) pthread_join(worker, NULL);
     if (j.head_done) dispatch_release(j.head_done);
 
-    // A tail not kept is made again here, on Accelerate.
+    // A tail not kept is made again here, on Accelerate: on the K axis into C
+    // with beta 1, P ignored. A kept one on the K axis is added to C in FP64.
     bool kept = engine == 1 || staged_kept(j.why);
-    if (!kept) part_cblas(tail);
+    if (!kept && P) {
+        tail->C = w->C;
+        tail->ldC = w->ldC;
+        tail->beta = 1.0;
+    }
+    if (!kept) {
+        part_cblas(tail);
+    } else if (P && w->routine == 'z') {
+        const double complex *p = P;
+        double complex *c = w->C;
+        for (size_t col = 0; col < (size_t)w->N; col++)
+            for (size_t i = 0; i < (size_t)w->M; i++) c[col * w->ldC + i] += p[col * w->M + i];
+    } else if (P) {
+        const double *p = P;
+        double *c = w->C;
+        for (size_t col = 0; col < (size_t)w->N; col++)
+            for (size_t i = 0; i < (size_t)w->M; i++) c[col * w->ldC + i] += p[col * w->M + i];
+    }
+    free(P);
     rec->staged = engine == 0 ? j.why : AB_PROF_STAGED_NONE;
     rec->in_place = kept ? j.in_place : 0;
     rec->outcome = engine == 1                         ? AB_SPLIT_CPU
@@ -1570,9 +1605,8 @@ static int split_seam(const ab_split_forced_t *f, const gemm_part_t *w) {
         !ab_blas_args_valid(w->ta, w->tb, w->M, w->N, w->K, w->ldA, w->ldB, w->ldC) ||
         w->alpha == 0.0)
         return AB_SPLIT_INVALID;
-    // The N axis; M and K follow.
-    if (f->axis != 'N') return AB_SPLIT_INVALID;
-    int L = w->N;
+    if (f->axis != 'N' && f->axis != 'M' && f->axis != 'K') return AB_SPLIT_INVALID;
+    int L = f->axis == 'N' ? w->N : f->axis == 'M' ? w->M : w->K;
     if (f->g < 0 || f->g > L) return AB_SPLIT_INVALID;
     ab_split_record_t *rec = &t_last_split;
     rec->row = -1;
