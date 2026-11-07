@@ -78,7 +78,17 @@ static inline int spawn_capture(char *const argv[], const char *const extra[], c
     size_t n = 0, ne = 0;
     while (extra[ne]) ne++;
     char **env = child_environ(ne, &n);
+    // A setting in extra replaces the caller's of the same name (VECLIB_MAXIMUM_THREADS, say).
+    size_t kept = 0;
+    for (size_t i = 0; i < n; i++) {
+        size_t len = strcspn(env[i], "=") + 1;
+        bool named = false;
+        for (size_t k = 0; k < ne && !named; k++) named = !strncmp(env[i], extra[k], len);
+        if (!named) env[kept++] = env[i];
+    }
+    n = kept;
     for (size_t k = 0; k < ne; k++) env[n + k] = (char *)extra[k];
+    env[n + ne] = NULL;
     pid_t pid;
     char why[256];
     FILE *in = spawn_piped(argv, env, &pid, why, sizeof why);
