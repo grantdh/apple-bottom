@@ -26,6 +26,8 @@
 #include "split_table.h"
 #include "test_registry.h"
 
+#include <Accelerate/Accelerate.h>
+#include <complex.h>
 #include <limits.h>
 #include <math.h>
 #include <stdarg.h>
@@ -1219,6 +1221,167 @@ static void test_split_builtin_matches_evidence(void) {
 }
 
 // =============================================================================
+// AB_SPLIT: the slices on Accelerate (the seam, engine 1)
+// =============================================================================
+// The library's executor cuts a call and runs both parts on cblas, the tail
+// on its own thread, in each completion order. C must be bitwise the two
+// parts made one after the other by cblas on slices this file works out
+// itself (the K axis: the head into C, the tail into a scratch product added
+// in FP64), with A, B and C's padding untouched.
+
+static uint64_t t2_state = 0x9E3779B97F4A7C15ULL;
+
+static double t2_uniform(void) {
+    uint64_t z = (t2_state += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return ((double)((z ^ (z >> 31)) >> 11) * 0x1p-53) * 2.0 - 1.0;
+}
+
+// An operand stored rows x cols with leading dimension ld (w doubles per
+// element), its padding NaN.
+static double *t2_operand(int w, int rows, int cols, int ld) {
+    size_t n = (size_t)w * ld * (cols ? cols : 1);
+    double *x = malloc(n * sizeof *x);
+    for (size_t i = 0; i < n; i++) x[i] = NAN;
+    for (int j = 0; j < cols; j++)
+        for (int i = 0; i < w * rows; i++) x[(size_t)j * w * ld + i] = t2_uniform();
+    return x;
+}
+
+static enum CBLAS_TRANSPOSE t2_trans(char t) {
+    return t == 'N' ? CblasNoTrans : t == 'T' ? CblasTrans : CblasConjTrans;
+}
+
+// cblas on one part; alpha and beta (real, imaginary).
+static void t2_cblas(char r, char ta, char tb, int M, int N, int K, const double *alpha,
+                     const double *A, int ldA, const double *B, int ldB, const double *beta,
+                     double *C, int ldC) {
+    if (r == 'z')
+        cblas_zgemm(CblasColMajor, t2_trans(ta), t2_trans(tb), M, N, K, (const void *)alpha,
+                    (const void *)A, ldA, (const void *)B, ldB, (const void *)beta, (void *)C, ldC);
+    else
+        cblas_dgemm(CblasColMajor, t2_trans(ta), t2_trans(tb), M, N, K, alpha[0], A, ldA, B, ldB,
+                    beta[0], C, ldC);
+}
+
+// The reference of a call cut at g on axis: the head, then the tail.
+static void t2_reference(char r, char axis, int g, char ta, char tb, int M, int N, int K,
+                         const double *alpha, const double *A, int ldA, const double *B, int ldB,
+                         const double *beta, double *C, int ldC) {
+    const size_t w = r == 'z' ? 2 : 1;
+    const bool na = ta == 'N', nb = tb == 'N';
+    if (axis == 'N') {
+        size_t c = (size_t)(N - g);
+        if (c) t2_cblas(r, ta, tb, M, (int)c, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+        t2_cblas(r, ta, tb, M, g, K, alpha, A, ldA, B + w * (nb ? c * ldB : c), ldB, beta,
+                 C + w * c * ldC, ldC);
+    } else if (axis == 'M') {
+        size_t c = (size_t)(M - g);
+        if (c) t2_cblas(r, ta, tb, (int)c, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
+        t2_cblas(r, ta, tb, g, N, K, alpha, A + w * (na ? c : c * ldA), ldA, B, ldB, beta, C + w * c,
+                 ldC);
+    } else {
+        size_t c = (size_t)(K - g);
+        static const double zero[2] = {0, 0};
+        double *P = calloc(w * (size_t)M * N, sizeof *P);
+        t2_cblas(r, ta, tb, M, N, (int)c, alpha, A, ldA, B, ldB, beta, C, ldC);
+        t2_cblas(r, ta, tb, M, N, g, alpha, A + w * (na ? c * ldA : c), ldA, B + w * (nb ? c : c * ldB),
+                 ldB, zero, P, M);
+        for (int j = 0; j < N; j++)
+            for (size_t i = 0; i < w * (size_t)M; i++) C[w * (size_t)j * ldC + i] += P[w * (size_t)j * M + i];
+        free(P);
+    }
+}
+
+// One case: every order against the reference, C whole (padding included)
+// bitwise, A and B unchanged.
+static void t2_case(char r, char axis, char ta, char tb, int M, int N, int K, int pad, int g,
+                    const double *alpha, const double *beta, bool nan_c) {
+    const int w = r == 'z' ? 2 : 1;
+    const bool na = ta == 'N', nb = tb == 'N';
+    const int rA = na ? M : K, cA = na ? K : M, rB = nb ? K : N, cB = nb ? N : K;
+    const int ldA = rA + pad, ldB = rB + pad, ldC = M + pad;
+    double *A = t2_operand(w, rA, cA, ldA), *B = t2_operand(w, rB, cB, ldB),
+           *C0 = t2_operand(w, M, N, ldC);
+    size_t nA = (size_t)w * ldA * cA, nB = (size_t)w * ldB * cB, nC = (size_t)w * ldC * N;
+    if (nan_c)                               // beta = 0 must not read C
+        for (int j = 0; j < N; j++) for (int i = 0; i < w * M; i++) C0[(size_t)j * w * ldC + i] = NAN;
+    double *A0 = malloc(nA * sizeof *A0), *B0 = malloc(nB * sizeof *B0);
+    double *ref = malloc(nC * sizeof *ref), *C = malloc(nC * sizeof *C);
+    memcpy(A0, A, nA * sizeof *A);
+    memcpy(B0, B, nB * sizeof *B);
+    memcpy(ref, C0, nC * sizeof *C0);
+    t2_reference(r, axis, g, ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, ref, ldC);
+    for (int order = 0; order < 3; order++) {
+        ab_split_forced_t f = {axis, g, order, 1};
+        memcpy(C, C0, nC * sizeof *C);
+        int got = r == 'z'
+            ? ab_internal_zgemm_split(&f, ta, tb, M, N, K, CMPLX(alpha[0], alpha[1]), (const void *)A, ldA,
+                                      (const void *)B, ldB, CMPLX(beta[0], beta[1]), (void *)C, ldC)
+            : ab_internal_dgemm_split(&f, ta, tb, M, N, K, alpha[0], A, ldA, B, ldB, beta[0], C, ldC);
+        expect(got == AB_SPLIT_CPU, "%cgemm %c %c %dx%dx%d axis %c g=%d order %d: outcome %d", r, ta, tb, M,
+               N, K, axis, g, order, got);
+        expect(!memcmp(C, ref, nC * sizeof *C), "%cgemm %c %c %dx%dx%d axis %c g=%d order %d alpha %g%+gi "
+               "beta %g%+gi: C is not the two cblas parts", r, ta, tb, M, N, K, axis, g, order, alpha[0],
+               alpha[1], beta[0], beta[1]);
+        expect(!memcmp(A, A0, nA * sizeof *A) && !memcmp(B, B0, nB * sizeof *B),
+               "%cgemm axis %c: A or B changed", r, axis);
+    }
+    free(A); free(B); free(C0); free(A0); free(B0); free(ref); free(C);
+}
+
+// The axes this tree's executor cuts.
+static const char T2_AXES[] = "N";
+
+static void test_split_slices_cblas(void) {
+    static const double SCALARS[][4] = {{1, 0, 0, 0}, {1, 0, 1, 0}, {-1.7, 0.6, 0.3, -0.45}};
+    static const char TR[] = "NTC";
+    begin();
+    for (const char *axis = T2_AXES; *axis; axis++)
+        for (int z = 0; z < 2; z++)
+            for (int a = 0; a < (z ? 3 : 2); a++)
+                for (int b = 0; b < (z ? 3 : 2); b++)
+                    for (size_t s = 0; s < TEST_REGISTRY_SIZE(SCALARS); s++) {
+                        char r = z ? 'z' : 'd';
+                        int M = 70, N = 97, K = 53;
+                        if (*axis == 'K') K = 700;
+                        int L = *axis == 'N' ? N : *axis == 'M' ? M : K;
+                        const int G[] = {1, 32, L / 2, L - 1, L};
+                        for (size_t gi = 0; gi < TEST_REGISTRY_SIZE(G); gi++)
+                            t2_case(r, *axis, TR[a], TR[b], M, N, K, (int)(gi % 3), G[gi], SCALARS[s],
+                                    SCALARS[s] + 2, false);
+                    }
+    // beta = 0 with NaN in C, and the call cut at g = 0 (cblas on the whole call).
+    static const double one[2] = {1, 0}, zero[2] = {0, 0};
+    for (const char *axis = T2_AXES; *axis; axis++) {
+        t2_case('z', *axis, 'C', 'N', 64, 64, 512, 1, 32, one, zero, true);
+        t2_case('d', *axis, 'N', 'T', 64, 64, 512, 2, 32, one, zero, true);
+        t2_case('z', *axis, 'N', 'N', 40, 50, 450, 0, 0, SCALARS[2], SCALARS[2] + 2, false);
+    }
+    // Arguments the seam does not cut leave C alone.
+    double A[64], B[64], C[64];
+    for (int i = 0; i < 64; i++) A[i] = B[i] = C[i] = i;
+    ab_split_forced_t bad[] = {{'N', 9, 0, 1}, {'Q', 1, 0, 1}, {'N', -1, 0, 1}, {'N', 1, 3, 1}, {'N', 1, 0, 2}};
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(bad); i++)
+        expect(ab_internal_dgemm_split(&bad[i], 'N', 'N', 8, 8, 8, 1.0, A, 8, B, 8, 0.0, C, 8) ==
+               AB_SPLIT_INVALID, "forced cut %zu should be refused", i);
+    expect(ab_internal_dgemm_split(NULL, 'N', 'N', 8, 8, 8, 1.0, A, 8, B, 8, 0.0, C, 8) == AB_SPLIT_INVALID &&
+           ab_internal_dgemm_split(&(ab_split_forced_t){'N', 4, 0, 1}, 'X', 'N', 8, 8, 8, 1.0, A, 8, B, 8,
+                                   0.0, C, 8) == AB_SPLIT_INVALID &&
+           ab_internal_dgemm_split(&(ab_split_forced_t){'N', 4, 0, 1}, 'N', 'N', 8, 8, 8, 0.0, A, 8, B, 8,
+                                   0.0, C, 8) == AB_SPLIT_INVALID &&
+           ab_internal_dgemm_split(&(ab_split_forced_t){'N', 4, 0, 1}, 'N', 'N', 8, 8, 8, 1.0, A, 7, B, 8,
+                                   0.0, C, 8) == AB_SPLIT_INVALID, "invalid BLAS arguments should be refused");
+    bool same = true;
+    for (int i = 0; i < 64; i++) same = same && C[i] == i;
+    expect(same, "a refused cut wrote C");
+    ab_split_record_t rec;
+    expect(!ab_internal_last_split(&rec), "a refused cut left a record");
+    finish();
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 
@@ -1245,6 +1408,7 @@ static const TestCase TESTS[] = {
     {"test_split_load_table",             test_split_load_table},
     {"test_split_config_from_env",        test_split_config_from_env},
     {"test_split_builtin_matches_evidence", test_split_builtin_matches_evidence},
+    {"test_split_slices_cblas",           test_split_slices_cblas},
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
 

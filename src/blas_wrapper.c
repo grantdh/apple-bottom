@@ -8,6 +8,7 @@
 #include <limits.h>
 #include <math.h>
 #include <dispatch/dispatch.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
@@ -23,6 +24,7 @@
 #include "dispatch.h"
 #include "gpu_stage.h"
 #include "profiling/blas_profiler.h"
+#include "split_slice.h"
 
 // Thread-local record of the path the last BLAS-ABI call on this thread
 // actually took, for bench harnesses and the profiler (prof_end). Only the
@@ -1389,6 +1391,218 @@ static bool dgemm_staged(CallProf *p, enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSP
         ab_internal_dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
     }
     return staged_done(p, why);
+}
+
+// =============================================================================
+// AB_SPLIT: one call cut between Accelerate and the GPU (split_slice.h)
+// =============================================================================
+// The calling thread runs the head on Accelerate while a thread made for the
+// call, and joined before it returns, runs the tail on the staged path. A
+// tail the staged path does not keep is made again on Accelerate here, after
+// the join, so that the two Accelerate calls of one split never overlap
+// (Accelerate's bits depend on its thread count). The tail takes classical
+// products: Strassen's bound is normwise only. Nothing outlives the call.
+
+// One part of a call, as cblas takes it.
+typedef struct {
+    char routine;
+    enum CBLAS_TRANSPOSE ta, tb;
+    int M, N, K;
+    double complex alpha, beta;     // a DGEMM's in the real parts
+    const void *A, *B;
+    void *C;
+    int ldA, ldB, ldC;
+} gemm_part_t;
+
+// The part on Accelerate; nothing for an empty one.
+static void part_cblas(const gemm_part_t *q) {
+    if (q->M == 0 || q->N == 0) return;
+    if (q->routine == 'z')
+        ab_internal_zgemm_cpu(q->ta, q->tb, q->M, q->N, q->K, q->alpha, q->A, q->ldA, q->B, q->ldB,
+                              q->beta, q->C, q->ldC);
+    else
+        ab_internal_dgemm_cpu(q->ta, q->tb, q->M, q->N, q->K, creal(q->alpha), q->A, q->ldA, q->B,
+                              q->ldB, creal(q->beta), q->C, q->ldC);
+}
+
+// The part as the staged path takes it (zgemm_stage_begin, dgemm_stage_begin).
+static ab_prof_staged_t part_stage_begin(ab_stage_gemm_t *g, const gemm_part_t *q) {
+    if (q->routine == 'z')
+        return zgemm_stage_begin(g, q->ta, q->tb, q->M, q->N, q->K, q->alpha, q->A, q->ldA, q->B,
+                                 q->ldB, q->beta, q->C, q->ldC);
+    return dgemm_stage_begin(g, q->ta, q->tb, q->M, q->N, q->K, creal(q->alpha), q->A, q->ldA, q->B,
+                             q->ldB, creal(q->beta), q->C, q->ldC);
+}
+
+// The tail and what became of it, on the caller's stack.
+typedef struct {
+    gemm_part_t tail;
+    ab_stage_gemm_t g;                  // the tail on the staged path (engine 0)
+    int engine, order;                  // as ab_split_forced_t
+    dispatch_semaphore_t head_done;     // order 1: the tail starts once the head is done
+    ab_prof_staged_t why;               // the staged path's outcome, or why it did not run
+    int in_place;                       // operands the staged run used in place
+    uint64_t t0, t1;                    // ticks: the tail's start and end
+} split_job_t;
+
+static void *split_worker(void *arg) {
+    split_job_t *j = arg;
+    if (j->head_done) dispatch_semaphore_wait(j->head_done, DISPATCH_TIME_FOREVER);
+    j->t0 = ab_prof_now_ticks();
+    if (j->engine == 1) {
+        part_cblas(&j->tail);
+    } else {
+        j->why = staged_why();          // this thread's own floating-point control
+        if (j->why == AB_PROF_STAGED_NONE) {
+            t_last_stage.in_place = 0;
+            j->why = run_staged(NULL, &j->g);
+            j->in_place = t_last_stage.in_place;
+        }
+    }
+    j->t1 = ab_prof_now_ticks();
+    return NULL;
+}
+
+static __thread ab_split_record_t t_last_split;
+static __thread bool t_last_split_valid;
+
+bool ab_internal_last_split(ab_split_record_t *out) {
+    if (t_last_split_valid && out) *out = t_last_split;
+    return t_last_split_valid;
+}
+
+static ab_split_outcome_t split_declined(ab_split_record_t *rec, ab_prof_split_decline_t why) {
+    rec->declined = why;
+    return rec->outcome = AB_SPLIT_DECLINED;
+}
+
+// The call w cut at g (0 < g <= L) on axis: the head on Accelerate here, the
+// tail on a thread of its own by the staged path (engine 0) or by cblas
+// (engine 1), in the order asked for (split_slice.h). A declined call is not
+// touched. Fills *rec.
+static ab_split_outcome_t split_run(const gemm_part_t *w, char axis, int g, int order, int engine,
+                                    ab_split_record_t *rec) {
+    *rec = (ab_split_record_t){.outcome = AB_SPLIT_DECLINED, .declined = AB_PROF_SPLIT_DECLINE_NONE,
+                               .staged = AB_PROF_STAGED_NONE, .row = rec->row, .axis = axis, .g = g,
+                               .L = axis == 'N' ? w->N : axis == 'M' ? w->M : w->K};
+    const size_t e = w->routine == 'z' ? sizeof(double complex) : sizeof(double);
+    ab_split_part_t hc, tc;
+    ab_split_parts(axis, g, op_char(w->ta), op_char(w->tb), w->M, w->N, w->K, w->ldA, w->ldB,
+                   w->ldC, &hc, &tc);
+    gemm_part_t head = *w;
+    head.M = hc.M;
+    head.N = hc.N;
+    head.K = hc.K;
+    split_job_t j = {.tail = *w, .engine = engine, .order = order, .why = AB_PROF_STAGED_NONE};
+    gemm_part_t *tail = &j.tail;
+    tail->M = tc.M;
+    tail->N = tc.N;
+    tail->K = tc.K;
+    tail->A = (const char *)w->A + tc.a * e;
+    tail->B = (const char *)w->B + tc.b * e;
+    tail->C = (char *)w->C + tc.c * e;
+
+    // The staged path takes the tail, or the whole call takes its own route.
+    bool run_tail = true;
+    if (engine == 0) {
+        ABStatus st = gpu_ready(w->M, w->N, w->K);
+        if (st != AB_OK)
+            return split_declined(rec, st == AB_ERROR_TOO_LARGE ? AB_PROF_SPLIT_DECLINE_TOO_LARGE
+                                                                : AB_PROF_SPLIT_DECLINE_NO_DEVICE);
+        ab_prof_staged_t why = staged_why();
+        if (why != AB_PROF_STAGED_NONE)
+            return split_declined(rec, why == AB_PROF_STAGED_HOST_PACK ? AB_PROF_SPLIT_DECLINE_HOST_PACK
+                                                                       : AB_PROF_SPLIT_DECLINE_FPCR);
+        why = part_stage_begin(&j.g, tail);
+        if (why == AB_PROF_STAGED_SCALAR) return split_declined(rec, AB_PROF_SPLIT_DECLINE_SCALAR);
+        j.g.classical = true;
+        // A ZGEMM tail reading NaN or Inf in C goes to Accelerate without a run.
+        if (why == AB_PROF_STAGED_RANGE) {
+            j.why = why;
+            run_tail = false;
+        }
+    }
+    pthread_t worker = NULL;
+    j.head_done = run_tail && order == 1 ? dispatch_semaphore_create(0) : NULL;
+    if (run_tail && pthread_create(&worker, NULL, split_worker, &j) != 0) {
+        if (j.head_done) dispatch_release(j.head_done);
+        return split_declined(rec, AB_PROF_SPLIT_DECLINE_THREAD);
+    }
+
+    // The head, before or after the tail as asked; the join.
+    bool joined = !run_tail;
+    if (order == 2 && !joined) {
+        pthread_join(worker, NULL);
+        joined = true;
+    }
+    part_cblas(&head);
+    if (j.head_done) dispatch_semaphore_signal(j.head_done);
+    if (!joined) pthread_join(worker, NULL);
+    if (j.head_done) dispatch_release(j.head_done);
+
+    // A tail not kept is made again here, on Accelerate.
+    bool kept = engine == 1 || staged_kept(j.why);
+    if (!kept) part_cblas(tail);
+    rec->staged = engine == 0 ? j.why : AB_PROF_STAGED_NONE;
+    rec->in_place = kept ? j.in_place : 0;
+    rec->outcome = engine == 1                         ? AB_SPLIT_CPU
+                 : j.why == AB_PROF_STAGED_KEPT        ? AB_SPLIT_KEPT
+                 : j.why == AB_PROF_STAGED_KEPT_4M     ? AB_SPLIT_KEPT_4M
+                 : j.why == AB_PROF_STAGED_RANGE       ? AB_SPLIT_RANGE
+                                                       : AB_SPLIT_GPU_FAILED;
+    return rec->outcome;
+}
+
+// Where the call's result came from, for ab_get_last_dispatch_path() and
+// ab_internal_last_staged(): "split" if the GPU's part stood, else "cpu".
+static void split_note_path(const ab_split_record_t *rec) {
+    bool gpu = rec->outcome == AB_SPLIT_KEPT || rec->outcome == AB_SPLIT_KEPT_4M;
+    _ab_last_path = gpu ? "split" : "cpu";
+    t_last_stage.staged = gpu;
+    t_last_stage.in_place = gpu ? rec->in_place : 0;
+}
+
+// The seam: the call cut as f says.
+static int split_seam(const ab_split_forced_t *f, const gemm_part_t *w) {
+    t_last_split_valid = false;
+    t_last_stage.staged = false;
+    if (!f || f->order < 0 || f->order > 2 || f->engine < 0 || f->engine > 1 ||
+        !ab_blas_args_valid(w->ta, w->tb, w->M, w->N, w->K, w->ldA, w->ldB, w->ldC) ||
+        w->alpha == 0.0)
+        return AB_SPLIT_INVALID;
+    // The N axis; M and K follow.
+    if (f->axis != 'N') return AB_SPLIT_INVALID;
+    int L = w->N;
+    if (f->g < 0 || f->g > L) return AB_SPLIT_INVALID;
+    ab_split_record_t *rec = &t_last_split;
+    rec->row = -1;
+    if (f->g == 0 || w->M == 0 || w->N == 0 || w->K == 0) {
+        *rec = (ab_split_record_t){.outcome = AB_SPLIT_CPU, .declined = AB_PROF_SPLIT_DECLINE_NONE,
+                                   .staged = AB_PROF_STAGED_NONE, .row = -1, .axis = f->axis, .L = L};
+        part_cblas(w);
+    } else if (split_run(w, f->axis, f->g, f->order, f->engine, rec) == AB_SPLIT_DECLINED) {
+        part_cblas(w);
+    }
+    t_last_split_valid = true;
+    split_note_path(rec);
+    return rec->outcome;
+}
+
+int ab_internal_dgemm_split(const ab_split_forced_t *f, char ta, char tb, int M, int N, int K,
+                            double alpha, const double *A, int ldA, const double *B, int ldB,
+                            double beta, double *C, int ldC) {
+    gemm_part_t w = {'d', ab_blas_trans(ta, false), ab_blas_trans(tb, false), M, N, K, alpha, beta,
+                     A, B, C, ldA, ldB, ldC};
+    return split_seam(f, &w);
+}
+
+int ab_internal_zgemm_split(const ab_split_forced_t *f, char ta, char tb, int M, int N, int K,
+                            double complex alpha, const double complex *A, int ldA,
+                            const double complex *B, int ldB, double complex beta,
+                            double complex *C, int ldC) {
+    gemm_part_t w = {'z', ab_blas_trans(ta, true), ab_blas_trans(tb, true), M, N, K, alpha, beta,
+                     A, B, C, ldA, ldB, ldC};
+    return split_seam(f, &w);
 }
 
 // =============================================================================

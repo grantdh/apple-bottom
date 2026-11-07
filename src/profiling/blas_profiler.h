@@ -94,6 +94,20 @@ typedef enum {
     AB_PROF_STAGED_COUNT
 } ab_prof_staged_t;
 
+// Why an AB_SPLIT call a row covered was not split (it then takes its own
+// route, as with AB_SPLIT unset), in the order the executor checks.
+typedef enum {
+    AB_PROF_SPLIT_DECLINE_NONE = -1,
+    AB_PROF_SPLIT_DECLINE_NO_DEVICE,   // no Metal context: no device, or a fork()ed child
+    AB_PROF_SPLIT_DECLINE_TOO_LARGE,   // an operand beyond the ABMatrix size limits
+    AB_PROF_SPLIT_DECLINE_HOST_PACK,   // AB_HOST_PACK=1
+    AB_PROF_SPLIT_DECLINE_FPCR,        // the caller's floating-point control is not the default
+    AB_PROF_SPLIT_DECLINE_SCALAR,      // a DGEMM alpha or beta the staged path does not take
+    AB_PROF_SPLIT_DECLINE_SCRATCH,     // no memory for the K axis's partial product
+    AB_PROF_SPLIT_DECLINE_THREAD,      // no thread for the GPU's part
+    AB_PROF_SPLIT_DECLINE_COUNT
+} ab_prof_split_decline_t;
+
 // Dimension bins (by max(M,N)):
 //   [0] 1-32     [1] 33-128   [2] 129-512   [3] 513-1024
 //   [4] 1025-2048 [5] 2049-4096 [6] 4097-8192 [7] 8193+

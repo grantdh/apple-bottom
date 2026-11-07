@@ -5142,8 +5142,8 @@ ab_stage_t* ab_internal_stage_acquire(const ab_stage_gemm_t* g) {
     stage_needs(s, g, need);
     if (!stage_fit(ctx, s, need)) return NULL;
     // The products' workspace when AB_STRASSEN routes the shape (the run gives
-    // it back if a line is scaled: stage_lines_scaled).
-    if (takes_strassen(AB_PRODUCTS_ROUTED, g->M, g->N, g->K) &&
+    // it back if a line is scaled: stage_lines_scaled), unless g is classical.
+    if (!g->classical && takes_strassen(AB_PRODUCTS_ROUTED, g->M, g->N, g->K) &&
         strassen_temps(ctx.device, g->M, g->N, g->K, &s->strassen) != AB_OK) {
         ab_internal_stage_release(s);
         return NULL;

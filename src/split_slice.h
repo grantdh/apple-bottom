@@ -1,5 +1,6 @@
 // =============================================================================
-// split_slice.h — the cut and the two parts of an AB_SPLIT call (internal)
+// split_slice.h — the cut and the two parts of an AB_SPLIT call, and the
+// executor's seam (internal)
 // =============================================================================
 //
 // A call the split table covers (dispatch.h) is cut along one axis of
@@ -15,7 +16,7 @@
 //      writes P = alpha op(A_t) op(B_t) (beta 0, M x N, ld M), which is
 //      added to C in FP64 after the join.
 // The cut is a multiple of 32 on N and M, 64 on K; ab_split_cut has the
-// rule. Pure: no state, no GPU.
+// rule. The cut and the parts are pure: no state, no GPU.
 // =============================================================================
 #ifndef AB_SPLIT_SLICE_H
 #define AB_SPLIT_SLICE_H
@@ -90,5 +91,61 @@ static inline void ab_split_parts(char axis, int g, char ta, char tb, int M, int
         gpu->into_p = true;
     }
 }
+
+// =============================================================================
+// The executor's seam (blas_wrapper.c)
+// =============================================================================
+// ab_internal_dgemm_split and ab_internal_zgemm_split run one BLAS-ABI call
+// cut as f says, whatever the split table says, so that tests and
+// benchmarks can compare cuts and engines in one process. Not profiled.
+
+typedef enum {
+    AB_SPLIT_KEPT,          // the GPU's part stood
+    AB_SPLIT_KEPT_4M,       // ... a ZGEMM part by 4M
+    AB_SPLIT_CPU,           // cblas made both parts (engine 1, or g = 0)
+    AB_SPLIT_RANGE,         // the GPU's part was made again on Accelerate: the range guard
+                            // did not certify it, or its C held NaN or Inf
+    AB_SPLIT_GPU_FAILED,    // ... its run failed: no buffers, a command buffer failed twice,
+                            // line scales unlike the host's, Inf or NaN in its epilogue, or
+                            // the worker's floating-point control
+    AB_SPLIT_DECLINED,      // not split (record.declined says why): the seam made the whole
+                            // call on cblas, dgemm_/zgemm_ by their own routing
+    AB_SPLIT_INVALID,       // arguments the seam does not cut (invalid BLAS arguments, alpha
+                            // 0, g outside [0, L]); C untouched
+} ab_split_outcome_t;
+
+typedef struct {
+    char axis;      // 'N', 'M' or 'K'
+    int g;          // the GPU's part of the axis: L for the GPU only, 0 for the CPU only
+    int order;      // 0 free; 1 the CPU's part finishes first; 2 the GPU's part finishes first
+    int engine;     // 0 the staged path; 1 cblas (no GPU; tests)
+} ab_split_forced_t;
+
+// This thread's last split attempt, by the seam or by dgemm_/zgemm_ under
+// AB_SPLIT.
+typedef struct {
+    int outcome;        // ab_split_outcome_t
+    int declined;       // why it was not split (ab_prof_split_decline_t), -1 if it was
+    int staged;         // the GPU part's staged-path outcome (ab_prof_staged_t), -1 if none ran
+    int retries;        // staged runs repeated after a failed command buffer
+    bool retry_kept;    // ... and the repeat stood
+    bool scales;        // the GPU part's line scales were not the host's
+    int in_place;       // operands the GPU part used in place
+    int row;            // the split table's row (dgemm_/zgemm_), -1 for the seam
+    char axis;
+    int L, g;
+} ab_split_record_t;
+
+int ab_internal_dgemm_split(const ab_split_forced_t *f, char ta, char tb, int M, int N, int K,
+                            double alpha, const double *A, int ldA, const double *B, int ldB,
+                            double beta, double *C, int ldC);
+int ab_internal_zgemm_split(const ab_split_forced_t *f, char ta, char tb, int M, int N, int K,
+                            double _Complex alpha, const double _Complex *A, int ldA,
+                            const double _Complex *B, int ldB, double _Complex beta,
+                            double _Complex *C, int ldC);
+
+// The record of this thread's last BLAS-ABI GEMM if it reached the split (the
+// seam, or a call a row covered); false otherwise.
+bool ab_internal_last_split(ab_split_record_t *out);
 
 #endif // AB_SPLIT_SLICE_H

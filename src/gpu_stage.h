@@ -79,6 +79,8 @@ typedef struct {
     ab_stage_matrix_t x[3];       // A, B, C
     bool c_in;                    // the GPU reads C: DGEMM beta != 0, ZGEMM alpha = 1, beta = 1
     bool split;                   // ZGEMM with other alpha or beta: the host epilogue
+    bool classical;               // classical products even where AB_STRASSEN routes the shape
+                                  // (AB_SPLIT's parts: Strassen's bound is normwise only)
     double alpha[2], beta[2];     // real, imaginary; a DGEMM's applied in DD by the GEMM kernel
 } ab_stage_gemm_t;
 

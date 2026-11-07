@@ -4,7 +4,7 @@
 
 The registry-based test runners (`test_correctness.c`, `test_chaos.c`,
 `test_device_api.c`, `test_dispatch.c`, `test_trace.c`, `test_blas2.c`, `test_fft.c`,
-`test_strassen.c`) dispatch via a
+`test_strassen.c`, `test_split.c`) dispatch via a
 `TESTS[]` registry array of `{name, fn}` pairs declared just above
 `main()`. To add a test:
 
@@ -45,8 +45,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 230, every test but
-the chaos ones, and `make ci-local` all 248 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 232, every test but
+the chaos ones, and `make ci-local` all 250 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -78,7 +78,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     gives its first bits again right after NaN data (which a beta = 0
     call must not read), after larger and smaller shapes, and from 4
     threads at once
-  - `tests/test_dispatch.c` — 22 tests of the BLAS-ABI routing and the
+  - `tests/test_dispatch.c` — 23 tests of the BLAS-ABI routing and the
     `AB_SPLIT` plan, no GPU, see below
   - `tests/test_range_guard.c` — 7 tests of the exponent-range guards'
     stage 2 against the plain loops it replaced, no GPU, see below
@@ -108,6 +108,11 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     classical componentwise bound on both paths, and that ZHERK, a
     one-element ZGEMM batch, DTRSM and `ab_dgesv_mpir` give the same bits
     with `AB_STRASSEN=1` and every size routed as without it
+  - `tests/test_split.c` — 1 test of `AB_SPLIT`'s executor on the GPU,
+    through its seam (`ab_internal_dgemm_split`, `ab_internal_zgemm_split`):
+    a call cut at g is, bit for bit, cblas on the head slice and the staged
+    path on the tail slice alone, in every completion order, over every
+    TRANS pair, scalar set and a range of cuts, padded operands untouched
 
 - **Not yet registry-based (one `main`, no ghost guard):**
   - `tests/test_precision.c` — 17 tests (the last compares
@@ -466,8 +471,9 @@ hold NaN.
 ## Routing unit tests
 
 `tests/test_dispatch.c` tests the routing decision of the BLAS-ABI entry
-points (`src/dispatch.c`, see `dispatch.h`), built from that file alone,
-without the library or a GPU. It checks every built-in table
+points (`src/dispatch.c`, see `dispatch.h`), without a GPU (it links the
+library only for the split executor's Accelerate-only engine, below). It
+checks every built-in table
 (`src/dispatch_table.h`, one per calibrated chip, generated from
 `benchmarks/calibration/<chip>/` by `scripts/ingest_calibration.py`) against
 the `calibrate_summary.csv` it was derived from: every measured shape routes
@@ -491,7 +497,13 @@ shapes), that `AB_MODE=cpu` and `AB_MIN_GPU_DIM` come before it and
 chip, the slices of each axis, and every built-in split table
 (`src/split_table.h`) against its filed `split_evidence.csv` by the rules
 of `scripts/ingest_split.py`, which it also checks on tables made to break
-each rule.
+each rule. `test_split_slices_cblas` runs the executor with both parts on
+Accelerate (the seam's engine 1, the tail on its own thread) in each
+completion order: C, padding included, must be bitwise the two parts made
+one after the other by cblas on slices the test works out itself (the K
+axis: the head into C, the tail's product added in FP64), A and B
+unchanged, beta = 0 never reading C, and cuts it cannot make refused with C
+untouched.
 
 ## Range guard, stage 2
 

@@ -94,7 +94,7 @@ $(BUILD)/apple_bottom.o: $(SRC)/apple_bottom.m $(SRC)/ab_internal.h $(INCLUDE)/a
 $(BUILD)/strassen.o: $(SRC)/strassen.m $(SRC)/strassen.h $(INCLUDE)/apple_bottom.h | $(BUILD)
 	$(OBJC) $(OBJCFLAGS) -I$(INCLUDE) -xobjective-c++ -c $(SRC)/strassen.m -o $@
 
-$(BUILD)/blas_wrapper.o: $(SRC)/blas_wrapper.c $(SRC)/ab_internal.h $(SRC)/blas_trans.h $(SRC)/dispatch.h $(SRC)/gpu_stage.h $(INCLUDE)/apple_bottom.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
+$(BUILD)/blas_wrapper.o: $(SRC)/blas_wrapper.c $(SRC)/ab_internal.h $(SRC)/blas_trans.h $(SRC)/dispatch.h $(SRC)/gpu_stage.h $(SRC)/split_slice.h $(INCLUDE)/apple_bottom.h $(SRC)/profiling/blas_profiler.h | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -c $(SRC)/blas_wrapper.c -o $@
 
 $(BUILD)/fortran_bridge.o: $(SRC)/fortran_bridge.c $(INCLUDE)/apple_bottom.h | $(BUILD)
@@ -285,12 +285,19 @@ $(BUILD)/test_fft: tests/test_fft.c tests/fft_ref.h tests/test_blas_check.h $(SR
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< $(BUILD)/fft_emu.o -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
-# Routing unit tests: dispatch.c alone, no library or GPU. They check every
-# built-in table against its calibration data, and every built-in split table
-# against its evidence, found under AB_SOURCE_ROOT. dispatch.c reads the chip
-# from sysctl and the GPU core count from IOKit.
-$(BUILD)/test_dispatch: tests/test_dispatch.c $(BUILD)/dispatch.o $(SRC)/dispatch.h $(SRC)/dispatch_table.h $(SRC)/split_table.h $(SRC)/split_slice.h | $(BUILD)
-	$(CC) $(CFLAGS) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' $< $(BUILD)/dispatch.o -o $@ -framework IOKit -framework CoreFoundation
+# Routing unit tests, no GPU. They check every built-in table against its
+# calibration data, and every built-in split table against its evidence,
+# found under AB_SOURCE_ROOT. dispatch.c reads the chip from sysctl and the
+# GPU core count from IOKit. Linked to the library for AB_SPLIT's executor
+# with both parts on Accelerate (its seam's engine 1), which needs no GPU.
+$(BUILD)/test_dispatch: tests/test_dispatch.c $(SRC)/dispatch.h $(SRC)/dispatch_table.h $(SRC)/split_table.h $(SRC)/split_slice.h lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
+# AB_SPLIT's executor on the GPU through its seam, and dgemm_/zgemm_ under
+# AB_SPLIT in child processes (tests/test_split.c).
+$(BUILD)/test_split: tests/test_split.c tests/test_blas_check.h tests/test_dot2.h tests/test_spawn.h tests/test_registry.h $(SRC)/gpu_stage.h $(SRC)/split_slice.h lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH) -lpthread
 	@echo "Built: $@"
 
 # Stage 2 of the exponent-range guards against the plain loops they replace,
@@ -299,7 +306,7 @@ $(BUILD)/test_range_guard: tests/test_range_guard.c tests/test_blas_check.h test
 	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
-test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_range_guard $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_staging $(BUILD)/test_blas2 $(BUILD)/test_fft $(BUILD)/test_strassen test-ghost-detection test-symbols test-fortran
+test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_range_guard $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_staging $(BUILD)/test_blas2 $(BUILD)/test_fft $(BUILD)/test_strassen $(BUILD)/test_split test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "Running Tests"
@@ -316,6 +323,7 @@ test: $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_device_api
 	./$(BUILD)/test_blas2
 	./$(BUILD)/test_fft
 	./$(BUILD)/test_strassen
+	./$(BUILD)/test_split
 	@echo ""
 	@echo "✓ All tests passed!"
 
@@ -782,6 +790,8 @@ build-check: $(BUILD)/fft_metal_src.h | $(BUILD)/check
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c tests/test_device_api.c -o $(BUILD)/check/test_device_api.o
 	@echo "Compiling test_strassen.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -c tests/test_strassen.c -o $(BUILD)/check/test_strassen.o
+	@echo "Compiling test_split.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' -c tests/test_split.c -o $(BUILD)/check/test_split.o
 	@echo "Compiling test_blas2.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' -c tests/test_blas2.c -o $(BUILD)/check/test_blas2.o
 	@echo "Compiling bench_gemv.c..."
@@ -810,12 +820,12 @@ build-check: $(BUILD)/fft_metal_src.h | $(BUILD)/check
 # Counting rule (also README.md, tests/README.md): TEST_TOTAL counts tests.
 # A test is one test_precision case, one TESTS[] registry entry of
 # test_correctness / test_chaos / test_device_api / test_dispatch /
-# test_range_guard / test_trace / test_blas2 / test_fft / test_strassen, or one test_blas_abi suite. Device-API CHECKs and BLAS-ABI cases
+# test_range_guard / test_trace / test_blas2 / test_fft / test_strassen / test_split, or one test_blas_abi suite. Device-API CHECKs and BLAS-ABI cases
 # are reported on their own lines and are not part of TEST_TOTAL, nor is
 # test_qe_golden (its TEST_QE_GOLDEN line says PASS, or SKIP on another device).
 # The report is written only after every binary passed, so TEST_PASSED =
 # TEST_TOTAL and TEST_FAILED = 0.
-ci-local: version-check dispatch-table-check split-table-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_range_guard $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_staging $(BUILD)/test_blas2 $(BUILD)/test_fft $(BUILD)/test_strassen $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
+ci-local: version-check dispatch-table-check split-table-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_range_guard $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_staging $(BUILD)/test_blas2 $(BUILD)/test_fft $(BUILD)/test_strassen $(BUILD)/test_split $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "CI Local Validation"
@@ -835,6 +845,7 @@ ci-local: version-check dispatch-table-check split-table-check $(BUILD)/test_pre
 	@./$(BUILD)/test_staging > $(BUILD)/test_staging.log 2>&1 && echo "✓ test_staging: PASS" || (echo "✗ test_staging: FAIL" && cat $(BUILD)/test_staging.log && exit 1)
 	@./$(BUILD)/test_fft > $(BUILD)/test_fft.log 2>&1 && echo "✓ test_fft: PASS" || (echo "✗ test_fft: FAIL" && cat $(BUILD)/test_fft.log && exit 1)
 	@./$(BUILD)/test_strassen > $(BUILD)/test_strassen.log 2>&1 && echo "✓ test_strassen: PASS" || (echo "✗ test_strassen: FAIL" && cat $(BUILD)/test_strassen.log && exit 1)
+	@./$(BUILD)/test_split > $(BUILD)/test_split.log 2>&1 && echo "✓ test_split: PASS" || (echo "✗ test_split: FAIL" && cat $(BUILD)/test_split.log && exit 1)
 	@echo ""
 	@echo "Running convergence study (V-2)..."
 	@rm -f $(BUILD)/convergence_data.csv
@@ -854,12 +865,13 @@ ci-local: version-check dispatch-table-check split-table-check $(BUILD)/test_pre
 		BLAS2=$$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_blas2.log); \
 		FFT=$$(sed -nE "s/^Summary: ([0-9]+) test.*/\1/p" $(BUILD)/test_fft.log); \
 		STRASSEN=$$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_strassen.log); \
+		SPLIT=$$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_split.log); \
 		GOLDEN=$$(sed -nE "s/^Golden bits: //p" $(BUILD)/test_qe_golden.log); \
 		[ -n "$$GOLDEN" ] || { echo "✗ CI report: no Golden bits line in test_qe_golden.log"; exit 1; }; \
-		for n in "$$PRECISION" "$$CORRECTNESS" "$$CHAOS" "$$DEVICE_API" "$$DEVICE_API_CHECKS" "$$DISPATCH" "$$RANGE_GUARD" "$$BLAS_ABI" "$$TRACE" "$$BLAS2" "$$FFT" "$$STRASSEN"; do \
+		for n in "$$PRECISION" "$$CORRECTNESS" "$$CHAOS" "$$DEVICE_API" "$$DEVICE_API_CHECKS" "$$DISPATCH" "$$RANGE_GUARD" "$$BLAS_ABI" "$$TRACE" "$$BLAS2" "$$FFT" "$$STRASSEN" "$$SPLIT"; do \
 			case "$$n" in ""|*[!0-9]*|0) echo "✗ CI report: could not read a test count from the logs"; exit 1;; esac; \
 		done; \
-		TOTAL=$$((PRECISION + CORRECTNESS + CHAOS + DEVICE_API + DISPATCH + RANGE_GUARD + BLAS_ABI + TRACE + BLAS2 + FFT + STRASSEN)); \
+		TOTAL=$$((PRECISION + CORRECTNESS + CHAOS + DEVICE_API + DISPATCH + RANGE_GUARD + BLAS_ABI + TRACE + BLAS2 + FFT + STRASSEN + SPLIT)); \
 		echo "GIT_SHA: $$(git rev-parse HEAD)" > $(BUILD)/CI_REPORT.txt; \
 		echo "GIT_BRANCH: $$(git rev-parse --abbrev-ref HEAD)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "AB_BUILD_SHA: $(AB_BUILD_SHA)" >> $(BUILD)/CI_REPORT.txt; \
@@ -876,6 +888,7 @@ ci-local: version-check dispatch-table-check split-table-check $(BUILD)/test_pre
 		echo "TEST_BLAS2: PASS ($$BLAS2 tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_FFT: PASS ($$FFT tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_STRASSEN: PASS ($$STRASSEN tests)" >> $(BUILD)/CI_REPORT.txt; \
+		echo "TEST_SPLIT: PASS ($$SPLIT tests)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_QE_GOLDEN: $$GOLDEN" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_STAGING: PASS ($$(sed -nE "s/^Results: ([0-9]+) passed.*/\1/p" $(BUILD)/test_staging.log) cases, the staged path against the host path)" >> $(BUILD)/CI_REPORT.txt; \
 		echo "TEST_CONVERGENCE: PASS" >> $(BUILD)/CI_REPORT.txt; \
