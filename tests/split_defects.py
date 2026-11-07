@@ -81,9 +81,9 @@ DEFECTS = [
                           (BW, "    const size_t e = w->routine == 'z' ? sizeof(double complex) : sizeof(double);\n    ab_split_part_t hc, tc;",
                            "    if (pthread_mutex_trylock(&g_split_try)) return split_declined(rec, AB_PROF_SPLIT_DECLINE_THREAD);\n"
                            "    const size_t e = w->routine == 'z' ? sizeof(double complex) : sizeof(double);\n    ab_split_part_t hc, tc;"),
-                          (BW, "    if (j.head_done) dispatch_release(j.head_done);\n    if (p && run_tail) {",
-                           "    if (j.head_done) dispatch_release(j.head_done);\n    pthread_mutex_unlock(&g_split_try);\n"
-                           "    if (p && run_tail) {")],
+                          (BW, "    if (run_tail) pthread_setcancelstate(cancel_state, NULL);\n",
+                           "    if (run_tail) pthread_setcancelstate(cancel_state, NULL);\n"
+                           "    pthread_mutex_unlock(&g_split_try);\n")],
      [SPLIT("test_split_determinism")]),
     ("Strassen on a slice", [(BW, "        j.g.classical = true;\n", "")],
      [SPLIT("test_split_scenarios")]),

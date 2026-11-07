@@ -1604,9 +1604,14 @@ static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis
     }
     pthread_t worker = NULL;
     j.head_done = run_tail && order == 1 ? dispatch_semaphore_create(0) : NULL;
+    // The worker uses this frame until the join: no cancellation of the caller
+    // (pthread_join is a cancellation point) may unwind it before then.
+    int cancel_state = 0;
+    if (run_tail) pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancel_state);
     // AB_TEST_FAIL_STAGE=split_thread (test-only): as if pthread_create failed.
     if (run_tail && (ab_test_fail_stage() == AB_PROF_FAIL_SPLIT_THREAD ||
                      pthread_create(&worker, NULL, split_worker, &j) != 0)) {
+        pthread_setcancelstate(cancel_state, NULL);
         if (j.head_done) dispatch_release(j.head_done);
         free(P);
         return split_declined(rec, AB_PROF_SPLIT_DECLINE_THREAD);
@@ -1633,6 +1638,7 @@ static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis
             p->split.wait_cpu_ns = p->split.join_ns - before;
         }
     }
+    if (run_tail) pthread_setcancelstate(cancel_state, NULL);
     if (j.head_done) dispatch_release(j.head_done);
     if (p && run_tail) {
         p->split.gpu_wall_ns = ab_prof_ticks_to_ns(j.t1 - j.t0);
