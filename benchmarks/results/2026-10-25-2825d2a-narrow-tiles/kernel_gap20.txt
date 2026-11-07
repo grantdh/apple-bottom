@@ -1,0 +1,24 @@
+# Apple M2 Max, library compiled in 1 ms
+# dd_dgemm               maxThreads  832  staticTG 16384  pipeline 1.6 ms
+# dd_dgemm_pf            maxThreads  512  staticTG 16384  pipeline 0.1 ms
+# dd_dgemm_narrow        maxThreads 1024  staticTG  8192  pipeline 0.0 ms  (not run)
+# dd_dgemm_narrow_pf     maxThreads  896  staticTG  8192  pipeline 0.0 ms
+# dd_dgemm_ab            maxThreads  832  staticTG 16384  pipeline 0.0 ms  (not run)
+# dd_dgemm_ab_pf         maxThreads  512  staticTG 16384  pipeline 0.0 ms  (not run)
+# dd_dgemm_ab_narrow     maxThreads 1024  staticTG  8192  pipeline 0.0 ms  (not run)
+# dd_dgemm_ab_narrow_pf  maxThreads  896  staticTG  8192  pipeline 0.0 ms
+# dd_dgemm_ab_ts         maxThreads  896  staticTG 18432  pipeline 0.1 ms
+# dd_dgemm_ab_ts_pf      maxThreads  576  staticTG 18432  pipeline 0.0 ms
+# dd_dsyrk               maxThreads  768  staticTG 16384  pipeline 0.0 ms  (not run)
+# dd_dsyrk_pf            maxThreads  512  staticTG 16384  pipeline 0.0 ms  (not run)
+    M     N      K  np   t64   t32   tts       sq      sqp      nwp     nwsp       ts      tsp  |      sq/sqp      ts/tsp     nwp/sqp      sq/nwp    tsp/nwsp   MHz
+  600   360   4608  1x    60   228   115    6.171    5.950    5.954    6.033    7.316    6.736  | 1.037/1.059 1.086/1.097 1.001/0.971 1.036/1.104 1.116/1.137    981
+  640   360   4608  1x    60   240   115    7.130    6.394    6.680    6.840    7.798    7.138  | 1.115/1.076 1.093/1.124 1.045/1.097 1.067/1.009 1.044/1.018    943
+  700   700   4608  1x   121   484   264    8.762    8.434    8.255    8.265    9.642    9.413  | 1.039/1.039 1.024/1.023 0.979/0.979 1.061/1.062 1.139/1.140   1360
+  950   950   4608  1x   225   900   480   14.659   14.585   14.072   14.109   16.447   16.243  | 1.005/1.004 1.013/1.017 0.965/0.964 1.042/1.042 1.151/1.155   1369
+ 1000  1000   4608  1x   256  1024   504   16.528   16.591   16.407   16.449   17.400   17.290  | 0.996/0.999 1.006/1.019 0.989/0.988 1.007/1.006 1.051/1.057   1371
+ 1100  1100   2304  1x   324  1225   621    9.191    9.292    9.619    9.648   10.097    9.870  | 0.989/0.989 1.023/1.023 1.035/1.035 0.956/0.956 1.023/1.022   1362
+ 1024    48   4608  1x    16    64    24    6.234    4.779    2.513    2.475    4.545    3.173  | 1.304/1.247 1.432/1.403 0.526/0.547 2.480/2.394 1.282/1.510    753
+ 2000    72   4608  1x    64   189    80    9.646    8.425    6.663    7.089    7.647    7.920  | 1.145/1.108 0.966/0.971 0.791/0.831 1.448/1.456 1.117/1.151    700
+ 3000    64   4608  1x    47   188    96    9.541    8.000    6.626    6.588    7.576    7.073  | 1.193/1.100 1.071/1.028 0.828/0.833 1.440/1.375 1.074/1.105    735
+ 6000    64   4608  1x    94   376   188    7.456    7.663    7.529    7.589    8.471    8.006  | 0.973/0.991 1.058/1.041 0.983/0.985 0.990/1.005 1.055/1.095   1193

@@ -341,8 +341,14 @@ static const char* bin_labels[AB_PROF_HISTOGRAM_BINS] = {
     "1K-2K", "2K-4K", "4K-8K",  "8K+"
 };
 
+// " AB_PRECISION=fast" for the report headers in fast mode, else nothing, so
+// default-mode reports read as before.
+static const char* precision_token(void) {
+    return strcmp(ab_precision_mode(), "fast") == 0 ? " AB_PRECISION=fast" : "";
+}
+
 void ab_prof_dump(FILE* out) {
-    fprintf(out, "=== %s BLAS profile, pid %d", ab_build_info(), (int)getpid());
+    fprintf(out, "=== %s%s BLAS profile, pid %d", ab_build_info(), precision_token(), (int)getpid());
     if (g_threshold_ns)
         fprintf(out, ", calls under %llu ns not counted", (unsigned long long)g_threshold_ns);
     fprintf(out, " ===\n");
@@ -477,10 +483,15 @@ void ab_prof_report(FILE* out) {
     int pid = (int)getpid();
     report_line_t l = { .n = 0 };
     l.buf[0] = '\0';
-    line_add(&l, "AB_REPORT[%d] %s AB_MODE=%s", pid, ab_build_info(),
-             mode && *mode ? mode : "unset");
+    line_add(&l, "AB_REPORT[%d] %s AB_MODE=%s%s", pid, ab_build_info(),
+             mode && *mode ? mode : "unset", precision_token());
     if (g_threshold_ns)
         line_add(&l, " AB_PROFILE_THRESHOLD_NS=%llu", (unsigned long long)g_threshold_ns);
+    // The chip and the table auto routed by (dispatch.h), so a report from
+    // another machine says what routed it.
+    const ab_dispatch_config_t* dc = ab_dispatch_process_config();
+    line_add(&l, " chip=\"%s\" gpu_cores=%d table=%s", dc->chip[0] ? dc->chip : "unknown", dc->gpu_cores,
+             dc->table);
     line_add(&l, "\n");
     line_emit(&l, out);
     if (g_entry_count == 0) {
@@ -522,11 +533,15 @@ void ab_prof_report(FILE* out) {
 // Per-call trace (AB_TRACE)
 // =============================================================================
 
+uint64_t ab_prof_kernel_ns(uint64_t wall_ns, double gpu_seconds) {
+    uint64_t gpu = (uint64_t)(gpu_seconds * 1e9);
+    return gpu && gpu < wall_ns ? gpu : wall_ns;
+}
+
 uint64_t ab_prof_take_kernel_ns(uint64_t wall_ns, ab_prof_kernel_split_t* split) {
     ab_prof_kernel_split_t k;
-    uint64_t gpu = (uint64_t)(ab_internal_take_gpu_seconds(&k) * 1e9);
-    bool timed = gpu && gpu < wall_ns;
-    if (timed) {
+    uint64_t ns = ab_prof_kernel_ns(wall_ns, ab_internal_take_gpu_seconds(&k));
+    if (ns < wall_ns) {   // the GPU's time was used
         split->temps_ns += k.temps_ns;
         split->encode_ns += k.encode_ns;
         split->submit_ns += k.submit_ns;
@@ -534,7 +549,42 @@ uint64_t ab_prof_take_kernel_ns(uint64_t wall_ns, ab_prof_kernel_split_t* split)
     }
     if (!split->gpu_start_ns) split->gpu_start_ns = k.gpu_start_ns;
     if (k.gpu_end_ns) split->gpu_end_ns = k.gpu_end_ns;
-    return timed ? gpu : wall_ns;
+    return ns;
+}
+
+void ab_prof_stage_mark(uint64_t* stage_ns, uint64_t* mark, ab_prof_stage_t s) {
+    if (!stage_ns) return;
+    uint64_t now = ab_prof_now_ticks();
+    stage_ns[s] += ab_prof_ticks_to_ns(now - *mark);
+    *mark = now;
+}
+
+void ab_prof_print_gpu_call(const char* routine, int m, int n, int k, uint64_t total_ns,
+                            const uint64_t* stage_ns, ab_prof_staged_t staged) {
+    if (!ab_prof_verbose()) return;
+    // One write per line, so lines from concurrent callers do not interleave.
+    char line[512];
+    size_t len = (size_t)snprintf(line, sizeof line, "AB_PROFILE %s M=%d N=%d K=%d ", routine, m, n, k);
+    uint64_t named = 0;
+    for (int s = 0; s < AB_PROF_STAGE_COUNT && len < sizeof line; s++) {
+        named += stage_ns[s];
+        len += (size_t)snprintf(line + len, sizeof line - len, " %s=%.3f", ab_prof_stage_names[s],
+                                stage_ns[s] / 1e6);
+    }
+    if (len < sizeof line)
+        len += (size_t)snprintf(line + len, sizeof line - len, " other=%.3f  total=%.3f ms",
+                                (total_ns > named ? total_ns - named : 0) / 1e6, total_ns / 1e6);
+    if (len < sizeof line && staged > AB_PROF_STAGED_NONE)
+        len += (size_t)snprintf(line + len, sizeof line - len, "  staged=%s",
+                                ab_prof_staged_names[staged]);
+    if (len < sizeof line) snprintf(line + len, sizeof line - len, "\n");
+    fputs(line, stderr);
+}
+
+void ab_prof_print_fallback(const char* routine, int m, int n, int k, const char* why) {
+    if (ab_prof_verbose())
+        fprintf(stderr, "AB_PROFILE %s M=%d N=%d K=%d  GPU fallback to cblas: %s\n", routine, m, n,
+                k, why);
 }
 
 // The header of a new trace file: the build, the settings and the line format.
@@ -544,8 +594,14 @@ static void trace_header(int fd, pid_t pid) {
     l.buf[0] = '\0';
     line_add(&l, "# %s AB_TRACE pid=%d\n", ab_build_info(), (int)pid);
     // AB_MIN_GPU_DIM as the routing resolved it, so a replay routes as this run did.
-    line_add(&l, "# AB_MODE=%s AB_TRACE_HASH=%d AB_MIN_GPU_DIM=%d\n", mode && *mode ? mode : "unset",
-             g_trace_hash, ab_dispatch_process_config()->min_dim);
+    const ab_dispatch_config_t* dc = ab_dispatch_process_config();
+    line_add(&l, "# AB_MODE=%s AB_TRACE_HASH=%d AB_MIN_GPU_DIM=%d%s\n", mode && *mode ? mode : "unset",
+             g_trace_hash, dc->min_dim, precision_token());
+    // The chip and the routing table auto used (dispatch.h): a trace from
+    // another machine then says what routed it. A replay routes by its own
+    // machine's table.
+    line_add(&l, "# chip=\"%s\" gpu_cores=%d table=%s\n", dc->chip[0] ? dc->chip : "unknown", dc->gpu_cores,
+             dc->table);
     // The MPI rank and size one launcher exported (Open MPI, else PMI), so a
     // replay can map the files of one run to its ranks; -1 when not under MPI.
     const char *rank = getenv("OMPI_COMM_WORLD_RANK"), *size = getenv("OMPI_COMM_WORLD_SIZE");
@@ -688,6 +744,7 @@ void ab_prof_dump_json(const char* path) {
 
     fprintf(f, "{\n");
     fprintf(f, "  \"build\": \"%s\",\n", ab_build_info());
+    if (*precision_token()) fprintf(f, "  \"precision\": \"fast\",\n");
     fprintf(f, "  \"timestamp\": \"%s\",\n", ts);
     fprintf(f, "  \"pid\": %d,\n", (int)getpid());
     fprintf(f, "  \"threshold_ns\": %llu,\n", (unsigned long long)g_threshold_ns);

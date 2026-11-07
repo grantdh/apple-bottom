@@ -1,0 +1,5 @@
+mode,routine,M,K,N,method,reps,wall_med_ms,wall_min_ms,gpu_med_ms,temps_med_ms,submit_med_ms,wake_med_ms,gflops
+speed,zgemm,8192,8192,8192,strassen-first,1,4213.655,4213.655,4108.398,0.413,104.338,0.221,1043.8
+speed,zgemm,8192,8192,8192,classical,3,4616.109,4616.003,4557.639,0.200,58.136,0.197,952.8
+speed,zgemm,8192,8192,8192,strassen,3,4165.881,4150.463,4108.792,0.214,56.168,0.194,1055.7
+speed,zgemm,8192,8192,8192,accelerate,3,6932.636,6929.506,0.000,0.000,0.000,0.000,634.4

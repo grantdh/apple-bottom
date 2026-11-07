@@ -32,6 +32,7 @@
 #include "ab_internal.h"
 #include "gpu_stage.h"
 #include "profiling/blas_profiler.h"
+#include "strassen.h"
 
 // =============================================================================
 // Double-Float Primitives (Host Side)
@@ -285,6 +286,26 @@ inline DD dd_fma(DD a, DD b, DD c) {
 
 #endif  // APPLEBOTTOM_USE_DWTIMESDW3
 
+// The GEMM kernels' accumulation step acc += a·b, and the K-tiles between
+// renormalizations of acc (RENORM_INTERVAL). Default: dd_fma, every 8 tiles.
+// AB_LAZY_ACCUMULATION (AB_PRECISION=fast): Dot2-style, acc.hi a running sum
+// and acc.lo a running error, every tile; DWTimesDW2's product even in a
+// DWTIMESDW3 build. About 1 bit less accurate.
+#ifdef AB_LAZY_ACCUMULATION
+inline DD dd_acc(DD a, DD b, DD c) {
+    float p, e;
+    twoProduct(a.hi, b.hi, p, e);
+    e = fma(a.hi, b.lo, fma(a.lo, b.hi, e));
+    float s, r;
+    twoSum(c.hi, p, s, r);
+    return {s, c.lo + (r + e)};
+}
+#define RENORM_INTERVAL 1
+#else
+inline DD dd_acc(DD a, DD b, DD c) { return dd_fma(a, b, c); }
+#define RENORM_INTERVAL 8  // Every 8 tiles × TK=16 = 128 K-elements
+#endif
+
 // DD scaling by single float
 inline DD dd_scale(DD a, float s) {
     float p, e;
@@ -321,8 +342,9 @@ inline DD dd_scale(DD a, float s) {
 #define NT_TS ((BM_TS/TM_TS) * (BN_TS/TN_TS))
 
 // Narrow-output tiling: 32×32 blocks, 256 threads with 2×2 outputs each.
-// Four times the threadgroups of the square tiling, for a C too small to
-// keep the GPU busy with 64×64 blocks (routing: use_narrow_tiles, host side)
+// Four times the threadgroups of the square tiling, for grids small enough
+// that finer tiles spread better over the GPU's cores (routing:
+// use_narrow_tiles, host side)
 #define BM_NW 32
 #define BN_NW 32
 #define TM_NW 2
@@ -343,12 +365,11 @@ static_assert(TM % 2 == 0 && TN % 2 == 0 && TM_NW % 2 == 0 && TN_NW % 2 == 0,
 static_assert(TK_TS == TK, "narrow and tall-skinny kernels share the K tiling");
 
 // Block-wise compensated accumulation: renormalize accumulators every
-// RENORM_INTERVAL K-tiles to prevent drift in long dot products.
-// Per Wilkinson's probabilistic analysis, Frobenius error scales as O(sqrt(K)).
-// Periodic twoSum renormalization ensures the DD representation stays
-// well-conditioned, preventing edge-case denormalization when magnitudes
+// RENORM_INTERVAL K-tiles (defined with dd_acc) to prevent drift in long dot
+// products. Per Wilkinson's probabilistic analysis, Frobenius error scales as
+// O(sqrt(K)). Periodic twoSum renormalization ensures the DD representation
+// stays well-conditioned, preventing edge-case denormalization when magnitudes
 // shift during long accumulations. (Higham 2002, §4.2)
-#define RENORM_INTERVAL 8  // Every 8 tiles × TK=16 = 128 K-elements
 
 // =============================================================================
 // Morton Z-Order Threadgroup Remapping
@@ -522,7 +543,7 @@ kernel void dd_dgemm_t(
             }
             for (uint i = 0; i < TM; i++)
                 for (uint j = 0; j < TN; j++)
-                    acc[i][j] = dd_fma(av[i], bv[j], acc[i][j]);
+                    acc[i][j] = dd_acc(av[i], bv[j], acc[i][j]);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -634,7 +655,7 @@ kernel void dd_dgemm_ab_t(
             }
             for (uint i = 0; i < TM; i++)
                 for (uint j = 0; j < TN; j++)
-                    acc[i][j] = dd_fma(av[i], bv[j], acc[i][j]);
+                    acc[i][j] = dd_acc(av[i], bv[j], acc[i][j]);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -744,7 +765,7 @@ kernel void dd_dgemm_ab_ts_t(
             for (uint j = 0; j < TN_TS; j++) bv[j] = tileB[k * BN_TS + tx * TN_TS + j];
             for (uint i = 0; i < TM_TS; i++)
                 for (uint j = 0; j < TN_TS; j++)
-                    acc[i][j] = dd_fma(av[i], bv[j], acc[i][j]);
+                    acc[i][j] = dd_acc(av[i], bv[j], acc[i][j]);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -845,7 +866,7 @@ inline void dd_gemm_narrow_mainloop(
             }
             for (uint i = 0; i < TM_NW; i++)
                 for (uint j = 0; j < TN_NW; j++)
-                    acc[i][j] = dd_fma(av[i], bv[j], acc[i][j]);
+                    acc[i][j] = dd_acc(av[i], bv[j], acc[i][j]);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -1021,7 +1042,7 @@ kernel void dd_dsyrk_t(
             }
             for (uint i = 0; i < TM; i++)
                 for (uint j = 0; j < TN; j++)
-                    acc[i][j] = dd_fma(av[i], bv[j], acc[i][j]);
+                    acc[i][j] = dd_acc(av[i], bv[j], acc[i][j]);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -1692,6 +1713,7 @@ typedef enum { AB_PREFETCH_RULE, AB_PREFETCH_OFF, AB_PREFETCH_ALL } ABPrefetchMo
 @property (nonatomic, strong) id<MTLComputePipelineState> epiDPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> epiZPipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> scalesPipeline;
+@property (nonatomic) bool precisionFast;   // AB_PRECISION=fast at initialization
 + (instancetype)shared;
 + (void)shutdown;
 @end
@@ -1753,10 +1775,19 @@ static void ab_atfork_child(void) { g_forked_child = true; }
         // Default build: two-FMA variant of DWTimesDW2 (< 6.000001u², proven in
         // PRECISION_ENVELOPE.md §1.2). Opt-in: DWTimesDW3 (JMP 2017 Alg 12 /
         // MR 2022 Thm 2.8, < 4u²).
+        NSMutableDictionary* macros = [NSMutableDictionary dictionary];
 #ifdef APPLEBOTTOM_USE_DWTIMESDW3
-        opts.preprocessorMacros = @{@"APPLEBOTTOM_USE_DWTIMESDW3": @1};
+        macros[@"APPLEBOTTOM_USE_DWTIMESDW3"] = @1;
         NSLog(@"apple-bottom: MSL compiled with DWTimesDW3 (JMP 2017 Alg 12)");
 #endif
+        // AB_PRECISION=fast: the GEMM kernels accumulate lazily (dd_acc)
+        const char* precision = getenv("AB_PRECISION");
+        _precisionFast = precision && strcasecmp(precision, "fast") == 0;
+        if (_precisionFast) {
+            macros[@"AB_LAZY_ACCUMULATION"] = @1;
+            NSLog(@"apple-bottom: AB_PRECISION=fast: GEMM kernels accumulate lazily (about 1 bit less accurate)");
+        }
+        if (macros.count) opts.preprocessorMacros = macros;
 
         id<MTLLibrary> library = [_device newLibraryWithSource:kShaderSource options:opts error:&error];
         if (!library) { NSLog(@"Shader compile failed: %@", error); return nil; }
@@ -1838,7 +1869,7 @@ static void ab_atfork_child(void) { g_forked_child = true; }
 @end
 
 // =============================================================================
-// Internal Accessors for device_api.m (apple_bottom_internal.h)
+// Internal Accessors for the library's other sources
 // =============================================================================
 
 id<MTLCommandQueue> ab_internal_command_queue(void) {
@@ -1902,43 +1933,65 @@ static ab_range_t for_each_chunk(size_t count, size_t work,
         parts[c] = body(offset, n);
     });
     ab_range_t r = AB_RANGE_EMPTY;
+    for (int c = 0; c < AB_CONVERT_CHUNKS; c++) r = ab_range_merge(r, parts[c]);
+    return r;
+}
+
+// The ranges of a complex matrix's real and imaginary parts.
+typedef struct {
+    ab_range_t re, im;
+} parts_range_t;
+
+// Runs body(chunk, offset, n) on the chunks of ab_internal_for_each_chunk and
+// returns the merge of the parts' ranges the bodies return.
+static parts_range_t for_each_chunk_parts(size_t count, size_t work,
+                                          parts_range_t (^body)(size_t chunk, size_t offset,
+                                                                size_t n)) {
+    parts_range_t part_storage[AB_CONVERT_CHUNKS], *parts = part_storage;  // blocks write through it
+    for (int c = 0; c < AB_CONVERT_CHUNKS; c++) parts[c] = {AB_RANGE_EMPTY, AB_RANGE_EMPTY};
+    ab_internal_for_each_chunk(count, work, ^(size_t c, size_t offset, size_t n) {
+        parts[c] = body(c, offset, n);
+    });
+    parts_range_t r = {AB_RANGE_EMPTY, AB_RANGE_EMPTY};
     for (int c = 0; c < AB_CONVERT_CHUNKS; c++) {
-        r.max = parts[c].max > r.max ? parts[c].max : r.max;
-        r.min = parts[c].min < r.min ? parts[c].min : r.min;
+        r.re = ab_range_merge(r.re, parts[c].re);
+        r.im = ab_range_merge(r.im, parts[c].im);
     }
     return r;
 }
 
-// src * 2^-e to DD, each value rounded once; with range, also returns the range
-// of the converted values (in the same vectorized loop; AB_RANGE_EMPTY without).
+// src[i * S] * 2^-e to dst[i] in DD, each value rounded once; with range, also
+// returns the range of the converted values (in the same vectorized loop;
+// AB_RANGE_EMPTY without).
+template <size_t S = 1>
 static ab_range_t convert_fp64_to_dd(const double* __restrict src, DDFloat* __restrict dst,
                                      size_t count, int e, bool range) {
     uint32_t mx = 0, mn = UINT32_MAX;
     if (e < -1023 || e > 1022) {                // 2^-e is not a normal double
         for (size_t i = 0; i < count; i++) {
-            double v = ldexp(src[i], -e);
+            double v = ldexp(src[i * S], -e);
             if (range) AB_RANGE_ADD(v, mx, mn);
             dst[i] = fp64_to_dd(v);
         }
     } else if (e == 0) {
         if (range) {
             for (size_t i = 0; i < count; i++) {
-                AB_RANGE_ADD(src[i], mx, mn);
-                dst[i] = fp64_to_dd(src[i]);
+                AB_RANGE_ADD(src[i * S], mx, mn);
+                dst[i] = fp64_to_dd(src[i * S]);
             }
         } else {
-            for (size_t i = 0; i < count; i++) dst[i] = fp64_to_dd(src[i]);
+            for (size_t i = 0; i < count; i++) dst[i] = fp64_to_dd(src[i * S]);
         }
     } else {
         double f = ab_pow2(-e);
         if (range) {
             for (size_t i = 0; i < count; i++) {
-                double v = src[i] * f;
+                double v = src[i * S] * f;
                 AB_RANGE_ADD(v, mx, mn);
                 dst[i] = fp64_to_dd(v);
             }
         } else {
-            for (size_t i = 0; i < count; i++) dst[i] = fp64_to_dd(src[i] * f);
+            for (size_t i = 0; i < count; i++) dst[i] = fp64_to_dd(src[i * S] * f);
         }
     }
     return range ? (ab_range_t){mx, mn} : AB_RANGE_EMPTY;
@@ -2029,6 +2082,13 @@ static int native_scale_exp(ab_range_t r) {
     if (lo >= AB_STORE_MIN_EXP && hi <= AB_STORE_MAX_EXP) return 0;
     if (hi - lo <= AB_STORE_MAX_EXP - AB_STORE_MIN_EXP) return centre;
     return hi - AB_STORE_MAX_EXP;
+}
+
+// Gives m, as an upload measures it, the scale of the range r of its values
+// (native_scale_exp) and their largest magnitude.
+static inline void set_scale_measured(ABMatrix m, ab_range_t r) {
+    m->exp2 = native_scale_exp(r);
+    m->maxhw = r.max;
 }
 
 // =============================================================================
@@ -2126,6 +2186,11 @@ const char* ab_device_name(void) {
 
 bool ab_is_initialized(void) { return [ABContextImpl shared] != nil; }
 
+const char* ab_precision_mode(void) {
+    ABContextImpl* ctx = [ABContextImpl shared];
+    return ctx && ctx.precisionFast ? "fast" : "default";
+}
+
 // =============================================================================
 // Public API: Matrix Lifecycle
 // =============================================================================
@@ -2202,8 +2267,7 @@ ABStatus ab_matrix_upload(ABMatrix m, const double* data, bool parallel) {
     DDFloat* dst = (DDFloat*)m->buffer.contents;
     ab_range_t range = parallel ? convert_fp64_to_dd_parallel(data, dst, m->count, 0, true)
                                 : convert_fp64_to_dd(data, dst, m->count, 0, true);
-    m->exp2 = native_scale_exp(range);
-    m->maxhw = range.max;
+    set_scale_measured(m, range);
     if (m->exp2 != 0) {
         if (parallel)
             convert_fp64_to_dd_parallel(data, dst, m->count, m->exp2, false);
@@ -2275,8 +2339,7 @@ extern "C" ABStatus ab_internal_upload_scaled(ABMatrix m, const double* data, co
                     }
                     ri = (ab_range_t){mx, mn};
                 }
-                part.max = ri.max > part.max ? ri.max : part.max;
-                part.min = ri.min < part.min ? ri.min : part.min;
+                part = ab_range_merge(part, ri);
             }
             return part;
         });
@@ -2286,6 +2349,329 @@ extern "C" ABStatus ab_internal_upload_scaled(ABMatrix m, const double* data, co
     set_scale_unmeasured(m, 0);
     m->uploaded = true;
     stats_add_upload(get_time_ms() - t0, m->count);
+    return AB_OK;
+}
+
+// =============================================================================
+// Operands Where They Lie (device_api.m)
+// =============================================================================
+// device_api.m's column-major operands are converted in their buffers,
+// without a staging copy, in chunks of whole rows (of the ABMatrix) across
+// cores, each part to the values, scale and largest magnitude that
+// ab_matrix_upload gives an array of it.
+
+// Interleaved pairs x[2i], x[2i+1] to DD re[i] and im[i], unscaled, as
+// convert_fp64_to_dd converts each, with the parts' ranges in *rr and *ri;
+// with COLS, also adds their magnitudes to rmax[i] and imax[i].
+template <bool COLS>
+static void convert_pairs_to_dd(const double* __restrict x, DDFloat* __restrict re,
+                                DDFloat* __restrict im, size_t n, ab_range_t* rr, ab_range_t* ri,
+                                uint32_t* __restrict rmax, uint32_t* __restrict imax) {
+    uint32_t mxr = 0, mnr = UINT32_MAX, mxi = 0, mni = UINT32_MAX;
+    for (size_t i = 0; i < n; i++) {
+        double vr = x[2 * i], vi = x[2 * i + 1];
+        uint32_t hr = ab_abs_hiword(vr), hm = ab_abs_hiword(vi);
+        AB_HIWORD_ADD(hr, mxr, mnr);
+        AB_HIWORD_ADD(hm, mxi, mni);
+        if (COLS) {
+            AB_HIWORD_MAX(hr, rmax[i]);
+            AB_HIWORD_MAX(hm, imax[i]);
+        }
+        re[i] = fp64_to_dd(vr);
+        im[i] = fp64_to_dd(vi);
+    }
+    *rr = (ab_range_t){mxr, mnr};
+    *ri = (ab_range_t){mxi, mni};
+}
+
+// DD re[i] * 2^er and im[i] * 2^ei to the interleaved pairs x[2i], x[2i+1],
+// each as convert_dd_to_fp64 converts it.
+static void convert_dd_to_pairs(const DDFloat* __restrict re, const DDFloat* __restrict im,
+                                double* __restrict x, size_t n, int er, int ei) {
+    if (er == 0 && ei == 0) {
+        for (size_t i = 0; i < n; i++) {
+            x[2 * i] = dd_to_fp64(re[i]);
+            x[2 * i + 1] = dd_to_fp64(im[i]);
+        }
+    } else {
+        for (size_t i = 0; i < n; i++) {
+            x[2 * i] = ab_scale2(dd_to_fp64(re[i]), er);
+            x[2 * i + 1] = ab_scale2(dd_to_fp64(im[i]), ei);
+        }
+    }
+}
+
+// Rows [r0, r0 + nr) of the matrix whose element (i, j) is x[j * ld + i] to
+// DD at 2^-e, as convert_fp64_to_dd converts each value (with range, also
+// returning their range), through tiles of 16 rows (a 128-byte line of each
+// column) by 128 columns transposed in L1.
+static ab_range_t convert_cols_to_dd(const double* x, size_t ld, DDFloat* dst, size_t cols,
+                                     size_t r0, size_t nr, int e, bool range) {
+    enum { TILE_ROWS = 16, TILE_COLS = 128 };
+    double tile[TILE_ROWS * TILE_COLS];
+    ab_range_t r = AB_RANGE_EMPTY;
+    for (size_t b = r0; b < r0 + nr; b += TILE_ROWS) {
+        const size_t h = MIN((size_t)TILE_ROWS, r0 + nr - b);
+        for (size_t j0 = 0; j0 < cols; j0 += TILE_COLS) {
+            const size_t w = MIN((size_t)TILE_COLS, cols - j0);
+            for (size_t j = 0; j < w; j++)
+                for (size_t i = 0; i < h; i++)
+                    tile[i * TILE_COLS + j] = x[(j0 + j) * ld + b + i];
+            for (size_t i = 0; i < h; i++)
+                r = ab_range_merge(r, convert_fp64_to_dd(tile + i * TILE_COLS,
+                                                         dst + (b + i) * cols + j0, w, e, range));
+        }
+    }
+    return r;
+}
+
+// Gives m, whose rows were converted unscaled from x (row i from x + i *
+// stride, values S apart), the scale of their range r, and converts them
+// again where it is not 0.
+template <size_t S>
+static void upload_rows_rescale(ABMatrix m, ab_range_t r, const double* x, size_t stride) {
+    set_scale_measured(m, r);
+    m->uploaded = true;
+    if (m->exp2 == 0) return;
+    const size_t cols = (size_t)m->cols;
+    const int e = m->exp2;
+    DDFloat* dst = (DDFloat*)m->buffer.contents;
+    ab_internal_for_each_chunk((size_t)m->rows, cols, ^(size_t, size_t r0, size_t nr) {
+        for (size_t i = r0; i < r0 + nr; i++)
+            convert_fp64_to_dd<S>(x + i * stride, dst + i * cols, cols, e, false);
+    });
+}
+
+// One pass converts every part unscaled and measures it; a part whose scale
+// is not 0 is converted again (upload_rows_rescale). A column's maxima span
+// the chunks, so each chunk gathers those into a part of its own, merged
+// after.
+extern "C" ABStatus ab_internal_upload_rows(ABMatrix re, ABMatrix im, const double* x, size_t ld,
+                                            ab_line_stats_t* lines, bool by_row) {
+    if (!re || !x || (im && (im->rows != re->rows || im->cols != re->cols)))
+        return AB_ERROR_INVALID_ARG;
+    double t0 = get_time_ms();
+    const size_t rows = (size_t)re->rows, cols = (size_t)re->cols;
+    const size_t w = im ? 2 : 1, stride = w * ld;   // doubles per element and from row to row
+    DDFloat* dr = (DDFloat*)re->buffer.contents;
+    DDFloat* di = im ? (DDFloat*)im->buffer.contents : NULL;
+    const bool row_lines = im && lines && by_row, col_lines = im && lines && !by_row;
+    const size_t nparts = MIN(rows, (size_t)AB_CONVERT_CHUNKS);
+    uint32_t* colmax = col_lines ? (uint32_t*)calloc(nparts * 2 * cols, sizeof(uint32_t)) : NULL;
+    if (col_lines && !colmax) return AB_ERROR_ALLOC_FAILED;
+
+    const parts_range_t range = for_each_chunk_parts(rows, w * cols, ^(size_t c, size_t r0, size_t nr) {
+        uint32_t* pr = col_lines ? colmax + c * 2 * cols : NULL;
+        ab_range_t a = AB_RANGE_EMPTY, b = AB_RANGE_EMPTY;
+        for (size_t i = r0; i < r0 + nr; i++) {
+            const double* xi = x + i * stride;
+            ab_range_t ra = AB_RANGE_EMPTY, rb = AB_RANGE_EMPTY;
+            if (!im)
+                ra = convert_fp64_to_dd(xi, dr + i * cols, cols, 0, true);
+            else if (pr)
+                convert_pairs_to_dd<true>(xi, dr + i * cols, di + i * cols, cols, &ra, &rb, pr, pr + cols);
+            else
+                convert_pairs_to_dd<false>(xi, dr + i * cols, di + i * cols, cols, &ra, &rb, NULL, NULL);
+            if (row_lines) {
+                AB_HIWORD_MAX(ra.max, lines->rmax[i]);
+                AB_HIWORD_MAX(rb.max, lines->imax[i]);
+            }
+            a = ab_range_merge(a, ra);
+            b = ab_range_merge(b, rb);
+        }
+        return (parts_range_t){a, b};
+    });
+    for (size_t c = 0; c < nparts && col_lines; c++)
+        for (size_t j = 0; j < cols; j++) {
+            AB_HIWORD_MAX(colmax[c * 2 * cols + j], lines->rmax[j]);
+            AB_HIWORD_MAX(colmax[c * 2 * cols + cols + j], lines->imax[j]);
+        }
+    free(colmax);
+
+    if (!im) {
+        upload_rows_rescale<1>(re, range.re, x, stride);
+    } else {
+        upload_rows_rescale<2>(re, range.re, x, stride);
+        upload_rows_rescale<2>(im, range.im, x + 1, stride);
+    }
+    stats_add_upload(get_time_ms() - t0, w * re->count);
+    return AB_OK;
+}
+
+extern "C" ABStatus ab_internal_upload_cols(ABMatrix m, const double* x, size_t ld) {
+    if (!m || !x) return AB_ERROR_INVALID_ARG;
+    double t0 = get_time_ms();
+    const size_t rows = (size_t)m->rows, cols = (size_t)m->cols;
+    DDFloat* dst = (DDFloat*)m->buffer.contents;
+    ab_range_t r = for_each_chunk(rows, cols, ^(size_t r0, size_t nr) {
+        return convert_cols_to_dd(x, ld, dst, cols, r0, nr, 0, true);
+    });
+    set_scale_measured(m, r);
+    if (m->exp2 != 0) {
+        const int e = m->exp2;
+        for_each_chunk(rows, cols, ^(size_t r0, size_t nr) {
+            return convert_cols_to_dd(x, ld, dst, cols, r0, nr, e, false);
+        });
+    }
+    m->uploaded = true;
+    stats_add_upload(get_time_ms() - t0, m->count);
+    return AB_OK;
+}
+
+extern "C" ABStatus ab_internal_download_rows(ABMatrix re, ABMatrix im, double* x, size_t ld) {
+    if (!re || !x || (im && (im->rows != re->rows || im->cols != re->cols)))
+        return AB_ERROR_INVALID_ARG;
+    double t0 = get_time_ms();
+    const size_t cols = (size_t)re->cols, w = im ? 2 : 1;
+    const DDFloat* dr = (const DDFloat*)re->buffer.contents;
+    const DDFloat* di = im ? (const DDFloat*)im->buffer.contents : NULL;
+    const int er = re->exp2, ei = im ? im->exp2 : 0;
+    ab_internal_for_each_chunk((size_t)re->rows, w * cols, ^(size_t, size_t r0, size_t nr) {
+        for (size_t i = r0; i < r0 + nr; i++) {
+            if (im)
+                convert_dd_to_pairs(dr + i * cols, di + i * cols, x + 2 * i * ld, cols, er, ei);
+            else
+                convert_dd_to_fp64(dr + i * cols, x + i * ld, cols, er);
+        }
+    });
+    stats_add_download(get_time_ms() - t0, w * re->count);
+    return AB_OK;
+}
+
+// ab_internal_zgemm_epilogue (ab_internal.h) in three passes: C's ranges,
+// which give its parts' scales; the epilogue from T's DD and C where they
+// lie, which writes the result into C and measures it; and the result's
+// round trip in place.
+
+// A part's scale e for the round trips below, which give the values of an
+// upload at exp2 = e (convert_fp64_to_dd) and a download (convert_dd_to_fp64):
+// FAST, by multiplies by 2^-e and 2^e, both normal doubles (1 for e = 0, which
+// changes no value); else as those functions form them.
+typedef struct {
+    int e;
+    double down, up;
+} part_scale_t;
+
+static inline bool part_scale_fast(int e) { return e >= -1022 && e <= 1022; }
+
+static inline part_scale_t part_scale(int e) {
+    bool fast = part_scale_fast(e);
+    return {e, fast ? ab_pow2(-e) : 0.0, fast ? ab_pow2(e) : 0.0};
+}
+
+template <bool FAST>
+static inline double dd_download(DDFloat d, part_scale_t s) {
+    return FAST ? dd_to_fp64(d) * s.up : ab_scale2(dd_to_fp64(d), s.e);
+}
+
+template <bool FAST>
+static inline double dd_round_trip(double x, part_scale_t s) {
+    double v = FAST ? x * s.down : ab_scale2(x, -s.e);
+    return dd_download<FAST>(fp64_to_dd(v), s);
+}
+
+// One epilogue: T's parts (cols per row) and C's rows of complex pairs, ld
+// pairs apart, with alpha, beta and the parts' scales.
+typedef struct {
+    const DDFloat *tr, *ti;
+    double* x;
+    size_t ld, cols;
+    double ar, ai, br, bi;
+    part_scale_t str, sti, scr, sci;
+} zgemm_epilogue_t;
+
+// Rows [r0, r0 + nr) of C = alpha T + beta C (cr = ci = 0 without BETA), the
+// result into C unrounded; returns its ranges. The expression, and how its
+// operands are formed, fix the result's bits (FP contraction in this -O3
+// ObjC++ file, operand order for NaNs): keep both.
+template <bool BETA, bool FAST>
+static parts_range_t epilogue_rows(const zgemm_epilogue_t& p, size_t r0, size_t nr) {
+    uint32_t mxr = 0, mnr = UINT32_MAX, mxi = 0, mni = UINT32_MAX;
+    // Locals, which the stores into C cannot alias
+    const double ar = p.ar, ai = p.ai, br = p.br, bi = p.bi;
+    const part_scale_t str = p.str, sti = p.sti, scr = p.scr, sci = p.sci;
+    const size_t cols = p.cols;
+    for (size_t i = r0; i < r0 + nr; i++) {
+        const DDFloat* t_r = p.tr + i * cols;
+        const DDFloat* t_i = p.ti + i * cols;
+        double* c = p.x + 2 * i * p.ld;
+        for (size_t j = 0; j < cols; j++) {
+            double tr = dd_download<FAST>(t_r[j], str), ti = dd_download<FAST>(t_i[j], sti);
+            double cr = BETA ? dd_round_trip<FAST>(c[2 * j], scr) : 0.0;
+            double ci = BETA ? dd_round_trip<FAST>(c[2 * j + 1], sci) : 0.0;
+            double new_r = (ar * tr - ai * ti) + (br * cr - bi * ci);
+            double new_i = (ar * ti + ai * tr) + (br * ci + bi * cr);
+            c[2 * j] = new_r;
+            c[2 * j + 1] = new_i;
+            AB_RANGE_ADD(new_r, mxr, mnr);
+            AB_RANGE_ADD(new_i, mxi, mni);
+        }
+    }
+    return {{mxr, mnr}, {mxi, mni}};
+}
+
+// Rows [r0, r0 + nr) of complex pairs (x, ld) uploaded and downloaded in
+// place, each part at its scale.
+template <bool FAST>
+static void round_trip_rows(double* x, size_t ld, size_t cols, size_t r0, size_t nr,
+                            part_scale_t sr, part_scale_t si) {
+    for (size_t i = r0; i < r0 + nr; i++) {
+        double* c = x + 2 * i * ld;
+        for (size_t j = 0; j < cols; j++) {
+            c[2 * j] = dd_round_trip<FAST>(c[2 * j], sr);
+            c[2 * j + 1] = dd_round_trip<FAST>(c[2 * j + 1], si);
+        }
+    }
+}
+
+extern "C" ABStatus ab_internal_zgemm_epilogue(ABMatrix tr, ABMatrix ti, double* x, size_t ld,
+                                               const double alpha[2], const double beta[2]) {
+    if (!tr || !ti || !x || !alpha || !beta || ti->rows != tr->rows || ti->cols != tr->cols)
+        return AB_ERROR_INVALID_ARG;
+    double t0 = get_time_ms();
+    const size_t rows = (size_t)tr->rows, cols = (size_t)tr->cols;
+    const bool use_c = beta[0] != 0.0 || beta[1] != 0.0;
+
+    // C's ranges, as its upload measures them
+    parts_range_t rc = {AB_RANGE_EMPTY, AB_RANGE_EMPTY};
+    if (use_c)
+        rc = for_each_chunk_parts(rows, 2 * cols, ^(size_t, size_t r0, size_t nr) {
+            uint32_t mxr = 0, mnr = UINT32_MAX, mxi = 0, mni = UINT32_MAX;
+            for (size_t i = r0; i < r0 + nr; i++) {
+                const double* c = x + 2 * i * ld;
+                for (size_t j = 0; j < cols; j++) {
+                    AB_RANGE_ADD(c[2 * j], mxr, mnr);
+                    AB_RANGE_ADD(c[2 * j + 1], mxi, mni);
+                }
+            }
+            return (parts_range_t){{mxr, mnr}, {mxi, mni}};
+        });
+
+    const zgemm_epilogue_t p = {
+        (const DDFloat*)tr->buffer.contents, (const DDFloat*)ti->buffer.contents, x, ld, cols,
+        alpha[0], alpha[1], beta[0], beta[1], part_scale(tr->exp2), part_scale(ti->exp2),
+        part_scale(native_scale_exp(rc.re)), part_scale(native_scale_exp(rc.im))};
+    const bool fast = part_scale_fast(p.str.e) && part_scale_fast(p.sti.e) &&
+                      part_scale_fast(p.scr.e) && part_scale_fast(p.sci.e);
+    parts_range_t (*epilogue)(const zgemm_epilogue_t&, size_t, size_t) =
+        use_c ? (fast ? epilogue_rows<true, true> : epilogue_rows<true, false>)
+              : (fast ? epilogue_rows<false, true> : epilogue_rows<false, false>);
+    parts_range_t rn = for_each_chunk_parts(rows, 2 * cols, ^(size_t, size_t r0, size_t nr) {
+        return epilogue(p, r0, nr);
+    });
+
+    // The result's round trip, at the scales an upload gives its parts
+    const part_scale_t sr = part_scale(native_scale_exp(rn.re));
+    const part_scale_t si = part_scale(native_scale_exp(rn.im));
+    void (*round_trip)(double*, size_t, size_t, size_t, size_t, part_scale_t, part_scale_t) =
+        part_scale_fast(sr.e) && part_scale_fast(si.e) ? round_trip_rows<true>
+                                                       : round_trip_rows<false>;
+    ab_internal_for_each_chunk(rows, 2 * cols, ^(size_t, size_t r0, size_t nr) {
+        round_trip(x, ld, cols, r0, nr, sr, si);
+    });
+    // The conversions of the round trips it stands for: T's parts down, C's
+    // (when read) and the result's up and down
+    stats_add_download(get_time_ms() - t0, (use_c ? 10 : 6) * tr->count);
     return AB_OK;
 }
 
@@ -2433,27 +2819,28 @@ static bool encode_align_zgemm(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
 // epilogue (plain C = A*B, or alpha/beta), so the choice never changes results.
 //   - 64×64 (dd_dgemm, dd_dgemm_ab): the default.
 //   - Tall-skinny 128×16 (dd_dgemm_ab_ts) for M >= 4N.
-//   - Narrow 32×32 (dd_dgemm_narrow, dd_dgemm_ab_narrow) for C of at most
-//     AB_NARROW_MAX_OUTPUTS elements. Over tall-skinny only where 32 columns
-//     per tile add no padding to its 16 (N = 20, 32, 64, 150, ...) or where
-//     the tall-skinny grid would have at most AB_NARROW_MAX_TS_GROUPS
-//     threadgroups (Davidson's small nbase+notcnv × notcnv overlaps).
-// Measured on M2 Max (38-core GPU): 480×480 is the largest C measured faster
-// on the narrow tiles than on 64×64; 512×512 breaks even. Tall-skinny stays
-// faster where N pads more and its grid is larger, by up to 1.8x (18277×5).
-#define AB_NARROW_MAX_OUTPUTS (480u * 480u)
-#define AB_NARROW_MAX_TS_GROUPS 16u
+//   - Narrow 32×32 (dd_dgemm_narrow, dd_dgemm_ab_narrow) for small grids
+//     (use_narrow_tiles): at most AB_NARROW_MAX_GROUPS threadgroups alone on
+//     the GPU, AB_NARROW_MAX_GROUPS_CONCURRENT in a concurrent encoder
+//     (Gauss-3M's and 4M's products), AB_NARROW_MAX_GROUPS_VS_PF against
+//     64×64 tiles that prefetch; against tall-skinny ones while taking at most
+//     twice their GPU steps. AB_PREFETCH changes the instances, never the tiling.
+// Measured on M2 Max (38-core GPU), kernel GPU time: alone on the GPU, every
+// kernel's time rises in steps of about AB_GPU_STEP_GROUPS threadgroups. A
+// narrow threadgroup's step costs half a tall-skinny one's and 0.29x a 64×64
+// one's (~16% more per output at full occupancy), so the finer tiles win
+// while a grid takes few steps: 1.04-1.46x from 544×544 to 1024×1024 (but
+// 0.92-0.98x at 832×832 and 896×896, whose 64×64 grids fill their last
+// step), and 1.1-1.35x over tall-skinny on small grids whose N the 32-column
+// tiles pad more (1024×40, 1200×100). Beyond the limits the larger tiles win,
+// by up to 12%. Re-calibrate these limits, AB_GPU_STEP_GROUPS and the
+// prefetch limits below on a GPU with another core count.
+#define AB_NARROW_MAX_GROUPS 1024u
+#define AB_NARROW_MAX_GROUPS_CONCURRENT 441u
+#define AB_NARROW_MAX_GROUPS_VS_PF 239u
+#define AB_GPU_STEP_GROUPS 33u
 
 static bool use_tall_skinny(uint32_t M, uint32_t N) { return M >= 4 * N; }
-
-// The narrow kernels instead of 64×64 tiles, or of tall-skinny ones when
-// tall_skinny.
-static bool use_narrow_tiles(uint32_t M, uint32_t N, bool tall_skinny) {
-    if ((uint64_t)M * N > AB_NARROW_MAX_OUTPUTS) return false;
-    if (!tall_skinny) return true;
-    uint32_t ts_groups = (M + 127) / 128 * ((N + 15) / 16);
-    return (N + 31) / 32 * 32 == (N + 15) / 16 * 16 || ts_groups <= AB_NARROW_MAX_TS_GROUPS;
-}
 
 // Register prefetch: the *_pf instance of a kernel (Register Prefetch in the
 // MSL; same bits) instead of the plain one, while the GPU holds few enough
@@ -2472,20 +2859,67 @@ static bool use_narrow_tiles(uint32_t M, uint32_t N, bool tall_skinny) {
 #define AB_PREFETCH_MAX_TS_GROUPS 512u
 #define AB_PREFETCH_MAX_NARROW_GROUPS UINT32_MAX
 
-static uint64_t g_prefetch_dispatches = 0;
+// The GEMM-family kernels, each with a plain and a *_pf instance
+typedef enum {
+    AB_KERNEL_DGEMM, AB_KERNEL_DGEMM_NARROW, AB_KERNEL_DGEMM_AB, AB_KERNEL_DGEMM_AB_NARROW,
+    AB_KERNEL_DGEMM_AB_TS, AB_KERNEL_DSYRK, AB_KERNEL_KINDS
+} ABKernel;
+
+static const char* const g_kernel_names[AB_KERNEL_KINDS] = {
+    "dd_dgemm", "dd_dgemm_narrow", "dd_dgemm_ab", "dd_dgemm_ab_narrow", "dd_dgemm_ab_ts",
+    "dd_dsyrk",
+};
+static uint64_t g_kernel_dispatches[AB_KERNEL_KINDS][2];   // [kind][plain, *_pf]
 
 // The *_pf kernel for a grid of `groups` threadgroups while at most
-// max_groups (AB_PREFETCH=1: always, =0: never). Each true counts one dispatch.
+// max_groups (AB_PREFETCH=1: always, =0: never).
 static bool use_prefetch(ABContextImpl* ctx, uint32_t groups, uint32_t max_groups) {
     ABPrefetchMode mode = ctx.prefetchMode;
-    if (mode == AB_PREFETCH_OFF || (mode == AB_PREFETCH_RULE && groups > max_groups)) return false;
-    __atomic_fetch_add(&g_prefetch_dispatches, 1, __ATOMIC_RELAXED);
-    return true;
+    return mode == AB_PREFETCH_ALL || (mode == AB_PREFETCH_RULE && groups <= max_groups);
 }
 
-// Dispatches of a *_pf kernel since the process started, for the tests.
+// Kernel kind's pipeline for a grid of `groups` threadgroups, its *_pf
+// instance by use_prefetch. Counts the dispatch, for the tests.
+static id<MTLComputePipelineState> gemm_pipeline(ABContextImpl* ctx, ABKernel kind,
+                                                  uint32_t groups, uint32_t max_groups) {
+    bool pf = use_prefetch(ctx, groups, max_groups);
+    __atomic_fetch_add(&g_kernel_dispatches[kind][pf], 1, __ATOMIC_RELAXED);
+    switch (kind) {
+    case AB_KERNEL_DGEMM:
+        return pf ? ctx.dgemmPFPipeline : ctx.dgemmPipeline;
+    case AB_KERNEL_DGEMM_NARROW:
+        return pf ? ctx.dgemmNarrowPFPipeline : ctx.dgemmNarrowPipeline;
+    case AB_KERNEL_DGEMM_AB:
+        return pf ? ctx.dgemmABPFPipeline : ctx.dgemmABPipeline;
+    case AB_KERNEL_DGEMM_AB_NARROW:
+        return pf ? ctx.dgemmABNarrowPFPipeline : ctx.dgemmABNarrowPipeline;
+    case AB_KERNEL_DGEMM_AB_TS:
+        return pf ? ctx.dgemmABTSPFPipeline : ctx.dgemmABTSPipeline;
+    case AB_KERNEL_DSYRK:
+        return pf ? ctx.dsyrkPFPipeline : ctx.dsyrkPipeline;
+    default:
+        return nil;
+    }
+}
+
+// Dispatches since the process started of GEMM-family kernel `kind`'s plain
+// (pf 0) or *_pf (pf 1) instance, and the kernel's Metal function name (NULL
+// from AB_KERNEL_KINDS on), for the tests (tests/test_kernels.h).
+extern "C" uint64_t ab_internal_kernel_dispatches(int kind, int pf) {
+    return kind >= 0 && kind < AB_KERNEL_KINDS && (pf == 0 || pf == 1)
+               ? __atomic_load_n(&g_kernel_dispatches[kind][pf], __ATOMIC_RELAXED) : 0;
+}
+
+extern "C" const char* ab_internal_kernel_name(int kind) {
+    return kind >= 0 && kind < AB_KERNEL_KINDS ? g_kernel_names[kind] : NULL;
+}
+
+// Dispatches of any *_pf kernel since the process started: what 1.5 exported,
+// kept so that the library still defines every symbol 1.5.1 did.
 extern "C" uint64_t ab_internal_prefetch_dispatches(void) {
-    return __atomic_load_n(&g_prefetch_dispatches, __ATOMIC_RELAXED);
+    uint64_t n = 0;
+    for (int kind = 0; kind < AB_KERNEL_KINDS; kind++) n += ab_internal_kernel_dispatches(kind, 1);
+    return n;
 }
 
 // The 64×64 kernels' prefetch limit: none in a concurrent encoder, whose
@@ -2494,25 +2928,44 @@ static uint32_t square_prefetch_max(id<MTLComputeCommandEncoder> encoder) {
     return encoder.dispatchType == MTLDispatchTypeConcurrent ? 0 : AB_PREFETCH_MAX_GROUPS;
 }
 
+// GPU steps of a grid of `groups` threadgroups alone on the GPU (Output tiling)
+static uint32_t gpu_steps(uint32_t groups) {
+    return (groups + AB_GPU_STEP_GROUPS - 1) / AB_GPU_STEP_GROUPS;
+}
+
+// The narrow kernels instead of 64×64 tiles, or of tall-skinny ones when
+// tall_skinny, for a dispatch into encoder (Output tiling, above).
+static bool use_narrow_tiles(id<MTLComputeCommandEncoder> encoder, uint32_t M, uint32_t N,
+                             bool tall_skinny) {
+    uint32_t groups = ((M + 31) / 32) * ((N + 31) / 32);
+    bool concurrent = encoder.dispatchType == MTLDispatchTypeConcurrent;
+    if (groups > (concurrent ? AB_NARROW_MAX_GROUPS_CONCURRENT : AB_NARROW_MAX_GROUPS)) return false;
+    if (tall_skinny) {
+        uint32_t ts_groups = ((M + 127) / 128) * ((N + 15) / 16);
+        return gpu_steps(groups) <= 2 * gpu_steps(ts_groups);
+    }
+    uint32_t square_groups = ((M + 63) / 64) * ((N + 63) / 64);
+    return square_groups > square_prefetch_max(encoder) || groups <= AB_NARROW_MAX_GROUPS_VS_PF;
+}
+
 // dd_dgemm (C = A*B) with all of its buffers bound, including the Morton grid
-// dims at 6/7, or dd_dgemm_narrow (same buffers) for a small C, or their
+// dims at 6/7, or dd_dgemm_narrow (same buffers) for a small grid, or their
 // prefetch instances. ab_dgemm and ab_dgemm_async always come here, so their
 // results are bitwise identical.
 static void encode_dgemm_square_dispatch(id<MTLComputeCommandEncoder> encoder,
                                           ABContextImpl* ctx,
                                           ABMatrix A, ABMatrix B, ABMatrix C) {
     uint32_t M = A->rows, N = B->cols, K = A->cols;
-    bool narrow = use_narrow_tiles(M, N, false);
+    bool narrow = use_narrow_tiles(encoder, M, N, false);
     uint32_t tile = narrow ? 32 : 64;
     uint32_t gridW = (N + tile - 1) / tile, gridH = (M + tile - 1) / tile;
-    id<MTLComputePipelineState> plain = ctx.dgemmPipeline, pf = ctx.dgemmPFPipeline;
+    ABKernel kind = AB_KERNEL_DGEMM;
     uint32_t max_groups = square_prefetch_max(encoder);
     if (narrow) {
-        plain = ctx.dgemmNarrowPipeline;
-        pf = ctx.dgemmNarrowPFPipeline;
+        kind = AB_KERNEL_DGEMM_NARROW;
         max_groups = AB_PREFETCH_MAX_NARROW_GROUPS;
     }
-    [encoder setComputePipelineState:use_prefetch(ctx, gridW * gridH, max_groups) ? pf : plain];
+    [encoder setComputePipelineState:gemm_pipeline(ctx, kind, gridW * gridH, max_groups)];
     [encoder setBuffer:A->buffer offset:0 atIndex:0];
     [encoder setBuffer:B->buffer offset:0 atIndex:1];
     [encoder setBuffer:C->buffer offset:0 atIndex:2];
@@ -2536,28 +2989,26 @@ static void encode_dgemm_scaled_dispatch(id<MTLComputeCommandEncoder> encoder,
     DDFloat alpha_dd = fp64_to_dd(alpha);
     DDFloat beta_dd = fp64_to_dd(beta);
     bool use_ts = use_tall_skinny(M, N);
-    bool narrow = use_narrow_tiles(M, N, use_ts);
+    bool narrow = use_narrow_tiles(encoder, M, N, use_ts);
     // Tile rows × columns and threadgroup: 64×64 and narrow use 16×16 threads,
     // tall-skinny (TM=4, TN=2) 8×32
     uint32_t bm = 64, bn = 64;
     MTLSize threads = MTLSizeMake(16, 16, 1);
-    id<MTLComputePipelineState> plain = ctx.dgemmABPipeline, pf = ctx.dgemmABPFPipeline;
+    ABKernel kind = AB_KERNEL_DGEMM_AB;
     uint32_t max_groups = square_prefetch_max(encoder);
     if (narrow) {
         bm = bn = 32;
-        plain = ctx.dgemmABNarrowPipeline;
-        pf = ctx.dgemmABNarrowPFPipeline;
+        kind = AB_KERNEL_DGEMM_AB_NARROW;
         max_groups = AB_PREFETCH_MAX_NARROW_GROUPS;
     } else if (use_ts) {
         bm = 128;
         bn = 16;
         threads = MTLSizeMake(8, 32, 1);
-        plain = ctx.dgemmABTSPipeline;
-        pf = ctx.dgemmABTSPFPipeline;
+        kind = AB_KERNEL_DGEMM_AB_TS;
         max_groups = AB_PREFETCH_MAX_TS_GROUPS;
     }
     uint32_t gridW = (N + bn - 1) / bn, gridH = (M + bm - 1) / bm;
-    [encoder setComputePipelineState:use_prefetch(ctx, gridW * gridH, max_groups) ? pf : plain];
+    [encoder setComputePipelineState:gemm_pipeline(ctx, kind, gridW * gridH, max_groups)];
     [encoder setBuffer:A->buffer offset:0 atIndex:0];
     [encoder setBuffer:B->buffer offset:0 atIndex:1];
     [encoder setBuffer:C->buffer offset:0 atIndex:2];
@@ -2595,6 +3046,52 @@ static void encode_elemwise_dispatch(id<MTLComputeCommandEncoder> encoder,
              threadsPerThreadgroup:MTLSizeMake(MIN((size_t)256, threads), 1, 1)];
 }
 
+// =============================================================================
+// Strassen-Winograd Products (strassen.h, AB_STRASSEN)
+// =============================================================================
+// Opt-in: each real product of a call that AB_STRASSEN sends there (and of
+// ab_dgemm_strassen and ab_zgemm_strassen) runs as one level of
+// Strassen-Winograd instead of on one GEMM kernel. The call keeps its
+// scales, its choice between Gauss-3M and 4M and its epilogue.
+
+void ab_internal_encode_product(id ctx, id<MTLComputeCommandEncoder> enc, ABMatrix X, ABMatrix Y,
+                                ABMatrix P) {
+    encode_dgemm_dispatch(enc, (ABContextImpl*)ctx, X, Y, P);
+}
+
+id<MTLBuffer> ab_internal_matrix_buffer(ABMatrix m) { return m->buffer; }
+
+// P = alpha*X*Y + beta*P: dd_dgemm_ab's kernels in an encoder of their own,
+// or Strassen-Winograd on the workspace W (strassen.h) if there is one.
+static void encode_product_scaled(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx, double alpha,
+                                  ABMatrix X, ABMatrix Y, double beta, ABMatrix P,
+                                  const ABMatrix* W) {
+    if (W) {
+        ab_internal_encode_strassen(ctx, cmdBuf, alpha, X, Y, beta, P, W);
+        return;
+    }
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+    encode_dgemm_scaled_dispatch(enc, ctx, alpha, X, Y, beta, P);
+    [enc endEncoding];
+}
+
+// P[t] = X[t]*Y[t] for t < n, into distinct buffers: the classical products
+// in one encoder, concurrent unless serial; with Strassen-Winograd's
+// workspace W, one after another in that order, each in a serial encoder.
+static void encode_products(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx, int n,
+                            const ABMatrix X[], const ABMatrix Y[], const ABMatrix P[],
+                            bool serial, const ABMatrix* W) {
+    if (W) {
+        for (int t = 0; t < n; t++)
+            ab_internal_encode_strassen(ctx, cmdBuf, 1.0, X[t], Y[t], 0.0, P[t], W);
+        return;
+    }
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoderWithDispatchType:
+        serial ? MTLDispatchTypeSerial : MTLDispatchTypeConcurrent];
+    for (int t = 0; t < n; t++) encode_dgemm_dispatch(enc, ctx, X[t], Y[t], P[t]);
+    [enc endEncoding];
+}
+
 // C = A B by Gauss-3M, encoder boundaries ordering the steps:
 //   1: T3 = Ar + Ai, T4 = Br + Bi
 //   2: T1 = Ar*Br, T2 = Ai*Bi, Ci = T3*T4
@@ -2604,22 +3101,20 @@ static void encode_elemwise_dispatch(id<MTLComputeCommandEncoder> encoder,
 // scale, and B's (encode_align_zgemm). Step 2's products write distinct
 // buffers, so its encoder is concurrent and the products of a small C share
 // the GPU; if Ci shares a buffer with Ar, Ai, Br or Bi, writing it could race
-// T1's or T2's reads, so those stay serial. encode_zgemm_3m_from_sums makes
+// T1's or T2's reads, so those stay serial, Ci's last, as Strassen-Winograd's
+// products (workspace W, or NULL) always are. encode_zgemm_3m_from_sums makes
 // steps 2 to 4 on T3 and T4 already formed (the BLAS ABI's staged path forms
 // them in its pre-pass), encode_zgemm_3m all four.
 static void encode_zgemm_3m_from_sums(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
                                  ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
-                                 const ABMatrix T[4], ABMatrix Cr, ABMatrix Ci) {
-    ABMatrix T1 = T[0], T2 = T[1], T3 = T[2], T4 = T[3];
+                                 const ABMatrix T[4], ABMatrix Cr, ABMatrix Ci,
+                                 const ABMatrix* W) {
+    ABMatrix T1 = T[0], T2 = T[1];
     bool ci_is_input = Ci->buffer == Ar->buffer || Ci->buffer == Ai->buffer ||
                        Ci->buffer == Br->buffer || Ci->buffer == Bi->buffer;
-    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoderWithDispatchType:
-        ci_is_input ? MTLDispatchTypeSerial : MTLDispatchTypeConcurrent];
-    encode_dgemm_dispatch(enc, ctx, Ar, Br, T1);
-    encode_dgemm_dispatch(enc, ctx, Ai, Bi, T2);
-    encode_dgemm_dispatch(enc, ctx, T3, T4, Ci);
-    [enc endEncoding];
-    enc = [cmdBuf computeCommandEncoder];
+    const ABMatrix X[3] = {Ar, Ai, T[2]}, Y[3] = {Br, Bi, T[3]}, P[3] = {T1, T2, Ci};
+    encode_products(cmdBuf, ctx, 3, X, Y, P, ci_is_input, W);
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
     encode_elemwise_dispatch(enc, ctx.subPipeline, Ci, T1, Ci);
     encode_elemwise_dispatch(enc, ctx.subPipeline, T1, T2, Cr);
     [enc endEncoding];
@@ -2630,30 +3125,27 @@ static void encode_zgemm_3m_from_sums(id<MTLCommandBuffer> cmdBuf, ABContextImpl
 
 static void encode_zgemm_3m(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
                             ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
-                            const ABMatrix T[4], ABMatrix Cr, ABMatrix Ci) {
+                            const ABMatrix T[4], ABMatrix Cr, ABMatrix Ci, const ABMatrix* W) {
     int e = Ar->exp2 + Br->exp2;
     id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
     encode_elemwise_dispatch(enc, ctx.addPipeline, Ar, Ai, T[2]);
     encode_elemwise_dispatch(enc, ctx.addPipeline, Br, Bi, T[3]);
     [enc endEncoding];
-    encode_zgemm_3m_from_sums(cmdBuf, ctx, Ar, Ai, Br, Bi, T, Cr, Ci);
+    encode_zgemm_3m_from_sums(cmdBuf, ctx, Ar, Ai, Br, Bi, T, Cr, Ci, W);
     set_scale_unmeasured(Cr, e);
     set_scale_unmeasured(Ci, e);
 }
 
 // C = A B by 4M: T1..T4 = Ar*Br, Ai*Bi, Ai*Br, Ar*Bi (M x N each,
-// zgemm_temps) in one concurrent encoder, each on its own scale; then
-// Cr = T1 - T2 and Ci = T3 + T4, each pair brought to the larger of its
-// scales first. Only the temporaries are written before the last step, so C
-// may share buffers with A or B.
+// zgemm_temps) in one concurrent encoder (or by Strassen-Winograd on the
+// workspace W), each on its own scale; then Cr = T1 - T2 and Ci = T3 + T4,
+// each pair brought to the larger of its scales first. Only the temporaries
+// are written before the last step, so C may share buffers with A or B.
 static void encode_zgemm_4m(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
                             ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
-                            const ABMatrix T[4], ABMatrix Cr, ABMatrix Ci) {
+                            const ABMatrix T[4], ABMatrix Cr, ABMatrix Ci, const ABMatrix* W) {
     const ABMatrix X[4] = {Ar, Ai, Ai, Ar}, Y[4] = {Br, Bi, Br, Bi};
-    id<MTLComputeCommandEncoder> enc =
-        [cmdBuf computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
-    for (int t = 0; t < 4; t++) encode_dgemm_dispatch(enc, ctx, X[t], Y[t], T[t]);
-    [enc endEncoding];
+    encode_products(cmdBuf, ctx, 4, X, Y, T, false, W);
     for (int t = 0; t < 4; t += 2) {
         int e = MAX(X[t]->exp2 + Y[t]->exp2, X[t + 1]->exp2 + Y[t + 1]->exp2);
         for (int u = t; u < t + 2; u++) {
@@ -2661,7 +3153,7 @@ static void encode_zgemm_4m(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx,
             set_scale_unmeasured(T[u], e);
         }
     }
-    enc = [cmdBuf computeCommandEncoder];
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
     encode_elemwise_dispatch(enc, ctx.subPipeline, T[0], T[1], Cr);
     encode_elemwise_dispatch(enc, ctx.addPipeline, T[2], T[3], Ci);
     [enc endEncoding];
@@ -2684,46 +3176,86 @@ static bool zgemm_uses_4m(ab_zgemm_method_t method, ABMatrix Ar, ABMatrix Ai, AB
     return ab_gauss3m_rho(p, q) > AB_GAUSS3M_MAX_RHO;
 }
 
-static ab_stage_t* stage_views(ABContextImpl* ctx, int n, const int rows[], const int cols[],
-                               ABMatrix out[]);     // BLAS-ABI Staging, below
-
-// One ZGEMM's temporaries, NULL where unused: T1..T4 for encode_zgemm_3m or
-// encode_zgemm_4m, views of a staging-pool slot's buffers, and the copies
+// One GEMM's temporaries, NULL where unused: a ZGEMM's T1..T4 for
+// encode_zgemm_3m or encode_zgemm_4m and Strassen-Winograd's workspace W
+// (strassen.h), views of one staging-pool slot's buffers, and the copies
 // encode_align_zgemm makes for 3M. Blocks capture it by value.
 typedef struct {
     ABMatrix T[4];
+    ABMatrix W[AB_STRASSEN_WORKSPACE];
     ABMatrix aligned[2];
-    ab_stage_t* slot;               // T's buffers, which the pool keeps between calls
-} ZgemmTemps;
+    ab_stage_t* slot;               // T's and W's buffers, which the pool keeps between calls
+} GemmTemps;
 
-static void zgemm_temps_free(ZgemmTemps t) {
+static void gemm_temps_free(GemmTemps t) {
     for (int i = 0; i < 4; i++) ab_matrix_destroy(t.T[i]);
+    for (int i = 0; i < AB_STRASSEN_WORKSPACE; i++) ab_matrix_destroy(t.W[i]);
     for (int i = 0; i < 2; i++) ab_matrix_destroy(t.aligned[i]);
     ab_internal_stage_release(t.slot);
 }
 
-// T1..T4 for 4M or 3M into t, from the staging pool (BLAS-ABI Staging);
-// false, with t all NULL, if one cannot be allocated.
-static bool zgemm_temps(bool four_m, int M, int N, int K, ZgemmTemps* t) {
-    *t = ZgemmTemps();
-    const int rows[4] = {M, M, M, four_m ? M : K}, cols[4] = {N, N, four_m ? N : K, N};
-    t->slot = stage_views([ABContextImpl shared], 4, rows, cols, t->T);
-    return t->slot != NULL;
+// Into t, from one slot of the staging pool (BLAS-ABI Staging): T1..T4 for
+// 4M (four_m) or 3M if zgemm, and Strassen-Winograd's workspace for the
+// M x K by K x N products if strassen (its pipeline built for dev).
+// AB_ERROR_SHADER_COMPILE if Metal refuses that pipeline, AB_ERROR_ALLOC_FAILED
+// if a buffer; either way t is all NULL.
+static ABStatus gemm_temps(id<MTLDevice> dev, bool zgemm, bool four_m, bool strassen, int M,
+                           int N, int K, GemmTemps* t) {
+    *t = GemmTemps();
+    int rows[4 + AB_STRASSEN_WORKSPACE] = {M, M, M, four_m ? M : K};
+    int cols[4 + AB_STRASSEN_WORKSPACE] = {N, N, four_m ? N : K, N};
+    const int z = zgemm ? 4 : 0;
+    int n = z;
+    if (strassen) {
+        if (!ab_internal_strassen_prepare(dev, M, N, K, rows + n, cols + n))
+            return AB_ERROR_SHADER_COMPILE;
+        n += AB_STRASSEN_WORKSPACE;
+    }
+    ABMatrix views[4 + AB_STRASSEN_WORKSPACE];
+    t->slot = ab_internal_stage_views(n, rows, cols, views);
+    if (!t->slot) return AB_ERROR_ALLOC_FAILED;
+    for (int i = 0; i < z; i++) t->T[i] = views[i];
+    for (int i = z; i < n; i++) t->W[i - z] = views[i];
+    return AB_OK;
+}
+
+// T1..T4 for a classical ZGEMM by 4M or 3M; false, with t all NULL, if one
+// cannot be allocated.
+static bool zgemm_temps(bool four_m, int M, int N, int K, GemmTemps* t) {
+    return gemm_temps(nil, true, four_m, false, M, N, K, t) == AB_OK;
+}
+
+// Strassen-Winograd's workspace alone, for a real M x K by K x N product.
+static ABStatus strassen_temps(id<MTLDevice> dev, int M, int N, int K, GemmTemps* t) {
+    return gemm_temps(dev, false, false, true, M, N, K, t);
+}
+
+// The workspace for encode_products: NULL for classical products.
+static const ABMatrix* strassen_ws(const GemmTemps* t) { return t->W[0] ? t->W : NULL; }
+
+// Whether an M x K by K x N GEMM takes Strassen-Winograd products, as
+// products says (ab_internal.h).
+static bool takes_strassen(ab_products_t products, int M, int N, int K) {
+    return products == AB_PRODUCTS_STRASSEN ||
+           (products == AB_PRODUCTS_ROUTED && ab_internal_strassen_wanted(M, N, K));
 }
 
 // C = A B by 4M (four_m) or by Gauss-3M, which first brings A's parts, and
 // B's, to one scale into aligned (encode_align_zgemm), with T1..T4 from
-// zgemm_temps. False if such a copy could not be allocated. The caller frees
-// T and aligned (zgemm_temps_free) once cmdBuf has completed.
+// gemm_temps and the real products by Strassen-Winograd on the workspace W
+// (gemm_temps), or classical if W is NULL. False if such a copy could not
+// be allocated. The caller frees T, W and aligned (gemm_temps_free) once cmdBuf
+// has completed.
 static bool encode_zgemm(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx, bool four_m,
                          ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
-                         const ABMatrix T[4], ABMatrix aligned[2], ABMatrix Cr, ABMatrix Ci) {
+                         const ABMatrix T[4], ABMatrix aligned[2], ABMatrix Cr, ABMatrix Ci,
+                         const ABMatrix* W) {
     if (four_m) {
-        encode_zgemm_4m(cmdBuf, ctx, Ar, Ai, Br, Bi, T, Cr, Ci);
+        encode_zgemm_4m(cmdBuf, ctx, Ar, Ai, Br, Bi, T, Cr, Ci, W);
         return true;
     }
     if (!encode_align_zgemm(cmdBuf, ctx, &Ar, &Ai, &Br, &Bi, aligned)) return false;
-    encode_zgemm_3m(cmdBuf, ctx, Ar, Ai, Br, Bi, T, Cr, Ci);
+    encode_zgemm_3m(cmdBuf, ctx, Ar, Ai, Br, Bi, T, Cr, Ci, W);
     return true;
 }
 
@@ -2731,13 +3263,52 @@ static bool encode_zgemm(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ctx, bool f
 // Public API: BLAS Operations
 // =============================================================================
 
-ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C) {
+// ab_dgemm_scaled, its products as products says (ab_internal.h).
+static ABStatus dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C,
+                             ab_products_t products) {
     ABAutoreleaseScope pool;
     if (!A || !B || !C) return AB_ERROR_INVALID_ARG;
     if (A->cols != B->rows || A->rows != C->rows || B->cols != C->cols) return AB_ERROR_DIMENSION_MISMATCH;
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return AB_ERROR_NO_DEVICE;
-    
+    GemmTemps tmp = GemmTemps();
+    if (takes_strassen(products, A->rows, B->cols, A->cols)) {
+        uint64_t temps_ns = host_ns();
+        ABStatus status = strassen_temps(ctx.device, A->rows, B->cols, A->cols, &tmp);
+        t_kernel_split.temps_ns += host_ns() - temps_ns;
+        if (status != AB_OK) return status;
+    }
+
+    int exp2 = scaled_gemm_scalars(A, B, C, &alpha, &beta);
+    double t0 = get_time_ms();
+
+    uint64_t encode_ns = host_ns();
+    id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
+    encode_product_scaled(cmdBuf, ctx, alpha, A, B, beta, C, strassen_ws(&tmp));
+    bool completed = commit_and_wait(cmdBuf, encode_ns);
+    set_scale_unmeasured(C, exp2);
+    if (tmp.slot) {
+        uint64_t temps_ns = host_ns();
+        gemm_temps_free(tmp);
+        t_kernel_split.temps_ns += host_ns() - temps_ns;
+    }
+    if (!completed) return AB_ERROR_KERNEL_FAILED;
+
+    stats_add_kernel(get_time_ms() - t0);
+    stats_add_dgemm();
+    return AB_OK;
+}
+
+// ab_dgemm, its products as products says (ab_internal.h).
+static ABStatus dgemm(ABMatrix A, ABMatrix B, ABMatrix C, ab_products_t products) {
+    ABAutoreleaseScope pool;
+    if (!A || !B || !C) return AB_ERROR_INVALID_ARG;
+    if (A->cols != B->rows || A->rows != C->rows || B->cols != C->cols) return AB_ERROR_DIMENSION_MISMATCH;
+    ABContextImpl* ctx = [ABContextImpl shared];
+    if (!ctx) return AB_ERROR_NO_DEVICE;
+    if (takes_strassen(products, A->rows, B->cols, A->cols))   // the same result, by Strassen-Winograd
+        return dgemm_scaled(1.0, A, B, 0.0, C, AB_PRODUCTS_STRASSEN);
+
     double t0 = get_time_ms();
     
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
@@ -2754,28 +3325,21 @@ ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C) {
     return AB_OK;
 }
 
+ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C) {
+    return dgemm(A, B, C, AB_PRODUCTS_ROUTED);
+}
+
 ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C) {
-    ABAutoreleaseScope pool;
-    if (!A || !B || !C) return AB_ERROR_INVALID_ARG;
-    if (A->cols != B->rows || A->rows != C->rows || B->cols != C->cols) return AB_ERROR_DIMENSION_MISMATCH;
-    ABContextImpl* ctx = [ABContextImpl shared];
-    if (!ctx) return AB_ERROR_NO_DEVICE;
+    return dgemm_scaled(alpha, A, B, beta, C, AB_PRODUCTS_ROUTED);
+}
 
-    int exp2 = scaled_gemm_scalars(A, B, C, &alpha, &beta);
-    double t0 = get_time_ms();
+ABStatus ab_dgemm_strassen(double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C) {
+    return dgemm_scaled(alpha, A, B, beta, C, AB_PRODUCTS_STRASSEN);
+}
 
-    uint64_t encode_ns = host_ns();
-    id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
-    encode_dgemm_scaled_dispatch(encoder, ctx, alpha, A, B, beta, C);
-    [encoder endEncoding];
-    bool completed = commit_and_wait(cmdBuf, encode_ns);
-    set_scale_unmeasured(C, exp2);
-    if (!completed) return AB_ERROR_KERNEL_FAILED;
-
-    stats_add_kernel(get_time_ms() - t0);
-    stats_add_dgemm();
-    return AB_OK;
+extern "C" ABStatus ab_internal_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta,
+                                             ABMatrix C, ab_products_t products) {
+    return dgemm_scaled(alpha, A, B, beta, C, products);
 }
 
 // C = A + B or A - B elementwise (pipeline), on one power-of-two scale.
@@ -2836,16 +3400,17 @@ ABStatus ab_matrix_scale(double alpha, ABMatrix A) {
 
 // Forward declaration of internal ZGEMM
 static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
-                                  ABMatrix Cr, ABMatrix Ci, bool four_m);
+                                  ABMatrix Cr, ABMatrix Ci, bool four_m, bool strassen);
 
 // Extended ZGEMM with transpose support (for QE compatibility), by the given
-// method (ab_internal.h).
+// method, its real products as products says (ab_internal.h).
 static ABStatus zgemm_ex(
     ABTranspose transA, ABTranspose transB,
     ABMatrix Ar, ABMatrix Ai,
     ABMatrix Br, ABMatrix Bi,
     ABMatrix Cr, ABMatrix Ci,
-    ab_zgemm_method_t method
+    ab_zgemm_method_t method,
+    ab_products_t products
 ) {
     ABAutoreleaseScope pool;
     if (!Ar || !Ai || !Br || !Bi || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
@@ -2998,7 +3563,8 @@ static ABStatus zgemm_ex(
     }
 
     // Call internal ZGEMM with (possibly transposed) matrices
-    status = ab_zgemm_internal(A_work_r, A_work_i, B_work_r, B_work_i, Cr, Ci, four_m);
+    status = ab_zgemm_internal(A_work_r, A_work_i, B_work_r, B_work_i, Cr, Ci, four_m,
+                               takes_strassen(products, M, N, K_A));
 
 cleanup:
     // Cleanup temporary transpose buffers
@@ -3016,26 +3582,28 @@ cleanup:
 
 ABStatus ab_zgemm_ex(ABTranspose transA, ABTranspose transB, ABMatrix Ar, ABMatrix Ai,
                      ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci) {
-    return zgemm_ex(transA, transB, Ar, Ai, Br, Bi, Cr, Ci, AB_ZGEMM_AUTO);
+    return zgemm_ex(transA, transB, Ar, Ai, Br, Bi, Cr, Ci, AB_ZGEMM_AUTO, AB_PRODUCTS_ROUTED);
 }
 
 extern "C" ABStatus ab_internal_zgemm(ABTranspose transA, ABTranspose transB, ABMatrix Ar,
                                       ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr,
-                                      ABMatrix Ci, ab_zgemm_method_t method) {
-    return zgemm_ex(transA, transB, Ar, Ai, Br, Bi, Cr, Ci, method);
+                                      ABMatrix Ci, ab_zgemm_method_t method,
+                                      ab_products_t products) {
+    return zgemm_ex(transA, transB, Ar, Ai, Br, Bi, Cr, Ci, method, products);
 }
 
 // ZGEMM using Gauss's trick: 3 real multiplications instead of 4
 // (A_r + iA_i)(B_r + iB_i) = (A_r*B_r - A_i*B_i) + i((A_r+A_i)(B_r+B_i) - A_r*B_r - A_i*B_i)
 // or, for parts whose imbalance would cost 3M's imaginary part its accuracy,
-// by 4M (four_m: zgemm_uses_4m); encode_zgemm.
+// by 4M (four_m: zgemm_uses_4m); encode_zgemm. The real products by
+// Strassen-Winograd if strassen.
 //
 // Fused implementation: 1 command buffer (was 8 separate round-trips); this
 // eliminates ~350μs of command buffer commit+wait overhead per ZGEMM call.
 //
 // NOTE: This is the internal implementation - ab_zgemm is now a wrapper
 static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
-                                  ABMatrix Cr, ABMatrix Ci, bool four_m) {
+                                  ABMatrix Cr, ABMatrix Ci, bool four_m, bool strassen) {
     if (!Ar || !Ai || !Br || !Bi || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
 
     int M = Ar->rows, N = Br->cols, K = Ar->cols;
@@ -3044,17 +3612,18 @@ static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatri
 
     // Allocate all temporaries upfront
     uint64_t temps_ns = host_ns();
-    ZgemmTemps tmp;
-    bool allocated = zgemm_temps(four_m, M, N, K, &tmp);
+    GemmTemps tmp;
+    ABStatus status = gemm_temps(ctx.device, true, four_m, strassen, M, N, K, &tmp);
     t_kernel_split.temps_ns += host_ns() - temps_ns;
-    if (!allocated) return AB_ERROR_ALLOC_FAILED;
+    if (status != AB_OK) return status;
 
     double t0 = get_time_ms();
 
     uint64_t encode_ns = host_ns();
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
-    if (!encode_zgemm(cmdBuf, ctx, four_m, Ar, Ai, Br, Bi, tmp.T, tmp.aligned, Cr, Ci)) {
-        zgemm_temps_free(tmp);
+    if (!encode_zgemm(cmdBuf, ctx, four_m, Ar, Ai, Br, Bi, tmp.T, tmp.aligned, Cr, Ci,
+                      strassen_ws(&tmp))) {
+        gemm_temps_free(tmp);
         return AB_ERROR_ALLOC_FAILED;
     }
     bool completed = commit_and_wait(cmdBuf, encode_ns);
@@ -3063,7 +3632,7 @@ static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatri
     stats_add_zgemm();
 
     temps_ns = host_ns();
-    zgemm_temps_free(tmp);
+    gemm_temps_free(tmp);
     t_kernel_split.temps_ns += host_ns() - temps_ns;
 
     if (!completed) {
@@ -3084,18 +3653,18 @@ static ABStatus ab_zgemm_internal_async(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, A
     if (!ctx) return AB_ERROR_NO_DEVICE;
 
     const bool four_m = zgemm_uses_4m(AB_ZGEMM_AUTO, Ar, Ai, Br, Bi);
-    ZgemmTemps tmp;
+    GemmTemps tmp;
     if (!zgemm_temps(four_m, M, N, K, &tmp)) return AB_ERROR_ALLOC_FAILED;
 
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
-    if (!encode_zgemm(cmdBuf, ctx, four_m, Ar, Ai, Br, Bi, tmp.T, tmp.aligned, Cr, Ci)) {
-        zgemm_temps_free(tmp);
+    if (!encode_zgemm(cmdBuf, ctx, four_m, Ar, Ai, Br, Bi, tmp.T, tmp.aligned, Cr, Ci, NULL)) {
+        gemm_temps_free(tmp);
         return AB_ERROR_ALLOC_FAILED;
     }
 
     // Completion handler cleans up temporaries when GPU finishes
     [cmdBuf addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull __unused buf) {
-        zgemm_temps_free(tmp);
+        gemm_temps_free(tmp);
     }];
 
     [cmdBuf commit];
@@ -3108,6 +3677,17 @@ static ABStatus ab_zgemm_internal_async(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, A
 // Public ab_zgemm: wrapper for ab_zgemm_ex with no transpose
 ABStatus ab_zgemm(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci) {
     return ab_zgemm_ex(AB_NO_TRANS, AB_NO_TRANS, Ar, Ai, Br, Bi, Cr, Ci);
+}
+
+ABStatus ab_zgemm_strassen(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr,
+                           ABMatrix Ci) {
+    if (!Ar || !Ai || !Br || !Bi || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
+    int M = Ar->rows, K = Ar->cols, N = Br->cols;
+    if (Ai->rows != M || Ai->cols != K || Br->rows != K || Bi->rows != K || Bi->cols != N ||
+        Cr->rows != M || Cr->cols != N || Ci->rows != M || Ci->cols != N)
+        return AB_ERROR_DIMENSION_MISMATCH;
+    return zgemm_ex(AB_NO_TRANS, AB_NO_TRANS, Ar, Ai, Br, Bi, Cr, Ci, AB_ZGEMM_AUTO,
+                    AB_PRODUCTS_STRASSEN);
 }
 
 ABStatus ab_dsyrk(ABMatrix A, ABMatrix C) {
@@ -3126,8 +3706,8 @@ ABStatus ab_dsyrk(ABMatrix A, ABMatrix C) {
     encode_rescale(cmdBuf, ctx, C, C->exp2 - 2 * A->exp2);
     id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
     uint32_t gridW = (N + 63) / 64, gridH = (N + 63) / 64;
-    bool pf = use_prefetch(ctx, gridW * gridH, square_prefetch_max(encoder));
-    [encoder setComputePipelineState:pf ? ctx.dsyrkPFPipeline : ctx.dsyrkPipeline];
+    [encoder setComputePipelineState:gemm_pipeline(ctx, AB_KERNEL_DSYRK, gridW * gridH,
+                                                   square_prefetch_max(encoder))];
     [encoder setBuffer:A->buffer offset:0 atIndex:0];
     [encoder setBuffer:C->buffer offset:0 atIndex:1];
     [encoder setBytes:&N length:sizeof(N) atIndex:2];
@@ -3288,7 +3868,7 @@ ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
                     // B_remaining -= A_off * X_solved  (via GPU: alpha=-1, beta=1)
                     // First upload current B_remaining
                     ab_matrix_upload(mUpdate, &B_host[off_start * NRHS], true);
-                    ab_dgemm_scaled(-1.0, mA_off, mX, 1.0, mUpdate);
+                    dgemm_scaled(-1.0, mA_off, mX, 1.0, mUpdate, AB_PRODUCTS_CLASSICAL);
 
                     // Download updated B_remaining
                     ab_matrix_download(mUpdate, &B_host[off_start * NRHS], true);
@@ -3359,7 +3939,7 @@ ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
                     free(A_off_data);
 
                     ab_matrix_upload(mUpdate, B_host, true);
-                    ab_dgemm_scaled(-1.0, mA_off, mX, 1.0, mUpdate);
+                    dgemm_scaled(-1.0, mA_off, mX, 1.0, mUpdate, AB_PRODUCTS_CLASSICAL);
                     ab_matrix_download(mUpdate, B_host, true);
 
                     ab_matrix_destroy(mX);
@@ -3517,7 +4097,7 @@ ABStatus ab_dgesv_mpir(ABMatrix A, ABMatrix B) {
         ab_matrix_upload(mR_gpu, B_orig, true);  // R starts as B
 
         // R = B - A*X = -1.0 * A * X + 1.0 * B
-        ab_dgemm_scaled(-1.0, mA_gpu, mX_gpu, 1.0, mR_gpu);
+        dgemm_scaled(-1.0, mA_gpu, mX_gpu, 1.0, mR_gpu, AB_PRODUCTS_CLASSICAL);
 
         ab_matrix_download(mR_gpu, R_host, true);
         ab_matrix_destroy(mA_gpu);
@@ -3635,10 +4215,10 @@ ABStatus ab_zherk(ABMatrix Ar, ABMatrix Ai, ABMatrix Cr, ABMatrix Ci) {
     }
 
     // Ci = Ai × Arᵀ
-    if ((status = ab_dgemm(Ai, ArT, Ci)) != AB_OK) goto cleanup;
+    if ((status = dgemm(Ai, ArT, Ci, AB_PRODUCTS_CLASSICAL)) != AB_OK) goto cleanup;
 
     // temp = Ar × Aiᵀ
-    if ((status = ab_dgemm(Ar, AiT, temp)) != AB_OK) goto cleanup;
+    if ((status = dgemm(Ar, AiT, temp, AB_PRODUCTS_CLASSICAL)) != AB_OK) goto cleanup;
 
     // Ci = Ci - temp
     if ((status = ab_matrix_sub(Ci, temp, Ci)) != AB_OK) goto cleanup;
@@ -3709,7 +4289,8 @@ ABStatus ab_zgemm_batched(
 
     // Fall back to sequential for single ZGEMM
     if (batch_count == 1) {
-        return ab_zgemm(Ars[0], Ais[0], Brs[0], Bis[0], Crs[0], Cis[0]);
+        return zgemm_ex(AB_NO_TRANS, AB_NO_TRANS, Ars[0], Ais[0], Brs[0], Bis[0], Crs[0],
+                        Cis[0], AB_ZGEMM_AUTO, AB_PRODUCTS_CLASSICAL);
     }
 
     ABContextImpl* ctx = [ABContextImpl shared];
@@ -3724,7 +4305,7 @@ ABStatus ab_zgemm_batched(
     // only when dimensions change — QE's uniform workloads never trigger this.
 
     int cur_M = Ars[0]->rows, cur_N = Brs[0]->cols, cur_K = Ars[0]->cols;
-    ZgemmTemps shared[2] = {};          // [four_m]; their aligned slots stay NULL
+    GemmTemps shared[2] = {};          // [four_m]; their aligned slots stay NULL
 
     double t0 = get_time_ms();
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
@@ -3747,17 +4328,17 @@ ABStatus ab_zgemm_batched(
             cmdBuf = [ctx.commandQueue commandBuffer];
 
             for (int m = 0; m < 2; m++) {
-                zgemm_temps_free(shared[m]);
-                shared[m] = ZgemmTemps();
+                gemm_temps_free(shared[m]);
+                shared[m] = GemmTemps();
             }
             cur_M = M; cur_N = N; cur_K = K;
         }
 
         const bool four_m = zgemm_uses_4m(AB_ZGEMM_AUTO, Ars[i], Ais[i], Brs[i], Bis[i]);
-        ZgemmTemps* t = &shared[four_m];
+        GemmTemps* t = &shared[four_m];
         if ((!t->T[0] && !zgemm_temps(four_m, M, N, K, t)) ||
             !encode_zgemm(cmdBuf, ctx, four_m, Ars[i], Ais[i], Brs[i], Bis[i], t->T,
-                          &aligned[2 * i], Crs[i], Cis[i])) {
+                          &aligned[2 * i], Crs[i], Cis[i], NULL)) {
             status = AB_ERROR_ALLOC_FAILED;
             break;
         }
@@ -3770,7 +4351,7 @@ ABStatus ab_zgemm_batched(
     stats_add_kernel(get_time_ms() - t0);
     for (int i = 0; i < encoded; i++) stats_add_zgemm();
 
-    for (int m = 0; m < 2; m++) zgemm_temps_free(shared[m]);
+    for (int m = 0; m < 2; m++) gemm_temps_free(shared[m]);
     for (int i = 0; aligned && i < 2 * batch_count; i++) ab_matrix_destroy(aligned[i]);
     free(aligned);
 
@@ -4058,20 +4639,20 @@ ABStatus ab_batch_zgemm(ABBatch batch, ABMatrix Ar, ABMatrix Ai, ABMatrix Br, AB
     // Temporaries for Gauss's trick or 4M (zgemm_uses_4m), released by a
     // completion handler; the ZGEMM's encoders go between the batch's.
     const bool four_m = zgemm_uses_4m(AB_ZGEMM_AUTO, Ar, Ai, Br, Bi);
-    ZgemmTemps tmp;
+    GemmTemps tmp;
     if (!zgemm_temps(four_m, M, N, K, &tmp)) return AB_ERROR_ALLOC_FAILED;
     [batch->currentEncoder endEncoding];
     bool encoded = encode_zgemm(batch->cmdBuffer, ctx, four_m, Ar, Ai, Br, Bi, tmp.T,
-                                tmp.aligned, Cr, Ci);
+                                tmp.aligned, Cr, Ci, NULL);
     batch->currentEncoder = [batch->cmdBuffer computeCommandEncoder];
     if (!encoded) {
-        zgemm_temps_free(tmp);
+        gemm_temps_free(tmp);
         return AB_ERROR_ALLOC_FAILED;
     }
 
     // Cleanup temporaries via completion handler
     [batch->cmdBuffer addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull __unused buf) {
-        zgemm_temps_free(tmp);
+        gemm_temps_free(tmp);
     }];
 
     batch->op_count++;
@@ -4300,8 +4881,9 @@ static void registrations_shutdown(void) {
 // settles at about what its largest calls need, whatever their mix. A fresh buffer costs
 // first-touch page faults on the host and, in its first command buffer,
 // ~12-16 ms/GB between commit and the GPU's start; a reused one neither.
-// The native ZGEMMs' temporaries come from here too (stage_views): only the
-// GPU touches those, and a fresh one costs about 32 ms/GiB before it starts.
+// The native ZGEMMs' temporaries come from here too (ab_internal_stage_views):
+// only the GPU touches those, and a fresh one costs about 32 ms/GiB before it
+// starts. So do device_api.m's ABMatrix handles.
 
 typedef enum {
     STAGE_SA, STAGE_SB, STAGE_SC,   // FP64 staging copies of A, B, C (AB_STAGE_A + i)
@@ -4322,6 +4904,7 @@ struct ab_stage_s {
     int ld[3];                      // A, B, C's leading dimensions, staged or in place
     size_t elems[3];                // and the elements staged (0 in place)
     uint64_t generation;            // the pool's when the slot was made
+    GemmTemps strassen;             // during a call: Strassen-Winograd's workspace (another slot)
     struct ab_stage_s* next;        // idle list
 };
 
@@ -4481,7 +5064,15 @@ ab_stage_t* ab_internal_stage_acquire(const ab_stage_gemm_t* g) {
     stage_layout(s, g);
     size_t need[STAGE_ROLES];
     stage_needs(s, g, need);
-    return stage_fit(ctx, s, need) ? s : NULL;
+    if (!stage_fit(ctx, s, need)) return NULL;
+    // The products' workspace when AB_STRASSEN routes the shape (the run gives
+    // it back if a line is scaled: stage_lines_scaled).
+    if (takes_strassen(AB_PRODUCTS_ROUTED, g->M, g->N, g->K) &&
+        strassen_temps(ctx.device, g->M, g->N, g->K, &s->strassen) != AB_OK) {
+        ab_internal_stage_release(s);
+        return NULL;
+    }
+    return s;
 }
 
 void* ab_internal_stage_host(ab_stage_t* s, ab_stage_operand_t which, int* ld) {
@@ -4498,6 +5089,8 @@ int ab_internal_stage_in_place(const ab_stage_t* s) {
 void ab_internal_stage_release(ab_stage_t* s) {
     if (!s) return;
     ABAutoreleaseScope pool;
+    gemm_temps_free(s->strassen);
+    s->strassen = GemmTemps();
     for (int i = 0; i < 3; i++) s->ext[i] = nil;
     size_t cap = ab_staging_cap_bytes();
     struct ab_stage_s* freed = NULL;        // idle slots dropped, deleted after the lock
@@ -4564,14 +5157,13 @@ static void stage_matrix(struct ABMatrix_s* m, id<MTLBuffer> b, int rows, int co
     set_scale_unmeasured(m, 0);
 }
 
-// n (at most STAGE_ROLES) DD matrices of the given shapes from one slot, each
-// seen through a new ABMatrix in out; view i takes role i (stage_fit matches
-// by size alone). The caller frees the views with ab_matrix_destroy() and the
-// slot with ab_internal_stage_release(). NULL if Metal refuses a buffer.
-static ab_stage_t* stage_views(ABContextImpl* ctx, int n, const int rows[], const int cols[],
-                               ABMatrix out[]) {
+// View i takes role i (stage_fit matches by size alone).
+ab_stage_t* ab_internal_stage_views(int n, const int rows[], const int cols[], ABMatrix out[]) {
+    ABAutoreleaseScope pool;
+    ABContextImpl* ctx = [ABContextImpl shared];
     // AB_TEST_FAIL_STAGE=alloc (test-only): no buffers, as for ab_matrix_create().
-    if (!ctx || ab_test_fail_stage() == AB_PROF_STAGE_ALLOC) return NULL;
+    if (!ctx || n < 1 || n > STAGE_ROLES || ab_test_fail_stage() == AB_PROF_STAGE_ALLOC)
+        return NULL;
     size_t need[STAGE_ROLES] = {};
     for (int i = 0; i < n; i++) need[i] = (size_t)rows[i] * cols[i] * sizeof(DDFloat);
     struct ab_stage_s* s = stage_take();
@@ -4698,6 +5290,14 @@ static ab_stage_result_t stage_commit(id<MTLCommandBuffer> cmdBuf, uint64_t enco
     return AB_STAGE_RAN;
 }
 
+// Whether the GPU gave a row of op(A) or a column of op(B) a scale of its own,
+// once the run's scales pass has completed: ab_scales sets those operands'
+// fix-up grids (never empty) only then.
+static bool stage_lines_scaled(ab_stage_t* s, const ab_stage_gemm_t* g) {
+    const uint32_t* st = (const uint32_t*)stage_buf(s, STAGE_STATS).contents;
+    return st[stage_fix_args(g, 0)] || st[stage_fix_args(g, 1)];
+}
+
 ab_stage_result_t ab_internal_stage_run(ab_stage_t* s, const ab_stage_gemm_t* g) {
     ABAutoreleaseScope pool;
     ABContextImpl* ctx = [ABContextImpl shared];
@@ -4753,13 +5353,26 @@ ab_stage_result_t ab_internal_stage_run(ab_stage_t* s, const ab_stage_gemm_t* g)
     for (int i = 0; i < passes; i++) encode_stage_pass(enc, ctx, s, g, &v, i, true);
     [enc endEncoding];
 
+    // Strassen-Winograd's block sums add rows of op(A), and columns of op(B),
+    // from different quadrants, which must share a scale. The GPU has just
+    // computed the lines' scales: run what is encoded, and if a line has one,
+    // give the workspace back and take classical products, as the host path
+    // does (ab_lines_products); then encode the rest anew.
+    if (strassen_ws(&s->strassen)) {
+        if (!commit_and_wait(cmdBuf, encode_ns)) return AB_STAGE_FAILED;
+        if (stage_lines_scaled(s, g)) {
+            gemm_temps_free(s->strassen);
+            s->strassen = GemmTemps();
+        }
+        encode_ns = host_ns();
+        cmdBuf = [ctx.commandQueue commandBuffer];
+    }
+    const ABMatrix* W = strassen_ws(&s->strassen);
     if (z) {                                 // Gauss-3M as ab_zgemm, T3 and T4 formed above
         const ABMatrix T[4] = {&v.T1, &v.T2, &v.A3, &v.B4};
-        encode_zgemm_3m_from_sums(cmdBuf, ctx, &v.A, &v.Ai, &v.B, &v.Bi, T, &v.C, &v.Ci);
+        encode_zgemm_3m_from_sums(cmdBuf, ctx, &v.A, &v.Ai, &v.B, &v.Bi, T, &v.C, &v.Ci, W);
     } else {
-        enc = [cmdBuf computeCommandEncoder];
-        encode_dgemm_scaled_dispatch(enc, ctx, g->alpha[0], &v.A, &v.B, g->beta[0], &v.C);
-        [enc endEncoding];
+        encode_product_scaled(cmdBuf, ctx, g->alpha[0], &v.A, &v.B, g->beta[0], &v.C, W);
     }
     encode_stage_epilogue(cmdBuf, ctx, s, g, &v);
     return stage_commit(cmdBuf, encode_ns, flag, t0);
@@ -4780,12 +5393,9 @@ ab_stage_result_t ab_internal_stage_redo_4m(ab_stage_t* s, const ab_stage_gemm_t
     double t0 = get_time_ms();
     uint64_t encode_ns = host_ns();
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> enc =
-        [cmdBuf computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
-    encode_dgemm_dispatch(enc, ctx, &v.Ai, &v.B, &v.T1);
-    encode_dgemm_dispatch(enc, ctx, &v.A, &v.Bi, &v.T2);
-    [enc endEncoding];
-    enc = [cmdBuf computeCommandEncoder];
+    const ABMatrix X[2] = {&v.Ai, &v.A}, Y[2] = {&v.B, &v.Bi}, P[2] = {&v.T1, &v.T2};
+    encode_products(cmdBuf, ctx, 2, X, Y, P, false, strassen_ws(&s->strassen));
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
     encode_elemwise_dispatch(enc, ctx.addPipeline, &v.T1, &v.T2, &v.Ci);
     [enc endEncoding];
     encode_stage_epilogue(cmdBuf, ctx, s, g, &v);

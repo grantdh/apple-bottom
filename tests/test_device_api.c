@@ -11,7 +11,8 @@
 //   6. Stream create / sync / destroy doesn't crash
 // and the BLAS entry points: ab_dev_dgemm / ab_dev_zgemm against column-major
 // cblas, ab_dev_zgemm on imbalanced real and imaginary parts against Dot2,
-// plus the element-wise ops.
+// both on the staging pool's reused buffers and on registered, non-page-
+// aligned memory, plus the element-wise ops.
 //
 // Pass criteria: all assertions hold. Exits non-zero on first failure.
 // =============================================================================
@@ -20,9 +21,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <pthread.h>
 
 #include "apple_bottom.h"
 #include "apple_bottom_device.h"
+#include "gpu_stage.h"
 #include "test_registry.h"
 
 #define N_ELEMS 1024
@@ -202,6 +205,8 @@ static size_t operand_elems(Operand o) {
     return o.off + (size_t)o.ld * o.cols;
 }
 
+static size_t operand_bytes(Operand o) { return operand_elems(o) * o.w * sizeof(double); }
+
 static bool in_block(Operand o, size_t e) {
     if (e < o.off) return false;
     return (e - o.off) % o.ld < (size_t)o.rows && (e - o.off) / o.ld < (size_t)o.cols;
@@ -209,7 +214,7 @@ static bool in_block(Operand o, size_t e) {
 
 // NaN everywhere; uniform in [-1, 1) inside the block unless nan_block.
 static double* make_operand(Operand o, bool nan_block) {
-    double* X = (double*)malloc(operand_elems(o) * o.w * sizeof(double));
+    double* X = (double*)malloc(operand_bytes(o));
     assert(X);
     for (size_t e = 0; e < operand_elems(o); e++)
         for (int q = 0; q < o.w; q++)
@@ -251,61 +256,92 @@ static void gemm_operands(GemmCase c, int w, Operand* oA, Operand* oB, Operand* 
     *oC = (Operand){c.off, c.m + c.pad, c.m, c.n, w};
 }
 
+// A case's stored operands, from seed 42: NaN outside each block, and in
+// C's for beta = 0, which BLAS must not read.
+typedef struct {
+    bool cplx;
+    GemmCase c;
+    Operand oA, oB, oC;
+    double *A, *B, *C0;
+} GemmData;
+
+static void gemm_data_init(GemmData* g, bool cplx, GemmCase c) {
+    *g = (GemmData){.cplx = cplx, .c = c};
+    gemm_operands(c, cplx ? 2 : 1, &g->oA, &g->oB, &g->oC);
+    srand(42);
+    g->A  = make_operand(g->oA, false);
+    g->B  = make_operand(g->oB, false);
+    g->C0 = make_operand(g->oC, c.beta == 0.0);
+}
+
+static void gemm_data_free(GemmData* g) {
+    free(g->A); free(g->B); free(g->C0);
+}
+
+// g's call on buffers dA, dB and dC, by ab_dev_zgemm (complex) or
+// ab_dev_dgemm, their _offset forms for c.off != 0.
+static ABStatus gemm_data_call(const GemmData* g, ab_dev_buffer_t dA, ab_dev_buffer_t dB,
+                               ab_dev_buffer_t dC) {
+    const GemmCase c = g->c;
+    const int lda = g->oA.ld, ldb = g->oB.ld, ldc = g->oC.ld;
+    if (g->cplx) {
+        double alpha[2] = {creal(c.alpha), cimag(c.alpha)};
+        double beta[2]  = {creal(c.beta), cimag(c.beta)};
+        return c.off ? ab_dev_zgemm_offset(c.ta, c.tb, c.m, c.n, c.k, alpha,
+                                           dA, c.off, lda, dB, c.off, ldb, beta, dC, c.off, ldc)
+                     : ab_dev_zgemm(c.ta, c.tb, c.m, c.n, c.k, alpha,
+                                    dA, lda, dB, ldb, beta, dC, ldc);
+    }
+    return c.off ? ab_dev_dgemm_offset(c.ta, c.tb, c.m, c.n, c.k, creal(c.alpha),
+                                       dA, c.off, lda, dB, c.off, ldb,
+                                       creal(c.beta), dC, c.off, ldc)
+                 : ab_dev_dgemm(c.ta, c.tb, c.m, c.n, c.k, creal(c.alpha),
+                                dA, lda, dB, ldb, creal(c.beta), dC, ldc);
+}
+
+// g's call on device copies of A (every double a NaN if nan_a), B and C0; C,
+// A and B as the call leaves them go into C, A1 and B1 where not NULL.
+static ABStatus gemm_data_run(const GemmData* g, bool nan_a, double* C, double* A1, double* B1) {
+    size_t bA = operand_bytes(g->oA), bB = operand_bytes(g->oB), bC = operand_bytes(g->oC);
+    ab_dev_buffer_t dA = ab_dev_malloc(bA), dB = ab_dev_malloc(bB), dC = ab_dev_malloc(bC);
+    assert(dA && dB && dC);
+    ab_dev_memcpy_h2d(dA, 0, g->A, bA);
+    if (nan_a) ab_dev_memset(dA, 0, 0xFF, bA);
+    ab_dev_memcpy_h2d(dB, 0, g->B, bB);
+    ab_dev_memcpy_h2d(dC, 0, g->C0, bC);
+
+    ABStatus s = gemm_data_call(g, dA, dB, dC);
+    if (C)  ab_dev_memcpy_d2h(C, dC, 0, bC);
+    if (A1) ab_dev_memcpy_d2h(A1, dA, 0, bA);
+    if (B1) ab_dev_memcpy_d2h(B1, dB, 0, bB);
+    ab_dev_free(dA); ab_dev_free(dB); ab_dev_free(dC);
+    return s;
+}
+
 // One ab_dev_dgemm / ab_dev_zgemm call against cblas ColMajor (3 CHECKs).
 static void check_gemm(bool cplx, GemmCase c) {
-    int w = cplx ? 2 : 1;
-    Operand oA, oB, oC;
-    gemm_operands(c, w, &oA, &oB, &oC);
-    size_t bytesA = operand_elems(oA) * w * sizeof(double);
-    size_t bytesB = operand_elems(oB) * w * sizeof(double);
-    size_t bytesC = operand_elems(oC) * w * sizeof(double);
-
-    srand(42);
-    double* A    = make_operand(oA, false);
-    double* B    = make_operand(oB, false);
-    double* C0   = make_operand(oC, c.beta == 0.0);
+    GemmData g;
+    gemm_data_init(&g, cplx, c);
+    const Operand oA = g.oA, oB = g.oB, oC = g.oC;
+    size_t bytesA = operand_bytes(oA), bytesB = operand_bytes(oB), bytesC = operand_bytes(oC);
     double* Cref = (double*)malloc(bytesC);
     double* C    = (double*)malloc(bytesC);
     double* A1   = (double*)malloc(bytesA);
     double* B1   = (double*)malloc(bytesB);
     assert(Cref && C && A1 && B1);
-    memcpy(Cref, C0, bytesC);
+    memcpy(Cref, g.C0, bytesC);
 
-    ab_dev_buffer_t dA = ab_dev_malloc(bytesA);
-    ab_dev_buffer_t dB = ab_dev_malloc(bytesB);
-    ab_dev_buffer_t dC = ab_dev_malloc(bytesC);
-    assert(dA && dB && dC);
-    ab_dev_memcpy_h2d(dA, 0, A, bytesA);
-    ab_dev_memcpy_h2d(dB, 0, B, bytesB);
-    ab_dev_memcpy_h2d(dC, 0, C0, bytesC);
-
-    ABStatus s;
-    if (cplx) {
+    if (cplx)
         cblas_zgemm(CblasColMajor, ref_trans(c.ta, true), ref_trans(c.tb, true),
                     c.m, c.n, c.k, &c.alpha,
-                    (double complex*)A + c.off, oA.ld,
-                    (double complex*)B + c.off, oB.ld,
+                    (double complex*)g.A + c.off, oA.ld,
+                    (double complex*)g.B + c.off, oB.ld,
                     &c.beta, (double complex*)Cref + c.off, oC.ld);
-        double alpha[2] = {creal(c.alpha), cimag(c.alpha)};
-        double beta[2]  = {creal(c.beta), cimag(c.beta)};
-        s = c.off ? ab_dev_zgemm_offset(c.ta, c.tb, c.m, c.n, c.k, alpha,
-                                        dA, c.off, oA.ld, dB, c.off, oB.ld,
-                                        beta, dC, c.off, oC.ld)
-                  : ab_dev_zgemm(c.ta, c.tb, c.m, c.n, c.k, alpha,
-                                 dA, oA.ld, dB, oB.ld, beta, dC, oC.ld);
-    } else {
+    else
         cblas_dgemm(CblasColMajor, ref_trans(c.ta, false), ref_trans(c.tb, false),
-                    c.m, c.n, c.k, creal(c.alpha), A + c.off, oA.ld,
-                    B + c.off, oB.ld, creal(c.beta), Cref + c.off, oC.ld);
-        s = c.off ? ab_dev_dgemm_offset(c.ta, c.tb, c.m, c.n, c.k, creal(c.alpha),
-                                        dA, c.off, oA.ld, dB, c.off, oB.ld,
-                                        creal(c.beta), dC, c.off, oC.ld)
-                  : ab_dev_dgemm(c.ta, c.tb, c.m, c.n, c.k, creal(c.alpha),
-                                 dA, oA.ld, dB, oB.ld, creal(c.beta), dC, oC.ld);
-    }
-    ab_dev_memcpy_d2h(C, dC, 0, bytesC);
-    ab_dev_memcpy_d2h(A1, dA, 0, bytesA);
-    ab_dev_memcpy_d2h(B1, dB, 0, bytesB);
+                    c.m, c.n, c.k, creal(c.alpha), g.A + c.off, oA.ld,
+                    g.B + c.off, oB.ld, creal(c.beta), Cref + c.off, oC.ld);
+    ABStatus s = gemm_data_run(&g, false, C, A1, B1);
 
     char label[96], msg[192];
     snprintf(label, sizeof(label), "%s %s%s %dx%dx%d pad %d off %zu%s",
@@ -320,11 +356,11 @@ static void check_gemm(bool cplx, GemmCase c) {
     CHECK(err <= GEMM_TOL, msg);  // false for NaN
 
     snprintf(msg, sizeof(msg), "%s: A, B and C outside its block unchanged", label);
-    CHECK(!memcmp(A1, A, bytesA) && !memcmp(B1, B, bytesB) &&
-          outside_block_unchanged(oC, C, C0), msg);
+    CHECK(!memcmp(A1, g.A, bytesA) && !memcmp(B1, g.B, bytesB) &&
+          outside_block_unchanged(oC, C, g.C0), msg);
 
-    ab_dev_free(dA); ab_dev_free(dB); ab_dev_free(dC);
-    free(A); free(B); free(C0); free(Cref); free(C); free(A1); free(B1);
+    gemm_data_free(&g);
+    free(Cref); free(C); free(A1); free(B1);
 }
 
 static const ABTranspose ALL_TRANS[] = {AB_NO_TRANS, AB_TRANS, AB_CONJ_TRANS};
@@ -550,9 +586,7 @@ static void check_imbalance(GemmCase c, ImagData d) {
     const double alpha = creal(c.alpha);
     Operand oA, oB, oC;
     gemm_operands(c, 2, &oA, &oB, &oC);
-    size_t bytesA = operand_elems(oA) * 2 * sizeof(double);
-    size_t bytesB = operand_elems(oB) * 2 * sizeof(double);
-    size_t bytesC = operand_elems(oC) * 2 * sizeof(double);
+    size_t bytesA = operand_bytes(oA), bytesB = operand_bytes(oB), bytesC = operand_bytes(oC);
 
     srand(11);
     double* A = make_operand(oA, false);
@@ -633,6 +667,186 @@ static void test_zgemm_imbalance(void) {
                     IMAG_LINES);
 }
 
+// The GEMMs take their ABMatrix handles from the staged path's pool
+// (gpu_stage.h), whose buffers hold what their last call left. A call
+// repeated must leave the pool as it was, and each call must give the bits
+// of its first run again after the pool served NaN data (which a beta = 0
+// call must not read), larger and smaller shapes, and from threads calling
+// at once.
+enum { POOL_CALLS = 4, POOL_THREADS = 4 };
+
+typedef struct { GemmData g; double* first; } PoolCall;    // a call and its first C
+
+// p's call again: its first bits?
+static bool pool_call_same(const PoolCall* p) {
+    size_t bytes = operand_bytes(p->g.oC);
+    double* C = (double*)malloc(bytes);
+    assert(C);
+    bool same = gemm_data_run(&p->g, false, C, NULL, NULL) == AB_OK &&
+                !memcmp(C, p->first, bytes);
+    free(C);
+    return same;
+}
+
+typedef struct { const PoolCall* calls; int differ; } PoolThread;
+
+static void* pool_thread(void* arg) {
+    PoolThread* t = (PoolThread*)arg;
+    for (int r = 0; r < 2; r++)
+        for (int i = 0; i < POOL_CALLS; i++) t->differ += !pool_call_same(&t->calls[i]);
+    return NULL;
+}
+
+static void test_gemm_pool(void) {
+    printf("[GEMM-11] device GEMM handles from the staging pool\n");
+    // QE's patterns: zgemm 'C','N' and dgemm 'T','N' with beta = 0, and
+    // 'N','N' with general alpha and beta.
+    PoolCall p[POOL_CALLS];
+    gemm_data_init(&p[0].g, true, (GemmCase){AB_CONJ_TRANS, AB_NO_TRANS, 150, 150, 2000, 4, 0,
+                                             1.0, 0.0});
+    gemm_data_init(&p[1].g, true, (GemmCase){AB_NO_TRANS, AB_NO_TRANS, 2000, 150, 150, 3, 5,
+                                             CMPLX(1.25, -0.5), CMPLX(-0.75, 0.25)});
+    gemm_data_init(&p[2].g, false, (GemmCase){AB_TRANS, AB_NO_TRANS, 150, 150, 4000, 2, 0,
+                                              1.0, 0.0});
+    gemm_data_init(&p[3].g, false, (GemmCase){AB_NO_TRANS, AB_NO_TRANS, 4000, 150, 150, 1, 3,
+                                              1.25, -0.75});
+    for (int i = 0; i < POOL_CALLS; i++) {
+        p[i].first = (double*)malloc(operand_bytes(p[i].g.oC));
+        assert(p[i].first);
+    }
+
+    int bad = gemm_data_run(&p[0].g, false, p[0].first, NULL, NULL) != AB_OK;
+    size_t pool = ab_internal_stage_pool_bytes();
+    CHECK(!bad && pool > 0, "zgemm CN 150x150x2000: the pool holds buffers after it");
+    CHECK(pool_call_same(&p[0]) && ab_internal_stage_pool_bytes() == pool,
+          "zgemm CN repeated: its first bits, the pool as it was");
+
+    // A call repeated gets the same buffers in the same roles, so C^T's holds
+    // the NaN result of the call before.
+    bad = 0;
+    for (int i = 1; i < POOL_CALLS; i++)
+        bad += gemm_data_run(&p[i].g, false, p[i].first, NULL, NULL) != AB_OK;
+    for (int i = 0; i < POOL_CALLS; i += 2)
+        bad += gemm_data_run(&p[i].g, true, NULL, NULL, NULL) != AB_OK || !pool_call_same(&p[i]);
+    CHECK(!bad, "zgemm CN and dgemm TN (beta 0) right after NaN data: their first bits");
+
+    // A larger and a smaller shape, each against cblas
+    check_gemm(true, (GemmCase){AB_NO_TRANS, AB_CONJ_TRANS, 1024, 512, 768, 0, 0, 1.0, 0.0});
+    check_gemm(false, (GemmCase){AB_NO_TRANS, AB_TRANS, 40, 30, 50, 1, 0, 1.0, 1.0});
+    bad = 0;
+    for (int i = 0; i < POOL_CALLS; i++) bad += !pool_call_same(&p[i]);
+    CHECK(!bad, "zgemm CN, NN and dgemm TN, NN after larger and smaller shapes: "
+                "their first bits");
+
+    PoolThread t[POOL_THREADS];
+    pthread_t th[POOL_THREADS];
+    for (int i = 0; i < POOL_THREADS; i++) {
+        t[i] = (PoolThread){p, 0};
+        pthread_create(&th[i], NULL, pool_thread, &t[i]);
+    }
+    bad = 0;
+    for (int i = 0; i < POOL_THREADS; i++) {
+        pthread_join(th[i], NULL);
+        bad += t[i].differ;
+    }
+    CHECK(!bad, "4 threads at once, each call twice: their first bits");
+
+    for (int i = 0; i < POOL_CALLS; i++) {
+        gemm_data_free(&p[i].g);
+        free(p[i].first);
+    }
+}
+
+// ---- GEMM on registered memory ----------------------------------------------
+//
+// ab_dev_register() wraps the pages around the caller's memory and keeps the
+// distance to it as the buffer's base, which every host read or write of the
+// buffer must add (dev_data() in src/device_api.m). Each operand here starts
+// `misalign` bytes past a page, with whole pages of sentinels on both sides, so
+// that a pointer missing the base lands in a sentinel or leaves C wrong. The
+// result must be bitwise that of the same call on ab_dev_malloc() buffers,
+// which check_gemm holds to cblas.
+
+#define REG_PAD 4096                // sentinel doubles on each side: 2 pages of 16 KB
+#define REG_SENTINEL (-123.456)
+
+// bytes of x at `misalign` bytes past a page, between sentinels; *raw is to free().
+static double* reg_block(const double* x, size_t bytes, size_t misalign, void** raw) {
+    size_t n = bytes / sizeof(double);
+    int rc = posix_memalign(raw, 16384, (n + 2 * REG_PAD) * sizeof(double) + misalign);
+    assert(rc == 0);
+    (void)rc;
+    double* p = (double*)((char*)*raw + misalign);
+    for (size_t i = 0; i < n + 2 * REG_PAD; i++) p[i] = REG_SENTINEL;
+    memcpy(p + REG_PAD, x, bytes);
+    return p + REG_PAD;
+}
+
+static bool reg_sentinels_intact(const double* x, size_t bytes) {
+    size_t n = bytes / sizeof(double);
+    for (size_t i = 0; i < REG_PAD; i++)
+        if (x[n + i] != REG_SENTINEL || (x - REG_PAD)[i] != REG_SENTINEL) return false;
+    return true;
+}
+
+// Whether g's call on registered memory gives the bits of the call on allocated
+// buffers, with A, B and every sentinel left alone.
+static bool reg_call_same(const GemmData* g, size_t misalign) {
+    size_t bA = operand_bytes(g->oA), bB = operand_bytes(g->oB), bC = operand_bytes(g->oC);
+    double* ref = (double*)malloc(bC);
+    assert(ref);
+    bool ok = gemm_data_run(g, false, ref, NULL, NULL) == AB_OK;
+    void *ra, *rb, *rc;
+    double* A = reg_block(g->A, bA, misalign, &ra);
+    double* B = reg_block(g->B, bB, misalign, &rb);
+    double* C = reg_block(g->C0, bC, misalign, &rc);
+    ab_dev_buffer_t dA = ab_dev_register(A, bA), dB = ab_dev_register(B, bB),
+                    dC = ab_dev_register(C, bC);
+    ok = ok && dA && dB && dC && gemm_data_call(g, dA, dB, dC) == AB_OK;
+    ab_dev_free(dA); ab_dev_free(dB); ab_dev_free(dC);
+    ok = ok && !memcmp(C, ref, bC) && !memcmp(A, g->A, bA) && !memcmp(B, g->B, bB) &&
+         reg_sentinels_intact(A, bA) && reg_sentinels_intact(B, bB) && reg_sentinels_intact(C, bC);
+    free(ra); free(rb); free(rc); free(ref);
+    return ok;
+}
+
+static void test_gemm_registered(void) {
+    printf("[GEMM-12] device GEMM on registered, non-page-aligned memory\n");
+    static const size_t MISALIGN[] = {8, 24, 4088, 12344};
+    static const struct { const char* name; double complex alpha, beta; } SC[] = {
+        {"alpha 1, beta 0", 1.0, 0.0},
+        {"real alpha and beta", 0.75, -2.0},
+        {"complex alpha and beta", CMPLX(0.3, -1.1), CMPLX(0.25, 0.5)},
+    };
+    int calls = 0;
+    for (int z = 0; z < 2; z++)
+        for (int s = 0; s < 2 + z; s++) {           // a real GEMM has no complex scalars
+            int bad = 0, n = 0;
+            for (int i = 0; i < 3; i++)
+                for (int j = 0; j < 3; j++)
+                    for (size_t off = 0; off <= 13; off += 13) {
+                        GemmData g;
+                        gemm_data_init(&g, z, (GemmCase){ALL_TRANS[i], ALL_TRANS[j], 97, 65, 129, 7,
+                                                         off, SC[s].alpha, SC[s].beta});
+                        bad += !reg_call_same(&g, MISALIGN[calls++ % 4]);
+                        n++;
+                        gemm_data_free(&g);
+                    }
+            char msg[128];
+            snprintf(msg, sizeof msg, "%s, %s: %d calls, every trans pair, with and without offsets",
+                     z ? "zgemm" : "dgemm", SC[s].name, n);
+            CHECK(!bad, msg);
+        }
+    // A tall-skinny C, whose kernel and epilogue the shape above does not reach
+    for (int z = 0; z < 2; z++) {
+        GemmData g;
+        gemm_data_init(&g, z, (GemmCase){AB_NO_TRANS, AB_NO_TRANS, 1024, 40, 4608, 7, 13,
+                                         SC[1 + z].alpha, SC[1 + z].beta});
+        CHECK(reg_call_same(&g, MISALIGN[z]), z ? "zgemm 1024x40x4608" : "dgemm 1024x40x4608");
+        gemm_data_free(&g);
+    }
+}
+
 // Test element-wise operations
 static void test_elementwise(void) {
     printf("[BLAS-3] element-wise ops\n");
@@ -692,6 +906,8 @@ static const TestCase TESTS[] = {
     {"test_gemm_arg_errors",          test_gemm_arg_errors},
     {"test_gemm_matches_host_api",    test_gemm_matches_host_api},
     {"test_zgemm_imbalance",          test_zgemm_imbalance},
+    {"test_gemm_pool",                test_gemm_pool},
+    {"test_gemm_registered",          test_gemm_registered},
     {"test_elementwise",              test_elementwise},
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);

@@ -393,9 +393,9 @@ static void call_gemm(Problem *P) {
 // a DGEMM only with alpha and beta in their window. There the
 // exponent-range guard (ab_internal.h) certifies the product of the lines
 // as scaled (and a DGEMM's C, when read, as uploaded: scaled by its row's
-// and column's scales). Then no Inf or NaN may reach the GPU epilogue: a
-// ZGEMM's C with beta = 1 must be finite. The host path makes every other
-// call: on the GPU with such scalars or C's Inf or NaN, or on Accelerate.
+// and column's scales). Then no Inf or NaN may reach an epilogue: a ZGEMM's C
+// with beta != 0 must be finite. The host path makes every other call: on the
+// GPU with such scalars, or on Accelerate.
 static bool expected_staged(const Problem *P) {
     const Case *c = P->c;
     bool z = c->routine == 'z';
@@ -421,7 +421,7 @@ static bool expected_staged(const Problem *P) {
                 double v = P->C0[((size_t)j * P->lc.ld + i) * w + p];
                 AB_RANGE_ADD(ok && !z ? ab_scale2(v, -(sa.e[i] + sb.e[j])) : v, r.max, r.min);
             }
-    if (ok && case_c_in(c))
+    if (ok && be != 0.0)
         ok = z ? !ab_range_nonfinite(r)
                : ab_range_guard_c(&sa, &sb, r, ilogb(creal(be)), P->C0, P->lc.ld, 0);
     ab_line_stats_free(&sa);
@@ -574,7 +574,7 @@ static uint64_t native_hash(const NativeShape *sh, NativeVia via) {
         ab_batch_destroy(b);
     } else {
         st = ab_internal_zgemm(AB_NO_TRANS, AB_NO_TRANS, m[0], m[1], m[2], m[3], m[4], m[5],
-                               via == VIA_4M ? AB_ZGEMM_4M : AB_ZGEMM_3M);
+                               via == VIA_4M ? AB_ZGEMM_4M : AB_ZGEMM_3M, AB_PRODUCTS_CLASSICAL);
     }
     return native_result(sh, m, st == AB_OK);
 }

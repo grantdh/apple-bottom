@@ -4,8 +4,8 @@
 GPU path, and times the split against each engine alone. Results from an M2 Max are in
 [`benchmarks/results/2026-10-28-415cb5d-hybrid-split`](../results/2026-10-28-415cb5d-hybrid-split/README.md).
 
-The split is made here, in user code: `dgemm_` and `zgemm_` do not split a call in 1.5.0. A split
-inside the library is planned for 1.6.0.
+The split is made here, in user code: `dgemm_` and `zgemm_` make each call on one engine. A split
+inside the library is on the [roadmap](../../docs/ROADMAP.md#next).
 
 ## What it does
 

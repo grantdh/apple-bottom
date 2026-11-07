@@ -55,6 +55,7 @@
 #include "apple_bottom.h"
 #include "test_blas_check.h"
 #include "test_dot2.h"
+#include "test_kernels.h"
 #include "test_registry.h"
 #include "test_spawn.h"
 #include <Accelerate/Accelerate.h>
@@ -166,6 +167,9 @@ typedef enum {
     RANGE_C_TINY,       // row 0 of op(A) zero, the other rows of C0 x 2^-100: they only round
                         // away beside the products (the GPU must certify it)
     RANGE_C_HUGE,       // C0 x 2^135, beta = 2^-20: beta C0 fits FP32, C0 does not (Accelerate)
+    RANGE_C_INF,        // C0_00's real part +Inf, its imaginary part finite: C as cblas gives
+                        // it, not (NaN, NaN) from the epilogue's arithmetic (Accelerate)
+    RANGE_C_NAN,        // the same with a NaN
 } RangeData;
 
 static const char *const RANGE_TAG[] = {
@@ -174,7 +178,8 @@ static const char *const RANGE_TAG[] = {
     [RANGE_INF] = "inf", [RANGE_ALPHA_TINY] = "alpha-tiny", [RANGE_ALPHA_HUGE] = "alpha-huge",
     [RANGE_EXACT] = "exact", [RANGE_ROWS_LOW] = "rows-low", [RANGE_COLS_HIGH] = "cols-high",
     [RANGE_UNIFORM_EXACT] = "uniform-exact", [RANGE_C_ZERO_ROW] = "c-zero-row",
-    [RANGE_C_TINY] = "c-tiny", [RANGE_C_HUGE] = "c-huge",
+    [RANGE_C_TINY] = "c-tiny", [RANGE_C_HUGE] = "c-huge", [RANGE_C_INF] = "c-inf",
+    [RANGE_C_NAN] = "c-nan",
 };
 
 typedef struct {
@@ -223,6 +228,7 @@ typedef struct {
     RangeData data;                     // KIND_RANGE only
     ImagData imag;                      // KIND_IMAG only
     const void *sym;                    // OP_SYMBOL only
+    const char *kernel;                 // gen_native: what every GEMM dispatch runs (or its _pf)
 } AbiCase;
 
 static AbiCase CASES[MAX_CASES];
@@ -337,8 +343,9 @@ static void gen_blas(const Suite *s) {
     add_std(s, 'N', 'N', OLD_MAX_DIM + 1, 48, 48, 0, SC_GEN);       // past the v1.3 limit
 }
 
-// AB_MODE=auto with the built-in table (dispatch_table.h, from `make
-// calibrate`). Through every BLAS-ABI entry point, calls the GPU path was
+// AB_MODE=auto with this chip's built-in table (dispatch_table.h, generated
+// from benchmarks/calibration/; none on an uncalibrated chip, where the shapes
+// stay on Accelerate either way). Through every BLAS-ABI entry point, calls the GPU path was
 // measured slower on stay on Accelerate: the QE cegterg-like call of the
 // gen_blas suites, which v1.3's FLOP thresholds sent to the GPU, and QE si64
 // PAW DGEMMs and Davidson ZGEMMs (calibrate_summary.csv; test_dispatch
@@ -609,6 +616,14 @@ static void gen_range(const Suite *s) {
     };
     for (size_t i = 0; i < TEST_REGISTRY_SIZE(R); i++)
         add_range(s, R[i].op, R[i].ta, R[i].tb, R[i].data, R[i].route);
+    // A ZGEMM reading a NaN or Inf in C: the staged path's GPU epilogue
+    // (alpha = beta = 1; the host path decides) and its host epilogue (general
+    // alpha and beta; decided before the GPU runs).
+    for (RangeData d = RANGE_C_INF; d <= RANGE_C_NAN; d++) {
+        AbiCase *c = add_range(s, OP_ZGEMM_SYM, 'N', 'N', d, ROUTE_CPU);
+        c->alpha = c->beta = 1.0;
+        add_range(s, OP_ZGEMM_SYM, 'C', 'N', d, ROUTE_CPU);
+    }
 }
 
 // Gauss-3M's imaginary part under Re/Im imbalance (audit K-P1-2): zgemm_
@@ -631,30 +646,53 @@ static void gen_imbalance(const Suite *s) {
     }
 }
 
-static void add_native(Op op, int M, int N, int K) {
+static void add_native(Op op, int M, int N, int K, const char *kernel) {
     AbiCase *c = new_case();
     snprintf(c->name, sizeof c->name, "%s/%dx%dx%d", OP_NAME[op], M, N, K);
     c->op = op; c->M = M; c->N = N; c->K = K;
     c->alpha = SCALARS[SC_GEN].alpha; c->beta = SCALARS[SC_GEN].beta;   // ab_dgemm_scaled only
+    c->kernel = kernel;
 }
 
 // Native ABMatrix GEMMs (row-major) on tile grids that are powers of two but
-// neither square nor 2:1 wide (K-P0-1 regressions; 2048x128 uses the 128x16
-// tall-skinny tiles where the entry point routes M >= 4N there, 512x256 and
-// 1024x64 the 32x32 ones).
-// 256x512 (grid 8x4) is a control. The suite runs under MTL_DEBUG_LAYER=1,
-// which also catches unbound kernel buffers (K-P1-3).
+// neither square nor 2:1 wide (K-P0-1 regressions); 256x512, a 2:1 grid, is a
+// control. Each call must run the kernel its shape names for its entry point
+// (run_native), and the shapes must name every kernel in KERNEL: ab_dgemm and
+// ab_dgemm_async dispatch dd_dgemm or dd_dgemm_narrow, ab_dgemm_scaled a
+// dd_dgemm_ab kernel, and ab_zgemm (Gauss-3M's products in a concurrent
+// encoder) and ab_batch_dgemm the scaled kernels with alpha 1, beta 0 where
+// M >= 4N. The suite runs under MTL_DEBUG_LAYER=1, which also catches unbound
+// kernel buffers (K-P1-3).
 static void gen_native(const Suite *s) {
     (void)s;
-    static const int SHAPES[][2] = {
-        {512, 256}, {256, 1024}, {1024, 256}, {1024, 64}, {2048, 128}, {256, 512},
-    };
     static const Op OPS[] = {
         OP_DGEMM, OP_DGEMM_SCALED, OP_ZGEMM, OP_BATCH_DGEMM, OP_DGEMM_ASYNC,
     };
+    enum { K64, K32, AB64, AB32, ABTS };
+    static const char *const KERNEL[] = {
+        [K64] = "dd_dgemm", [K32] = "dd_dgemm_narrow", [AB64] = "dd_dgemm_ab",
+        [AB32] = "dd_dgemm_ab_narrow", [ABTS] = "dd_dgemm_ab_ts",
+    };
+    // Each shape's kernel for each of OPS
+    static const struct { int M, N, kernel[TEST_REGISTRY_SIZE(OPS)]; } SHAPES[] = {
+        {512,  256,  {K32, AB32, K32,  K32,  K32}},
+        {256,  1024, {K64, AB64, K32,  K64,  K64}},
+        {1024, 256,  {K64, AB32, AB32, AB32, K64}},
+        {1024, 64,   {K32, AB32, AB32, AB32, K32}},
+        {8192, 256,  {K64, ABTS, ABTS, ABTS, K64}},
+        {256,  512,  {K32, AB32, K32,  K32,  K32}},
+    };
+    unsigned named = 0;
     for (size_t o = 0; o < TEST_REGISTRY_SIZE(OPS); o++)
-        for (size_t i = 0; i < TEST_REGISTRY_SIZE(SHAPES); i++)
-            add_native(OPS[o], SHAPES[i][0], SHAPES[i][1], 64);
+        for (size_t i = 0; i < TEST_REGISTRY_SIZE(SHAPES); i++) {
+            add_native(OPS[o], SHAPES[i].M, SHAPES[i].N, 64, KERNEL[SHAPES[i].kernel[o]]);
+            named |= 1u << SHAPES[i].kernel[o];
+        }
+    for (size_t k = 0; k < TEST_REGISTRY_SIZE(KERNEL); k++)
+        if (!(named & 1u << k)) {   // a re-pinned case must not drop a kernel's coverage
+            fprintf(stderr, "test_blas_abi: no gen_native case runs %s\n", KERNEL[k]);
+            abort();
+        }
 }
 
 static void add_symbol(const char *sym, const void *addr) {
@@ -1120,6 +1158,20 @@ static bool run_native_complex(const AbiCase *c, char *detail, size_t n) {
     return st == AB_OK && err <= TOL;
 }
 
+// A native case (gen_native) by run, which must also have run only c->kernel's
+// GEMM dispatches; its detail gets the kernels that ran.
+static bool run_native(const AbiCase *c, bool (*run)(const AbiCase *, char *, size_t),
+                       char *detail, size_t n) {
+    KernelCounts before = kernel_counts();
+    bool ok = run(c, detail, n);
+    KernelCounts ran = kernel_counts_since(&before);
+    size_t len = strlen(detail);
+    char kernels[256];
+    bool on_kernel = kernel_check(&ran, c->kernel, kernels, sizeof kernels);
+    snprintf(detail + len, n - len, " %s", kernels);
+    return ok && on_kernel;
+}
+
 // The address the static linker bound for this executable is what a Fortran
 // call site gets; it must lie inside libapplebottom.
 static bool run_symbol(const AbiCase *c, char *detail, size_t n) {
@@ -1553,6 +1605,8 @@ static void range_apply(Call *k, RangeData d, bool base) {
                 range_set(&C0[((size_t)j * k->lc.ld + i) * w + p], base,
                           range_c(d, i, j, c->M, c->N));
     if (!base && d == RANGE_INF) A[op_index(c->ta, k->la, 0, 0) * w] = INFINITY;
+    if (!base && d == RANGE_C_INF) C0[0] = INFINITY;
+    if (!base && d == RANGE_C_NAN) C0[0] = NAN;
 }
 
 // True if x is finite where r is, and else non-finite as r is: the same
@@ -1904,7 +1958,8 @@ static bool parse_report_line(const char *line, const char *build, ProcessReport
         const char *rest = line + off;
         snprintf(head, sizeof head, "%s AB_MODE=gpu", build);
         if (!p) return false;
-        if (!strcmp(rest, head)) {
+        // The header line goes on with the chip and the routing table: chip="..." gpu_cores=N table=...
+        if (!strncmp(rest, head, strlen(head)) && (rest[strlen(head)] == '\0' || rest[strlen(head)] == ' ')) {
             p->headers++;
             return true;
         }
@@ -2113,13 +2168,13 @@ static bool run_case(int idx, char *detail, size_t n) {
     case OP_ZGEMM_BLAS: case OP_ZGEMM_F: case OP_ZGEMM_SYM:
         return run_blas_complex(c, detail, n);
     case OP_ZGEMM:
-        return run_native_complex(c, detail, n);
+        return run_native(c, run_native_complex, detail, n);
     case OP_SYMBOL:
         return run_symbol(c, detail, n);
     case OP_REPORT:
         return run_report(c, detail, n);
     default:
-        return run_native_real(c, detail, n);
+        return run_native(c, run_native_real, detail, n);
     }
 }
 

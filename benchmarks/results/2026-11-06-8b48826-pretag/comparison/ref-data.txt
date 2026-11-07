@@ -1,0 +1,59 @@
+suite  label        rtn     cases   gpu cases>bound max err/bound   maxU2 Re   maxU2 Im  sem-cases nan2fin fin2nan inf2x fin2inf
+data   new-auto     dgemm     456     0          12            44          0          0         24       0       0 79008       0 
+data   new-auto     zgemm     748     0          12          22.3       4.05       3.62        100      40       0 56602       0 
+data   new-cpu      dgemm     456     0          12            44          0          0         24       0       0 79008       0 
+data   new-cpu      zgemm     748     0          12          22.3       4.05       3.62        100      40       0 56602       0 
+data   new-gpu      dgemm     456   288         112      2.25e+15          0          0         24       0       0 79028       0 
+data   new-gpu      zgemm     748   578          25      1.89e+12   2.32e+14   2.37e+14        108      40       0 91162       0 
+dev    new-gpu      devd      320     0          59          7.93          0          0          0       0       0     0       0 
+dev    new-gpu      devz      600     0         110          4.33         64        333          0       0       0     0       0 
+
+== bound violations by label, routine, data class, path (cases; worst ratio)
+   ('new-auto', 'dgemm', 'mix16', 'cpu', 'data') 4 24.3
+   ('new-auto', 'dgemm', 'mix40', 'cpu', 'data') 4 44
+   ('new-auto', 'dgemm', 'tiny1042', 'cpu', 'data') 4 35.1
+   ('new-auto', 'zgemm', 'mix16', 'cpu', 'data') 4 3.82
+   ('new-auto', 'zgemm', 'mix40', 'cpu', 'data') 4 22.3
+   ('new-auto', 'zgemm', 'tiny1042', 'cpu', 'data') 4 10.5
+   ('new-cpu', 'dgemm', 'mix16', 'cpu', 'data') 4 24.3
+   ('new-cpu', 'dgemm', 'mix40', 'cpu', 'data') 4 44
+   ('new-cpu', 'dgemm', 'tiny1042', 'cpu', 'data') 4 35.1
+   ('new-cpu', 'zgemm', 'mix16', 'cpu', 'data') 4 3.82
+   ('new-cpu', 'zgemm', 'mix40', 'cpu', 'data') 4 22.3
+   ('new-cpu', 'zgemm', 'tiny1042', 'cpu', 'data') 4 10.5
+   ('new-gpu', 'devd', 'mix16', 'none', 'dev') 40 7.93
+   ('new-gpu', 'devd', 'spread', 'none', 'dev') 19 6.26
+   ('new-gpu', 'devz', 'mix16', 'none', 'dev') 74 4.33
+   ('new-gpu', 'devz', 'spread', 'none', 'dev') 36 3.23
+   ('new-gpu', 'dgemm', 'mix16', 'gpu', 'data') 12 7.65
+   ('new-gpu', 'dgemm', 'mix40', 'cpu', 'data') 4 44
+   ('new-gpu', 'dgemm', 'spread', 'gpu', 'data') 4 5.08
+   ('new-gpu', 'dgemm', 'tiny1042', 'cpu', 'data') 4 35.1
+   ('new-gpu', 'dgemm', 'tiny1042', 'gpu', 'data') 12 1e+13
+   ('new-gpu', 'dgemm', 'tinyc100', 'gpu', 'data') 24 4.19e+06
+   ('new-gpu', 'dgemm', 'tinyc130', 'gpu', 'data') 24 2.25e+15
+   ('new-gpu', 'dgemm', 'tinyc98', 'gpu', 'data') 24 4.19e+06
+   ('new-gpu', 'dgemm', 'zeros', 'gpu', 'data') 4 3.81
+   ('new-gpu', 'zgemm', 'tiny1042', 'gpu', 'data') 25 1.89e+12
+
+== IEEE mismatches by label, routine, class, path (cases: nan2fin fin2nan inf2x fin2inf)
+   ('new-auto', 'dgemm', 'mix300', 'cpu', 'data') [24, 0, 0, 79008, 0]
+   ('new-auto', 'zgemm', 'infA', 'cpu', 'data') [20, 0, 0, 4960, 0]
+   ('new-auto', 'zgemm', 'infC', 'cpu', 'data') [10, 20, 0, 0, 0]
+   ('new-auto', 'zgemm', 'mix300', 'cpu', 'data') [26, 0, 0, 44646, 0]
+   ('new-auto', 'zgemm', 'nanC', 'cpu', 'data') [10, 20, 0, 0, 0]
+   ('new-auto', 'zgemm', 'ninfB', 'cpu', 'data') [34, 0, 0, 6996, 0]
+   ('new-cpu', 'dgemm', 'mix300', 'cpu', 'data') [24, 0, 0, 79008, 0]
+   ('new-cpu', 'zgemm', 'infA', 'cpu', 'data') [20, 0, 0, 4960, 0]
+   ('new-cpu', 'zgemm', 'infC', 'cpu', 'data') [10, 20, 0, 0, 0]
+   ('new-cpu', 'zgemm', 'mix300', 'cpu', 'data') [26, 0, 0, 44646, 0]
+   ('new-cpu', 'zgemm', 'nanC', 'cpu', 'data') [10, 20, 0, 0, 0]
+   ('new-cpu', 'zgemm', 'ninfB', 'cpu', 'data') [34, 0, 0, 6996, 0]
+   ('new-gpu', 'dgemm', 'mix300', 'cpu', 'data') [12, 0, 0, 39504, 0]
+   ('new-gpu', 'dgemm', 'mix300', 'gpu', 'data') [12, 0, 0, 39524, 0]
+   ('new-gpu', 'zgemm', 'infA', 'cpu', 'data') [20, 0, 0, 4960, 0]
+   ('new-gpu', 'zgemm', 'infC', 'cpu', 'data') [10, 20, 0, 0, 0]
+   ('new-gpu', 'zgemm', 'mix300', 'gpu', 'data') [34, 0, 0, 79206, 0]
+   ('new-gpu', 'zgemm', 'nanC', 'cpu', 'data') [10, 20, 0, 0, 0]
+   ('new-gpu', 'zgemm', 'ninfB', 'cpu', 'data') [34, 0, 0, 6996, 0]
+

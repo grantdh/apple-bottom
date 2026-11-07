@@ -23,11 +23,14 @@
 
 // Thread-local record of the path the last BLAS-ABI call on this thread
 // actually took, for bench harnesses and the profiler (prof_end). Only the
-// two places that produce C write it: "cpu" in ab_internal_*gemm_cpu, "gpu"
-// once the GPU result is in C (H-P1-2). Routing (dispatch.c) never touches
+// places that produce the result write it: "cpu" in ab_internal_*gemm_cpu,
+// "gpu" once the GPU result is in C (H-P1-2), and the BLAS-2 entry points
+// through ab_internal_set_last_path(). Routing (dispatch.c) never touches
 // it. Zero runtime cost.
 static __thread const char *_ab_last_path = "none";
 const char* ab_get_last_dispatch_path(void) { return _ab_last_path; }
+
+void ab_internal_set_last_path(bool gpu) { _ab_last_path = gpu ? "gpu" : "cpu"; }
 
 // =============================================================================
 // Host-side helpers shared by the BLAS-ABI entry points
@@ -517,10 +520,7 @@ static CallProf *prof_begin(CallProf *p) {
 }
 
 static void prof_stage(CallProf *p, ab_prof_stage_t s) {
-    if (!p) return;
-    uint64_t now = ab_prof_now_ticks();
-    p->stage_ns[s] += ab_prof_ticks_to_ns(now - p->mark);
-    p->mark = now;
+    if (p) ab_prof_stage_mark(p->stage_ns, &p->mark, s);
 }
 
 // The kernel stage (ab_prof_take_kernel_ns); the rest of the kernel call is
@@ -545,21 +545,7 @@ static void prof_end(CallProf *p, const char *routine, int M, int N, int K) {
     if (p->trace)
         ab_trace_record(&p->call, ab_prof_ticks_to_ns(p->t0), ns, gpu ? p->stage_ns : NULL,
                         p->fallback, p->staged);
-    if (!gpu || !ab_prof_verbose()) return;
-    // One write per line, so lines from concurrent callers do not interleave.
-    char line[512];
-    size_t n = (size_t)snprintf(line, sizeof line, "AB_PROFILE %s M=%d N=%d K=%d ", routine, M, N, K);
-    uint64_t named = 0;
-    for (int s = 0; s < AB_PROF_STAGE_COUNT && n < sizeof line; s++) {
-        named += p->stage_ns[s];
-        n += (size_t)snprintf(line + n, sizeof line - n, " %s=%.3f", ab_prof_stage_names[s],
-                              p->stage_ns[s] / 1e6);
-    }
-    if (n < sizeof line)
-        snprintf(line + n, sizeof line - n, " other=%.3f  total=%.3f ms  staged=%s\n",
-                 (ns > named ? ns - named : 0) / 1e6, ns / 1e6,
-                 p->staged > AB_PROF_STAGED_NONE ? ab_prof_staged_names[p->staged] : "");
-    fputs(line, stderr);
+    if (gpu) ab_prof_print_gpu_call(routine, M, N, K, ns, p->stage_ns, p->staged);
 }
 
 // A GPU-routed call that has to run on cblas instead. The path record says
@@ -569,9 +555,7 @@ static void note_gpu_fallback(CallProf *p, const char *routine, int M, int N, in
                               ab_prof_fallback_t reason, const char *why) {
     if (!p) return;
     p->fallback = reason;
-    if (ab_prof_verbose())
-        fprintf(stderr, "AB_PROFILE %s M=%d N=%d K=%d  GPU fallback to cblas: %s\n",
-                routine, M, N, K, why);
+    ab_prof_print_fallback(routine, M, N, K, why);
 }
 
 // FNV-1a over the 64-bit words of the referenced elements of a stored
@@ -693,6 +677,21 @@ static void zgemm_epilogue(int M, int N, double complex alpha, double complex be
             C[dst] = result_r + I * result_i;
         }
     }
+}
+
+// Whether a ZGEMM with this beta reads a NaN or Inf in C's M x N block. Such a
+// call runs on Accelerate, as a DGEMM's does (ab_range_guard_c_stage1): the
+// epilogue's C[dst] = re + I * im, which the GPU's follows bit for bit, turns
+// (Inf, y) into (NaN, NaN).
+static bool zgemm_reads_nonfinite_c(double complex beta, const double complex *C, int ldC, int M,
+                                    int N) {
+    if (beta == 0.0) return false;
+    uint32_t mx = 0;
+    for (size_t j = 0; j < (size_t)N; j++) {
+        const double *x = (const double *)(C + j * ldC);
+        for (size_t i = 0; i < 2 * (size_t)M; i++) AB_HIWORD_MAX(ab_abs_hiword(x[i]), mx);
+    }
+    return mx >= AB_HIWORD_NONFINITE;
 }
 
 // =============================================================================
@@ -933,7 +932,11 @@ static bool zgemm_staged(CallProf *p, enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSP
         .c_in = gpu_epi && beta1, .split = !gpu_epi,
         .alpha = {creal(alpha), cimag(alpha)}, .beta = {creal(beta), cimag(beta)},
     };
-    ab_prof_staged_t why = run_staged(p, &g);
+    // C as the host epilogue would read it. The GPU epilogue flags a NaN or Inf
+    // itself, and that call comes back to the host path's check.
+    bool c_nonfinite = !gpu_epi && zgemm_reads_nonfinite_c(beta, C, ldC, M, N);
+    prof_stage(p, AB_PROF_STAGE_PACK);
+    ab_prof_staged_t why = c_nonfinite ? AB_PROF_STAGED_RANGE : run_staged(p, &g);
     // The guard's verdict on the same statistics is the host path's too.
     if (why == AB_PROF_STAGED_RANGE) {
         note_gpu_fallback(p, "zgemm", M, N, K, AB_PROF_FB_RANGE, AB_RANGE_WHY);
@@ -1049,7 +1052,8 @@ static void zgemm_blas(
 
     const ab_op_view_t va = {(const double*)A, ldA, M, K, ta != CblasNoTrans, true};
     const ab_op_view_t vb = {(const double*)B, ldB, K, N, tb != CblasNoTrans, true};
-    if (!ab_range_guard(K, &sa, &sb, 0, &va, &vb)) {
+    if (!ab_range_guard(K, &sa, &sb, 0, &va, &vb) ||
+        zgemm_reads_nonfinite_c(beta, C, ldC, M, N)) {
         fallback = AB_PROF_FB_RANGE;
         goto cleanup;
     }
@@ -1057,9 +1061,10 @@ static void zgemm_blas(
 
     // Compute C = op(A) * op(B), by 4M where some row of op(A) and column of
     // op(B) are imbalanced enough to cost Gauss-3M's imaginary part its
-    // accuracy (ab_internal.h).
+    // accuracy, by classical products where a line has a scale of its own
+    // (ab_internal.h).
     if (ab_internal_zgemm(AB_NO_TRANS, AB_NO_TRANS, mAr, mAi, mBr, mBi, mCr, mCi,
-                          ab_lines_method(&sa, &sb)) != AB_OK)
+                          ab_lines_method(&sa, &sb), ab_lines_products(ra, cb)) != AB_OK)
         goto cleanup;
     prof_kernel(p);
 
@@ -1203,8 +1208,10 @@ static void dgemm_blas(
         prof_stage(p, AB_PROF_STAGE_PACK);
     }
 
-    // Compute C = alpha*A*B + beta*C on GPU
-    if (ab_dgemm_scaled(alpha_s, mA, mB, beta_s, mC) != AB_OK) goto cleanup;
+    // Compute C = alpha*A*B + beta*C on GPU, by classical products where a
+    // line has a scale of its own (ab_internal.h)
+    if (ab_internal_dgemm_scaled(alpha_s, mA, mB, beta_s, mC, ab_lines_products(ra, cb)) != AB_OK)
+        goto cleanup;
     prof_kernel(p);
 
     // Download result (row-major to column-major); bit for bit

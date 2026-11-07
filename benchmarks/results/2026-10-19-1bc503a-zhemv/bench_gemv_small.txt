@@ -1,0 +1,73 @@
+apple-bottom BLAS-2 benchmark: apple-bottom 1.4.0 (1bc503a2e4d3-dirty), Apple M2 Max
+
+zhemv 'U' 256 x 256 (lda 256), A referenced 0.00 GB
+  resident gpu       0.198 ms      2.7 GB/s  err 7.2e-16
+  staged   gpu       0.202 ms      2.6 GB/s  err 7.2e-16
+  accel    cpu       0.020 ms     26.4 GB/s  err 5.4e-17
+  cloop4   cpu      0.025 ms     20.9 GB/s  err 6.7e-17
+
+zhemv 'L' 256 x 256 (lda 256), A referenced 0.00 GB
+  resident gpu       0.165 ms      3.2 GB/s  err 7.6e-16
+  staged   gpu       0.231 ms      2.3 GB/s  err 7.6e-16
+  accel    cpu       0.020 ms     26.3 GB/s  err 1.0e-16
+  cloop4   cpu      0.024 ms     21.6 GB/s  err 9.1e-17
+
+zhemv 'U' 512 x 512 (lda 512), A referenced 0.00 GB
+  resident gpu       0.201 ms     10.5 GB/s  err 5.3e-16
+  staged   gpu       0.273 ms      7.7 GB/s  err 5.3e-16
+  accel    cpu       0.064 ms     33.0 GB/s  err 9.9e-17
+  cloop4   cpu      0.056 ms     37.3 GB/s  err 1.1e-16
+
+zhemv 'L' 512 x 512 (lda 512), A referenced 0.00 GB
+  resident gpu       0.237 ms      8.9 GB/s  err 5.9e-16
+  staged   gpu       0.232 ms      9.1 GB/s  err 5.9e-16
+  accel    cpu       0.064 ms     32.7 GB/s  err 6.9e-17
+  cloop4   cpu      0.054 ms     39.1 GB/s  err 4.9e-17
+
+zhemv 'U' 1024 x 1024 (lda 1024), A referenced 0.01 GB
+  resident gpu       0.247 ms     34.1 GB/s  err 5.6e-16
+  staged   gpu       0.444 ms     18.9 GB/s  err 5.6e-16
+  accel    cpu       0.253 ms     33.2 GB/s  err 1.1e-16
+  cloop8   cpu      0.154 ms     54.7 GB/s  err 7.2e-17
+
+zhemv 'L' 1024 x 1024 (lda 1024), A referenced 0.01 GB
+  resident gpu       0.229 ms     36.7 GB/s  err 4.9e-16
+  staged   gpu       0.442 ms     19.0 GB/s  err 4.9e-16
+  accel    cpu       0.257 ms     32.7 GB/s  err 9.6e-17
+  cloop8   cpu      0.158 ms     53.1 GB/s  err 4.3e-17
+
+zhemv 'U' 1536 x 1536 (lda 1536), A referenced 0.02 GB
+  resident gpu       0.297 ms     63.5 GB/s  err 3.8e-16
+  staged   gpu       0.734 ms     25.7 GB/s  err 3.8e-16
+  accel    cpu       0.841 ms     22.5 GB/s  err 1.0e-16
+  cloop8   cpu      0.358 ms     52.8 GB/s  err 6.5e-17
+
+zhemv 'L' 1536 x 1536 (lda 1536), A referenced 0.02 GB
+  resident gpu       0.277 ms     68.1 GB/s  err 3.4e-16
+  staged   gpu       0.732 ms     25.8 GB/s  err 3.4e-16
+  accel    cpu       0.780 ms     24.2 GB/s  err 8.6e-17
+  cloop8   cpu      0.368 ms     51.3 GB/s  err 5.4e-17
+
+zhemv 'U' 2048 x 2048 (lda 2048), A referenced 0.03 GB
+  resident gpu       0.371 ms     90.4 GB/s  err 3.2e-16
+  staged   gpu       1.118 ms     30.0 GB/s  err 3.2e-16
+  accel    cpu       2.909 ms     11.5 GB/s  err 8.3e-17
+  cloop8   cpu      0.508 ms     66.1 GB/s  err 8.3e-17
+
+zhemv 'L' 2048 x 2048 (lda 2048), A referenced 0.03 GB
+  resident gpu       0.371 ms     90.5 GB/s  err 3.0e-16
+  staged   gpu       1.143 ms     29.4 GB/s  err 3.0e-16
+  accel    cpu       3.063 ms     11.0 GB/s  err 1.3e-16
+  cloop8   cpu      0.527 ms     63.7 GB/s  err 8.0e-17
+
+zhemv 'U' 3072 x 3072 (lda 3072), A referenced 0.08 GB
+  resident gpu       0.569 ms    132.8 GB/s  err 2.5e-16
+  staged   gpu       2.301 ms     32.8 GB/s  err 2.5e-16
+  accel    cpu       7.256 ms     10.4 GB/s  err 9.1e-17
+  cloop8   cpu      1.452 ms     52.0 GB/s  err 5.3e-17
+
+zhemv 'L' 3072 x 3072 (lda 3072), A referenced 0.08 GB
+  resident gpu       0.577 ms    130.9 GB/s  err 3.4e-16
+  staged   gpu       2.367 ms     31.9 GB/s  err 3.4e-16
+  accel    cpu       7.375 ms     10.2 GB/s  err 6.8e-17
+  cloop8   cpu      1.138 ms     66.3 GB/s  err 8.8e-17

@@ -1,0 +1,91 @@
+apple-bottom BLAS-2 benchmark: apple-bottom 1.4.0 (ba345df-base), Apple M2 Max
+
+dgemv 'N' 4096 x 4096 (lda 4096), A referenced 0.13 GB
+  resident gpu       0.632 ms    212.4 GB/s  err 4.5e-16
+  staged   gpu       2.322 ms     57.8 GB/s  err 4.5e-16
+  accel    cpu       6.810 ms     19.7 GB/s  err 2.1e-16
+  cloop8   cpu      2.668 ms     50.3 GB/s  err 2.1e-16
+
+dgemv 'T' 4096 x 4096 (lda 4096), A referenced 0.13 GB
+  resident gpu       0.618 ms    217.3 GB/s  err 6.2e-16
+  staged   gpu       2.225 ms     60.3 GB/s  err 6.2e-16
+  accel    cpu       2.344 ms     57.3 GB/s  err 2.1e-17
+  cloop12  cpu     1.394 ms     96.3 GB/s  err 5.6e-17
+
+zgemv 'N' 4096 x 4096 (lda 4096), A referenced 0.27 GB
+  resident gpu       1.121 ms    239.6 GB/s  err 4.3e-16
+  staged   gpu       4.211 ms     63.8 GB/s  err 4.3e-16
+  accel    cpu       6.801 ms     39.5 GB/s  err 1.0e-16
+  cloop8   cpu      3.409 ms     78.7 GB/s  err 1.1e-16
+
+zgemv 'T' 4096 x 4096 (lda 4096), A referenced 0.27 GB
+  resident gpu       0.989 ms    271.4 GB/s  err 5.8e-16
+  staged   gpu       3.791 ms     70.8 GB/s  err 5.8e-16
+  accel    cpu       2.538 ms    105.8 GB/s  err 1.9e-17
+  cloop12  cpu     3.176 ms     84.5 GB/s  err 7.3e-17
+
+zgemv 'C' 4096 x 4096 (lda 4096), A referenced 0.27 GB
+  resident gpu       1.080 ms    248.6 GB/s  err 4.9e-16
+  staged   gpu       3.889 ms     69.0 GB/s  err 4.9e-16
+  accel    cpu       2.447 ms    109.7 GB/s  err 2.5e-17
+  cloop12  cpu     2.483 ms    108.1 GB/s  err 6.2e-17
+
+dgemv 'N' 8192 x 8192 (lda 8192), A referenced 0.54 GB
+  resident gpu       1.863 ms    288.2 GB/s  err 7.2e-16
+  staged   gpu       7.292 ms     73.6 GB/s  err 7.2e-16
+  accel    cpu      26.592 ms     20.2 GB/s  err 1.9e-16
+  cloop12  cpu     7.414 ms     72.4 GB/s  err 1.9e-16
+
+dgemv 'T' 8192 x 8192 (lda 8192), A referenced 0.54 GB
+  resident gpu       1.719 ms    312.3 GB/s  err 4.7e-16
+  staged   gpu       7.176 ms     74.8 GB/s  err 4.7e-16
+  accel    cpu       9.432 ms     56.9 GB/s  err 2.3e-17
+  cloop8   cpu      4.306 ms    124.7 GB/s  err 5.8e-17
+
+zgemv 'N' 8192 x 8192 (lda 8192), A referenced 1.07 GB
+  resident gpu       3.572 ms    300.6 GB/s  err 7.6e-16
+  staged   gpu      16.559 ms     64.8 GB/s  err 7.6e-16
+  accel    cpu      28.699 ms     37.4 GB/s  err 1.5e-16
+  cloop8   cpu     13.381 ms     80.2 GB/s  err 1.0e-16
+
+zgemv 'T' 8192 x 8192 (lda 8192), A referenced 1.07 GB
+  resident gpu       3.268 ms    328.5 GB/s  err 4.6e-16
+  staged   gpu      15.030 ms     71.4 GB/s  err 4.6e-16
+  accel    cpu       8.801 ms    122.0 GB/s  err 1.9e-17
+  cloop8   cpu      8.639 ms    124.3 GB/s  err 6.2e-17
+
+zgemv 'C' 8192 x 8192 (lda 8192), A referenced 1.07 GB
+  resident gpu       3.257 ms    329.7 GB/s  err 5.5e-16
+  staged   gpu      15.199 ms     70.6 GB/s  err 5.5e-16
+  accel    cpu       9.032 ms    118.9 GB/s  err 1.9e-17
+  cloop8   cpu      8.930 ms    120.2 GB/s  err 6.1e-17
+
+dgemv 'N' 16384 x 16384 (lda 16384), A referenced 2.15 GB
+  resident gpu       7.104 ms    302.3 GB/s  err 8.8e-16
+  staged   gpu      38.301 ms     56.1 GB/s  err 8.8e-16
+  accel    cpu     110.571 ms     19.4 GB/s  err 1.1e-16
+  cloop8   cpu     25.669 ms     83.7 GB/s  err 1.1e-16
+
+dgemv 'T' 16384 x 16384 (lda 16384), A referenced 2.15 GB
+  resident gpu       6.193 ms    346.7 GB/s  err 5.0e-16
+  staged   gpu      34.615 ms     62.0 GB/s  err 5.0e-16
+  accel    cpu      42.031 ms     51.1 GB/s  err 2.4e-17
+  cloop8   cpu     19.270 ms    111.4 GB/s  err 7.4e-17
+
+zgemv 'N' 16384 x 16384 (lda 16384), A referenced 4.29 GB
+  resident gpu      13.808 ms    311.1 GB/s  err 1.0e-15
+  staged   gpu     108.043 ms     39.8 GB/s  err 1.0e-15
+  accel    cpu     111.887 ms     38.4 GB/s  err 1.2e-16
+  cloop8   cpu     50.463 ms     85.1 GB/s  err 8.7e-17
+
+zgemv 'T' 16384 x 16384 (lda 16384), A referenced 4.29 GB
+  resident gpu      12.058 ms    356.2 GB/s  err 5.3e-16
+  staged   gpu      91.582 ms     46.9 GB/s  err 5.3e-16
+  accel    cpu      40.600 ms    105.8 GB/s  err 1.7e-17
+  cloop12  cpu    37.930 ms    113.2 GB/s  err 7.0e-17
+
+zgemv 'C' 16384 x 16384 (lda 16384), A referenced 4.29 GB
+  resident gpu      12.100 ms    355.0 GB/s  err 4.9e-16
+  staged   gpu      92.310 ms     46.5 GB/s  err 4.9e-16
+  accel    cpu      39.961 ms    107.5 GB/s  err 1.6e-17
+  cloop8   cpu     34.681 ms    123.8 GB/s  err 7.4e-17

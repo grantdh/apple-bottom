@@ -3,7 +3,8 @@
 ## Adding a new test to a registry-based file
 
 The registry-based test runners (`test_correctness.c`, `test_chaos.c`,
-`test_device_api.c`, `test_dispatch.c`, `test_trace.c`) dispatch via a
+`test_device_api.c`, `test_dispatch.c`, `test_trace.c`, `test_blas2.c`, `test_fft.c`,
+`test_strassen.c`) dispatch via a
 `TESTS[]` registry array of `{name, fn}` pairs declared just above
 `main()`. To add a test:
 
@@ -44,8 +45,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 159, every test but
-the chaos ones, and `make ci-local` all 177 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 210, every test but
+the chaos ones, and `make ci-local` all 228 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -56,23 +57,54 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     runs every register-prefetch kernel (`AB_PREFETCH=1`) against the
     plain ones (`AB_PREFETCH=0`) and requires bitwise-equal results
   - `tests/test_chaos.c` — 18 tests
-  - `tests/test_device_api.c` — 17 tests (181 `CHECK`s); the GEMM
+  - `tests/test_device_api.c` — 19 tests (199 `CHECK`s); the GEMM
     tests compare `ab_dev_dgemm` / `ab_dev_zgemm` with column-major
     cblas over all trans pairs, non-square and tall-skinny shapes,
     `ld > rows`, buffer offsets and a C of 2²⁰ elements, and check that
     the device path is bitwise the host API on the transposed operands;
+    `test_gemm_registered` runs them on `ab_dev_register` memory that is
+    not page-aligned, bitwise against allocated buffers, between sentinels;
     `test_zgemm_imbalance` holds `ab_dev_zgemm_offset` to the Dot2 check
     of the BLAS ABI's `test_zgemm_imbalance` (below, `tests/test_dot2.h`)
     on both its alpha/beta paths, every way it gathers a line's parts, and
-    operands of 2²⁰ elements, which it stages in chunks across cores
-  - `tests/test_dispatch.c` — 9 tests of the BLAS-ABI routing, no GPU,
+    operands of 2²⁰ elements, which it stages in chunks across cores;
+    `test_gemm_pool` checks the GEMMs on the staging pool's reused
+    buffers: a call repeated leaves the pool as it was, and each call
+    gives its first bits again right after NaN data (which a beta = 0
+    call must not read), after larger and smaller shapes, and from 4
+    threads at once
+  - `tests/test_dispatch.c` — 13 tests of the BLAS-ABI routing, no GPU,
     see below
-  - `tests/test_blas_abi.c` — 33 suites (1069 cases), see below
+  - `tests/test_blas_abi.c` — 33 suites (1073 cases), see below
   - `tests/test_trace.c` — 5 tests of `AB_TRACE` and
     `AB_TEST_FAIL_STAGE`, see below
+  - `tests/test_blas2.c` — 19 tests (957 cases) of DGEMV, ZGEMV and
+    ZHEMV, see below
+  - `tests/test_fft.c` — 14 tests of the double-float FFT, see below
+  - `tests/test_strassen.c` — 11 tests of the opt-in Strassen-Winograd
+    products (`ab_dgemm_strassen`, `ab_zgemm_strassen`, `AB_STRASSEN`):
+    error against a compensated Dot2 reference within the normwise bound of
+    `docs/STRASSEN.md` over odd, tiny and rectangular shapes, alpha and
+    beta, ZGEMM and badly scaled rows (whose componentwise errors it
+    prints); a ZGEMM with imaginary parts 2⁻²⁴ of the real ones within the
+    bound of its imaginary part's own size (4M); data far outside FP32's
+    range bit for bit the unscaled result times the scales (DGEMM with alpha
+    and beta rescaled, ZGEMM by Gauss-3M with aligned parts and by 4M with
+    rescaled products, the unscaled ZGEMMs within the bound); argument checks; bitwise determinism across
+    workspace reuse and `ab_shutdown()`; and, in child processes with their
+    own environment, that `AB_STRASSEN` unset or 0 leaves every GEMM
+    bitwise classical, that `AB_STRASSEN=1` routes calls with M, N, K ≥
+    `AB_STRASSEN_MIN` bitwise to Strassen (native; through `dgemm_` /
+    `zgemm_`, balanced and 4M, on the staged path and on the host path, each
+    checked to have taken it; through `ab_dev_dgemm` / `ab_dev_zgemm`),
+    that `dgemm_` / `zgemm_` with rows scaled line by line stay within the
+    classical componentwise bound on both paths, and that ZHERK, a
+    one-element ZGEMM batch, DTRSM and `ab_dgesv_mpir` give the same bits
+    with `AB_STRASSEN=1` and every size routed as without it
 
 - **Not yet registry-based (one `main`, no ghost guard):**
-  - `tests/test_precision.c` — 16 tests; needs decomposition strategy
+  - `tests/test_precision.c` — 17 tests (the last compares
+    `AB_PRECISION=fast` with the default mode); needs decomposition strategy
   - `tests/test_qe_golden.c` — 32 golden-bits cases, see below
   - `tests/test_staging.c` — 127 cases of the staged path against the
     host path, bit for bit, see below (its `TEST_STAGING` line is not
@@ -85,7 +117,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 
 | Target | What it runs |
 |---|---|
-| `make ci-local` | `make version-check`, every suite of `make test`, the chaos tests and the V-2 convergence study (the DGEMM error-versus-N study of `docs/vv/VV_REPORT.md`, `tests/verification/test_convergence.c`); writes `build/CI_REPORT.txt` |
+| `make ci-local` | `make version-check`, `make dispatch-table-check` (the built-in routing tables against `benchmarks/calibration/`), every suite of `make test`, the chaos tests and the V-2 convergence study (the DGEMM error-versus-N study of `docs/vv/VV_REPORT.md`, `tests/verification/test_convergence.c`); writes `build/CI_REPORT.txt` |
 | `make test-chaos` | pathological inputs, IEEE edge cases, concurrent threads |
 | `make test-verification` | the V-2 convergence study alone |
 | `make test-rectangular` | `test_rectangular.c`: tall, wide, thin-K and conjugate-transposed shapes up to 18277 × 150 × 18277, componentwise against cblas, then timings (peaks at ~21 GB) |
@@ -115,7 +147,8 @@ DGEMM shapes that the old 46340-per-dimension limit kept on cblas (see
 `zgemm_` without `ab_init()`; each must run on the GPU. It checks
 robustness only: those DGEMMs are faster on Accelerate (the GPU ran them
 at 0.09–0.15× in `make calibrate`).
-`test_auto_mode` runs `AB_MODE=auto` with the built-in calibrated table:
+`test_auto_mode` runs `AB_MODE=auto` with this chip's built-in table (none
+on an uncalibrated chip, where the shapes stay on Accelerate either way):
 the QE cegterg-like call and QE si64 PAW and Davidson shapes, which the GPU
 path was measured slower on, must stay on Accelerate through every entry
 point. `test_profile_path` runs `auto` with a test `AB_DISPATCH_TABLE`
@@ -257,11 +290,11 @@ as `ab_internal_last_staged()` reports it: the staged result stands
 exactly where the exponent-range guard certifies the call, its lines
 scaled or not and a ZGEMM by Gauss-3M or 4M (the test asks the guard's own
 functions, `src/ab_internal.h`), a DGEMM's alpha and beta lie in their
-window, and no Inf or NaN reaches the GPU epilogue; every other call is
+window, and no Inf or NaN reaches an epilogue; every other call is
 made on the host path. It must run on the GPU and hash the
 whole C array (padding included) the same in all four children, unless the
-guard sends it to Accelerate (NaN or Inf in A, B or a DGEMM's C, a range
-the scaling cannot keep), which it must then do in every child. The
+guard sends it to Accelerate (NaN or Inf in A or B, or in C with beta ≠ 0,
+or a range the scaling cannot keep), which it must then do in every child. The
 registered child also checks how many operands were used in place and
 `ab_register_host_memory()`'s refusals. The cases: zgemm and dgemm for
 every TRANS pair in {N,T,C}², alpha 1 or not, beta 0, 1 or neither; both
@@ -327,16 +360,85 @@ kernels of the GPU work before the failure (none for `alloc`; for
 reports the failure), `AB_REPORT` must count each as a `gpu_failed`
 fallback and the trace must say `fallback:gpu_failed`.
 
+## BLAS-2 (GEMV, HEMV)
+
+`tests/test_blas2.c` checks `ab_dev_dgemv` / `ab_dev_zgemv` /
+`ab_dev_zhemv` on `ab_dev_malloc()` and `ab_dev_register()` buffers,
+`ab_dgemv_blas` / `ab_zgemv_blas` / `ab_zhemv_blas` and the plain
+`dgemv_` / `zgemv_` / `zhemv_` symbols, in `AB_MODE=gpu`. A case passes
+when y is within tol(K) = 16 K w u² + 8·2⁻⁵³ (u² = 2⁻⁴⁸, K the
+dot-product length, w = 2 for complex) of a compensated FP64 reference
+(`tests/test_blas2_ref.h`, shared with `benchmarks/bench_gemv.c`)
+componentwise, relative to |alpha| (|op(A)| |x|)_i + |beta| |y0_i|, and so
+is Accelerate's result; the expected path computed y ("gpu", or "cpu" with
+y bitwise equal to Accelerate's run on the same memory, since Accelerate's
+bits depend on A's address modulo 256 bytes); and A, x and every element of
+y's array outside the call's strided elements are bitwise unchanged.
+Leading-dimension padding, the unreferenced triangle of a Hermitian matrix,
+the imaginary parts of its diagonal and the gaps between strided elements
+hold NaN.
+
+- the three semantics tests run every TRANS or UPLO flag on shapes from
+  1 × 1 to 30001 × 5 (skinny shapes take the grid-split and reduction
+  paths), padded and tight lda, increments ±1, 2, −2, −3 and complex
+  alpha and beta, through all four entry points (488 cases);
+- ZHEMV's tiling: each of panels of 32 or 96 rows with chunks of one to
+  three panels, forced through `ab_internal_b2_hemv_override`, at sizes
+  from 1 to a panel ± 1, a chunk + 1 and a ragged last panel, chunk and
+  group of four columns, both triangles (the semantics matrix sees only
+  32-row panels and one-panel chunks);
+- the kernels' conversion of A's elements to double-float, run on the GPU
+  alone (`ab_internal_b2_convert`), bit for bit against the host's
+  `fp64_to_dd` with FP32 subnormals flushed as the GPU flushes them: every
+  sign and FP64 exponent with FP32 mantissas 0, 1, even, odd and all ones
+  (rounding up carries into the exponent) above rounding ties and their
+  neighbours, 989 random mantissas each, and residuals x − hi just around
+  2⁻¹²⁶, where lo starts to flush (4.2 million inputs); where hi would not
+  be finite it must be Inf or NaN;
+- beta = 0 with NaN and ±Inf in y (y not read); NaN and Inf in A, x,
+  alpha or beta give Accelerate's result bitwise (the call runs there),
+  and Inf in y with beta ≠ 0 stays on the GPU;
+- the range guard: an element of 1e200, all elements 1e-200 or 1e38 run on
+  Accelerate; A scaled by 1e30, x by 1e200 or 1e-200, x with components 1
+  and 1e-30, zero rows, columns and x elements, and FP64 subnormals in A
+  stay on the GPU and within tol; with its x element 1.5 × 2⁻⁷¹, so that
+  the exponents pass, an element just under what FP32 rounds to 2¹²⁸ stays
+  on the GPU, and the least that rounds to it (hi = Inf) runs on
+  Accelerate;
+- m or n = 0 and alpha = 0, with A and x all NaN, give Accelerate's result
+  bitwise;
+- determinism (two device-API calls and a BLAS-ABI call give the same
+  bits), 8 threads against single-threaded bits, long dot products
+  (K = 65536; error under 2e-14 of |A||x| as well as tol), registered
+  memory (updates seen by the next call, the caller's bytes at their
+  offset, unmapped, holed and PROT_NONE spans refused), invalid
+  device-API arguments;
+- the `AB_MODE=auto` rule against its measurements: every shape of
+  `benchmarks/results/2026-10-19-ba345df-gemv/sweep_*.csv` (GEMV) and
+  `2026-10-19-1bc503a-zhemv/sweep_*.csv` (ZHEMV) that the rule sends to the
+  GPU was measured at least 1.10× faster there, and each routed class has
+  such shapes (no GPU needed);
+- in child processes: `AB_MODE=cpu`, `gpu`, `auto` and `AB_MIN_GPU_DIM`
+  routing, illegal arguments through the Fortran symbols (cblas names the
+  parameter and exits with status 255), `AB_TEST_FAIL_STAGE=kernel` and
+  `alloc` (bitwise Accelerate results, `gpu_failed` in `AB_REPORT`) and the
+  `AB_REPORT` counts.
+
 ## Routing unit tests
 
 `tests/test_dispatch.c` tests the routing decision of the BLAS-ABI entry
 points (`src/dispatch.c`, see `dispatch.h`), built from that file alone,
-without the library or a GPU. It checks the built-in table
-(`src/dispatch_table.h`, written by `make calibrate`) against the
-`calibrate_summary.csv` it was derived from: every measured shape routes as
-recorded there, and no shape that was not at least 1.10x faster on the GPU
-goes there; each Quantum ESPRESSO si64 shape must have been measured. It
-also checks the precedence of `AB_MODE`, `AB_MIN_GPU_DIM` and
+without the library or a GPU. It checks every built-in table
+(`src/dispatch_table.h`, one per calibrated chip, generated from
+`benchmarks/calibration/<chip>/` by `scripts/ingest_calibration.py`) against
+the `calibrate_summary.csv` it was derived from: every measured shape routes
+as recorded there, and no shape that was not at least 1.10x faster on the
+GPU goes there; each Quantum ESPRESSO si64 shape must have been measured.
+It checks the choice of table by chip and GPU core count (`AB_CHIP`,
+`AB_GPU_CORES`; a sibling with another core count or an uncalibrated chip
+gets no rows), the chip slug and the `# chip:` / `# gpu_cores:` header
+keys of a table file. The host it runs on may have no table (a CI runner).
+It also checks the precedence of `AB_MODE`, `AB_MIN_GPU_DIM` and
 `AB_CROSSOVER_FLOPS[_REAL]` over the table, the row bounds and TRANS
 classes (`'C'` is `'T'`), and the `AB_DISPATCH_TABLE` format: parsing,
 loading, malformed and missing files.
@@ -349,9 +451,35 @@ leading dimensions). `make test-fortran` links it once against the dylib and
 once against the static archive and runs both with `AB_MODE=gpu`. Like QE,
 it never calls `ab_init()`. Each call must reach the GPU path
 (`ab_get_last_dispatch_path()` is `"gpu"` and the `ab_get_stats()` GEMM
-counter advanced) and match a reference loop within 1e-11. The target is
-skipped, with a message, when neither `gfortran-15` nor `gfortran` is on
-`PATH`; set `GFORTRAN=` to pick a compiler.
+counter advanced) and match a reference loop within 1e-11. Then `CALL DGEMV`,
+`CALL ZGEMV` (`'C'`) and `CALL ZHEMV` (`'U'`, NaN in the unreferenced
+triangle) the same way: a 1 × 1 DGEMM, which runs on Accelerate, sets the
+path to `"cpu"` first, so `"gpu"` afterwards shows the call reached
+apple-bottom. The target is skipped, with a message, when neither
+`gfortran-15` nor `gfortran` is on `PATH`; set `GFORTRAN=` to pick a compiler.
+
+## Double-float FFT
+
+`tests/test_fft.c` checks `apple_bottom_fft.h` two ways for every case.
+Against a reference in double-double arithmetic (`tests/fft_ref.h`, about
+106 bits: a mixed-radix FFT validated against the O(n²) sum to 5e-32), the
+relative L2 and max errors must stay within 4e-15 × (1 + log₂N / 4) and
+twice that, about three times the worst measured. Against
+`tests/fft_emu.cpp`, which runs the GPU's double-float arithmetic
+(`src/fft/fft_device.h`) on the CPU in the same order, every output bit
+must match: this pins the kernels' indexing, pass order, conversions and
+scaling exactly. The cases: 1D lengths from 1 to 2048 with every radix
+(2, 3, 4, 5, 7, 8, 11, 13), four-step lengths up to 2048² (and 2049, which
+has no split, rejected), 2D and 3D batches up to 72³, FFTW-style strides,
+embeddings and gaps, interleaved batches in and out, with the padding
+between output elements left untouched, in place (staged and zero copy),
+`ab_fft_malloc` and `ab_fft_register`d memory (bitwise the staged result,
+nothing kept after `ab_fft_unregister`, new data at a reused address read
+afresh), batches split into chunks (bitwise the unsplit result), the three
+normalizations, the FP64 ↔ double-float conversions on 4 million values and
+pairs (ties, powers of two), bad arguments, the FP32 exponent range, six
+threads on shared and own plans, and a `fork()`ed child, which gets
+`AB_ERROR_NO_DEVICE` instead of a crash.
 
 ## Meta-test
 

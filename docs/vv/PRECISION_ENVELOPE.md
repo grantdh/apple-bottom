@@ -4,13 +4,19 @@
 **Validation Baseline**: Git tag `v1.0.2-bugfix` (SHA: f3e2fc1)
 **Test System**: Apple M2 Max, macOS 14.7, Metal 3
 
-> **Status (Revision 1.4, 2026-10-30).** Written for v1.0.2 and kept as its
+> **Status (Revision 1.5, 2026-11-06).** Written for v1.0.2 and kept as its
 > record, with corrections: the per-operation bounds of §1.2 (Revision 1.4:
 > `dd_mul` ≤ 6.000001u², the fused `dd_fma` ≤ 13u²|ab| + 3u²|c|, both proven;
 > GEMM ≤ (3K+13)u²|A||B| componentwise, §1.3), the
 > summary's guarantee restated as the target the measurements meet, notes
 > on the max-element measure (§2.3) and on threads (§4.4), and §5.1 pointed
 > at 1.5.0. The exponent-range text (§3.2, §4.2, §4.3) describes 1.5.0.
+
+> **Correction (2026-11-06).** §3.2 and §4.2 read as if every finite input
+> either keeps DD accuracy or runs on Accelerate. Some input passes the range
+> guard and loses accuracy without a fallback;
+> `LIMITATIONS.md#what-the-guard-misses` has the triggers and the measured
+> errors. Both sections now say so.
 
 > **Correction (2026-10-14).** The Quantum ESPRESSO result of §2.4 came from
 > runs that did not use the GPU (versions before 1.4.0 needed an `ab_init()`
@@ -31,9 +37,11 @@
 For matrix multiplication `C = A × B` where:
 - Matrix dimensions: `64 ≤ N ≤ 4096` (square matrices, validated range)
 - Matrix entries: finite FP64 values. The BLAS ABI scales rows and columns
-  far from 1 by powers of two, and runs on Accelerate what that cannot keep
-  in DD's range. A native `ABMatrix` keeps its nonzero entries within a span
-  of 2⁷⁸ under one power-of-two scale; `LIMITATIONS.md#exponent-range`.
+  far from 1 by powers of two, and runs on Accelerate what its guard refuses.
+  A native `ABMatrix` keeps its nonzero
+  entries within a span of 2⁷⁸ under one power-of-two scale;
+  `LIMITATIONS.md#exponent-range`. Some data passes the guard and loses
+  accuracy: `LIMITATIONS.md#what-the-guard-misses`.
 - Condition number: `κ(A), κ(B) < 10¹²`
 
 ~~apple-bottom guarantees:~~ The V-2 study checks each measured size against:
@@ -273,12 +281,12 @@ Frobenius-class error is appropriate.
 
 | Condition | Validated Range | Behavior Outside Range |
 |-----------|----------------|------------------------|
-| Exponent range, BLAS ABI | Any finite FP64 | Rows of op(A) and columns of op(B) outside `[2⁻²⁰, 2²⁰)` are scaled by powers of two; calls a guard cannot certify run on Accelerate |
+| Exponent range, BLAS ABI | Any finite FP64, except the data under `LIMITATIONS.md#what-the-guard-misses` | Rows of op(A) and columns of op(B) outside `[2⁻²⁰, 2²⁰)` are scaled by powers of two; calls the guard refuses run on Accelerate; calls that pass it through a gap lose accuracy with no fallback |
 | Exponent range, native API | Nonzero entries of a matrix spanning at most `2⁷⁸` | One power-of-two scale per matrix; a wider span keeps FP32's range relative to it |
 | Condition number | `κ < 10¹²` | Higher κ: error grows as `κ · N · ε` |
 | NaN/Inf | Documented | BLAS ABI: the call runs on Accelerate; native API: propagates (DD's `∞ − ∞` gives NaN) |
 
-**Subnormal handling**: the GPU flushes FP32 subnormals (below 2⁻¹²⁶) to zero, as inputs and as results, and a DD product keeps its full precision only above about 2⁻⁸⁰. The power-of-two scaling keeps data out of that region; see `LIMITATIONS.md#exponent-range` for the measurements and the guard's thresholds.
+**Subnormal handling**: the GPU flushes FP32 subnormals (below 2⁻¹²⁶) to zero, as inputs and as results, and a DD product keeps its full precision only above about 2⁻⁸⁰. The power-of-two scaling keeps data out of that region where it can, and the BLAS ABI's guard sends to Accelerate the calls it finds it cannot. Data can stay in the region and lose accuracy on the GPU in two cases: a native or device-API matrix spanning more than 2⁷⁸, and the BLAS-ABI data under `LIMITATIONS.md#what-the-guard-misses`. See `LIMITATIONS.md#exponent-range` for the measurements and the guard's thresholds.
 
 ### 3.3 Precision Scaling by Operation
 
@@ -308,7 +316,8 @@ The following conditions are **outside the validated envelope**. Results are und
 
 - **Exponent spans a power-of-two scale cannot bridge**: a native `ABMatrix`
   whose nonzero entries span more than 2⁷⁸, or BLAS-ABI data whose products
-  the guard cannot certify (those calls run on Accelerate)
+  the guard refuses (those calls run on Accelerate) or misses (those do
+  not: `LIMITATIONS.md#what-the-guard-misses`)
   - DD uses FP32 components; products far below the result lose their low
     parts, and values beyond FP32's range overflow or flush
 - **Condition numbers `κ > 10¹²`**: Error bound becomes `κ · N · 2⁻⁴⁸ > 10⁻³`
@@ -347,8 +356,7 @@ The following conditions are **outside the validated envelope**. Results are und
   except ZGEMM with both operands transposed at N ≥ 4096 (1.11–1.20×).
   `AB_MODE=auto` routes by this measurement. 1.5.0's staged path converts
   on the GPU and has not been calibrated yet; Quantum ESPRESSO forced onto
-  it takes 1.01–1.06× its time on Accelerate
-  (`benchmarks/results/2026-10-29-351d56c-staged-refusals/`).
+  it is not faster than Accelerate (`README.md`, Performance).
 
 ### 5.2 Precision vs. Performance
 
@@ -482,6 +490,7 @@ If precision is insufficient:
 | 1.2 | 2026-04-16 | Correct DWTimesDW2 error bound to Muller-Rideau 2022 Thm 2.7 (`< 5u²/(1+u)² < 5u²`); fix EFT table (twoSum/twoProduct are error-free, `dd_fma` at DD level) | Grant Heileman |
 | 1.3 | 2026-10-14 to 2026-10-30 | Correction notice (§2.4 replaced by VAL-1 revision 2, §5.1 by the 1.4.0 measurements); exponent range and complex products for 1.5.0 (§3.2, §3.3, §4.2, §4.3); per-operation bounds corrected (§1.2: `dd_mul` < 5u², `dd_fma` ≲ 8u²); guarantee restated; notes on the max-element measure (§2.3) and threads (§4.4); §5.1 points at 1.5.0 | Grant Heileman |
 | 1.4 | 2026-10-30 | §1.2: the default product is not JMP Algorithm 11, so Theorem 2.7 does not apply. Proven bounds for `dd_mul` (≤ 6.000001u²) and `dd_fma` ((13+43u)u²|ab| + (3+5u)u²|c|), the final `Fast2Sum` shown to be exact, and the GEMM bound (3K+13)u²|A||B|. They replace the unproven 5u² and 8u² figures. New `make test-dd-bound`. §1.3: slope note | Grant Heileman |
+| 1.5 | 2026-11-06 | Correction notice: some data passes the range guard and loses accuracy with no fallback (Stated Guarantee, §3.2, §4.2; `LIMITATIONS.md#what-the-guard-misses`) | Grant Heileman |
 
 ---
 

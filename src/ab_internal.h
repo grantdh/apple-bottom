@@ -5,7 +5,8 @@
 // apple_bottom.m owns the ABMatrix layout and the FP64 <-> double-float (DD)
 // conversion; blas_wrapper.c's BLAS-ABI path uses these to scale operands by
 // powers of two on the way in (the exponent-range guard, blas_wrapper.c), and
-// device_api.m's ZGEMM to choose between Gauss-3M and 4M as that path does.
+// device_api.m to convert its column-major operands where they lie and, for
+// ZGEMM, to choose between Gauss-3M and 4M as that path does.
 // =============================================================================
 #ifndef AB_INTERNAL_H
 #define AB_INTERNAL_H
@@ -59,7 +60,7 @@ static inline int ab_scalar_exp(double x, int window) {
 // =============================================================================
 // Host loops across cores
 // =============================================================================
-// apple_bottom.m's FP64 <-> DD conversions and device_api.m's staging copies
+// apple_bottom.m's FP64 <-> DD conversions and device-API ZGEMM epilogue
 // split large arrays into chunks across cores.
 #define AB_CONVERT_PARALLEL_MIN ((size_t)1 << 20)  // elements; serial below this
 #define AB_CONVERT_CHUNKS 8
@@ -114,6 +115,12 @@ typedef struct {
 
 static inline bool ab_range_nonfinite(ab_range_t r) { return r.max >= AB_HIWORD_NONFINITE; }
 
+// The range of the values of a and b together.
+static inline ab_range_t ab_range_merge(ab_range_t a, ab_range_t b) {
+    ab_range_t r = {a.max > b.max ? a.max : b.max, a.min < b.min ? a.min : b.min};
+    return r;
+}
+
 // Adds high word h to a maximum mx, or to a minimum mn as in ab_range_t
 // (ignoring 0), or to both, in selects that vectorize.
 #define AB_HIWORD_MAX(h, mx) do {                          \
@@ -155,7 +162,8 @@ static inline bool ab_range_nonfinite(ab_range_t r) { return r.max >= AB_HIWORD_
 //      cb[j] + ea - eb), in the same way (ab_range_guard_c): NaN or Inf, or a
 //      C' or beta' C' that could reach 2^AB_SUM_MAX_EXP, go to Accelerate;
 //      where a row of op(A) or a column of op(B) is zero, beta' C' must be at
-//      least 2^AB_PRODUCT_MIN_EXP.
+//      least 2^AB_PRODUCT_MIN_EXP. A ZGEMM with beta != 0 and NaN or Inf in C
+//      goes to Accelerate too (zgemm_reads_nonfinite_c).
 // The unscale, bit for bit (dgemm_blas, zgemm_blas): each GPU result C'_ij
 // becomes FP64 as (double)hi + (double)lo, then is multiplied by
 // 2^(ra[i] + cb[j] + ea) (ea = 0 for ZGEMM) with ab_scale2, one rounding. A
@@ -246,9 +254,12 @@ bool ab_range_guard_c(const ab_line_stats_t* sa, const ab_line_stats_t* sb, ab_r
 //     rho(p, q) = (1 + p)(1 + q) / (p + q),  p = |Ai|/|Ar|, q = |Bi|/|Br|:
 // 2 for balanced parts, about 1/(2p) when p = q << 1 (or p = q >> 1). A ZGEMM
 // whose parts give rho above AB_GAUSS3M_MAX_RHO runs as 4M (docs/vv/
-// LIMITATIONS.md, "Complex products"): measured on M2 Max, 3M's imaginary
-// part stays within 8 u^2 of its componentwise scale up to rho = 4 (6.9 u^2
-// at K = 2048) and grows as about 2.3 rho u^2 above; 4M's stays near 1 u^2.
+// LIMITATIONS.md, "Complex products"): measured on M2 Max at M = N = 96 with
+// p = q, 3M's imaginary part stays within 8 u^2 of its componentwise scale up
+// to rho = 4 (6.9 u^2 at K = 2048) and grows as about 2.3 rho u^2 above; 4M's
+// stays near 1 u^2. The rule reads the largest parts of a line (of a matrix on
+// the native API), not of each element, so data spread within a line stays on
+// 3M and goes further (same section).
 #define AB_GAUSS3M_MAX_RHO 4.0
 
 static inline double ab_gauss3m_rho(double p, double q) {
@@ -279,11 +290,35 @@ static inline ab_zgemm_method_t ab_lines_method(const ab_line_stats_t* sa,
 // Entry points of apple_bottom.m
 // =============================================================================
 
+// How a GEMM forms its real products (src/strassen.h): as AB_STRASSEN says,
+// always by Strassen-Winograd (ab_dgemm_strassen, ab_zgemm_strassen), or
+// always classically. Classical: the library's own uses of its GEMMs (ZHERK,
+// DTRSM, iterative refinement, one-element batches), and BLAS-ABI calls whose
+// rows of op(A) or columns of op(B) carry scales of their own, which
+// Strassen-Winograd's block sums would add across scales.
+typedef enum {
+    AB_PRODUCTS_ROUTED,
+    AB_PRODUCTS_STRASSEN,
+    AB_PRODUCTS_CLASSICAL,
+} ab_products_t;
+
+// The products of a BLAS-ABI GEMM on the host path, from its lines' scales
+// (ab_line_scales: ra for op(A)'s rows, cb for op(B)'s columns, NULL if none
+// is scaled). The staged path makes the same choice on the GPU's scales.
+static inline ab_products_t ab_lines_products(const int* ra, const int* cb) {
+    return ra || cb ? AB_PRODUCTS_CLASSICAL : AB_PRODUCTS_ROUTED;
+}
+
+// C = alpha*A*B + beta*C as ab_dgemm_scaled computes it, its products as
+// products says.
+ABStatus ab_internal_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C,
+                                  ab_products_t products);
+
 // C = op(A) op(B) for split-complex A (Ar, Ai) and B (Br, Bi), as ab_zgemm_ex
-// computes it, by the given method.
+// computes it, by the given method, its products as products says.
 ABStatus ab_internal_zgemm(ABTranspose transA, ABTranspose transB, ABMatrix Ar, ABMatrix Ai,
                            ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci,
-                           ab_zgemm_method_t method);
+                           ab_zgemm_method_t method, ab_products_t products);
 
 // Uploads row-major rows x cols data (the matrix's own shape) as
 // x * 2^-(row_exp[i] + col_exp[j] + shift) into m, whose power-of-two scale
@@ -292,6 +327,32 @@ ABStatus ab_internal_zgemm(ABTranspose transA, ABTranspose transB, ABMatrix Ar, 
 // the scaled values.
 ABStatus ab_internal_upload_scaled(ABMatrix m, const double* data, const int* row_exp,
                                    const int* col_exp, int shift, ab_range_t* range);
+
+// device_api.m's column-major operands, converted where they lie (no staging
+// copy) in chunks across cores: each matrix gets the values, scale and
+// largest magnitude ab_matrix_upload gives an array of its elements, and
+// downloads as ab_matrix_download writes one.
+//
+// Row i of re is x[i * ld + j], j < its cols. With im, x holds complex pairs
+// and ld counts pairs: rows i of re and im are the real and imaginary parts
+// of the pairs x[2 * (i * ld + j)], x[2 * (i * ld + j) + 1]; and if lines is
+// not NULL (complex only), the high words of the largest |Re| and |Im| of
+// each row (by_row) or column are added to lines->rmax and lines->imax.
+ABStatus ab_internal_upload_rows(ABMatrix re, ABMatrix im, const double* x, size_t ld,
+                                 ab_line_stats_t* lines, bool by_row);
+// Element (i, j) of m is x[j * ld + i]: a column-major matrix, not transposed.
+ABStatus ab_internal_upload_cols(ABMatrix m, const double* x, size_t ld);
+// re (and im) into the rows ab_internal_upload_rows reads.
+ABStatus ab_internal_download_rows(ABMatrix re, ABMatrix im, double* x, size_t ld);
+// C = alpha T + beta C, C the complex rows ab_internal_upload_rows reads (not
+// read if beta is 0) and T = (tr, ti) as a GEMM left it: device_api.m's ZGEMM
+// with alpha != 1 or beta != 0. Each value is the one C took through handles:
+// C's parts uploaded and downloaded, T downloaded, then
+//     (ar*tr - ai*ti) + (br*cr - bi*ci),  (ar*ti + ai*tr) + (br*ci + bi*cr)
+// in FP64 (cr = ci = 0 if beta is 0), and the result's parts uploaded and
+// downloaded, each round trip at the scale an upload gives the part.
+ABStatus ab_internal_zgemm_epilogue(ABMatrix tr, ABMatrix ti, double* x, size_t ld,
+                                    const double alpha[2], const double beta[2]);
 
 #ifdef __cplusplus
 }
