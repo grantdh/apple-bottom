@@ -847,12 +847,20 @@ bool ab_range_guard_c(const ab_line_stats_t* sa, const ab_line_stats_t* sb, ab_r
 // The gate of dgemm_blas and zgemm_blas (dispatch.h): Accelerate where the
 // routing says so, and for the BLAS quick return for alpha == 0 (A and B must
 // not be read) and invalid arguments.
-bool ab_internal_blas_routes_gpu(char routine, char transA, char transB, int M, int N, int K,
-                                 int ldA, int ldB, int ldC, bool alpha_nonzero) {
+// The same under a configuration the caller already holds (dgemm_blas and
+// zgemm_blas fetch it once per call).
+static bool blas_routes_gpu(const ab_dispatch_config_t *cfg, char routine, char transA, char transB,
+                            int M, int N, int K, int ldA, int ldB, int ldC, bool alpha_nonzero) {
     bool z = routine == 'z';
     return ab_blas_args_valid(ab_blas_trans(transA, z), ab_blas_trans(transB, z),
                               M, N, K, ldA, ldB, ldC) &&
-           alpha_nonzero && ab_dispatch_route_gpu(routine, transA, transB, M, N, K);
+           alpha_nonzero && ab_dispatch_gpu(cfg, routine, transA, transB, M, N, K);
+}
+
+bool ab_internal_blas_routes_gpu(char routine, char transA, char transB, int M, int N, int K,
+                                 int ldA, int ldB, int ldC, bool alpha_nonzero) {
+    return blas_routes_gpu(ab_dispatch_process_config(), routine, transA, transB, M, N, K, ldA, ldB,
+                           ldC, alpha_nonzero);
 }
 
 // Whole-call CPU paths (Accelerate cblas, column-major). Used for calls the
@@ -1712,14 +1720,15 @@ static int split_seam(const ab_split_forced_t *f, const gemm_part_t *w) {
 // the split table's row says. True if it is done; false for its own route,
 // with AB_SPLIT unset's bits: no row, a row that does not cut it (attributed
 // to the row), or a declined call.
-static bool gemm_split(CallProf *p, char transA, char transB, const gemm_part_t *w) {
+static bool gemm_split(CallProf *p, const ab_dispatch_config_t *cfg, char transA, char transB,
+                       const gemm_part_t *w) {
     t_last_split_valid = false;
     if (!ab_blas_args_valid(w->ta, w->tb, w->M, w->N, w->K, w->ldA, w->ldB, w->ldC) ||
         w->alpha == 0.0)
         return false;
     double ar = creal(w->alpha), ai = cimag(w->alpha), br = creal(w->beta), bi = cimag(w->beta);
     ab_split_plan_t plan;
-    if (!ab_dispatch_split_plan(ab_dispatch_process_config(), w->routine, transA, transB, w->M, w->N,
+    if (!ab_dispatch_split_plan(cfg, w->routine, transA, transB, w->M, w->N,
                                 w->K, ar == 1.0 && ai == 0.0, br == 0.0 && bi == 0.0,
                                 br == 1.0 && bi == 0.0,
                                 isfinite(ar) && isfinite(ai) && isfinite(br) && isfinite(bi), &plan))
@@ -1797,12 +1806,13 @@ static void zgemm_blas(
     t_last_stage.staged = false;
 
     // AB_SPLIT (opt-in) comes before the routing table (dispatch.h).
-    if (ab_dispatch_process_config()->split_on &&
-        gemm_split(p, transA, transB, &(gemm_part_t){'z', ta, tb, M, N, K, alpha, beta, A, B, C,
-                                                     ldA, ldB, ldC}))
+    const ab_dispatch_config_t *cfg = ab_dispatch_process_config();   // once per call
+    if (cfg->split_on &&
+        gemm_split(p, cfg, transA, transB, &(gemm_part_t){'z', ta, tb, M, N, K, alpha, beta, A, B, C,
+                                                          ldA, ldB, ldC}))
         return;
 
-    if (!ab_internal_blas_routes_gpu('z', transA, transB, M, N, K, ldA, ldB, ldC, alpha != 0.0)) {
+    if (!blas_routes_gpu(cfg, 'z', transA, transB, M, N, K, ldA, ldB, ldC, alpha != 0.0)) {
         ab_internal_zgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }
@@ -1941,12 +1951,13 @@ static void dgemm_blas(
     t_last_stage.staged = false;
 
     // AB_SPLIT (opt-in) comes before the routing table (dispatch.h).
-    if (ab_dispatch_process_config()->split_on &&
-        gemm_split(p, transA, transB, &(gemm_part_t){'d', ta, tb, M, N, K, alpha, beta, A, B, C,
-                                                     ldA, ldB, ldC}))
+    const ab_dispatch_config_t *cfg = ab_dispatch_process_config();   // once per call
+    if (cfg->split_on &&
+        gemm_split(p, cfg, transA, transB, &(gemm_part_t){'d', ta, tb, M, N, K, alpha, beta, A, B, C,
+                                                          ldA, ldB, ldC}))
         return;
 
-    if (!ab_internal_blas_routes_gpu('d', transA, transB, M, N, K, ldA, ldB, ldC, alpha != 0.0)) {
+    if (!blas_routes_gpu(cfg, 'd', transA, transB, M, N, K, ldA, ldB, ldC, alpha != 0.0)) {
         ab_internal_dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }
