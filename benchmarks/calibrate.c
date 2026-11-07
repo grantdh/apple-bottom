@@ -491,6 +491,12 @@ int main(int argc, char **argv) {
                 ab_precision_mode());
         return 1;
     }
+    // AB_SPLIT would cut the GPU path's calls between both engines.
+    if (strcmp(ab_split_source(), "off") != 0) {
+        fprintf(stderr, "calibrate: AB_SPLIT is set (split table %s); calibrate each engine alone\n",
+                ab_split_source());
+        return 1;
+    }
     build_grid();
 
     FILE *raw = open_out(out, "calibrate_raw.csv");

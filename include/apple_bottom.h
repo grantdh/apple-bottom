@@ -377,7 +377,8 @@ void ab_zhemv_blas(char uplo, int N, double _Complex alpha,
 // Returns the dispatch path taken by the most recent ab_*_blas (or dgemm_/zgemm_,
 // dgemv_/zgemv_/zhemv_, ab_dev_*gemv / ab_dev_zhemv) call on this thread: "gpu"
 // only if the GPU computed the result, "cpu" if cblas did (including a fallback
-// after a GPU failure), or "none" before any call. Thread-local.
+// after a GPU failure), "split" if AB_SPLIT made it partly on each and the GPU's
+// part stood, or "none" before any call. Thread-local.
 const char* ab_get_last_dispatch_path(void);
 
 // Where AB_SPLIT's rows come from in this process (read once, with the other

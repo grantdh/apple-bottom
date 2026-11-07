@@ -133,15 +133,18 @@ static void note_gpu_time(id<MTLCommandBuffer> cmdBuf, uint64_t commit_ns, uint6
 
 // Commits cmdBuf, which encoding started to build at encode_ns, waits for it
 // and notes its times. False if it failed; AB_TEST_FAIL_STAGE=kernel
-// (test-only) reports every one as failed.
+// (test-only) reports every one as failed, kernel_once the process's first.
+static std::atomic<bool> g_failed_once{false};
+
 static bool commit_and_wait(id<MTLCommandBuffer> cmdBuf, uint64_t encode_ns) {
     uint64_t commit_ns = host_ns();
     t_kernel_split.encode_ns += commit_ns - encode_ns;
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
     note_gpu_time(cmdBuf, commit_ns, host_ns());
-    return cmdBuf.status != MTLCommandBufferStatusError &&
-           ab_test_fail_stage() != AB_PROF_STAGE_KERNEL;
+    int fail = ab_test_fail_stage();
+    return cmdBuf.status != MTLCommandBufferStatusError && fail != AB_PROF_STAGE_KERNEL &&
+           !(fail == AB_PROF_FAIL_KERNEL_ONCE && !g_failed_once.exchange(true));
 }
 
 extern "C" double ab_internal_take_gpu_seconds(ab_prof_kernel_split_t *split) {
@@ -5460,7 +5463,8 @@ ab_stage_result_t ab_internal_stage_run(ab_stage_t* s, const ab_stage_gemm_t* g)
 ab_stage_result_t ab_internal_stage_redo_4m(ab_stage_t* s, const ab_stage_gemm_t* g) {
     ABAutoreleaseScope pool;
     ABContextImpl* ctx = [ABContextImpl shared];
-    if (!ctx) return AB_STAGE_FAILED;
+    // AB_TEST_FAIL_STAGE=redo_4m (test-only): as a command buffer failed before it ran.
+    if (!ctx || ab_test_fail_stage() == AB_PROF_FAIL_REDO_4M) return AB_STAGE_FAILED;
     StageViews v;
     stage_views_of(s, g, &v);
     volatile uint32_t* flag = (volatile uint32_t*)stage_buf(s, STAGE_FLAG).contents;

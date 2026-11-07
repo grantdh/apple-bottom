@@ -104,13 +104,21 @@ static int env_flag(const char* name) {
     return e && *e && *e != '0';
 }
 
-// AB_TEST_FAIL_STAGE names a GPU step that can fail: alloc or kernel.
+// AB_TEST_FAIL_STAGE names a GPU step that can fail: alloc or kernel, or one
+// of the other failures of blas_profiler.h.
 static int parse_fail_stage(const char* name) {
+    static const struct { const char* name; int stage; } OTHER[] = {
+        {"kernel_once", AB_PROF_FAIL_KERNEL_ONCE}, {"redo_4m", AB_PROF_FAIL_REDO_4M},
+        {"scales", AB_PROF_FAIL_SCALES}, {"split_thread", AB_PROF_FAIL_SPLIT_THREAD},
+        {"split_scratch", AB_PROF_FAIL_SPLIT_SCRATCH}, {"split_fpcr", AB_PROF_FAIL_SPLIT_FPCR},
+    };
     if (!name || !*name) return -1;
     if (!strcmp(name, ab_prof_stage_names[AB_PROF_STAGE_ALLOC])) return AB_PROF_STAGE_ALLOC;
     if (!strcmp(name, ab_prof_stage_names[AB_PROF_STAGE_KERNEL])) return AB_PROF_STAGE_KERNEL;
-    fprintf(stderr, "apple-bottom: AB_TEST_FAIL_STAGE=%s: expected alloc or kernel; ignored\n",
-            name);
+    for (size_t i = 0; i < sizeof OTHER / sizeof OTHER[0]; i++)
+        if (!strcmp(name, OTHER[i].name)) return OTHER[i].stage;
+    fprintf(stderr, "apple-bottom: AB_TEST_FAIL_STAGE=%s: expected alloc, kernel, kernel_once, "
+                    "redo_4m, scales, split_thread, split_scratch or split_fpcr; ignored\n", name);
     return -1;
 }
 

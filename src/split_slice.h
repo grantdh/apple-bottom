@@ -110,6 +110,8 @@ typedef enum {
                             // the worker's floating-point control
     AB_SPLIT_DECLINED,      // not split (record.declined says why): the seam made the whole
                             // call on cblas, dgemm_/zgemm_ by their own routing
+    AB_SPLIT_NOT_CUT,       // dgemm_/zgemm_: a row with f = 0, or an axis too short to cut;
+                            // attributed to the row, made by the call's own routing
     AB_SPLIT_INVALID,       // arguments the seam does not cut (invalid BLAS arguments, alpha
                             // 0, g outside [0, L]); C untouched
 } ab_split_outcome_t;

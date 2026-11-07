@@ -1214,8 +1214,10 @@ static ab_prof_staged_t staged_refusal(ab_stage_t *s, const ab_stage_gemm_t *g, 
     bool scaled = ra || rb;
     *re = scaled ? sa.e : NULL;
     *ce = scaled ? sb.e : NULL;
+    // AB_TEST_FAIL_STAGE=scales (test-only): as if the GPU's scales differed.
     if (memcmp(sa.e, gpu, (size_t)g->M * sizeof *gpu) ||
-        memcmp(sb.e, gpu + g->M, (size_t)g->N * sizeof *gpu))
+        memcmp(sb.e, gpu + g->M, (size_t)g->N * sizeof *gpu) ||
+        ab_test_fail_stage() == AB_PROF_FAIL_SCALES)
         return AB_PROF_STAGED_GPU_FAILED;
     if (!ab_range_guard(g->K, &sa, &sb, z ? 0 : ilogb(g->alpha[0]), &va, &vb) ||
         (!z && g->c_in && !ab_range_guard_c(&sa, &sb, c, g->alpha[0], g->beta[0], C->ptr, C->ld,
@@ -1441,24 +1443,48 @@ typedef struct {
     int engine, order;                  // as ab_split_forced_t
     dispatch_semaphore_t head_done;     // order 1: the tail starts once the head is done
     ab_prof_staged_t why;               // the staged path's outcome, or why it did not run
+    int retries;                        // runs repeated after a failed command buffer
+    bool retry_kept;                    // ... and the repeat stood
+    bool scales;                        // line scales unlike the host's
     int in_place;                       // operands the staged run used in place
     uint64_t t0, t1;                    // ticks: the tail's start and end
 } split_job_t;
+
+// AB_TEST_FAIL_STAGE=split_fpcr (test-only): this thread flushes subnormals
+// to zero (FPCR.FZ), as a caller's setting would if the thread inherited it.
+static void split_test_fpcr(void) {
+#if defined(__aarch64__)
+    if (ab_test_fail_stage() != AB_PROF_FAIL_SPLIT_FPCR) return;
+    uint64_t fpcr;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+    fpcr |= 1ULL << 24;
+    __asm__ volatile("msr fpcr, %0" : : "r"(fpcr));
+#endif
+}
+
+// The tail on the staged path, again once if a command buffer failed (a
+// second attempt usually works; the line scales' verdict does not change).
+static void split_run_gpu(split_job_t *j) {
+    split_test_fpcr();
+    j->why = staged_why();              // this thread's own floating-point control
+    if (j->why != AB_PROF_STAGED_NONE) return;
+    t_last_stage.in_place = 0;
+    j->why = run_staged(NULL, &j->g);
+    if (j->why == AB_PROF_STAGED_GPU_FAILED && t_stage_cb_failed) {
+        j->retries = 1;
+        j->why = run_staged(NULL, &j->g);
+        j->retry_kept = staged_kept(j->why);
+    }
+    j->scales = j->why == AB_PROF_STAGED_GPU_FAILED && !t_stage_cb_failed;
+    j->in_place = t_last_stage.in_place;
+}
 
 static void *split_worker(void *arg) {
     split_job_t *j = arg;
     if (j->head_done) dispatch_semaphore_wait(j->head_done, DISPATCH_TIME_FOREVER);
     j->t0 = ab_prof_now_ticks();
-    if (j->engine == 1) {
-        part_cblas(&j->tail);
-    } else {
-        j->why = staged_why();          // this thread's own floating-point control
-        if (j->why == AB_PROF_STAGED_NONE) {
-            t_last_stage.in_place = 0;
-            j->why = run_staged(NULL, &j->g);
-            j->in_place = t_last_stage.in_place;
-        }
-    }
+    if (j->engine == 1) part_cblas(&j->tail);
+    else split_run_gpu(j);
     j->t1 = ab_prof_now_ticks();
     return NULL;
 }
@@ -1532,14 +1558,17 @@ static ab_split_outcome_t split_run(const gemm_part_t *w, char axis, int g, int 
     }
     void *P = NULL;
     if (tc.into_p) {
-        P = malloc((size_t)w->M * w->N * e);
+        // AB_TEST_FAIL_STAGE=split_scratch (test-only): as if malloc failed.
+        P = ab_test_fail_stage() == AB_PROF_FAIL_SPLIT_SCRATCH ? NULL : malloc((size_t)w->M * w->N * e);
         if (!P) return split_declined(rec, AB_PROF_SPLIT_DECLINE_SCRATCH);
         tail->C = P;
         j.g.x[AB_STAGE_C].ptr = P;
     }
     pthread_t worker = NULL;
     j.head_done = run_tail && order == 1 ? dispatch_semaphore_create(0) : NULL;
-    if (run_tail && pthread_create(&worker, NULL, split_worker, &j) != 0) {
+    // AB_TEST_FAIL_STAGE=split_thread (test-only): as if pthread_create failed.
+    if (run_tail && (ab_test_fail_stage() == AB_PROF_FAIL_SPLIT_THREAD ||
+                     pthread_create(&worker, NULL, split_worker, &j) != 0)) {
         if (j.head_done) dispatch_release(j.head_done);
         free(P);
         return split_declined(rec, AB_PROF_SPLIT_DECLINE_THREAD);
@@ -1579,6 +1608,9 @@ static ab_split_outcome_t split_run(const gemm_part_t *w, char axis, int g, int 
     }
     free(P);
     rec->staged = engine == 0 ? j.why : AB_PROF_STAGED_NONE;
+    rec->retries = j.retries;
+    rec->retry_kept = j.retry_kept;
+    rec->scales = j.scales;
     rec->in_place = kept ? j.in_place : 0;
     rec->outcome = engine == 1                         ? AB_SPLIT_CPU
                  : j.why == AB_PROF_STAGED_KEPT        ? AB_SPLIT_KEPT
@@ -1622,6 +1654,37 @@ static int split_seam(const ab_split_forced_t *f, const gemm_part_t *w) {
     return rec->outcome;
 }
 
+// AB_SPLIT's step in dgemm_blas and zgemm_blas (dispatch.h): the call cut as
+// the split table's row says. True if it is done; false for its own route,
+// with AB_SPLIT unset's bits: no row, a row that does not cut it (attributed
+// to the row), or a declined call.
+static bool gemm_split(CallProf *p, char transA, char transB, const gemm_part_t *w) {
+    (void)p;
+    t_last_split_valid = false;
+    if (!ab_blas_args_valid(w->ta, w->tb, w->M, w->N, w->K, w->ldA, w->ldB, w->ldC) ||
+        w->alpha == 0.0)
+        return false;
+    double ar = creal(w->alpha), ai = cimag(w->alpha), br = creal(w->beta), bi = cimag(w->beta);
+    ab_split_plan_t plan;
+    if (!ab_dispatch_split_plan(ab_dispatch_process_config(), w->routine, transA, transB, w->M, w->N,
+                                w->K, ar == 1.0 && ai == 0.0, br == 0.0 && bi == 0.0,
+                                br == 1.0 && bi == 0.0,
+                                isfinite(ar) && isfinite(ai) && isfinite(br) && isfinite(bi), &plan))
+        return false;
+    ab_split_record_t *rec = &t_last_split;
+    t_last_split_valid = true;
+    if (plan.g == 0) {
+        *rec = (ab_split_record_t){.outcome = AB_SPLIT_NOT_CUT, .declined = AB_PROF_SPLIT_DECLINE_NONE,
+                                   .staged = AB_PROF_STAGED_NONE, .row = plan.row, .axis = plan.axis,
+                                   .L = plan.L};
+        return false;
+    }
+    rec->row = plan.row;
+    if (split_run(w, plan.axis, plan.g, 0, 0, rec) == AB_SPLIT_DECLINED) return false;
+    split_note_path(rec);
+    return true;
+}
+
 int ab_internal_dgemm_split(const ab_split_forced_t *f, char ta, char tb, int M, int N, int K,
                             double alpha, const double *A, int ldA, const double *B, int ldB,
                             double beta, double *C, int ldC) {
@@ -1656,6 +1719,12 @@ static void zgemm_blas(
     enum CBLAS_TRANSPOSE ta = ab_blas_trans(transA, true);
     enum CBLAS_TRANSPOSE tb = ab_blas_trans(transB, true);
     t_last_stage.staged = false;
+
+    // AB_SPLIT (opt-in) comes before the routing table (dispatch.h).
+    if (ab_dispatch_process_config()->split_on &&
+        gemm_split(p, transA, transB, &(gemm_part_t){'z', ta, tb, M, N, K, alpha, beta, A, B, C,
+                                                     ldA, ldB, ldC}))
+        return;
 
     if (!ab_internal_blas_routes_gpu('z', transA, transB, M, N, K, ldA, ldB, ldC, alpha != 0.0)) {
         ab_internal_zgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
@@ -1794,6 +1863,12 @@ static void dgemm_blas(
     enum CBLAS_TRANSPOSE ta = ab_blas_trans(transA, false);
     enum CBLAS_TRANSPOSE tb = ab_blas_trans(transB, false);
     t_last_stage.staged = false;
+
+    // AB_SPLIT (opt-in) comes before the routing table (dispatch.h).
+    if (ab_dispatch_process_config()->split_on &&
+        gemm_split(p, transA, transB, &(gemm_part_t){'d', ta, tb, M, N, K, alpha, beta, A, B, C,
+                                                     ldA, ldB, ldC}))
+        return;
 
     if (!ab_internal_blas_routes_gpu('d', transA, transB, M, N, K, ldA, ldB, ldC, alpha != 0.0)) {
         ab_internal_dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);

@@ -893,6 +893,8 @@ static int sustain(const Case *c, const char *outdir, int g, double secs, double
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);   // whole lines, so the library's exit-time AB_REPORT (stderr) lands after them
     if (argc >= 2 && !strcmp(argv[1], "list")) { for (int i = 0; i < NCASES; i++) printf("%s\n", CASES[i].name); return 0; }
+    // The library's AB_SPLIT would cut this program's slices again.
+    if (strcmp(ab_split_source(), "off")) { fprintf(stderr, "bench_split: AB_SPLIT is set (split table %s); unset it\n", ab_split_source()); return 2; }
     if (argc >= 5 && !strcmp(argv[1], "sustain")) {
         const Case *c = find_case(argv[2]);
         if (!c) { fprintf(stderr, "unknown case\n"); return 2; }

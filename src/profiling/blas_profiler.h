@@ -20,6 +20,7 @@
 //   AB_TRACE=/path/to/trace                 a line per call in /path/to/trace.<pid>
 //   AB_TRACE_HASH=1                         with AB_TRACE: hash the operands read
 //   AB_TEST_FAIL_STAGE=alloc|kernel         test-only: fail GPU allocations or GEMMs
+//                                           (and the other failures below)
 //   AB_HOST_PACK=1                          GPU calls take the host path (gpu_stage.h)
 //   AB_STAGING_MB=n                         the GPU buffer pool keeps at most n MB
 //
@@ -248,8 +249,18 @@ void ab_trace_record(const ab_trace_call_t* call, uint64_t t0_ns, uint64_t elaps
 // AB_TEST_FAIL_STAGE (test-only): AB_PROF_STAGE_ALLOC makes every
 // ab_matrix_create() fail, AB_PROF_STAGE_KERNEL the command buffer of every
 // ab_dgemm_scaled() and ab_zgemm() (apple_bottom.m), as real failures there
-// would; -1 when unset.
+// would; -1 when unset. The values below go past the stages.
 int  ab_test_fail_stage(void);
+
+enum {
+    AB_PROF_FAIL_KERNEL_ONCE = AB_PROF_STAGE_COUNT,  // kernel_once: the process's first command
+                                                     // buffer fails, no other
+    AB_PROF_FAIL_REDO_4M,        // redo_4m: every staged ZGEMM's 4M run fails
+    AB_PROF_FAIL_SCALES,         // scales: the staged path's line scales read as unlike the host's
+    AB_PROF_FAIL_SPLIT_THREAD,   // split_thread: AB_SPLIT cannot make its thread
+    AB_PROF_FAIL_SPLIT_SCRATCH,  // split_scratch: AB_SPLIT cannot allocate the K axis's product
+    AB_PROF_FAIL_SPLIT_FPCR,     // split_fpcr: AB_SPLIT's thread runs with flush to zero
+};
 
 // AB_HOST_PACK=1 (as the other flags: set, not empty, not starting with 0):
 // every GPU-routed BLAS-ABI call takes the host path. AB_STAGING_MB=n: the

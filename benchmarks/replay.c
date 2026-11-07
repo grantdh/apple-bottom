@@ -750,6 +750,11 @@ int main(int argc, char **argv) {
     }
     if (!src || mode < 0 || pools < 1 || !(gap_scale >= 0.0) || !(timeout_s > 0.0))
         usage(argv[0]);
+    // The workers route each call to one engine themselves; AB_SPLIT would
+    // cut the calls they send through the BLAS ABI.
+    if (strcmp(ab_split_source(), "off") != 0)
+        die("AB_SPLIT is set (split table %s); the replay routes each call itself, unset it",
+            ab_split_source());
 
     TraceFile *f;
     int n = read_trace_dir(src, &f);
