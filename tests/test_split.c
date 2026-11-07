@@ -30,6 +30,7 @@
 // =============================================================================
 
 #include "apple_bottom.h"
+#include "apple_bottom_device.h"
 #include "gpu_stage.h"
 #include "split_slice.h"
 #include "test_blas_check.h"
@@ -841,7 +842,8 @@ static int child_fork(bool use_exit) {
 }
 
 // Child: the other APIs a split never touches, hashed: native ab_dgemm and
-// ab_zgemm, a batch, and dgemv_.
+// ab_zgemm, a batch, ab_dgemm_async, ab_dev_dgemm on registered memory, and
+// dgemv_.
 static void child_other(void) {
     const int n = 300;
     double *a = malloc((size_t)n * n * sizeof *a), *b = malloc((size_t)n * n * sizeof *b);
@@ -871,6 +873,18 @@ static void child_other(void) {
     if (fut) { ab_future_wait(fut); ab_future_destroy(fut); }
     ab_matrix_download(C, c, true);
     printf("ab_dgemm_async %016llx\n", (unsigned long long)hash_doubles(c, (size_t)n * n));
+    size_t bytes;
+    double *da = page_alloc((size_t)n * n, &bytes), *db = page_alloc((size_t)n * n, &bytes),
+           *dc = page_alloc((size_t)n * n, &bytes);
+    memcpy(da, a, (size_t)n * n * sizeof *da);
+    memcpy(db, b, (size_t)n * n * sizeof *db);
+    ab_dev_buffer_t DA = ab_dev_register(da, bytes), DB = ab_dev_register(db, bytes),
+                    DC = ab_dev_register(dc, bytes);
+    ABStatus dst = DA && DB && DC ? ab_dev_dgemm(AB_NO_TRANS, AB_NO_TRANS, n, n, n, 1.0, DA, n, DB, n, 0.0, DC, n)
+                                  : AB_ERROR_ALLOC_FAILED;
+    printf("ab_dev_dgemm %d %016llx\n", (int)dst, (unsigned long long)hash_doubles(dc, (size_t)n * n));
+    ab_dev_free(DA); ab_dev_free(DB); ab_dev_free(DC);
+    free(da); free(db); free(dc);
     double *y = calloc((size_t)n, sizeof *y), one = 1.0, zero = 0.0;
     int nn = n, inc = 1;
     fortran_dgemv("N", &nn, &nn, &one, a, &nn, b, &inc, &zero, y, &inc);
@@ -1391,7 +1405,7 @@ static void test_split_interactions(void) {
     int st_off = status;
     const char *catch_all[] = {"AB_SPLIT=1", table_env, NULL};
     char *on = run_child("other", catch_all, &status);
-    check(st_off == 0 && status == 0 && off && on && strstr(off, "dgemv_ ") && !strcmp(off, on),
+    check(st_off == 0 && status == 0 && off && on && strstr(off, "dgemv_ ") && strstr(off, "ab_dev_dgemm 0 ") && !strcmp(off, on),
           "the other APIs differ with AB_SPLIT on:\n%.300s\nvs\n%.300s", off ? off : "", on ? on : "");
     free(off);
     free(on);
