@@ -125,14 +125,14 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     their calls: `AB_SPLIT` unset, empty and 0 alike with no split field in
     any report or trace; `AB_MODE=cpu` bitwise cblas with no GPU GEMM; each
     `AB_TEST_FAIL_STAGE` failure (`alloc`, `kernel`, `kernel_once`,
-    `redo_4m`, `scales`, `split_thread`, `split_scratch`, `split_fpcr`) and
+    `redo_4m`, `scales`, `split_thread`, `split_scratch`, `split_fpcr`, and `split_poison` for a refused K tail) and
     `AB_HOST_PACK` with the outcome, retries and bits it calls for (the
     cblas parts, the GPU's bits, or the whole call's as with `AB_SPLIT`
     unset); `AB_STRASSEN`, `AB_STAGING_MB=0` and `AB_MIN_GPU_DIM=0` keeping
     the bits; `VECLIB_MAXIMUM_THREADS` 1, 2 and 8 repeating; `fork()` with
     `_exit` and `exit`; the reports (counts that add up, a line per row,
     trace stages that sum exactly, the JSON fields); `AB_PRECISION=fast`
-    within 4x the default error; the native, batched and BLAS-2 APIs
+    within 4x the default error; the native, batched, asynchronous and BLAS-2 APIs
     unchanged; no memory growth; and calibrate, replay and bench_split
     refusing to run
 

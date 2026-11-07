@@ -126,6 +126,7 @@ static int parse_fail_stage(const char* name) {
         {"kernel_once", AB_PROF_FAIL_KERNEL_ONCE}, {"redo_4m", AB_PROF_FAIL_REDO_4M},
         {"scales", AB_PROF_FAIL_SCALES}, {"split_thread", AB_PROF_FAIL_SPLIT_THREAD},
         {"split_scratch", AB_PROF_FAIL_SPLIT_SCRATCH}, {"split_fpcr", AB_PROF_FAIL_SPLIT_FPCR},
+        {"split_poison", AB_PROF_FAIL_SPLIT_POISON},
     };
     if (!name || !*name) return -1;
     if (!strcmp(name, ab_prof_stage_names[AB_PROF_STAGE_ALLOC])) return AB_PROF_STAGE_ALLOC;
@@ -133,7 +134,7 @@ static int parse_fail_stage(const char* name) {
     for (size_t i = 0; i < sizeof OTHER / sizeof OTHER[0]; i++)
         if (!strcmp(name, OTHER[i].name)) return OTHER[i].stage;
     fprintf(stderr, "apple-bottom: AB_TEST_FAIL_STAGE=%s: expected alloc, kernel, kernel_once, "
-                    "redo_4m, scales, split_thread, split_scratch or split_fpcr; ignored\n", name);
+                    "redo_4m, scales, split_thread, split_scratch, split_fpcr or split_poison; ignored\n", name);
     return -1;
 }
 

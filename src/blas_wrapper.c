@@ -1617,6 +1617,9 @@ static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis
         // AB_TEST_FAIL_STAGE=split_scratch (test-only): as if malloc failed.
         P = ab_test_fail_stage() == AB_PROF_FAIL_SPLIT_SCRATCH ? NULL : malloc((size_t)w->M * w->N * e);
         if (!P) return split_declined(rec, AB_PROF_SPLIT_DECLINE_SCRATCH);
+        // AB_TEST_FAIL_STAGE=split_poison (test-only): a P that must never reach C.
+        if (ab_test_fail_stage() == AB_PROF_FAIL_SPLIT_POISON)
+            for (size_t i = 0; i < (size_t)w->M * w->N * (e / sizeof(double)); i++) ((double *)P)[i] = 1.0;
         tail->C = P;
         j.g.x[AB_STAGE_C].ptr = P;
     }

@@ -325,6 +325,7 @@ enum {
     AB_PROF_FAIL_SPLIT_THREAD,   // split_thread: AB_SPLIT cannot make its thread
     AB_PROF_FAIL_SPLIT_SCRATCH,  // split_scratch: AB_SPLIT cannot allocate the K axis's product
     AB_PROF_FAIL_SPLIT_FPCR,     // split_fpcr: AB_SPLIT's thread runs with flush to zero
+    AB_PROF_FAIL_SPLIT_POISON,   // split_poison: AB_SPLIT fills the K axis's product with 1.0 once made
 };
 
 // AB_HOST_PACK=1 (as the other flags: set, not empty, not starting with 0):

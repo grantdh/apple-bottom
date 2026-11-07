@@ -450,6 +450,8 @@ static void plant(const Call *c, Operands *o, char axis, int l, Plant what) {
     }
 }
 
+static char *run_child(const char *scenario, const char *const *extra, int *status);
+
 // T6: bad data in the head only, or the tail only, on each axis.
 static void test_split_exponent_range(void) {
     for (const char *axis = AXES; *axis; axis++)
@@ -511,6 +513,14 @@ static void test_split_exponent_range(void) {
         free(C); free(ref);
         free_operands(&o);
     }
+    // A K tail refused after its run: nothing of P reaches C, though P holds
+    // 1.0 throughout (AB_TEST_FAIL_STAGE=split_poison, in a child).
+    const char *poison[] = {"AB_TEST_FAIL_STAGE=split_poison", NULL};
+    int status;
+    char *kout = run_child("k_refused", poison, &status);
+    check(status == 0 && kout && strstr(kout, "k_refused d 3 1") && strstr(kout, "k_refused z 3 1"),
+          "a refused K tail with a poisoned P: %.200s", kout ? kout : "");
+    free(kout);
     // Tails refused after their run give their buffers back: the pool keeps
     // its size over repeats.
     Call r = {'d', 'N', 'N', 300, 260, 200, 0, ONE, ZERO};
@@ -743,6 +753,7 @@ static const TableCall TCALLS[] = {
     {{'z', 'N', 'T', 300, 300, 300, 0, ONE, ZERO}, 5, 'N', 0, 1.0},
     {{'z', 'T', 'T', 100, 100, 100, 0, ONE, ZERO}, -1, 0, 0, 1.0},
     {{'z', 'N', 'N', 1200, 128, 64, 0, ONE, ZERO}, 0, 'N', 64, 0x1p-20},
+    {{'d', 'T', 'N', 64, 64, 5000, 2, ONE, {0.75, 0}}, 4, 'K', 2496, 1.0},   // K with beta != 0
 };
 #define N_TCALLS ((int)TEST_REGISTRY_SIZE(TCALLS))
 
@@ -856,6 +867,10 @@ static void child_other(void) {
     ab_batch_destroy(batch);
     ab_matrix_download(C, c, true);
     printf("ab_batch_dgemm %016llx\n", (unsigned long long)hash_doubles(c, (size_t)n * n));
+    ABFuture fut = ab_dgemm_async(B, B, C);
+    if (fut) { ab_future_wait(fut); ab_future_destroy(fut); }
+    ab_matrix_download(C, c, true);
+    printf("ab_dgemm_async %016llx\n", (unsigned long long)hash_doubles(c, (size_t)n * n));
     double *y = calloc((size_t)n, sizeof *y), one = 1.0, zero = 0.0;
     int nn = n, inc = 1;
     fortran_dgemv("N", &nn, &nn, &one, a, &nn, b, &inc, &zero, y, &inc);
@@ -867,6 +882,25 @@ static void child_other(void) {
 
 // Child: the bytes in use after 60 more split calls of every axis, once
 // the pool has grown (MallocNanoZone pinned by the parent).
+// Child: a K tail refused after its run (NaN in it) under split_poison, for
+// DGEMM with beta 0.75 and ZGEMM with a complex beta: C must be the cblas
+// parts, the head with beta then the tail with beta 1.
+static void child_k_refused(void) {
+    for (int z = 0; z < 2; z++) {
+        Call c = {z ? 'z' : 'd', 'N', 'N', 40, 40, 2100, 1, ONE, {0.75, z ? -0.25 : 0}};
+        Operands o = operands(&c);
+        plant(&c, &o, 'K', 2095, PLANT_NAN);
+        double *C = malloc(o.nC * sizeof *C), *ref = malloc(o.nC * sizeof *ref);
+        memcpy(C, o.C0, o.nC * sizeof *C);
+        memcpy(ref, o.C0, o.nC * sizeof *ref);
+        int got = seam(&c, 'K', 1024, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
+        parts_reference(&c, 'K', 1024, &o, ref);
+        printf("k_refused %c %d %d\n", c.r, got, !memcmp(C, ref, o.nC * sizeof *C));
+        free(C); free(ref);
+        free_operands(&o);
+    }
+}
+
 static void child_memory(void) {
     malloc_statistics_t s0, s1;
     for (int pass = 0; pass < 2; pass++) {
@@ -895,6 +929,7 @@ static int child_main(const char *scenario) {
     else if (!strcmp(scenario, "fork__exit")) child_fork(false);
     else if (!strcmp(scenario, "other")) child_other();
     else if (!strcmp(scenario, "memory")) child_memory();
+    else if (!strcmp(scenario, "k_refused")) child_k_refused();
     else printf("unknown scenario %s\n", scenario);
     fflush(stdout);
     return 0;
@@ -1072,7 +1107,7 @@ static void test_split_scenarios(void) {
     static const struct { const char *fail; int call_mask, outcome, ref, declined, retries; } ONE_HIT[] = {
         {"AB_TEST_FAIL_STAGE=kernel_once", 1 << 0, AB_SPLIT_KEPT, REF_SPLIT, -1, 1},
         {"AB_TEST_FAIL_STAGE=redo_4m", 1 << 7, AB_SPLIT_GPU_FAILED, REF_PARTS, -1, 1},
-        {"AB_TEST_FAIL_STAGE=split_scratch", 1 << 2 | 1 << 4, AB_SPLIT_DECLINED, REF_WHOLE, 5 /* scratch */, ANY},
+        {"AB_TEST_FAIL_STAGE=split_scratch", 1 << 2 | 1 << 4 | 1 << 8, AB_SPLIT_DECLINED, REF_WHOLE, 5 /* scratch */, ANY},
     };
     for (size_t k = 0; k < TEST_REGISTRY_SIZE(ONE_HIT); k++) {
         Scenario s = {ONE_HIT[k].fail, {ONE_HIT[k].fail}, 0, 0, 0, 0, 0, 0};
@@ -1112,10 +1147,14 @@ static void test_split_off(void) {
     char trace[PATH_MAX + 16], trace_env[PATH_MAX + 32];
     snprintf(trace, sizeof trace, "%s/off", g_dir);
     snprintf(trace_env, sizeof trace_env, "AB_TRACE=%s", trace);
+    const char *tmp = getenv("TMPDIR");
+    char json[PATH_MAX], json_env[PATH_MAX + 32];   // a path without "split" in it
+    snprintf(json, sizeof json, "%s/ab_off_%d.json", tmp && *tmp ? tmp : "/tmp", (int)getpid());
+    snprintf(json_env, sizeof json_env, "AB_PROFILE_JSON=%s", json);
     const char *settings[] = {NULL, "AB_SPLIT=", "AB_SPLIT=0"};
     uint64_t first[N_TCALLS] = {0};
     for (int k = 0; k < 3; k++) {
-        const char *env[8] = {"AB_REPORT=1", "AB_PROFILE=1", trace_env, settings[k], NULL};
+        const char *env[8] = {"AB_REPORT=1", "AB_PROFILE=1", trace_env, json_env, settings[k], NULL};
         int status;
         char *out = run_child("calls", env, &status);
         CallLine l[N_TCALLS];
@@ -1135,6 +1174,12 @@ static void test_split_off(void) {
             check(!strstr(out, "split"), "AB_SPLIT %s: the reports mention the split", settings[k] ? settings[k] : "unset");
         }
         free(out);
+        FILE *jf = fopen(json, "r");
+        char *js = jf ? slurp(jf) : NULL;
+        check(js && strstr(js, "\"routines\"") && !strstr(js, "split"),
+              "AB_SPLIT %s: the JSON dump is missing or mentions the split", settings[k] ? settings[k] : "unset");
+        free(js);
+        unlink(json);
         // the child's trace file: no split field
         char cmd[PATH_MAX * 2];
         snprintf(cmd, sizeof cmd, "/bin/cat %s.* 2>/dev/null | /usr/bin/grep -c split", trace);
@@ -1233,6 +1278,7 @@ static void test_split_reports(void) {
     check(strstr(out, want) != NULL, "the report header lacks '%s'", want);
     // routine lines: calls = gpu_calls + cpu_calls + split_calls; split lines; row lines
     long long split_total = 0;
+    int routines = 0;
     int rows_seen = 0;
     for (char *line = out; line && *line; line = strchr(line, '\n') ? strchr(line, '\n') + 1 : NULL) {
         char l[2048];
@@ -1240,6 +1286,7 @@ static void test_split_reports(void) {
         snprintf(l, sizeof l, "%.*s", (int)(n < sizeof l ? n : sizeof l - 1), line);
         if (!strncmp(l, "AB_REPORT[", 10) && strstr(l, " calls=") && strstr(l, " split_calls=") &&
             !strstr(l, " split calls=")) {
+            routines++;
             check(field(l, "calls") == field(l, "gpu_calls") + field(l, "cpu_calls") + field(l, "split_calls"),
                   "calls != gpu + cpu + split: %s", l);
         } else if (!strncmp(l, "AB_REPORT[", 10) && strstr(l, " split calls=")) {   // not AB_PROFILE's copy
@@ -1262,7 +1309,8 @@ static void test_split_reports(void) {
                               "row 0: %s", l);
         }
     }
-    check(split_total == 12 && rows_seen == 6, "split calls by axis %lld (want 12), %d row lines (want 6)",
+    check(routines == 2, "%d routine lines with split_calls (want zgemm, dgemm)", routines);
+    check(split_total == 14 && rows_seen == 6, "split calls by axis %lld (want 14), %d row lines (want 6)",
           split_total, rows_seen);
     check(strstr(out, "AB_PROFILE zgemm M=1200 N=128 K=64  split row=0 axis=N g=64") != NULL,
           "no AB_PROFILE line for a split call");
@@ -1302,7 +1350,7 @@ static void test_split_reports(void) {
         }
     }
     if (p) pclose(p);
-    check(header && split_lines == 12 && row_lines == 2, "trace: header %d, %d split lines (want 12), %d f = 0 "
+    check(header && split_lines == 14 && row_lines == 2, "trace: header %d, %d split lines (want 14), %d f = 0 "
           "lines (want 2)", header, split_lines, row_lines);
     snprintf(cmd, sizeof cmd, "/bin/rm -f %s.* %s", trace, json);
     if (system(cmd)) {}
@@ -1364,7 +1412,14 @@ static void test_split_interactions(void) {
               DRIVERS[k].bin, rc, o ? o : "");
         free(o);
     }
-    // memory growth with MallocNanoZone pinned
+    // memory growth with MallocNanoZone pinned; not under AddressSanitizer,
+    // whose zone statistics count the bytes ever allocated
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define SPLIT_UNDER_ASAN 1
+#endif
+#endif
+#ifndef SPLIT_UNDER_ASAN
     const char *mem_env[] = {"AB_SPLIT=1", table_env, "MallocNanoZone=0", NULL};
     out = run_child("memory", mem_env, &status);
     long long growth = LLONG_MAX;
@@ -1372,6 +1427,7 @@ static void test_split_interactions(void) {
     if (m) growth = atoll(m + 14);
     check(status == 0 && growth <= (1 << 20), "memory grew %lld bytes over 50 split calls", growth);
     free(out);
+#endif
     finish();
 }
 
