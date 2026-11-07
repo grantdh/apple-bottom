@@ -869,7 +869,7 @@ static int child_fork(bool use_exit) {
 // ab_zgemm, a batch, ab_dgemm_async, ab_dev_dgemm on registered memory, and
 // dgemv_.
 static void child_other(void) {
-    const int n = 300;
+    const int n = 600;          // a shape TABLE's dgemm N N row covers (m=512:, K <= M)
     double *a = malloc((size_t)n * n * sizeof *a), *b = malloc((size_t)n * n * sizeof *b);
     g_seed = 77;
     for (int i = 0; i < n * n; i++) { a[i] = uniform(); b[i] = uniform(); }
@@ -894,9 +894,10 @@ static void child_other(void) {
     ab_matrix_download(C, c, true);
     printf("ab_batch_dgemm %016llx\n", (unsigned long long)hash_doubles(c, (size_t)n * n));
     ABFuture fut = ab_dgemm_async(B, B, C);
-    if (fut) { ab_future_wait(fut); ab_future_destroy(fut); }
+    ABStatus ast = fut ? ab_future_wait(fut) : AB_ERROR_ALLOC_FAILED;
+    if (fut) ab_future_destroy(fut);
     ab_matrix_download(C, c, true);
-    printf("ab_dgemm_async %016llx\n", (unsigned long long)hash_doubles(c, (size_t)n * n));
+    printf("ab_dgemm_async %d %016llx\n", (int)ast, (unsigned long long)hash_doubles(c, (size_t)n * n));
     size_t bytes;
     double *da = page_alloc((size_t)n * n, &bytes), *db = page_alloc((size_t)n * n, &bytes),
            *dc = page_alloc((size_t)n * n, &bytes);
@@ -1431,7 +1432,8 @@ static void test_split_interactions(void) {
     int st_off = status;
     const char *catch_all[] = {"AB_SPLIT=1", table_env, NULL};
     char *on = run_child("other", catch_all, &status);
-    check(st_off == 0 && status == 0 && off && on && strstr(off, "dgemv_ ") && strstr(off, "ab_dev_dgemm 0 ") && !strcmp(off, on),
+    check(st_off == 0 && status == 0 && off && on && strstr(off, "dgemv_ ") && strstr(off, "ab_dev_dgemm 0 ") &&
+          strstr(off, "ab_dgemm_async 0 ") && !strcmp(off, on),
           "the other APIs differ with AB_SPLIT on:\n%.300s\nvs\n%.300s", off ? off : "", on ? on : "");
     free(off);
     free(on);
