@@ -45,9 +45,7 @@ It depends on where the matrices live.
   shape, and keeps those calls on Accelerate. Forced onto the GPU, Quantum
   ESPRESSO takes 1.04–1.09× its time on Accelerate ([Performance](#performance)).
   On this hardware linking apple-bottom is not a speed-up yet. In the release
-  check below, Quantum ESPRESSO's si64 energies are the same in every mode, but
-  some other data that reaches the GPU by default loses accuracy with no
-  fallback ([what the guard misses](docs/vv/LIMITATIONS.md#what-the-guard-misses)).
+  check below, Quantum ESPRESSO's si64 energies are the same in every mode.
 - **Accelerate and the GPU together** (in user code for now): splitting one
   GEMM between them finished 1.5–1.9× sooner than the faster engine alone
   in all 20 well-scaled cases of the
@@ -470,12 +468,11 @@ without it the kernels give the bits of 1.4.0.
     matrix whose nonzero entries span more than about 2⁷⁸ (10²³) can still
     lose precision in its products there.
   - Data inside those windows computes exactly as before.
-  - Some data passes the guard and loses accuracy with no fallback: imaginary
-    parts far below the real parts, values below 2⁻¹⁰⁴², and a small C with
-    beta ≠ 0 that has no products to carry it. Through the BLAS ABI
-    `AB_MODE=cpu` avoids all of them; the device API does not read it.
-    [What the guard misses](docs/vv/LIMITATIONS.md#what-the-guard-misses)
-    gives the triggers and measured errors.
+  - The data 1.5.x was measured to let through the guard with a degraded
+    result (among it imaginary parts far below the real parts, values below
+    2⁻¹⁰⁴², and a small C with beta ≠ 0 that has no products to carry it)
+    runs on Accelerate in 1.6.0, or on the GPU at DD accuracy
+    ([what the guard misses](docs/vv/LIMITATIONS.md#what-the-guard-misses)).
   - [Details](docs/vv/LIMITATIONS.md#exponent-range).
 - **Per-call overhead.** Through 1.4.0's BLAS ABI, which packed and
   converted on the CPU, every measured shape was slower than Accelerate

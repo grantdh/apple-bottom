@@ -66,8 +66,7 @@
 //     operations carry and ab_matrix_download removes; a matrix spanning
 //     more keeps FP32's range relative to its scale. The BLAS ABI scales
 //     rows of op(A) and columns of op(B) instead, and runs on Accelerate
-//     what its guard refuses; some data passes the guard and loses accuracy
-//     (docs/vv/LIMITATIONS.md, Exponent range and What the guard misses).
+//     what its guard refuses (docs/vv/LIMITATIONS.md, Exponent range).
 // =============================================================================
 #ifndef APPLE_BOTTOM_H
 #define APPLE_BOTTOM_H

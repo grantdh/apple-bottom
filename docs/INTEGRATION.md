@@ -106,10 +106,9 @@ in-range data unchanged:
   `ABMatrix` handles, so it behaves as the native API does.
 
 The thresholds and their measurements are in
-[LIMITATIONS.md](vv/LIMITATIONS.md#exponent-range). Some data passes the
-guard and still loses accuracy, with no fallback
-([What the guard misses](vv/LIMITATIONS.md#what-the-guard-misses)). Through the
-BLAS ABI `AB_MODE=cpu` avoids it; the device API does not read `AB_MODE`.
+[LIMITATIONS.md](vv/LIMITATIONS.md#exponent-range), and the data 1.5.x was
+measured to let through the guard with a degraded result, and what 1.6.0 does
+with it, in [What the guard misses](vv/LIMITATIONS.md#what-the-guard-misses).
 
 ### Complex data with imbalanced parts
 

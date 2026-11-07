@@ -1,19 +1,20 @@
 // =============================================================================
-// probe_guard_gaps.c — data the BLAS ABI's exponent-range guard lets through
+// probe_guard_gaps.c — data the range guards let through before 1.6.0's fixes
 // =============================================================================
 //   build/probe_guard_gaps > out.csv
 //   AB_MODE=gpu AB_MIN_GPU_DIM=0 build/probe_guard_gaps > out.csv
 //   AB_MODE=cpu build/probe_guard_gaps > out.csv
-// The calls behind CHANGELOG 1.6.0's Known issues. One CSV row per call: the
-// path it took and, for each part of the result, the largest error at sampled
-// outputs against a Dot2 reference (tests/test_dot2.h), in u² = 2⁻⁴⁸ of that
-// part's own scale: |Ar||Br| + |Ai||Bi| for the real part, |Ar||Bi| + |Ai||Br|
-// for the imaginary part, |A||B| + |beta C| for a real result. A correct DD
-// result is a few u² at most; about 2.8×10¹⁴ means the part came back zero.
-// Alpha is 1 and beta 0 unless a row's data says otherwise. Correctness only,
-// so no timing is read from it. The first command is the default routing,
-// under which only the large T,T ZGEMM, ZGEMV and ZHEMV rows reach the GPU, and
-// only on the M2 Max the routing table was measured on.
+// The calls behind docs/vv/LIMITATIONS.md, What the guard misses. One CSV row
+// per call: the path it took and, for each part of the result, the largest
+// error at sampled outputs against a Dot2 reference (tests/test_dot2.h), in
+// u² = 2⁻⁴⁸ of that part's own scale: |Ar||Br| + |Ai||Bi| for the real part,
+// |Ar||Bi| + |Ai||Br| for the imaginary part, |A||B| + |beta C| for a real
+// result. Uniform data gives a few u² at most; about 2.8×10¹⁴ means the
+// part came back zero. Alpha is 1 and beta 0 unless a row's data says
+// otherwise. Correctness only, so no timing is read from it. The first command
+// is the default routing, under which only the large T,T ZGEMM, ZGEMV and
+// ZHEMV rows are routed to the GPU, and only on the M2 Max the routing table
+// was measured on.
 //
 // Data, for each part of an element of A, B or x, u uniform in [-1, 1):
 //   uniform  u

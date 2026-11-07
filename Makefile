@@ -560,7 +560,7 @@ $(BUILD)/bench_strassen: benchmarks/bench_strassen.c tests/test_blas_check.h tes
 	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -Itests $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
-# Accuracy on the data behind CHANGELOG 1.6.0's Known issues (see its header).
+# Accuracy on the data behind docs/vv/LIMITATIONS.md, What the guard misses (see its header).
 $(BUILD)/probe_guard_gaps: benchmarks/probe_guard_gaps.c tests/test_blas2_ref.h tests/test_blas_check.h tests/test_dot2.h lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -Itests $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"

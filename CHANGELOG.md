@@ -393,6 +393,16 @@ All notable changes to this project will be documented in this file.
   `tests/test_blas_abi.c`, which all fail on the previous guard (errors from
   2.8×10⁻⁹ to 1, Im 2.7×10⁷ u²); `subnormal` and `subnormalC` data in
   `tests/test_staging.c` hold the host and GPU statistics to the same counts.
+- **The calls that `benchmarks/probe_guard_gaps.c` found passing the guard
+  with a result degraded by FP32's exponent range now run on Accelerate, or on
+  the GPU at DD accuracy.** At 8b48826, before the fixes above and BLAS-2's
+  per-part guard, they returned up to 2.7×10⁶ u² of a part's own scale, or a
+  part as zero. At fb4dfe0 each of those calls runs on Accelerate, or on the GPU
+  within 2.2 u², and imaginary parts 2⁻⁸⁰ of the real parts run on Accelerate
+  too. The probe's other rows are unchanged, the `spread` rows' 3M imaginary
+  parts (up to 58 u²) included
+  ([what the guard misses](docs/vv/LIMITATIONS.md#what-the-guard-misses),
+  [results](benchmarks/results/2026-11-07-fb4dfe0-guard-gaps/)).
 - **The native API now scales a matrix made only of values below 2⁻¹⁰⁴².**
   `ab_matrix_upload` measured such a matrix as zero and stored it as zeros:
   `ab_dgemm` and `ab_zgemm` with every entry of A at 2⁻ᵏ against B at 2¹⁰⁰⁰
@@ -419,11 +429,13 @@ All notable changes to this project will be documented in this file.
 
 ### Corrected claims
 - **"No silent errors outside FP32's exponent range" and "every product keeps
-  DD precision" (1.5.0).** Too strong. Some data passes the range guard and
-  loses accuracy with no fallback
-  ([what the guard misses](docs/vv/LIMITATIONS.md#what-the-guard-misses)). And a
-  product may lose bits where a larger product carries the element, which the
-  guard accepts because the loss stays at that element's rounding level.
+  DD precision" (1.5.0).** Too strong. In 1.5.x some data passed the range
+  guard and lost accuracy with no fallback; the guard fixes above send the
+  measured cases to Accelerate or keep them at DD accuracy
+  ([what the guard misses](docs/vv/LIMITATIONS.md#what-the-guard-misses)). And,
+  in 1.6.0 too, a product may lose bits where a larger product carries the
+  element, which the guard accepts because the loss stays at that element's
+  rounding level.
 - **"ZGEMM keeps its imaginary part's accuracy" (1.5.0), and "3M's imaginary
   part stays within 8 u²" (`docs/vv/LIMITATIONS.md`).** Too strong. The rule
   between 3M and 4M reads each line's largest parts, not each element. Data
@@ -438,21 +450,6 @@ All notable changes to this project will be documented in this file.
   (`benchmarks/bench_split.c`).
 
 ### Known issues
-- **Some data passes the range guard and loses accuracy, with no fallback**
-  (since 1.5.0 for GEMM). On an M2 Max at 8b48826:
-  - imaginary parts far below the real parts, on the default routing for large
-    `zgemm_` calls: up to 1.4×10⁵ u² of the part's own scale at 2⁻¹⁰⁰ of the
-    real parts, where uniform data gives at most 2.3 u², and zero at 2⁻¹³⁰
-    (`zgemv_` and `zhemv_`, which returned up to 3.7×10⁵ u², now run such calls
-    on Accelerate);
-  - in GEMM, values near 2⁻¹⁰⁶⁰ with products in range, which come back zero, on
-    the default routing for `zgemm_` 'T','T' 4096³;
-  - under `AB_MODE=gpu AB_MIN_GPU_DIM=0`, a DGEMM's small C with beta ≠ 0 in
-    elements with no products.
-
-  `AB_MODE=cpu` keeps every case within 2 u². Triggers, reasons and each call's
-  error: [What the guard misses](docs/vv/LIMITATIONS.md#what-the-guard-misses);
-  `benchmarks/probe_guard_gaps.c` runs these calls.
 - **`AB_MODE=gpu AB_MIN_GPU_DIM=0` still fails Netlib's DGEMM and ZGEMM tests**,
   at double-float accuracy, as in 1.5.1. BLAS-2 calls below `AB_BLAS2_MIN_DIM` stay
   on Accelerate in that mode. With `AB_MODE` unset every Netlib routine passes and LAPACK fails

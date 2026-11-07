@@ -13,8 +13,9 @@ See [CHANGELOG.md](../CHANGELOG.md) for what has shipped.
   buffers between calls.
 - **Opt-in:** `AB_PRECISION=fast` and Strassen-Winograd products. Neither has
   a proven componentwise bound; with both unset the results keep their bits.
-- **Stated limits:** the range guard's gaps are listed with their triggers
-  ([what the guard misses](vv/LIMITATIONS.md#what-the-guard-misses)).
+- **The range guard's measured gaps closed:** the data 1.5.x was measured to
+  let through with a degraded result runs on Accelerate, or on the GPU at DD
+  accuracy ([what the guard misses](vv/LIMITATIONS.md#what-the-guard-misses)).
 
 ## 1.5 — the BLAS ABI's work moves to the GPU
 
@@ -25,8 +26,8 @@ See [CHANGELOG.md](../CHANGELOG.md) for what has shipped.
   multiplies, converts back and applies alpha and beta, with the host
   path's bits.
 - **Data outside FP32's exponent range** is scaled by powers of two, or
-  sent to Accelerate. Some data passes the guard and loses accuracy
-  ([what the guard misses](vv/LIMITATIONS.md#what-the-guard-misses)).
+  sent to Accelerate. Some data passed the guard and lost accuracy until
+  1.6.0 ([what the guard misses](vv/LIMITATIONS.md#what-the-guard-misses)).
 - **ZGEMM with imbalanced real and imaginary parts** runs as four real
   products; the BLAS ABI and the device-buffer API decide per row and
   column.
@@ -49,8 +50,6 @@ Accelerate.
 
 - **Calibrate the staged path.** `make calibrate` since 1.5.0 measures it;
   the built-in routing table still comes from 1.4.0's host path.
-- **Close the range guard's remaining gaps**
-  ([what the guard misses](vv/LIMITATIONS.md#what-the-guard-misses)).
 - **Split one call between Accelerate and the GPU inside the library.**
   `bench_split` does it in user code
   ([split benchmark](../benchmarks/results/2026-10-28-415cb5d-hybrid-split/));

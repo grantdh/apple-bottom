@@ -32,8 +32,7 @@ apple-bottom keeps each value as an unevaluated sum of two FP32 numbers and
 runs error-free transformations on the GPU's FP32 units, compiled without
 fast math. That gives about 10⁻¹⁵ relative error per element instead of
 FP64's 10⁻¹⁶, with FP32's exponent range bridged by power-of-two scaling
-(and Accelerate for BLAS-ABI calls its range guard refuses;
-[some data passes the guard with no fallback](vv/LIMITATIONS.md#what-the-guard-misses)).
+(and Accelerate for BLAS-ABI calls its range guard refuses).
 Where it helps:
 
 - Large GEMMs on matrices kept on the GPU between calls (the native
