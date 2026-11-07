@@ -1181,6 +1181,18 @@ static void test_split_scenarios(void) {
     finish();
 }
 
+// The first of fields that s holds, or NULL: AB_SPLIT's own fields, which
+// default reports must not have (a path may say "split").
+static const char *const REPORT_FIELDS[] = {"AB_SPLIT", "split_table", "split_calls", "split_row",
+                                            " split calls=", "  split row=", NULL};
+static const char *const JSON_FIELDS[] = {"\"split_rows\"", "\"split\"", "\"split_table\"",
+                                          "\"split_calls\"", NULL};
+static const char *split_field(const char *s, const char *const *fields) {
+    for (; *fields; fields++)
+        if (strstr(s, *fields)) return *fields;
+    return NULL;
+}
+
 // T3: AB_SPLIT unset, empty and 0 alike: every call on its own route (the
 // whole call on cblas under auto here), no record, and no AB_SPLIT field in
 // the reports or the trace.
@@ -1189,7 +1201,7 @@ static void test_split_off(void) {
     snprintf(trace, sizeof trace, "%s/off", g_dir);
     snprintf(trace_env, sizeof trace_env, "AB_TRACE=%s", trace);
     const char *tmp = getenv("TMPDIR");
-    char json[PATH_MAX], json_env[PATH_MAX + 32];   // a path without "split" in it
+    char json[PATH_MAX], json_env[PATH_MAX + 32];
     snprintf(json, sizeof json, "%s/ab_off_%d.json", tmp && *tmp ? tmp : "/tmp", (int)getpid());
     snprintf(json_env, sizeof json_env, "AB_PROFILE_JSON=%s", json);
     const char *settings[] = {NULL, "AB_SPLIT=", "AB_SPLIT=0"};
@@ -1212,18 +1224,21 @@ static void test_split_off(void) {
             }
             check(!strcmp(source, "off"), "ab_split_source() is %s with AB_SPLIT %s", source,
                   settings[k] ? settings[k] : "unset");
-            check(!strstr(out, "split"), "AB_SPLIT %s: the reports mention the split", settings[k] ? settings[k] : "unset");
+            const char *field = split_field(out, REPORT_FIELDS);
+            check(!field, "AB_SPLIT %s: the reports carry %s", settings[k] ? settings[k] : "unset", field);
         }
         free(out);
         FILE *jf = fopen(json, "r");
         char *js = jf ? slurp(jf) : NULL;
-        check(js && strstr(js, "\"routines\"") && !strstr(js, "split"),
+        check(js && strstr(js, "\"routines\"") && !split_field(js, JSON_FIELDS),
               "AB_SPLIT %s: the JSON dump is missing or mentions the split", settings[k] ? settings[k] : "unset");
         free(js);
         unlink(json);
         // the child's trace file: no split field
         char cmd[PATH_MAX * 2];
-        snprintf(cmd, sizeof cmd, "/bin/cat %s.* 2>/dev/null | /usr/bin/grep -c split", trace);
+        snprintf(cmd, sizeof cmd,
+                 "/bin/cat %s.* 2>/dev/null | /usr/bin/grep -cE 'AB_SPLIT|split_table| path=split| row=| declined='",
+                 trace);
         FILE *p = popen(cmd, "r");
         int hits = -1;
         if (p) { if (fscanf(p, "%d", &hits) != 1) hits = -1; pclose(p); }
