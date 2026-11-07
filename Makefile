@@ -295,9 +295,10 @@ $(BUILD)/test_dispatch: tests/test_dispatch.c $(SRC)/dispatch.h $(SRC)/dispatch_
 	@echo "Built: $@"
 
 # AB_SPLIT's executor on the GPU through its seam, and dgemm_/zgemm_ under
-# AB_SPLIT in child processes (tests/test_split.c).
-$(BUILD)/test_split: tests/test_split.c tests/test_blas_check.h tests/test_dot2.h tests/test_spawn.h tests/test_registry.h $(SRC)/gpu_stage.h $(SRC)/split_slice.h lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH) -lpthread
+# AB_SPLIT in child processes (tests/test_split.c); it checks that calibrate,
+# replay and bench_split refuse to run under AB_SPLIT.
+$(BUILD)/test_split: tests/test_split.c tests/test_blas_check.h tests/test_dot2.h tests/test_spawn.h tests/test_registry.h $(SRC)/gpu_stage.h $(SRC)/split_slice.h $(BUILD)/calibrate $(BUILD)/replay $(BUILD)/bench_split lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' '-DAB_BUILD_DIR="$(abspath $(BUILD))"' $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH) -lpthread
 	@echo "Built: $@"
 
 # Stage 2 of the exponent-range guards against the plain loops they replace,
@@ -509,27 +510,36 @@ uninstall:
 
 # =============================================================================
 # Sanitizer builds (for local debugging)
-.PHONY: test-asan test-ubsan
+.PHONY: test-asan test-ubsan test-tsan
 
-# Sanitizer builds: the whole library and test_correctness, built by the
-# normal rules with the sanitizer's flags into their own directory (so they
-# never mix with the normal objects).
+# Sanitizer builds: the whole library, test_correctness and test_split, built
+# by the normal rules with the sanitizer's flags into their own directory (so
+# they never mix with the normal objects). test-tsan builds and runs
+# test_split alone: AB_SPLIT's thread per call is what it is for.
 SAN_TARGET = $(MAKE) --no-print-directory BUILD=$(BUILD)/$(1) \
 	CFLAGS="$(CFLAGS) -fsanitize=$(2) -g" OBJCFLAGS="$(OBJCFLAGS) -fsanitize=$(2) -g" \
 	LDFLAGS="$(LDFLAGS) -fsanitize=$(2)" DYLIB_LDFLAGS="$(DYLIB_LDFLAGS) -fsanitize=$(2)" \
-	$(BUILD)/$(1)/test_correctness
+	$(3)
 
 test-asan:
 	@echo "Building with AddressSanitizer..."
-	+$(call SAN_TARGET,asan,address)
+	+$(call SAN_TARGET,asan,address,$(BUILD)/asan/test_correctness $(BUILD)/asan/test_split)
 	@echo "Running tests with ASan..."
 	ASAN_OPTIONS=halt_on_error=1 ./$(BUILD)/asan/test_correctness
+	ASAN_OPTIONS=halt_on_error=1 ./$(BUILD)/asan/test_split
 
 test-ubsan:
 	@echo "Building with UndefinedBehaviorSanitizer..."
-	+$(call SAN_TARGET,ubsan,undefined)
+	+$(call SAN_TARGET,ubsan,undefined,$(BUILD)/ubsan/test_correctness $(BUILD)/ubsan/test_split)
 	@echo "Running tests with UBSan..."
 	UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./$(BUILD)/ubsan/test_correctness
+	UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./$(BUILD)/ubsan/test_split
+
+test-tsan:
+	@echo "Building with ThreadSanitizer..."
+	+$(call SAN_TARGET,tsan,thread,$(BUILD)/tsan/test_split)
+	@echo "Running test_split with TSan..."
+	TSAN_OPTIONS=halt_on_error=1 ./$(BUILD)/tsan/test_split
 
 $(BUILD)/bench_dsyrk: benchmarks/bench_dsyrk.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
@@ -677,6 +687,13 @@ split-table-check:
 $(BUILD)/replay: benchmarks/replay.c $(SRC)/blas_trans.h $(SRC)/dispatch.h $(SRC)/profiling/blas_profiler.h tests/test_blas_check.h lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -Itests $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
+
+# Plants each defect AB_SPLIT's tests must catch (tests/split_defects.py), one
+# at a time in a copy of the tree, and checks that they do; not in `make test`
+# (about half an hour, GPU).
+.PHONY: test-split-defects
+test-split-defects:
+	python3 tests/split_defects.py
 
 .PHONY: bench-replay test-replay
 bench-replay: $(BUILD)/replay

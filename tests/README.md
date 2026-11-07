@@ -45,8 +45,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 232, every test but
-the chaos ones, and `make ci-local` all 250 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 243, every test but
+the chaos ones, and `make ci-local` all 261 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -108,11 +108,33 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     classical componentwise bound on both paths, and that ZHERK, a
     one-element ZGEMM batch, DTRSM and `ab_dgesv_mpir` give the same bits
     with `AB_STRASSEN=1` and every size routed as without it
-  - `tests/test_split.c` — 1 test of `AB_SPLIT`'s executor on the GPU,
-    through its seam (`ab_internal_dgemm_split`, `ab_internal_zgemm_split`):
+  - `tests/test_split.c` — 12 tests of `AB_SPLIT`. Through the executor's
+    seam (`ab_internal_dgemm_split`, `ab_internal_zgemm_split`), on the GPU:
     a call cut at g is, bit for bit, cblas on the head slice and the staged
     path on the tail slice alone, in every completion order, over every
-    TRANS pair, scalar set and a range of cuts, padded operands untouched
+    TRANS pair, scalar set and a range of cuts, padded operands untouched;
+    errors against cblas (1e-11) and, for DGEMM with alpha 1 and beta 0,
+    against Dot2 within (3K + 13) u² |A||B|, with cuts at 1 and L − 1, NaN
+    padding, beta = 0 over NaN in C, signed zeros, cancellation and QE's
+    K = 143666 on the K axis; NaN, Inf and scaled lines in the head only or
+    the tail only (a refused tail is the cblas parts, with nothing added on
+    K); repeats after other shapes, on registered and misaligned memory,
+    under background load and from 8 threads at once; registered memory in
+    place except C on the M axis; a caller with flush to zero declined. In
+    child processes through `dgemm_` / `zgemm_`, with a split table covering
+    their calls: `AB_SPLIT` unset, empty and 0 alike with no split field in
+    any report or trace; `AB_MODE=cpu` bitwise cblas with no GPU GEMM; each
+    `AB_TEST_FAIL_STAGE` failure (`alloc`, `kernel`, `kernel_once`,
+    `redo_4m`, `scales`, `split_thread`, `split_scratch`, `split_fpcr`) and
+    `AB_HOST_PACK` with the outcome, retries and bits it calls for (the
+    cblas parts, the GPU's bits, or the whole call's as with `AB_SPLIT`
+    unset); `AB_STRASSEN`, `AB_STAGING_MB=0` and `AB_MIN_GPU_DIM=0` keeping
+    the bits; `VECLIB_MAXIMUM_THREADS` 1, 2 and 8 repeating; `fork()` with
+    `_exit` and `exit`; the reports (counts that add up, a line per row,
+    trace stages that sum exactly, the JSON fields); `AB_PRECISION=fast`
+    within 4x the default error; the native, batched and BLAS-2 APIs
+    unchanged; no memory growth; and calibrate, replay and bench_split
+    refusing to run
 
 - **Not yet registry-based (one `main`, no ghost guard):**
   - `tests/test_precision.c` — 17 tests (the last compares
@@ -137,7 +159,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 | `make test-dd-bound` | `test_dd_fma_bound.cpp`: cuts the shader's `DD` primitives out of `src/apple_bottom.m`, compiles them on the CPU without contraction, and checks `dd_fma` on 5×10⁶ adversarial and cancelling triples against MPFR and the bound of `docs/vv/PRECISION_ENVELOPE.md` §1.2 (`DD_BOUND_N=` to change the count; needs `brew install mpfr`, else SKIP; ~5 s) |
 | `make test-python` | the Python bindings (`tests/python/`) |
 | `make test-replay` | `tests/test_replay.py`: the QE call-mix replay (`benchmarks/replay.c`) on a synthetic 2-rank trace, in every mode, with the trace header's `AB_MIN_GPU_DIM`, a killed and a hung worker, and `benchmarks/replay_summary.py` |
-| `make test-asan`, `make test-ubsan` | the library and `test_correctness` under AddressSanitizer / UndefinedBehaviorSanitizer, in `build/asan`, `build/ubsan`. On macOS 27.0.1 with Apple clang 17.0.0 the AddressSanitizer runtime hangs in its own initialization, before `main()`, even for an empty program; `test-ubsan` runs |
+| `make test-asan`, `make test-ubsan`, `make test-tsan` | the library, `test_correctness` and `test_split` under AddressSanitizer / UndefinedBehaviorSanitizer, in `build/asan`, `build/ubsan`; `test_split` alone under ThreadSanitizer, in `build/tsan`. On macOS 27.0.1 with Apple clang 17.0.0 the AddressSanitizer runtime hangs in its own initialization, before `main()`, even for an empty program; `test-ubsan` runs |
 
 ## BLAS-ABI conformance harness
 
