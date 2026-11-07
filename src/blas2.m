@@ -939,7 +939,7 @@ static ab_b2_result_t run_gpu(const ab_b2_call_t *c, id<MTLCommandQueue> queue, 
     [enc endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
-    if (cb.status == MTLCommandBufferStatusError || ab_test_fail_stage() == AB_PROF_STAGE_KERNEL)
+    if (cb.status == MTLCommandBufferStatusError || ab_test_fail_cmdbuf())
         return AB_B2_FAILED;
     if (stage_ns) {
         // The kernel stage is the GPU time; the rest of the step stays in "other".

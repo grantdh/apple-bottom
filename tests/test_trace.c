@@ -28,6 +28,10 @@
 //           result, the path record says "cpu", ab_get_stats() shows the GPU
 //           work done before the failure, AB_REPORT counts gpu_failed and the
 //           trace says fallback:gpu_failed.
+//   native  AB_TEST_FAIL_STAGE=kernel, AB_TEST_FAIL_ONLY=<n> for each n: of the
+//           native operations that wait for command buffers, only the one
+//           that waits for the n-th of the run returns
+//           AB_ERROR_KERNEL_FAILED. Without the hook all return AB_OK.
 // =============================================================================
 
 #include "apple_bottom.h"
@@ -283,6 +287,68 @@ static int open_on(const char *path, int fd) {
     return got;
 }
 
+// The native operations that wait for command buffers, in the order
+// child_native() runs them, and how many each waits for when none fails.
+static const struct {
+    const char *name;
+    int buffers;
+} NATIVE_OPS[] = {
+    {"zero", 1},
+    {"copy", 1},
+    {"add", 1},
+    {"sub", 1},
+    {"scale", 1},
+    {"dsyrk", 1},
+    {"dgemm", 1},
+    {"dgemm_batched", 1},
+    {"zgemm_batched", 1},
+    {"zgemm_batched_mixed", 2},     // before the dimensions change, and the last
+    {"zgemm_ex", 3},                // op(A), op(B) and the product
+    {"zherk", 7},                   // 2 DSYRK, the add, the transposes, 2 DGEMM, the sub
+};
+#define N_NATIVE_OPS TEST_REGISTRY_SIZE(NATIVE_OPS)
+
+// A rows x cols matrix of value()s.
+static ABMatrix native_matrix(unsigned seed, int rows, int cols) {
+    double *x = fill(seed, stored('N', rows, cols, 0), false, false);
+    ABMatrix m = ab_matrix_create(rows, cols);
+    ab_matrix_upload(m, x, true);
+    free(x);
+    return m;
+}
+
+// Runs NATIVE_OPS once each, printing "native <name> status=<ab_status_string>".
+static void child_native(void) {
+    enum { N = 8, SMALL = 4 };
+    if (ab_init() != AB_OK) {
+        printf("native: ab_init failed\n");
+        return;
+    }
+    ABMatrix m[6], s[6];            // Ar, Ai, Br, Bi, Cr, Ci
+    for (int i = 0; i < 6; i++) {
+        m[i] = native_matrix(10 + i, N, N);
+        s[i] = native_matrix(20 + i, SMALL, SMALL);
+    }
+    ABMatrix Ar[] = {m[0], m[0]}, Ai[] = {m[1], m[1]}, Br[] = {m[2], m[2]},
+             Bi[] = {m[3], m[3]}, Cr[] = {m[4], m[4]}, Ci[] = {m[5], m[5]};
+    ABMatrix xAr[] = {m[0], s[0]}, xAi[] = {m[1], s[1]}, xBr[] = {m[2], s[2]},
+             xBi[] = {m[3], s[3]}, xCr[] = {m[4], s[4]}, xCi[] = {m[5], s[5]};
+#define NATIVE(name, call) printf("native %s status=%s\n", name, ab_status_string(call))
+    NATIVE("zero", ab_matrix_zero(m[4]));
+    NATIVE("copy", ab_matrix_copy(m[0], m[4]));
+    NATIVE("add", ab_matrix_add(m[0], m[1], m[4]));
+    NATIVE("sub", ab_matrix_sub(m[0], m[1], m[4]));
+    NATIVE("scale", ab_matrix_scale(2.0, m[4]));
+    NATIVE("dsyrk", ab_dsyrk(m[0], m[4]));
+    NATIVE("dgemm", ab_dgemm(m[0], m[2], m[4]));
+    NATIVE("dgemm_batched", ab_dgemm_batched(2, Ar, Br, Cr));
+    NATIVE("zgemm_batched", ab_zgemm_batched(2, Ar, Ai, Br, Bi, Cr, Ci));
+    NATIVE("zgemm_batched_mixed", ab_zgemm_batched(2, xAr, xAi, xBr, xBi, xCr, xCi));
+    NATIVE("zgemm_ex", ab_zgemm_ex(AB_TRANS, AB_CONJ_TRANS, m[0], m[1], m[2], m[3], m[4], m[5]));
+    NATIVE("zherk", ab_zherk(m[0], m[1], m[4], m[5]));
+#undef NATIVE
+}
+
 static int child_main(const char *scenario, const char *dir) {
     if (!strcmp(scenario, "lines")) {
         child_calls(LINE_CALLS, TEST_REGISTRY_SIZE(LINE_CALLS));
@@ -319,6 +385,10 @@ static int child_main(const char *scenario, const char *dir) {
     }
     if (!strcmp(scenario, "fail")) {
         child_fail_calls();
+        return 0;
+    }
+    if (!strcmp(scenario, "native")) {
+        child_native();
         return 0;
     }
     return 2;
@@ -861,6 +931,52 @@ static void test_fail_stage(int stage_index) {
 static void test_fail_stage_alloc(void)  { test_fail_stage(0); }
 static void test_fail_stage_kernel(void) { test_fail_stage(1); }
 
+// The native scenario under env: the operation that waits for its failing-th
+// command buffer must return AB_ERROR_KERNEL_FAILED, and the others AB_OK.
+static void check_native(const char *dir, const char *const *env, int failing) {
+    ChildRun r = {0};
+    if (run_child("native", dir, env, &r)) {
+        int first = 1;
+        for (size_t i = 0; i < N_NATIVE_OPS; i++) {
+            const int next = first + NATIVE_OPS[i].buffers;
+            const bool fails = failing >= first && failing < next;
+            char prefix[64], want[128], line[128] = "";
+            snprintf(prefix, sizeof prefix, "native %s status=", NATIVE_OPS[i].name);
+            snprintf(want, sizeof want, "%s%s", prefix,
+                     ab_status_string(fails ? AB_ERROR_KERNEL_FAILED : AB_OK));
+            if (!expect(find_line(r.out, prefix, line, sizeof line) && !strcmp(line, want),
+                        "with buffer %d failing: '%s', expected '%s': %s", failing, line, want,
+                        r.out))
+                break;
+            first = next;
+        }
+    }
+    free(r.out);
+}
+
+// One command buffer fails and the rest of the run goes on, as when macOS
+// stops one. All failing cannot show this: ab_zherk's first DSYRK would fail
+// before its transposes, and ab_zgemm_batched's last buffer would hide an
+// earlier one. Past the last buffer no operation fails, which also fixes how
+// many buffers are checked, so a wait with no check shows as a wrong count.
+static void test_fail_native(void) {
+    begin();
+    char dir[PATH_MAX];
+    test_dir("native", dir, sizeof dir);
+    const char *none[] = {NULL};
+    check_native(dir, none, 0);
+    int total = 0;
+    for (size_t i = 0; i < N_NATIVE_OPS; i++) total += NATIVE_OPS[i].buffers;
+    for (int n = 1; n <= total + 1 && !first_failure[0]; n++) {
+        char only[32];
+        snprintf(only, sizeof only, "AB_TEST_FAIL_ONLY=%d", n);
+        const char *env[] = {"AB_TEST_FAIL_STAGE=kernel", only, NULL};
+        check_native(dir, env, n);
+    }
+    clean_dir(dir);
+    finish();
+}
+
 // =============================================================================
 // Main
 // =============================================================================
@@ -871,6 +987,7 @@ static const TestCase TESTS[] = {
     {"test_trace_off",         test_trace_off},
     {"test_fail_stage_alloc",  test_fail_stage_alloc},
     {"test_fail_stage_kernel", test_fail_stage_kernel},
+    {"test_fail_native",       test_fail_native},
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
 
