@@ -674,14 +674,15 @@ dispatch-table-check:
 # The built-in AB_SPLIT tables, src/split_table.h, from the tables filed with
 # their evidence under benchmarks/split/tables/ (scripts/ingest_split.py DIR
 # files one), and the check that the committed header matches them and that
-# their rows keep the evidence rules (part of ci-local and CI; it warns when
-# src/ changed since a table's library commit).
+# their rows keep the evidence rules, after the rules' own self-test on made-up
+# tables (part of ci-local and CI; it warns when src/ changed since a table's
+# library commit).
 .PHONY: split-table split-table-check
 split-table:
 	python3 scripts/ingest_split.py --regenerate
 
 split-table-check:
-	@python3 scripts/ingest_split.py --regenerate --check && echo "✓ split-table-check: src/split_table.h matches benchmarks/split/tables/"
+	@python3 scripts/ingest_split.py --self-test && python3 scripts/ingest_split.py --regenerate --check && echo "✓ split-table-check: src/split_table.h matches benchmarks/split/tables/"
 
 # QE call-mix replay, see "Replay" in benchmarks/qe/README.md; test-replay is not in `make test`.
 $(BUILD)/replay: benchmarks/replay.c $(SRC)/blas_trans.h $(SRC)/dispatch.h $(SRC)/profiling/blas_profiler.h tests/test_blas_check.h lib | $(BUILD)

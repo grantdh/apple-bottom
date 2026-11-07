@@ -1106,18 +1106,31 @@ static const char *split_evidence_why(const ab_split_row_t *rows, int nrows, con
         int k = 0;
         line[strcspn(line, "\r\n")] = '\0';
         for (char *t = strsep(&p, ","); t && k < 18; t = strsep(&p, ",")) field[k++] = t;
-        int row = atoi(field[0]);
-        if (k != 17 || row < 0 || row >= nrows) {
-            snprintf(why, len, "%s:%d: not a line of 17 fields for one of the %d rows", csv_path, n, nrows);
+        // counts in digits; share, split_s, base_s, ratio, ratio_lo, ratio_hi finite
+        static const int COUNT[] = {0, 6, 12, 13, 14, 15, 16}, REAL[] = {5, 7, 8, 9, 10, 11};
+        double x[17] = {0};
+        bool numbers = k == 17;
+        for (size_t c = 0; numbers && c < TEST_REGISTRY_SIZE(COUNT); c++)
+            numbers = field[COUNT[c]][0] && strspn(field[COUNT[c]], "0123456789") == strlen(field[COUNT[c]]);
+        for (size_t c = 0; numbers && c < TEST_REGISTRY_SIZE(REAL); c++) {
+            char *end;
+            const char *s = field[REAL[c]];
+            x[REAL[c]] = strtod(s, &end);
+            numbers = *s && !*end && strspn(s, "0123456789+-.eE") == strlen(s) && isfinite(x[REAL[c]]);
+        }
+        int row = numbers ? atoi(field[0]) : -1;
+        if (k != 17 || !numbers || row >= nrows) {
+            snprintf(why, len, "%s:%d: not a line of 17 fields with finite numbers for one of the %d rows",
+                     csv_path, n, nrows);
             ok = false;
-        } else if (strcmp(field[4], library) || fabs(atof(field[5]) - rows[row].share) > 1e-9) {
+        } else if (strcmp(field[4], library) || fabs(x[5] - rows[row].share) > 1e-9) {
             snprintf(why, len, "%s:%d: library %s share %s, the table's are %s and %g (rule 1)", csv_path, n,
                      field[4], field[5], library, rows[row].share);
             ok = false;
-        } else if (atof(field[10]) < 1.00) {
+        } else if (!(x[10] >= 1.00)) {
             snprintf(why, len, "%s:%d: ratio_lo %s < 1.00 (rule 2)", csv_path, n, field[10]);
             ok = false;
-        } else if (!(atof(field[7]) > 0 && atof(field[8]) > 0)) {
+        } else if (!(x[7] > 0 && x[8] > 0)) {
             snprintf(why, len, "%s:%d: split_s and base_s must be positive", csv_path, n);
             ok = false;
         } else {
@@ -1130,19 +1143,20 @@ static const char *split_evidence_why(const ab_split_row_t *rows, int nrows, con
                          (pw && !strcmp(field[2], "B") && !strcmp(field[3], "8x1")) << 1 |
                          (bench && !strcmp(field[3], "1x8")) << 2 | (bench && !strcmp(field[3], "4x2")) << 3 |
                          pw << 4 | bench << 5;
-            split[row] += atof(field[7]);
-            base[row] += atof(field[8]);
+            split[row] += x[7];
+            base[row] += x[8];
             lines[row]++;
         }
     }
     fclose(f);
     for (int i = 0; ok && i < nrows; i++) {
+        bool square = rows[i].ratio > 0;    // squares may stand on bench_split's synthetic data alone
         if (!lines[i]) snprintf(why, len, "row %d has no evidence (rule 1)", i);
-        else if (base[i] / split[i] < 1.10)
+        else if (!(base[i] / split[i] >= 1.10))
             snprintf(why, len, "row %d: pooled ratio %.3f < 1.10 (rule 3)", i, base[i] / split[i]);
-        else if ((have[i] & 16) && (have[i] & 3) != 3)
+        else if ((!square || (have[i] & 16)) && (have[i] & 3) != 3)
             snprintf(why, len, "row %d: no pw.x evidence on A and B at 8x1 (rule 4)", i);
-        else if ((have[i] & 32) && (have[i] & 12) != 12)
+        else if ((square || (have[i] & 32)) && (have[i] & 12) != 12)
             snprintf(why, len, "row %d: no bench_split evidence at 1x8 and 4x2 (rule 4)", i);
         else if (rows[i].scalars == 'a')
             snprintf(why, len, "row %d: scalars=a in a built-in table (rule 5)", i);
@@ -1192,6 +1206,22 @@ static void test_split_builtin_matches_evidence(void) {
         {"0,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n"
          "0,pw.x,B,4x2,abc1234,0.45,6,70,80,1.14,1.08,1.20,100,99,0,1,0\n", "rule 4"},
         {"0,replay,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "rule 4"},
+        // a QE-shaped row (no ratio=) on bench_split's synthetic data alone
+        {"0,bench_split,qe,1x8,abc1234,0.45,20,1.0,1.3,1.3,1.2,1.4,20,20,0,0,0\n"
+         "0,bench_split,qe,4x2,abc1234,0.45,20,1.0,1.2,1.2,1.1,1.3,20,20,0,0,0\n", "rule 4"},
+        // ... or with only part of pw.x's
+        {"0,bench_split,qe,1x8,abc1234,0.45,20,1.0,1.3,1.3,1.2,1.4,20,20,0,0,0\n"
+         "0,bench_split,qe,4x2,abc1234,0.45,20,1.0,1.2,1.2,1.1,1.3,20,20,0,0,0\n"
+         "0,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "rule 4"},
+        // numbers that are not finite, or not numbers, and short or blank lines
+        {"0,pw.x,A,8x1,abc1234,nan,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "finite"},
+        {"0,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,nan,1.25,100,100,0,0,0\n", "finite"},
+        {"0,pw.x,A,8x1,abc1234,0.45,6,inf,95,1.19,1.12,1.25,100,100,0,0,0\n", "finite"},
+        {"0,pw.x,A,8x1,abc1234,0.45,6,80,1e999,1.19,1.12,1.25,100,100,0,0,0\n", "finite"},
+        {"0,pw.x,A,8x1,abc1234,0.45,6,80,0x5f,1.19,1.12,1.25,100,100,0,0,0\n", "finite"},
+        {"0,pw.x,A,8x1,abc1234,0.45,six,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "finite"},
+        {"0,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0\n", "finite"},
+        {"\n0,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "finite"},
     };
     char doc[2048];
     snprintf(doc, sizeof doc, "%s%s", H, GOOD);

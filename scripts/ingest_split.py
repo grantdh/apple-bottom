@@ -17,9 +17,12 @@ tests/test_dispatch.c on the built-in tables):
   1. every row has evidence, all of it from the table's library and at the row's share;
   2. every evidence line has ratio_lo >= 1.00;
   3. each row's pooled ratio (sum of base_s / sum of split_s) is at least 1.10;
-  4. a row with pw.x evidence has it for inputs A and B at 8x1; a row with bench_split evidence has
-     it at 1x8 and 4x2; no other source counts;
+  4. every row without a ratio= bound (not a square row) has pw.x evidence for inputs A and B at
+     8x1, whatever else it has; a square row has bench_split evidence at 1x8 and 4x2 (well-scaled
+     synthetic data, which the generated header labels as such); a row with pw.x evidence has it for
+     both A and B at 8x1, and one with bench_split evidence has both layouts; no other source counts;
   5. no row has scalars=a (or leaves scalars out).
+Every number must be finite, in ASCII digits, and every line of the CSV must have its 17 fields.
 A table without rows passes. A table is filed under benchmarks/split/tables/<slug>/ (the chip without
 "Apple " plus the GPU core count: M2-Max-38c), and src/split_table.h is regenerated from every filed
 directory, in slug order. Commit both. A chip's earlier table is replaced only with --force; nothing
@@ -35,11 +38,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TABLES = os.path.join(REPO, "benchmarks", "split", "tables")
@@ -71,9 +76,15 @@ def split_trans(routine, t):
     return "T" if routine == "d" and t == "C" else t
 
 
+DIGITS = re.compile(r"[0-9]+", re.ASCII)
+# A number as dispatch.c's parse_double() takes it in the C locale: ASCII digits, an optional point
+# and exponent; finite.
+NUMBER = re.compile(r"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?", re.ASCII)
+
+
 def parse_int_range(v):
     lo, sep, hi = v.partition(":")
-    if not sep or (lo and not lo.isdigit()) or (hi and not hi.isdigit()):
+    if not sep or (lo and not DIGITS.fullmatch(lo)) or (hi and not DIGITS.fullmatch(hi)):
         raise ValueError(v)
     lo, hi = int(lo or 0), int(hi or 0)
     if lo > 2**31 - 1 or hi > 2**31 - 1 or (hi and hi < lo):
@@ -81,11 +92,20 @@ def parse_int_range(v):
     return lo, hi
 
 
-def parse_number(v):
-    if not re.fullmatch(r"(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?", v):
+def finite(v):
+    """v as a finite float in the NUMBER grammar; ValueError otherwise."""
+    if not NUMBER.fullmatch(v):
         raise ValueError(v)
     x = float(v)
-    if x == float("inf"):
+    if not math.isfinite(x):
+        raise ValueError(v)
+    return x
+
+
+def parse_number(v):
+    """A table value: finite and not negative."""
+    x = finite(v)
+    if x < 0 or v.startswith("-"):
         raise ValueError(v)
     return x
 
@@ -199,23 +219,36 @@ class Table:
         if self.library == "none" and self.rows:
             raise Ingest(f"{self.txt}: rows need the library commit they were measured on")
         self.slug = chip_slug(self.chip, self.gpu_cores)
+        # As strict as tests/test_dispatch.c's reader: the header, then lines of exactly 17 fields.
+        self.evidence = []
         with open(self.csv, encoding="utf-8", newline="") as f:
-            reader = csv.DictReader(f)
-            if reader.fieldnames is None or list(reader.fieldnames) != COLUMNS:
-                raise Ingest(f"{self.csv}: the columns must be {','.join(COLUMNS)}")
-            self.evidence = list(reader)
+            reader = csv.reader(f)
+            if next(reader, None) != COLUMNS:
+                raise Ingest(f"{self.csv}: the first line must be {','.join(COLUMNS)}")
+            for fields in reader:
+                if len(fields) != len(COLUMNS):
+                    raise Ingest(f"{self.csv}:{reader.line_num}: {len(fields)} fields, expected {len(COLUMNS)}")
+                e = dict(zip(COLUMNS, fields))
+                e["line"] = reader.line_num
+                self.evidence.append(e)
 
     def validate(self):
         """Rules 1-5 of the docstring."""
         by_row = {i: [] for i in range(len(self.rows))}
-        for n, e in enumerate(self.evidence, 2):
-            where = f"{self.csv}:{n}"
+        self.pooled = {}
+        for e in self.evidence:
+            where = f"{self.csv}:{e['line']}"
             try:
-                i = int(e["row"])
-                share, lo = float(e["share"]), float(e["ratio_lo"])
-                split_s, base_s = float(e["split_s"]), float(e["base_s"])
-            except ValueError:
-                raise Ingest(f"{where}: row, share, ratio_lo, split_s and base_s must be numbers")
+                for k in ("row", "pairs", "calls", "kept", "kept_4m", "range", "gpu_failed"):
+                    if not DIGITS.fullmatch(e[k]):
+                        raise ValueError(k)
+                for k in ("share", "split_s", "base_s", "ratio", "ratio_lo", "ratio_hi"):
+                    finite(e[k])
+            except ValueError as bad:
+                raise Ingest(f"{where}: {bad} is not a finite number (counts: digits only)")
+            i = int(e["row"])
+            share, lo = float(e["share"]), float(e["ratio_lo"])
+            split_s, base_s = float(e["split_s"]), float(e["base_s"])
             if i not in by_row:
                 raise Ingest(f"{where}: row {i}: the table has {len(self.rows)} rows")
             r = self.rows[i]
@@ -235,22 +268,22 @@ class Table:
             if not lines:
                 raise Ingest(f"{self.txt}: {name} has no evidence (rule 1)")
             pooled = sum(float(e["base_s"]) for e in lines) / sum(float(e["split_s"]) for e in lines)
-            if pooled < MIN_POOLED:
+            if not (math.isfinite(pooled) and pooled >= MIN_POOLED):
                 raise Ingest(f"{self.txt}: {name}: pooled ratio {pooled:.3f} < {MIN_POOLED:.2f} (rule 3)")
             have = {(e["source"], e["input"], e["layout"]) for e in lines}
             sources = {e["source"] for e in lines}
-            if "pw.x" in sources:
+            square = r["ratio"] > 0
+            if "pw.x" in sources or not square:
                 for inp in ("A", "B"):
                     if ("pw.x", inp, "8x1") not in have:
                         raise Ingest(f"{self.txt}: {name}: no pw.x evidence on input {inp} at 8x1 (rule 4)")
-            if "bench_split" in sources:
+            if "bench_split" in sources or square:
                 for layout in ("1x8", "4x2"):
                     if not any(s == "bench_split" and lay == layout for s, _, lay in have):
                         raise Ingest(f"{self.txt}: {name}: no bench_split evidence at {layout} (rule 4)")
             if r["scalars"] == "a":
                 raise Ingest(f"{self.txt}: {name}: scalars=a (or none) is not allowed in a built-in table (rule 5)")
-        self.pooled = {i: sum(float(e["base_s"]) for e in by_row[i]) / sum(float(e["split_s"]) for e in by_row[i])
-                       for i in by_row if by_row[i]}
+            self.pooled[i] = pooled
         self.nlines = {i: len(by_row[i]) for i in by_row}
 
 
@@ -379,13 +412,57 @@ def ingest(directory, force):
           f"{len(t.evidence)} evidence line{'s' if len(t.evidence) != 1 else ''}")
 
 
+def self_test():
+    """The rules on tables made to keep or break them (tests/test_dispatch.c checks the same cases in C).
+    Returns the number of wrong verdicts."""
+    head = ("# chip: Apple M2 Max\n# gpu_cores: 38\n# cpu_matrix: AMX\n# library: abc1234\n# date: x\n"
+            "# method: self-test\nzgemm N N N m=8192: scalars=u f=0.45\nzgemm N N N m=2048: ratio=2 scalars=z f=0.6\n")
+    pw = ("0,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n"
+          "0,pw.x,B,8x1,abc1234,0.45,6,70,80,1.14,1.08,1.20,100,99,0,1,0\n")
+    sq = ("1,bench_split,sq,1x8,abc1234,0.6,20,1.0,1.3,1.3,1.2,1.4,20,20,0,0,0\n"
+          "1,bench_split,sq,4x2,abc1234,0.6,20,1.0,1.2,1.2,1.1,1.3,20,20,0,0,0\n")
+    qe_bench = ("0,bench_split,qe,1x8,abc1234,0.45,20,1.0,1.3,1.3,1.2,1.4,20,20,0,0,0\n"
+                "0,bench_split,qe,4x2,abc1234,0.45,20,1.0,1.2,1.2,1.1,1.3,20,20,0,0,0\n")
+    cases = [  # (what, evidence after the header line, filed)
+        ("pw.x for the QE row, bench_split for the square", pw + sq, True),
+        ("a QE-shaped row on bench_split alone", qe_bench + sq, False),
+        ("a QE-shaped row with pw.x A only", qe_bench + pw.splitlines(True)[0] + sq, False),
+        ("a NaN share", pw.replace("0.45,6,80", "nan,6,80") + sq, False),
+        ("a NaN ratio_lo", pw.replace("1.12", "nan") + sq, False),
+        ("an infinite split_s", pw.replace(",80,95,", ",inf,95,") + sq, False),
+        ("an overflowing base_s", pw.replace(",80,95,", ",80,1e999,") + sq, False),
+        ("a hex float", pw.replace(",80,95,", ",80,0x5f,") + sq, False),
+        ("a short line", pw + sq.replace(",0,0,0\n", ",0,0\n", 1), False),
+        ("a blank line", "\n" + pw + sq, False),
+    ]
+    wrong = 0
+    with tempfile.TemporaryDirectory() as d:
+        for what, body, filed in cases:
+            with open(os.path.join(d, "split_table.txt"), "w") as f:
+                f.write(head)
+            with open(os.path.join(d, "split_evidence.csv"), "w") as f:
+                f.write(",".join(COLUMNS) + "\n" + body)
+            try:
+                Table(d).validate()
+                got, why = True, ""
+            except Ingest as e:
+                got, why = False, str(e)
+            if got != filed:
+                wrong += 1
+                print(f"ingest_split self-test: {what}: {'filed' if got else 'refused'} ({why})")
+    return wrong
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("dirs", nargs="*", help="directories with split_table.txt and split_evidence.csv to file")
     ap.add_argument("--force", action="store_true", help="replace a chip's earlier filed table")
     ap.add_argument("--regenerate", action="store_true", help="only rebuild src/split_table.h from benchmarks/split/tables/")
     ap.add_argument("--check", action="store_true", help="with --regenerate: exit 1 if the header is stale, change nothing")
+    ap.add_argument("--self-test", action="store_true", help="check the filing rules on made-up tables, change nothing")
     args = ap.parse_args()
+    if args.self_test:
+        sys.exit(1 if self_test() else 0)
     if args.regenerate == bool(args.dirs):
         ap.error("give directories to file, or --regenerate")
     if args.check and not args.regenerate:
