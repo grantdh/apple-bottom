@@ -1456,6 +1456,24 @@ static ab_prof_staged_t part_stage_begin(ab_stage_gemm_t *g, const gemm_part_t *
                              q->ldB, creal(q->beta), q->C, q->ldC);
 }
 
+// Whether a staged call reads a NaN or Inf: in op(A), op(B), or C when its
+// epilogue (GPU or host) reads C. A run ends NONFINITE either on such data,
+// which the host path's guard sends to Accelerate as out of range, or on a
+// value the GPU made; only the first is a data condition.
+static bool stage_reads_nonfinite(const ab_stage_gemm_t *g) {
+    const size_t w = g->routine == 'z' ? 2 : 1;
+    const bool c_read = g->c_in || (g->split && (g->beta[0] != 0.0 || g->beta[1] != 0.0));
+    uint32_t mx = 0;
+    for (int i = 0; i < 2 + c_read; i++) {
+        const ab_stage_matrix_t *x = &g->x[i];
+        for (size_t j = 0; j < (size_t)x->cols; j++) {
+            const double *col = (const double *)x->ptr + w * j * (size_t)x->ld;
+            for (size_t k = 0; k < w * (size_t)x->rows; k++) AB_HIWORD_MAX(ab_abs_hiword(col[k]), mx);
+        }
+    }
+    return mx >= AB_HIWORD_NONFINITE;
+}
+
 // The tail and what became of it, on the caller's stack.
 typedef struct {
     gemm_part_t tail;
@@ -1640,6 +1658,9 @@ static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis
     }
     if (run_tail) pthread_setcancelstate(cancel_state, NULL);
     if (j.head_done) dispatch_release(j.head_done);
+    // A tail the GPU epilogue stopped on a NaN or Inf it read is a data
+    // condition, as the host path's guard reports it without AB_SPLIT: range.
+    if (j.why == AB_PROF_STAGED_NONFINITE && stage_reads_nonfinite(&j.g)) j.why = AB_PROF_STAGED_RANGE;
     if (p && run_tail) {
         p->split.gpu_wall_ns = ab_prof_ticks_to_ns(j.t1 - j.t0);
         p->split.wait_gpu_ns = head_end > j.t1 ? ab_prof_ticks_to_ns(head_end - j.t1) : 0;

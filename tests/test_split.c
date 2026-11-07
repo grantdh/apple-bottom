@@ -474,11 +474,8 @@ static void test_split_exponent_range(void) {
                     if (what != PLANT_SCALE && tail_side) {
                         // the tail goes to Accelerate: the cblas parts, P not added on K
                         parts_reference(&c, *axis, g, &o, ref);
-                        // the guard (RANGE), or the GPU epilogue meeting it (NONFINITE: gpu_failed)
-                        ab_split_record_t rec;
-                        check(ab_internal_last_split(&rec) &&
-                              (got == AB_SPLIT_RANGE || (got == AB_SPLIT_GPU_FAILED && rec.staged == 7)),
-                              "%s, NaN/Inf in the tail: outcome %d staged %d", text, got, rec.staged);
+                        // range, whether the guard or the GPU epilogue met it first
+                        check(got == AB_SPLIT_RANGE, "%s, NaN/Inf in the tail: outcome %d", text, got);
                     } else {
                         // the head on cblas, the tail (scaled lines included) on the GPU
                         compose_reference(&c, *axis, g, &o, ref);
@@ -495,21 +492,25 @@ static void test_split_exponent_range(void) {
                     free(C); free(ref);
                     free_operands(&o);
                 }
-    // A ZGEMM tail that reads NaN in C (alpha 2: the host epilogue) goes to Accelerate unrun.
-    Call c = {'z', 'N', 'N', 300, 260, 200, 0, {2, 0}, {0.5, 0}};
-    Operands o = operands(&c);
-    o.C0[(size_t)2 * o.ldC * 250 + 4] = NAN;              // column 250: in the tail
-    double *C = malloc(o.nC * sizeof *C), *ref = malloc(o.nC * sizeof *ref);
-    memcpy(C, o.C0, o.nC * sizeof *C);
-    memcpy(ref, o.C0, o.nC * sizeof *ref);
-    int got = seam(&c, 'N', 64, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
-    parts_reference(&c, 'N', 64, &o, ref);
-    ab_split_record_t rec;
-    check(got == AB_SPLIT_RANGE && ab_internal_last_split(&rec) && rec.staged == 8 /* RANGE */,
-          "ZGEMM with NaN in the tail's C: outcome %d", got);
-    check(!memcmp(C, ref, o.nC * sizeof *C), "ZGEMM with NaN in the tail's C: C is not the cblas parts");
-    free(C); free(ref);
-    free_operands(&o);
+    // A ZGEMM tail that reads NaN in C goes to Accelerate as out of range:
+    // with alpha 2 (the host epilogue) unrun, with alpha 1, beta 1 after the
+    // GPU epilogue meets it, as without AB_SPLIT.
+    for (int gpu_epi = 0; gpu_epi < 2; gpu_epi++) {
+        Call c = {'z', 'N', 'N', 300, 260, 200, 0, {gpu_epi ? 1 : 2, 0}, {gpu_epi ? 1 : 0.5, 0}};
+        Operands o = operands(&c);
+        o.C0[(size_t)2 * o.ldC * 250 + 4] = NAN;              // column 250: in the tail
+        double *C = malloc(o.nC * sizeof *C), *ref = malloc(o.nC * sizeof *ref);
+        memcpy(C, o.C0, o.nC * sizeof *C);
+        memcpy(ref, o.C0, o.nC * sizeof *ref);
+        int got = seam(&c, 'N', 64, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
+        parts_reference(&c, 'N', 64, &o, ref);
+        ab_split_record_t rec;
+        check(got == AB_SPLIT_RANGE && ab_internal_last_split(&rec) && rec.staged == 8 /* RANGE */,
+              "ZGEMM alpha %g beta %g with NaN in the tail's C: outcome %d", c.alpha[0], c.beta[0], got);
+        check(!memcmp(C, ref, o.nC * sizeof *C), "ZGEMM with NaN in the tail's C: C is not the cblas parts");
+        free(C); free(ref);
+        free_operands(&o);
+    }
     // Tails refused after their run give their buffers back: the pool keeps
     // its size over repeats.
     Call r = {'d', 'N', 'N', 300, 260, 200, 0, ONE, ZERO};
@@ -520,7 +521,7 @@ static void test_split_exponent_range(void) {
     for (int k = 0; k < 6; k++) {
         memcpy(Cr, ro.C0, ro.nC * sizeof *Cr);
         int out = seam(&r, 'N', 64, 0, r.M, r.N, r.K, &ro, 0, 0, Cr, ro.ldC);
-        check(out == AB_SPLIT_RANGE || out == AB_SPLIT_GPU_FAILED, "refused tail %d: outcome %d", k, out);
+        check(out == AB_SPLIT_RANGE, "refused tail %d: outcome %d", k, out);
         if (k == 1) bytes = ab_internal_stage_pool_bytes();
         if (k > 1) check(ab_internal_stage_pool_bytes() == bytes, "the pool grew to %zu bytes over refused tails",
                          ab_internal_stage_pool_bytes());
