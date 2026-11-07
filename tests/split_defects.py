@@ -67,6 +67,9 @@ DEFECTS = [
                                "    if (staged_kept(why)) ab_internal_stage_release(s);\n"
                                "    prof_stage(p, AB_PROF_STAGE_ALLOC);\n    return why;")],
      [SPLIT("test_split_exponent_range")]),
+    ("NaN made by the GPU taken for data", [(BW, "if (j.why == AB_PROF_STAGED_NONFINITE && stage_reads_nonfinite(&j.g))",
+                                             "if (j.why == AB_PROF_STAGED_NONFINITE)")],
+     [SPLIT("test_split_scenarios")]),
     ("P leak", [(BW, "    free(P);\n    rec->staged", "    rec->staged")],
      [SPLIT("test_split_interactions")]),
     # routing

@@ -514,6 +514,30 @@ static void test_split_exponent_range(void) {
         free(C); free(ref);
         free_operands(&o);
     }
+    // The scan that makes a NaN read from the data range, on transposed and
+    // conjugated layouts and a DGEMM that reads C: NaN in the tail's op(A)
+    // rows (M axis) or op(B) columns (N axis) is range, and C the cblas parts.
+    static const Call SCAN[] = {
+        {'d', 'T', 'N', 300, 260, 200, 1, ONE, {0.5, 0}},
+        {'d', 'N', 'T', 300, 260, 200, 2, {-1.5, 0}, {0.25, 0}},
+        {'z', 'C', 'N', 300, 260, 200, 1, ONE, ONE},
+        {'z', 'N', 'C', 300, 260, 200, 0, ONE, ZERO},
+    };
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(SCAN); i++)
+        for (const char *axis = "NM"; *axis; axis++) {
+            const Call *s = &SCAN[i];
+            Operands o = operands(s);
+            plant(s, &o, *axis, (*axis == 'N' ? s->N : s->M) - 5, PLANT_NAN);
+            double *C = malloc(o.nC * sizeof *C), *ref = malloc(o.nC * sizeof *ref);
+            memcpy(C, o.C0, o.nC * sizeof *C);
+            memcpy(ref, o.C0, o.nC * sizeof *ref);
+            int got = seam(s, *axis, 128, 0, s->M, s->N, s->K, &o, 0, 0, C, o.ldC);
+            parts_reference(s, *axis, 128, &o, ref);
+            check(got == AB_SPLIT_RANGE && !memcmp(C, ref, o.nC * sizeof *C), "%s, NaN in the tail: outcome %d, %s",
+                  call_text(s, *axis, 128), got, memcmp(C, ref, o.nC * sizeof *C) ? "not the cblas parts" : "parts");
+            free(C); free(ref);
+            free_operands(&o);
+        }
     // A K tail refused after its run: nothing of P reaches C, though P holds
     // 1.0 throughout (AB_TEST_FAIL_STAGE=split_poison, in a child).
     const char *poison[] = {"AB_TEST_FAIL_STAGE=split_poison", NULL};
@@ -1046,6 +1070,8 @@ static const Scenario SCENARIOS[] = {
     {"split_thread", {"AB_TEST_FAIL_STAGE=split_thread"}, AB_SPLIT_DECLINED, REF_WHOLE, 6 /* thread */, ANY,
      ANY, ANY},
     {"split_fpcr", {"AB_TEST_FAIL_STAGE=split_fpcr"}, AB_SPLIT_GPU_FAILED, REF_PARTS, -1, 3 /* fpcr */, 0, 0},
+    // a NaN the GPU made of finite data (T and C layouts, a DGEMM reading C): gpu_failed, not range
+    {"nonfinite", {"AB_TEST_FAIL_STAGE=nonfinite"}, AB_SPLIT_GPU_FAILED, REF_PARTS, -1, 7 /* nonfinite */, 0, 0},
     {"host_pack", {"AB_HOST_PACK=1"}, AB_SPLIT_DECLINED, REF_WHOLE, 2 /* host_pack */, ANY, ANY, ANY},
     {"strassen", {"AB_STRASSEN=1", "AB_STRASSEN_MIN=1"}, AB_SPLIT_KEPT, REF_SPLIT, -1, ANY, 0, 0},
     {"staging0", {"AB_STAGING_MB=0"}, AB_SPLIT_KEPT, REF_SPLIT, -1, ANY, 0, 0},

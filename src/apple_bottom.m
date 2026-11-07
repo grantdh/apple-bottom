@@ -5364,7 +5364,8 @@ static void encode_stage_epilogue(id<MTLCommandBuffer> cmdBuf, ABContextImpl* ct
 static ab_stage_result_t stage_commit(id<MTLCommandBuffer> cmdBuf, uint64_t encode_ns,
                                       volatile uint32_t* flag, double t0) {
     if (!commit_and_wait(cmdBuf, encode_ns)) return AB_STAGE_FAILED;
-    if (flag && *flag) return AB_STAGE_NONFINITE;
+    // AB_TEST_FAIL_STAGE=nonfinite (test-only): as if the epilogue had made a NaN of finite data.
+    if ((flag && *flag) || ab_test_fail_stage() == AB_PROF_FAIL_NONFINITE) return AB_STAGE_NONFINITE;
     stats_add_kernel(get_time_ms() - t0);
     return AB_STAGE_RAN;
 }

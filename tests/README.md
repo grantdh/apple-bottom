@@ -125,7 +125,9 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     their calls: `AB_SPLIT` unset, empty and 0 alike with no split field in
     any report or trace; `AB_MODE=cpu` bitwise cblas with no GPU GEMM; each
     `AB_TEST_FAIL_STAGE` failure (`alloc`, `kernel`, `kernel_once`,
-    `redo_4m`, `scales`, `split_thread`, `split_scratch`, `split_fpcr`, and `split_poison` for a refused K tail) and
+    `redo_4m`, `scales`, `split_thread`, `split_scratch`, `split_fpcr`,
+    `nonfinite` for a NaN the GPU made, and `split_poison` for a refused K
+    tail) and
     `AB_HOST_PACK` with the outcome, retries and bits it calls for (the
     cblas parts, the GPU's bits, or the whole call's as with `AB_SPLIT`
     unset); `AB_STRASSEN`, `AB_STAGING_MB=0` and `AB_MIN_GPU_DIM=0` keeping
