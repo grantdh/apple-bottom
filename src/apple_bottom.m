@@ -130,17 +130,22 @@ static void note_gpu_time(id<MTLCommandBuffer> cmdBuf, uint64_t commit_ns, uint6
     k->gpu_end_ns = end_ns;
 }
 
-// Commits cmdBuf, which encoding started to build at encode_ns, waits for it
-// and notes its times. False if it failed; AB_TEST_FAIL_STAGE=kernel
-// (test-only) reports every one as failed.
+// Commits cmdBuf and waits for it. False if it failed; the AB_TEST_FAIL_STAGE
+// hook (test-only) can report it as failed.
+static bool run_cmd(id<MTLCommandBuffer> cmdBuf) {
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+    return cmdBuf.status != MTLCommandBufferStatusError && !ab_test_fail_cmdbuf();
+}
+
+// run_cmd for the GEMMs of the BLAS-ABI profile: cmdBuf's encoding started at
+// encode_ns, and its times are noted.
 static bool commit_and_wait(id<MTLCommandBuffer> cmdBuf, uint64_t encode_ns) {
     uint64_t commit_ns = host_ns();
     t_kernel_split.encode_ns += commit_ns - encode_ns;
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
+    bool completed = run_cmd(cmdBuf);
     note_gpu_time(cmdBuf, commit_ns, host_ns());
-    return cmdBuf.status != MTLCommandBufferStatusError &&
-           ab_test_fail_stage() != AB_PROF_STAGE_KERNEL;
+    return completed;
 }
 
 extern "C" double ab_internal_take_gpu_seconds(ab_prof_kernel_split_t *split) {
@@ -2724,8 +2729,10 @@ ABStatus ab_matrix_zero(ABMatrix m) {
     [encoder setBytes:&count length:sizeof(count) atIndex:1];
     [encoder dispatchThreads:MTLSizeMake(m->count, 1, 1) threadsPerThreadgroup:MTLSizeMake(MIN((size_t)256, m->count), 1, 1)];
     [encoder endEncoding];
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
+    if (!run_cmd(cmdBuf)) {
+        set_scale_unmeasured(m, m->exp2);
+        return AB_ERROR_KERNEL_FAILED;
+    }
     m->exp2 = 0;
     m->maxhw = 0;
     return AB_OK;
@@ -2739,8 +2746,10 @@ ABStatus ab_matrix_copy(ABMatrix src, ABMatrix dst) {
     if (!ctx) return AB_ERROR_NO_DEVICE;
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
     encode_copy(cmdBuf, ctx, src, dst);
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
+    if (!run_cmd(cmdBuf)) {
+        set_scale_unmeasured(dst, src->exp2);
+        return AB_ERROR_KERNEL_FAILED;
+    }
     dst->exp2 = src->exp2;
     dst->maxhw = src->maxhw;
     return AB_OK;
@@ -3315,10 +3324,9 @@ static ABStatus dgemm(ABMatrix A, ABMatrix B, ABMatrix C, ab_products_t products
     id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
     encode_dgemm_square_dispatch(encoder, ctx, A, B, C);
     [encoder endEncoding];
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
+    bool completed = run_cmd(cmdBuf);
     set_scale_unmeasured(C, A->exp2 + B->exp2);
-    if (cmdBuf.status == MTLCommandBufferStatusError) return AB_ERROR_KERNEL_FAILED;
+    if (!completed) return AB_ERROR_KERNEL_FAILED;
 
     stats_add_kernel(get_time_ms() - t0);
     stats_add_dgemm();
@@ -3352,11 +3360,10 @@ static ABStatus elementwise_aligned(id<MTLComputePipelineState> pipeline, ABCont
     id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
     encode_elemwise_dispatch(encoder, pipeline, a, b, C);
     [encoder endEncoding];
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
+    bool completed = run_cmd(cmdBuf);
     ab_matrix_destroy(temp);
     set_scale_unmeasured(C, e);
-    return AB_OK;
+    return completed ? AB_OK : AB_ERROR_KERNEL_FAILED;
 }
 
 ABStatus ab_matrix_add(ABMatrix A, ABMatrix B, ABMatrix C) {
@@ -3389,9 +3396,7 @@ ABStatus ab_matrix_scale(double alpha, ABMatrix A) {
     set_scale_unmeasured(A, A->exp2 + e);
     id<MTLCommandBuffer> cmdBuf = [ctx.commandQueue commandBuffer];
     encode_scale(cmdBuf, ctx, A, fp64_to_dd(ab_scale2(alpha, -e)));
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
-    return AB_OK;
+    return run_cmd(cmdBuf) ? AB_OK : AB_ERROR_KERNEL_FAILED;
 }
 
 // =============================================================================
@@ -3489,9 +3494,7 @@ static ABStatus zgemm_ex(
         }
 
         [enc endEncoding];
-        [cmdBuf commit];
-        [cmdBuf waitUntilCompleted];
-        if (cmdBuf.status == MTLCommandBufferStatusError) {
+        if (!run_cmd(cmdBuf)) {
             status = AB_ERROR_KERNEL_FAILED;
             goto cleanup;
         }
@@ -3549,9 +3552,7 @@ static ABStatus zgemm_ex(
         }
 
         [enc endEncoding];
-        [cmdBuf commit];
-        [cmdBuf waitUntilCompleted];
-        if (cmdBuf.status == MTLCommandBufferStatusError) {
+        if (!run_cmd(cmdBuf)) {
             status = AB_ERROR_KERNEL_FAILED;
             goto cleanup;
         }
@@ -3716,9 +3717,9 @@ ABStatus ab_dsyrk(ABMatrix A, ABMatrix C) {
     [encoder setBytes:&gridH length:sizeof(gridH) atIndex:5];
     [encoder dispatchThreadgroups:MTLSizeMake(gridW, gridH, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     [encoder endEncoding];
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
+    bool completed = run_cmd(cmdBuf);
     set_scale_unmeasured(C, 2 * A->exp2);
+    if (!completed) return AB_ERROR_KERNEL_FAILED;
 
     stats_add_kernel(get_time_ms() - t0);
     return AB_OK;
@@ -4205,8 +4206,10 @@ ABStatus ab_zherk(ABMatrix Ar, ABMatrix Ai, ABMatrix Cr, ABMatrix Ci) {
         [enc dispatchThreadgroups:grid threadsPerThreadgroup:block];
 
         [enc endEncoding];
-        [cmdBuf commit];
-        [cmdBuf waitUntilCompleted];
+        if (!run_cmd(cmdBuf)) {
+            status = AB_ERROR_KERNEL_FAILED;
+            goto cleanup;
+        }
 
         ArT->uploaded = true;
         AiT->uploaded = true;
@@ -4263,8 +4266,7 @@ ABStatus ab_dgemm_batched(
         set_scale_unmeasured(Cs[i], As[i]->exp2 + Bs[i]->exp2);
     }
 
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
+    if (!run_cmd(cmdBuf)) return AB_ERROR_KERNEL_FAILED;
 
     stats_add_kernel(get_time_ms() - t0);
     for (int i = 0; i < batch_count; i++) stats_add_dgemm();
@@ -4323,9 +4325,12 @@ ABStatus ab_zgemm_batched(
             // Insert barrier: previous ZGEMM must finish before we destroy temps
             // (encoder boundary from the loop structure already provides this,
             // but we need to wait for the GPU to finish with the old buffers)
-            [cmdBuf commit];
-            [cmdBuf waitUntilCompleted];
+            bool completed = run_cmd(cmdBuf);
             cmdBuf = [ctx.commandQueue commandBuffer];
+            if (!completed) {
+                status = AB_ERROR_KERNEL_FAILED;
+                break;
+            }
 
             for (int m = 0; m < 2; m++) {
                 gemm_temps_free(shared[m]);
@@ -4345,8 +4350,7 @@ ABStatus ab_zgemm_batched(
         encoded++;
     }
 
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
+    bool completed = run_cmd(cmdBuf);
 
     stats_add_kernel(get_time_ms() - t0);
     for (int i = 0; i < encoded; i++) stats_add_zgemm();
@@ -4355,7 +4359,7 @@ ABStatus ab_zgemm_batched(
     for (int i = 0; aligned && i < 2 * batch_count; i++) ab_matrix_destroy(aligned[i]);
     free(aligned);
 
-    if (status == AB_OK && cmdBuf.status == MTLCommandBufferStatusError) {
+    if (status == AB_OK && !completed) {
         return AB_ERROR_KERNEL_FAILED;
     }
     return status;

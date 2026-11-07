@@ -45,8 +45,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 210, every test but
-the chaos ones, and `make ci-local` all 228 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 211, every test but
+the chaos ones, and `make ci-local` all 229 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -76,7 +76,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
   - `tests/test_dispatch.c` — 13 tests of the BLAS-ABI routing, no GPU,
     see below
   - `tests/test_blas_abi.c` — 33 suites (1073 cases), see below
-  - `tests/test_trace.c` — 5 tests of `AB_TRACE` and
+  - `tests/test_trace.c` — 6 tests of `AB_TRACE` and
     `AB_TEST_FAIL_STAGE`, see below
   - `tests/test_blas2.c` — 19 tests (957 cases) of DGEMV, ZGEMV and
     ZHEMV, see below
@@ -350,15 +350,24 @@ referenced elements, column by column), so equal operands stored with
 other leading dimensions hash equal and a changed element does not.
 `test_trace_off` checks that no file appears with `AB_TRACE` unset or
 empty. `test_fail_stage_alloc` and `test_fail_stage_kernel` set
-`AB_TEST_FAIL_STAGE` (every `ab_matrix_create()` returns NULL, or the
-command buffer of every `ab_dgemm_scaled()` and `ab_zgemm()` reports an
-error) with `AB_REPORT=1`: a GPU-routed DGEMM and ZGEMM must give C bitwise
+`AB_TEST_FAIL_STAGE` (every `ab_matrix_create()` returns NULL, or every
+command buffer reports an error) with `AB_REPORT=1`: a GPU-routed DGEMM and ZGEMM must give C bitwise
 equal to cblas's, `ab_get_last_dispatch_path()` must say `"cpu"`,
 `ab_get_stats()` must count exactly the elements converted and the GEMM
 kernels of the GPU work before the failure (none for `alloc`; for
 `kernel` the uploads, and the ZGEMM, which counts its kernel before it
 reports the failure), `AB_REPORT` must count each as a `gpu_failed`
 fallback and the trace must say `fallback:gpu_failed`.
+`test_fail_native` runs the native operations that wait for command buffers
+(`ab_matrix_zero`, `_copy`, `_add`, `_sub` and `_scale`, `ab_dsyrk`, `ab_dgemm`,
+`ab_dgemm_batched`, `ab_zgemm_batched`, `ab_zgemm_ex`, `ab_zherk`): each must
+return `AB_OK` without the hook. Then, with `AB_TEST_FAIL_STAGE=kernel` and
+`AB_TEST_FAIL_ONLY=n`, one run per n up to one past their last command buffer,
+only the operation that waits for the n-th may return
+`AB_ERROR_KERNEL_FAILED`. That reaches what failing them all cannot:
+`ab_zherk`'s transposes, after its DSYRKs, and the buffer of `ab_zgemm_batched`
+before its last. These hooks change the status the library reads; no test
+makes macOS stop a command buffer.
 
 ## BLAS-2 (GEMV, HEMV)
 

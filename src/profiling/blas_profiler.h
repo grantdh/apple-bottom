@@ -17,7 +17,8 @@
 //   AB_PROFILE_THRESHOLD_NS=1000            count only calls above threshold
 //   AB_TRACE=/path/to/trace                 a line per call in /path/to/trace.<pid>
 //   AB_TRACE_HASH=1                         with AB_TRACE: hash the operands read
-//   AB_TEST_FAIL_STAGE=alloc|kernel         test-only: fail GPU allocations or GEMMs
+//   AB_TEST_FAIL_STAGE=alloc|kernel         test-only: fail GPU allocations or command buffers
+//   AB_TEST_FAIL_ONLY=n                     test-only: with kernel, only the n-th fails
 //   AB_HOST_PACK=1                          GPU calls take the host path (gpu_stage.h)
 //   AB_STAGING_MB=n                         the GPU buffer pool keeps at most n MB
 //
@@ -230,10 +231,14 @@ void ab_trace_record(const ab_trace_call_t* call, uint64_t t0_ns, uint64_t elaps
                      ab_prof_staged_t staged);
 
 // AB_TEST_FAIL_STAGE (test-only): AB_PROF_STAGE_ALLOC makes every
-// ab_matrix_create() fail, AB_PROF_STAGE_KERNEL the command buffer of every
-// ab_dgemm_scaled() and ab_zgemm() (apple_bottom.m), as real failures there
-// would; -1 when unset.
+// ab_matrix_create() fail, AB_PROF_STAGE_KERNEL command buffers
+// (ab_test_fail_cmdbuf), as real failures there would; -1 when unset.
 int  ab_test_fail_stage(void);
+
+// Whether AB_TEST_FAIL_STAGE=kernel fails the command buffer that has just
+// completed: every one or, with AB_TEST_FAIL_ONLY=n, the process's n-th. Call
+// it once per command buffer.
+int  ab_test_fail_cmdbuf(void);
 
 // AB_HOST_PACK=1 (as the other flags: set, not empty, not starting with 0):
 // every GPU-routed BLAS-ABI call takes the host path. AB_STAGING_MB=n: the
