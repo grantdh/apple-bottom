@@ -1,0 +1,19 @@
+# AB_SPLIT starting table for the M2 Max with a 38-core GPU: PROVISIONAL.
+# Not a built-in table and not measured on this library: the shares are the
+# starting values the split's fit begins from (weighted from Quantum ESPRESSO
+# si64 runs of a user-code split at 8 ranks x 1 thread; the squares from
+# bench_split's burst best). Use it with
+#   AB_SPLIT=1 AB_SPLIT_TABLE=benchmarks/split/start_table.txt
+# Format: src/dispatch.h. scripts/ingest_split.py files a table only with
+# evidence for every row; this one has none.
+# chip: Apple M2 Max
+# gpu_cores: 38
+# cpu_matrix: AMX
+# library: none
+# date: provisional
+# method: starting values, not measured on this library
+zgemm N N N m=2048: n=2048: k=2048: ratio=2 gf=0.5 scalars=z f=0.60   # squares
+dgemm N N N m=2048: n=2048: k=2048: ratio=2 gf=0.5 scalars=z f=0.55   # squares
+zgemm N N N m=8192: n=256:  k=33:           gf=0.5 scalars=u f=0.45   # updates
+zgemm N N M m=8192: n=33:255 k=33:          gf=0.5 scalars=u f=0.52   # narrow updates
+zgemm C N K m=33:   n=33:   k=8192:         gf=0.5 scalars=z f=0.51   # reductions

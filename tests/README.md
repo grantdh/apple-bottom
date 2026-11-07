@@ -45,8 +45,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 221, every test but
-the chaos ones, and `make ci-local` all 239 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 230, every test but
+the chaos ones, and `make ci-local` all 248 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -78,8 +78,8 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     gives its first bits again right after NaN data (which a beta = 0
     call must not read), after larger and smaller shapes, and from 4
     threads at once
-  - `tests/test_dispatch.c` — 13 tests of the BLAS-ABI routing, no GPU,
-    see below
+  - `tests/test_dispatch.c` — 22 tests of the BLAS-ABI routing and the
+    `AB_SPLIT` plan, no GPU, see below
   - `tests/test_range_guard.c` — 7 tests of the exponent-range guards'
     stage 2 against the plain loops it replaced, no GPU, see below
   - `tests/test_blas_abi.c` — 33 suites (1095 cases), see below
@@ -481,6 +481,17 @@ It also checks the precedence of `AB_MODE`, `AB_MIN_GPU_DIM` and
 `AB_CROSSOVER_FLOPS[_REAL]` over the table, the row bounds and TRANS
 classes (`'C'` is `'T'`), and the `AB_DISPATCH_TABLE` format: parsing,
 loading, malformed and missing files.
+
+For `AB_SPLIT` it checks the split table's row format and file loading
+(`AB_SPLIT_TABLE`, and `benchmarks/split/start_table.txt`), the plan of a
+call (window edges, exact TRANS, scalar classes, GFLOP and ratio limits,
+the code's K limits, first match, the cut, its clamps and floors, huge
+shapes), that `AB_MODE=cpu` and `AB_MIN_GPU_DIM` come before it and
+`AB_MODE=gpu` and the FLOP overrides after, the choice of split table by
+chip, the slices of each axis, and every built-in split table
+(`src/split_table.h`) against its filed `split_evidence.csv` by the rules
+of `scripts/ingest_split.py`, which it also checks on tables made to break
+each rule.
 
 ## Range guard, stage 2
 

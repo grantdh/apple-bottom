@@ -10,12 +10,24 @@
 // table, TRANS classes, and the AB_DISPATCH_TABLE format, header keys and
 // loading. The host this runs on may have no table (a CI runner): nothing
 // here assumes one.
+//
+// AB_SPLIT: the split table's row format and file loading, the plan (window
+// edges, exact TRANS, scalar classes, GFLOP and ratio limits, the code's K
+// limits, first match, the cut and its floors, overflow-safe huge shapes),
+// its place ahead of AB_MODE=gpu and the FLOP overrides and behind AB_MODE=cpu
+// and AB_MIN_GPU_DIM, the choice of split table by chip, the slices of each
+// axis, and every built-in split table against its filed evidence (the rules
+// of scripts/ingest_split.py, also checked here on tables made to break them).
 // =============================================================================
 
 #include "dispatch.h"
 #include "dispatch_table.h"
+#include "split_slice.h"
+#include "split_table.h"
 #include "test_registry.h"
 
+#include <limits.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,7 +63,7 @@ static void finish(void) { if (first_failure[0]) FAIL(first_failure); else PASS(
 
 static const char *const ENV_VARS[] = {
     "AB_MODE", "AB_MIN_GPU_DIM", "AB_BLAS2_MIN_DIM", "AB_CROSSOVER_FLOPS", "AB_CROSSOVER_FLOPS_REAL",
-    "AB_DISPATCH_TABLE", "AB_CHIP", "AB_GPU_CORES",
+    "AB_DISPATCH_TABLE", "AB_CHIP", "AB_GPU_CORES", "AB_SPLIT", "AB_SPLIT_TABLE",
 };
 
 static void clear_env(void) {
@@ -662,6 +674,551 @@ static void test_config_from_env(void) {
 }
 
 // =============================================================================
+// AB_SPLIT: rows, plan, cut and slices, tables and their evidence
+// =============================================================================
+
+// The provisional M2 Max rows of benchmarks/split/start_table.txt.
+static const char *const START_ROWS =
+    "zgemm N N N m=2048: n=2048: k=2048: ratio=2 gf=0.5 scalars=z f=0.60;"   // 0 squares
+    "dgemm N N N m=2048: n=2048: k=2048: ratio=2 gf=0.5 scalars=z f=0.55;"   // 1 squares
+    "zgemm N N N m=8192: n=256:  k=33:           gf=0.5 scalars=u f=0.45;"   // 2 updates
+    "zgemm N N M m=8192: n=33:255 k=33:          gf=0.5 scalars=u f=0.52;"   // 3 narrow updates
+    "zgemm C N K m=33:   n=33:   k=8192:         gf=0.5 scalars=z f=0.51";   // 4 reductions
+
+static ab_dispatch_config_t with_split_rows(ab_dispatch_mode_t mode, const char *rows) {
+    ab_dispatch_config_t c = {.mode = mode, .min_dim = AB_DISPATCH_DEFAULT_MIN_DIM, .split_on = true};
+    char buf[1024], *save = NULL;
+    snprintf(buf, sizeof buf, "%s", rows);
+    for (char *line = strtok_r(buf, ";", &save); line; line = strtok_r(NULL, ";", &save)) {
+        int got = ab_split_parse_row(line, &c.split_rows[c.split_nrows]);
+        if (got < 0) {
+            fprintf(stderr, "bad split row: %s\n", line);
+            abort();
+        }
+        c.split_nrows += got;
+    }
+    return c;
+}
+
+// The plan of "<dgemm|zgemm> <ta> <tb> M N K <scalars>", scalars one of a1b0
+// (alpha 1, beta 0), a1b1, a1bx (alpha 1, another beta), axb0, axbx, nan (a
+// scalar not finite): its row, or -1 with no plan.
+static int split_plan(const ab_dispatch_config_t *c, const char *call, ab_split_plan_t *p) {
+    char r[8], ta, tb, sc[8];
+    int M, N, K;
+    if (sscanf(call, "%7s %c %c %d %d %d %7s", r, &ta, &tb, &M, &N, &K, sc) != 7) {
+        fprintf(stderr, "bad call spec: %s\n", call);
+        abort();
+    }
+    bool a1 = sc[1] == '1', b0 = !strcmp(sc + 2, "b0"), b1 = !strcmp(sc + 2, "b1");
+    bool finite = strcmp(sc, "nan") != 0;
+    if (!finite) a1 = b0 = b1 = false;
+    *p = (ab_split_plan_t){-1, 0, 0, 0};
+    return ab_dispatch_split_plan(c, r[0], ta, tb, M, N, K, a1, b0, b1, finite, p) ? p->row : -1;
+}
+
+// Expects the call's plan: row (-1: none), and for a row its axis, L and g.
+static void expect_plan(const ab_dispatch_config_t *c, const char *call, int row, char axis, int L,
+                        int g) {
+    ab_split_plan_t p;
+    int got = split_plan(c, call, &p);
+    if (row < 0)
+        expect(got < 0, "%s: planned on row %d, expected no row", call, got);
+    else
+        expect(got == row && p.axis == axis && p.L == L && p.g == g,
+               "%s: row %d axis %c L %d g %d, expected row %d axis %c L %d g %d", call, got,
+               p.axis ? p.axis : '-', p.L, p.g, row, axis, L, g);
+}
+
+static void test_split_parse_row(void) {
+    static const char *const BAD[] = {
+        "zgemm N N N", "zgemm N N N m=33: n=33:", "zgemm N N X f=0.5", "zgemm N N N m=1 f=0.5",
+        "zgemm N N N m=5:3 f=0.5", "zgemm N N N m=-1: f=0.5", "zgemm N N N f=1.5",
+        "zgemm N N N f=-0.1", "zgemm N N N f=nan", "zgemm N N N f=inf", "zgemm N N N gf=1 m=1:",
+        "zgemm N N N f=0.5 f=0.6", "zgemm N N N q=1: f=0.5", "zgemm N N N scalars=x f=0.5",
+        "zgemm N N N scalars=uz f=0.5", "zgemm N N N ratio=0.5 f=0.5", "sgemm N N N f=0.5",
+        "zgemm NN N N f=0.5", "zgemm N N N =1 f=0.5", "zgemm N N N m=1:2:3 f=0.5",
+        "zgemm N N N k=3000000000: f=0.5", "zgemm N Q N f=0.5", "zgemm N N NK f=0.5",
+        "zgemm N N N mn=9:1 f=0.5", "zgemm N N N gf=-1 f=0.5", "zgemm,N,N,N,f=0.5",
+        "zgemm N N N m=1: m=2: n=1: k=1: mn=1: ratio=2 gf=1 scalars=u f=0.5 x=1",
+    };
+    begin();
+    ab_split_row_t r;
+    expect(ab_split_parse_row("zgemm N N M m=8192: n=33:255 k=33: gf=0.5 scalars=u f=0.52  # x\n", &r) == 1 &&
+           r.routine == 'z' && r.ta == 'N' && r.tb == 'N' && r.axis == 'M' && r.min_m == 8192 &&
+           !r.max_m && r.min_n == 33 && r.max_n == 255 && r.min_k == 33 && !r.max_k && !r.min_mn &&
+           !r.max_mn && !r.ratio && r.min_gf == 0.5 && r.scalars == 'u' && r.share == 0.52,
+           "the narrow-updates row");
+    expect(ab_split_parse_row("zgemm c n k f=0", &r) == 1 && r.ta == 'C' && r.tb == 'N' && r.axis == 'K' &&
+           r.scalars == 'a' && r.share == 0.0 && !r.min_gf && !r.ratio, "zgemm c n k f=0 (defaults)");
+    expect(ab_split_parse_row("DGEMM C t m f=1", &r) == 1 && r.routine == 'd' && r.ta == 'T' &&
+           r.tb == 'T' && r.axis == 'M' && r.share == 1.0, "a DGEMM 'C' is 'T'");
+    expect(ab_split_parse_row("zgemm T C N mn=1e6:2.5e7 ratio=2 m=:4096 f=.5", &r) == 1 && r.ta == 'T' &&
+           r.tb == 'C' && r.min_mn == 1e6 && r.max_mn == 2.5e7 && r.ratio == 2 && !r.min_m &&
+           r.max_m == 4096 && r.share == 0.5, "mn, ratio, an upper bound alone");
+    expect(ab_split_parse_row("zgemm N N N m=: f=0.5", &r) == 1 && !r.min_m && !r.max_m, "m=: is any M");
+    expect(ab_split_parse_row("", &r) == 0 && ab_split_parse_row(" \t\r\n", &r) == 0 &&
+           ab_split_parse_row("# zgemm N N N f=0.5", &r) == 0 &&
+           ab_split_parse_row("# chip: Apple M2 Max", &r) == 0, "blank and comment lines");
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(BAD); i++)
+        expect(ab_split_parse_row(BAD[i], &r) == -1, "'%s' should be malformed", BAD[i]);
+    // Each provisional row parses.
+    ab_dispatch_config_t c = with_split_rows(AB_DISPATCH_AUTO, START_ROWS);
+    expect(c.split_nrows == 5 && c.split_rows[4].axis == 'K' && c.split_rows[4].ta == 'C' &&
+           c.split_rows[1].routine == 'd' && c.split_rows[0].ratio == 2, "the start table's rows");
+    finish();
+}
+
+// Windows and their edges, exact TRANS, scalar classes, GFLOP and ratio,
+// the code's K limits and first match, on the provisional rows.
+static void test_split_plan_rows(void) {
+    begin();
+    ab_dispatch_config_t c = with_split_rows(AB_DISPATCH_AUTO, START_ROWS);
+    // updates: N axis, g = round(0.45 L / 32) 32
+    expect_plan(&c, "zgemm N N 9000 256 160 a1b0", 2, 'N', 256, 128);
+    expect_plan(&c, "zgemm N N 8192 500 33 a1b1", 2, 'N', 500, 224);
+    expect_plan(&c, "zgemm n n 18277 1000 1000 a1b0", 2, 'N', 1000, 448);
+    expect_plan(&c, "zgemm N N 8191 500 160 a1b0", -1, 0, 0, 0);           // below m=8192:
+    expect_plan(&c, "zgemm N N 9000 500 32 a1b0", -1, 0, 0, 0);            // below k=33: (and the floor)
+    // narrow updates: M axis below N = 256
+    expect_plan(&c, "zgemm N N 9000 255 160 a1b0", 3, 'M', 9000, 4672);
+    expect_plan(&c, "zgemm N N 9000 33 1000 a1b1", 3, 'M', 9000, 4672);
+    expect_plan(&c, "zgemm N N 4096 1024 200 a1b0", -1, 0, 0, 0);          // never the M axis
+    // reductions: K axis, exact TRANS
+    expect_plan(&c, "zgemm C N 500 500 18277 a1b0", 4, 'K', 18277, 9344);
+    expect_plan(&c, "zgemm c N 500 500 18277 a1b0", 4, 'K', 18277, 9344);
+    expect_plan(&c, "zgemm T N 500 500 18277 a1b0", -1, 0, 0, 0);          // 'T' is not 'C' here
+    expect_plan(&c, "zgemm C C 500 500 18277 a1b0", -1, 0, 0, 0);
+    expect_plan(&c, "zgemm C N 500 500 8191 a1b0", -1, 0, 0, 0);           // below k=8192:
+    expect_plan(&c, "zgemm C N 1200 1200 8192 a1b0", -1, 0, 0, 0);         // K < 7 max(M, N)
+    // scalar classes: 'z' alpha 1, beta 0; 'u' beta 0 or 1
+    expect_plan(&c, "zgemm C N 500 500 18277 a1b1", -1, 0, 0, 0);
+    expect_plan(&c, "zgemm C N 500 500 18277 axb0", -1, 0, 0, 0);
+    expect_plan(&c, "zgemm N N 9000 256 160 a1bx", -1, 0, 0, 0);
+    expect_plan(&c, "zgemm N N 9000 256 160 axbx", -1, 0, 0, 0);
+    expect_plan(&c, "zgemm N N 9000 256 160 nan", -1, 0, 0, 0);
+    // squares: ratio 2, K <= M on the N axis, DGEMM by its own row
+    expect_plan(&c, "zgemm N N 2048 2048 2048 a1b0", 0, 'N', 2048, 1216);
+    expect_plan(&c, "zgemm N N 2048 4096 2048 a1b0", 0, 'N', 4096, 2464);
+    expect_plan(&c, "zgemm N N 2048 4097 2048 a1b0", -1, 0, 0, 0);         // ratio > 2
+    expect_plan(&c, "zgemm N N 2048 2048 4096 a1b0", -1, 0, 0, 0);         // K > M
+    expect_plan(&c, "zgemm N N 2047 2048 2047 a1b0", -1, 0, 0, 0);         // below m=2048:
+    expect_plan(&c, "dgemm N N 3000 3000 3000 a1b0", 1, 'N', 3000, 1664);
+    expect_plan(&c, "dgemm N T 3000 3000 3000 a1b0", -1, 0, 0, 0);
+    expect_plan(&c, "dgemm N N 3000 3000 3000 a1b1", -1, 0, 0, 0);
+
+    // GFLOP: 8 M N K (complex), 2 M N K (real) against gf
+    c = with_split_rows(AB_DISPATCH_AUTO, "zgemm N N N gf=1 f=0.5; dgemm N N N gf=1 f=0.5");
+    expect_plan(&c, "zgemm N N 500 500 500 axbx", 0, 'N', 500, 256);
+    expect_plan(&c, "zgemm N N 499 500 500 axbx", -1, 0, 0, 0);
+    expect_plan(&c, "dgemm N N 794 794 794 axbx", 1, 'N', 794, 384);       // 1.0011 GF
+    expect_plan(&c, "dgemm N N 793 794 794 axbx", -1, 0, 0, 0);
+    // First match wins; DGEMM 'C' matches a 'T' row; upper bounds and mn.
+    c = with_split_rows(AB_DISPATCH_AUTO, "dgemm T N K f=0.25; dgemm T N M f=0.75; "
+                                          "zgemm N N N m=:999 n=100:200 mn=:150000 f=0.5");
+    expect_plan(&c, "dgemm C N 100 100 7000 a1b0", 0, 'K', 7000, 1728);
+    expect_plan(&c, "dgemm t n 1000 1000 6999 a1b0", -1, 0, 0, 0);         // K < 7 max; row 1 needs K <= M
+    expect_plan(&c, "dgemm T N 1000 100 100 a1b0", 1, 'M', 1000, 736);
+    expect_plan(&c, "zgemm N N 999 150 150 a1b0", 2, 'N', 150, 64);
+    expect_plan(&c, "zgemm N N 1000 150 150 a1b0", -1, 0, 0, 0);
+    expect_plan(&c, "zgemm N N 999 201 150 a1b0", -1, 0, 0, 0);
+    expect_plan(&c, "zgemm N N 800 190 150 a1b0", -1, 0, 0, 0);           // M N = 152000
+    // f = 0: the call is attributed to its row, g = 0; too short to cut: g = 0
+    c = with_split_rows(AB_DISPATCH_AUTO, "zgemm N N N f=0; zgemm N N M f=0.5");
+    expect_plan(&c, "zgemm N N 5000 5000 500 a1b0", 0, 'N', 5000, 0);
+    c = with_split_rows(AB_DISPATCH_AUTO, "zgemm N N N f=0.5");
+    expect_plan(&c, "zgemm N N 1000 63 100 a1b0", 0, 'N', 63, 0);
+    finish();
+}
+
+static void test_split_cut(void) {
+    static const struct { char axis; int L; double f; int min_dim, g; } CUTS[] = {
+        {'N', 63, 0.5, 0, 0},       {'N', 64, 0.5, 0, 32},      {'N', 64, 0.5, 32, 0},
+        {'N', 1000, 0.0, 32, 0},    {'N', 1000, -0.5, 32, 0},   {'N', 1000, 1.0, 32, 968},
+        {'N', 1000, 0.999, 0, 968}, {'N', 1000, 0.001, 0, 32},  {'N', 1000, 0.001, 32, 64},
+        {'M', 9000, 0.52, 32, 4672}, {'M', 9000, 0.52, 5000, 5024}, {'M', 9000, 0.1, 8980, 0},
+        {'K', 127, 0.5, 0, 0},      {'K', 128, 0.5, 0, 64},     {'K', 128, 0.5, 64, 0},
+        {'K', 18277, 0.51, 32, 9344}, {'K', 18277, 0.99, 32, 18112}, {'K', 200, 0.5, 70, 128},
+        {'N', 256, 0.45, 32, 128},  {'N', 256, 0.45, 128, 160}, {'N', 96, 0.5, 32, 64},
+        {'N', INT_MAX, 0.5, 32, 1073741824}, {'K', INT_MAX, 1.0, 32, INT_MAX - 64},
+    };
+    begin();
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(CUTS); i++) {
+        int g = ab_split_cut(CUTS[i].axis, CUTS[i].L, CUTS[i].f, CUTS[i].min_dim);
+        expect(g == CUTS[i].g, "cut %c L=%d f=%g floor %d: g=%d, expected %d", CUTS[i].axis, CUTS[i].L,
+               CUTS[i].f, CUTS[i].min_dim, g, CUTS[i].g);
+        // Every cut leaves both parts at least one unit, and the GPU's above the floor.
+        int a = ab_split_align(CUTS[i].axis);
+        expect(g == 0 || (g >= a && CUTS[i].L - g >= a && g > CUTS[i].min_dim),
+               "cut %c L=%d: g=%d leaves a part below %d or g at the floor", CUTS[i].axis, CUTS[i].L, g, a);
+    }
+    // The plan applies the configured floor to g.
+    ab_dispatch_config_t c = with_split_rows(AB_DISPATCH_AUTO, "zgemm N N N f=0.1");
+    c.min_dim = 500;
+    expect_plan(&c, "zgemm N N 1000 1000 600 a1b0", 0, 'N', 1000, 512);
+    finish();
+}
+
+// The slices of each axis and TRANS: shapes and offsets, as split_slice.h
+// documents them, also where an offset exceeds 2^31 elements.
+static void test_split_parts(void) {
+    begin();
+    ab_split_part_t c, g;
+    ab_split_parts('N', 96, 'N', 'N', 500, 256, 160, 600, 170, 510, &c, &g);
+    expect(c.M == 500 && c.N == 160 && c.K == 160 && !c.a && !c.b && !c.c && !c.into_p &&
+           g.M == 500 && g.N == 96 && g.K == 160 && !g.a && g.b == 160u * 170 && g.c == 160u * 510 &&
+           !g.into_p, "N axis, tb N");
+    ab_split_parts('N', 96, 'C', 't', 500, 256, 160, 600, 300, 510, &c, &g);
+    expect(g.N == 96 && !g.a && g.b == 160 && g.c == 160u * 510, "N axis, tb T: B from row cut");
+    ab_split_parts('M', 4672, 'n', 'N', 9000, 200, 160, 9100, 170, 9050, &c, &g);
+    expect(c.M == 4328 && g.M == 4672 && g.N == 200 && g.a == 4328 && !g.b && g.c == 4328,
+           "M axis, ta N");
+    ab_split_parts('M', 4672, 'C', 'N', 9000, 200, 160, 170, 170, 9050, &c, &g);
+    expect(g.a == 4328u * 170 && !g.b && g.c == 4328, "M axis, ta C: A from column cut");
+    ab_split_parts('K', 9344, 'C', 'N', 500, 500, 18277, 18300, 18290, 510, &c, &g);
+    expect(c.K == 8933 && g.K == 9344 && c.M == 500 && g.N == 500 && g.a == 8933 && g.b == 8933 &&
+           !g.c && g.into_p && !c.into_p, "K axis, ta C, tb N");
+    ab_split_parts('K', 9344, 'N', 'T', 500, 500, 18277, 510, 520, 510, &c, &g);
+    expect(g.a == 8933u * 510 && g.b == 8933u * 520 && g.into_p, "K axis, ta N, tb T");
+    ab_split_parts('N', 64, 'N', 'N', 64, INT_MAX, 64, 64, INT_MAX, INT_MAX, &c, &g);
+    size_t cut = (size_t)INT_MAX - 64;
+    expect(g.b == cut * INT_MAX && g.c == cut * INT_MAX, "offsets beyond 2^31 elements");
+    finish();
+}
+
+// AB_MODE=cpu and AB_MIN_GPU_DIM come first; a covered call is planned under
+// gpu and whatever the FLOP overrides say.
+static void test_split_precedence(void) {
+    begin();
+    ab_dispatch_config_t c = with_split_rows(AB_DISPATCH_CPU, START_ROWS);
+    expect_plan(&c, "zgemm N N 9000 256 160 a1b0", -1, 0, 0, 0);
+    c = with_split_rows(AB_DISPATCH_GPU, START_ROWS);
+    expect_plan(&c, "zgemm N N 9000 256 160 a1b0", 2, 'N', 256, 128);
+    c = with_split_rows(AB_DISPATCH_AUTO, START_ROWS);
+    c.crossover_flops = UINT64_MAX;            // would keep every call on Accelerate
+    expect_plan(&c, "zgemm N N 9000 256 160 a1b0", 2, 'N', 256, 128);
+    c.crossover_flops = 1;                     // would send every call to the GPU
+    expect_plan(&c, "zgemm C N 500 500 18277 a1b0", 4, 'K', 18277, 9344);
+    c = with_split_rows(AB_DISPATCH_AUTO, "zgemm N N N f=0.5");
+    expect_plan(&c, "zgemm N N 1000 1000 32 a1b0", -1, 0, 0, 0);    // a dimension at the floor
+    expect_plan(&c, "zgemm N N 1000 32 1000 a1b0", -1, 0, 0, 0);
+    c.min_dim = 0;
+    expect_plan(&c, "zgemm N N 1000 1000 32 a1b0", 0, 'N', 1000, 512);
+    c.split_nrows = 0;                         // no rows: no plan
+    expect_plan(&c, "zgemm N N 1000 1000 1000 a1b0", -1, 0, 0, 0);
+    // Huge shapes: GFLOP, ratio and the K limit in double, no overflow.
+    c = with_split_rows(AB_DISPATCH_AUTO, "zgemm N N N gf=1e9 f=0.5; zgemm C N K f=0.5; "
+                                          "dgemm N N N ratio=2 f=0.5");
+    expect_plan(&c, "zgemm N N 2147483647 2147483647 2147483647 a1b0", 0, 'N', INT_MAX, 1073741824);
+    expect_plan(&c, "zgemm C N 1000 1000 2147483647 a1b0", 1, 'K', INT_MAX, 1073741824);
+    expect_plan(&c, "zgemm C N 2147483647 2147483647 2147483647 a1b0", -1, 0, 0, 0);
+    expect_plan(&c, "dgemm N N 2147483647 64 64 a1b0", -1, 0, 0, 0);
+    finish();
+}
+
+static void test_split_select_table(void) {
+    static const ab_split_row_t R1[] = {{'z', 'N', 'N', 'N', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 'u', 0.5},
+                                        {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
+    static const ab_split_table_t T[] = {
+        {"Apple M2 Max", 38, "AMX", "abc1234", "", R1},
+        {"Apple M2 Max", 30, "AMX", "abc1234", "", R1},
+        {"Apple M4 Pro", 0, "SME", "abc1234", "", R1},
+        {"Apple M3", 10, "AMX", "abc1234", "", R1},
+        {NULL, 0, NULL, NULL, NULL, NULL},
+    };
+    begin();
+    expect(ab_split_select_table(T, "Apple M2 Max", 38) == &T[0], "M2 Max/38 -> its table");
+    expect(ab_split_select_table(T, "apple m2 max", 30) == &T[1], "M2 Max/30 -> its table");
+    expect(ab_split_select_table(T, "Apple M2 Max", 40) == NULL, "M2 Max/40: a sibling's table is not used");
+    expect(ab_split_select_table(T, "Apple M2 Max", 0) == NULL, "M2 Max, unknown cores, two tables: none");
+    expect(ab_split_select_table(T, "Apple M4 Pro", 16) == &T[2], "M4 Pro/16 -> the any-core table");
+    expect(ab_split_select_table(T, "Apple M3", 0) == &T[3], "M3, unknown cores, one table -> it");
+    expect(ab_split_select_table(T, "Apple M3", 8) == NULL, "M3/8: the 10-core table is not used");
+    expect(ab_split_select_table(T, "", 38) == NULL && ab_split_select_table(T, NULL, 38) == NULL,
+           "an unknown chip gets no table");
+    for (int i = 0; AB_SPLIT_BUILTIN_TABLES[i].chip; i++) {
+        const ab_split_table_t *w = &AB_SPLIT_BUILTIN_TABLES[i];
+        const ab_split_table_t *g = ab_split_builtin_table(w->chip, w->gpu_cores);
+        expect(g && !strcasecmp(g->chip, w->chip) && g->gpu_cores == w->gpu_cores,
+               "ab_split_builtin_table(%s, %d) is not that table", w->chip, w->gpu_cores);
+    }
+    expect(ab_split_builtin_table("Apple M0 Nano", 1) == NULL, "the built-in split set has no M0 Nano");
+    finish();
+}
+
+static void test_split_load_table(void) {
+    char path[1024], err[256];
+    begin();
+    ab_dispatch_config_t c = with_split_rows(AB_DISPATCH_AUTO, "dgemm T T K f=0.5");
+    snprintf(c.split_table_chip, sizeof c.split_table_chip, "stale");
+    c.split_table_gpu_cores = 99;
+    expect(write_temp("# AB_SPLIT table\n# chip: Apple M5 Max\n# gpu_cores: 40\n# library: abc1234\n"
+                      "zgemm N N N m=8192: f=0.45  # updates\n\nzgemm C N K f=0.51\n", path, sizeof path),
+           "mkstemp");
+    expect(ab_split_load_table(&c, path, err, sizeof err) && c.split_nrows == 2 &&
+           c.split_rows[0].min_m == 8192 && c.split_rows[1].axis == 'K' &&
+           !strcmp(c.split_table_chip, "Apple M5 Max") && c.split_table_gpu_cores == 40,
+           "valid file: %d rows, '%s'/%d (%s)", c.split_nrows, c.split_table_chip, c.split_table_gpu_cores, err);
+    unlink(path);
+
+    expect(write_temp("zgemm N N N f=0.5\nzgemm N N N f=0.5 f=0.4\n", path, sizeof path), "mkstemp");
+    err[0] = '\0';
+    expect(!ab_split_load_table(&c, path, err, sizeof err) && strstr(err, "line 2") && c.split_nrows == 2 &&
+           c.split_rows[0].min_m == 8192 && !strcmp(c.split_table_chip, "Apple M5 Max"),
+           "a malformed line must fail with its number and leave the config alone: %s", err);
+    unlink(path);
+    // A dispatch-table row is not a split row.
+    expect(write_temp("zgemm T T 4096 4096 4096\n", path, sizeof path), "mkstemp");
+    expect(!ab_split_load_table(&c, path, err, sizeof err), "a routing-table row must be refused");
+    unlink(path);
+
+    char many[(AB_SPLIT_MAX_ROWS + 1) * 24 + 32] = "";
+    for (int i = 0; i <= AB_SPLIT_MAX_ROWS; i++) strcat(many, "zgemm N N N f=0.5\n");
+    expect(write_temp(many, path, sizeof path), "mkstemp");
+    expect(!ab_split_load_table(&c, path, err, sizeof err) && strstr(err, "too many rows"),
+           "more than %d rows must fail: %s", AB_SPLIT_MAX_ROWS, err);
+    unlink(path);
+
+    char longline[700], doc[800];
+    memset(longline, 'x', sizeof longline - 2);
+    longline[0] = '#';
+    longline[sizeof longline - 2] = '\n';
+    longline[sizeof longline - 1] = '\0';
+    snprintf(doc, sizeof doc, "%szgemm C N K f=0.5\n", longline);
+    expect(write_temp(doc, path, sizeof path), "mkstemp");
+    expect(ab_split_load_table(&c, path, err, sizeof err) && c.split_nrows == 1 && !c.split_table_chip[0] &&
+           !c.split_table_gpu_cores, "an over-long comment is skipped, no identity keys clear the chip: %s", err);
+    unlink(path);
+    longline[0] = 'z';
+    expect(write_temp(longline, path, sizeof path), "mkstemp");
+    expect(!ab_split_load_table(&c, path, err, sizeof err), "an over-long row must fail");
+    unlink(path);
+
+    expect(!ab_split_load_table(&c, "/nonexistent/split_table.txt", err, sizeof err), "a missing file must fail");
+    expect(write_temp("# no rows: nothing is split\n", path, sizeof path), "mkstemp");
+    expect(ab_split_load_table(&c, path, err, sizeof err) && c.split_nrows == 0, "a file without rows is valid");
+    unlink(path);
+    // The provisional table loads with its five rows.
+    expect(ab_split_load_table(&c, AB_SOURCE_ROOT "/benchmarks/split/start_table.txt", err, sizeof err) &&
+           c.split_nrows == 5 && !strcmp(c.split_table_chip, "Apple M2 Max") && c.split_table_gpu_cores == 38,
+           "benchmarks/split/start_table.txt: %s", err);
+    finish();
+}
+
+// AB_SPLIT and AB_SPLIT_TABLE in ab_dispatch_config_from_env.
+static void test_split_config_from_env(void) {
+    static const struct { const char *value; bool on; } VALUES[] = {
+        {NULL, false}, {"", false}, {"0", false}, {"00", false}, {"0yes", false},
+        {"1", true}, {"yes", true}, {"on", true},
+    };
+    char path[1024], want[AB_DISPATCH_LABEL_LEN];
+    ab_dispatch_config_t c;
+    begin();
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(VALUES); i++) {
+        clear_env();
+        setenv("AB_CHIP", "Apple M9 Ultra", 1);
+        setenv("AB_GPU_CORES", "99", 1);
+        if (VALUES[i].value) setenv("AB_SPLIT", VALUES[i].value, 1);
+        if (VALUES[i].on) fprintf(stderr, "(expected note follows) ");
+        ab_dispatch_config_from_env(&c);
+        expect(c.split_on == VALUES[i].on && c.split_nrows == 0 &&
+               !strcmp(c.split_table, VALUES[i].on ? "none:uncalibrated-chip" : "off"),
+               "AB_SPLIT=%s: on %d, %d rows, '%s'", VALUES[i].value ? VALUES[i].value : "(unset)",
+               c.split_on, c.split_nrows, c.split_table);
+    }
+    // A file replaces the rows; one from another chip is used.
+    expect(write_temp("# chip: Apple M2 Max\n# gpu_cores: 38\nzgemm N N N m=8192: scalars=u f=0.45\n", path,
+                      sizeof path), "mkstemp");
+    clear_env();
+    setenv("AB_CHIP", "Apple M9 Ultra", 1);
+    setenv("AB_GPU_CORES", "99", 1);
+    setenv("AB_SPLIT", "1", 1);
+    setenv("AB_SPLIT_TABLE", path, 1);
+    fprintf(stderr, "(expected note follows) ");
+    ab_dispatch_config_from_env(&c);
+    snprintf(want, sizeof want, "file:%s", path);
+    expect(c.split_on && c.split_nrows == 1 && c.split_rows[0].share == 0.45 && !strcmp(c.split_table, want) &&
+           !strcmp(c.split_table_chip, "Apple M2 Max") && c.split_table_gpu_cores == 38,
+           "AB_SPLIT_TABLE replaces the rows (%d rows, %s)", c.split_nrows, c.split_table);
+    // Off, the file is not read.
+    unsetenv("AB_SPLIT");
+    ab_dispatch_config_from_env(&c);
+    expect(!c.split_on && !c.split_nrows && !strcmp(c.split_table, "off"), "AB_SPLIT unset reads no table");
+    unlink(path);
+    // A file that cannot be read keeps what the chip has.
+    setenv("AB_SPLIT", "1", 1);
+    setenv("AB_SPLIT_TABLE", "/nonexistent/split_table.txt", 1);
+    fprintf(stderr, "(expected notes follow) ");
+    ab_dispatch_config_from_env(&c);
+    expect(c.split_on && !c.split_nrows && !strcmp(c.split_table, "none:uncalibrated-chip"),
+           "an unreadable AB_SPLIT_TABLE keeps the chip's (no) table: %s", c.split_table);
+    // The split leaves the routing table alone.
+    ab_dispatch_config_t off = builtin_auto();
+    setenv("AB_SPLIT", "1", 1);
+    if (!ab_split_builtin_table(off.chip, off.gpu_cores)) fprintf(stderr, "(expected note follows) ");
+    ab_dispatch_config_from_env(&c);
+    expect(c.nrows == off.nrows && !memcmp(c.rows, off.rows, (size_t)c.nrows * sizeof c.rows[0]) &&
+           !strcmp(c.table, off.table) && c.mode == off.mode && c.min_dim == off.min_dim,
+           "AB_SPLIT changed the routing table");
+    // Each built-in split table is what a machine with its chip gets.
+    for (int i = 0; AB_SPLIT_BUILTIN_TABLES[i].chip; i++) {
+        const ab_split_table_t *t = &AB_SPLIT_BUILTIN_TABLES[i];
+        char slug[AB_DISPATCH_CHIP_LEN], cores[16];
+        int n = 0;
+        while (t->rows[n].routine) n++;
+        clear_env();
+        setenv("AB_CHIP", t->chip, 1);
+        snprintf(cores, sizeof cores, "%d", t->gpu_cores);
+        setenv("AB_GPU_CORES", cores, 1);
+        setenv("AB_SPLIT", "1", 1);
+        ab_dispatch_config_from_env(&c);
+        ab_dispatch_chip_slug(t->chip, t->gpu_cores, slug, sizeof slug);
+        snprintf(want, sizeof want, "builtin:%s@%s", slug, t->library);
+        expect(c.split_nrows == n && !memcmp(c.split_rows, t->rows, (size_t)n * sizeof *t->rows) &&
+               !strcmp(c.split_table, want), "%s: %d split rows, '%s'", slug, c.split_nrows, c.split_table);
+    }
+    clear_env();
+    finish();
+}
+
+// The rules of scripts/ingest_split.py for a table (rows, library) against
+// its split_evidence.csv: NULL if they hold, else why.
+static const char *split_evidence_why(const ab_split_row_t *rows, int nrows, const char *library,
+                                      const char *csv_path, char *why, size_t len) {
+    static const char HEADER[] = "row,source,input,layout,library,share,pairs,split_s,base_s,ratio,"
+                                 "ratio_lo,ratio_hi,calls,kept,kept_4m,range,gpu_failed";
+    FILE *f = fopen(csv_path, "r");
+    if (!f) {
+        snprintf(why, len, "cannot read %s", csv_path);
+        return why;
+    }
+    char line[1024];
+    double base[AB_SPLIT_MAX_ROWS] = {0}, split[AB_SPLIT_MAX_ROWS] = {0};
+    int lines[AB_SPLIT_MAX_ROWS] = {0};
+    unsigned have[AB_SPLIT_MAX_ROWS] = {0};      // bits: pw.x A 8x1, pw.x B 8x1, bench 1x8, bench 4x2, pw.x, bench
+    bool ok = fgets(line, sizeof line, f) && !strncmp(line, HEADER, sizeof HEADER - 1) &&
+              strchr("\r\n", line[sizeof HEADER - 1]);
+    if (!ok) snprintf(why, len, "%s: the columns are not %s", csv_path, HEADER);
+    for (int n = 2; ok && fgets(line, sizeof line, f); n++) {
+        char *field[18], *p = line;
+        int k = 0;
+        line[strcspn(line, "\r\n")] = '\0';
+        for (char *t = strsep(&p, ","); t && k < 18; t = strsep(&p, ",")) field[k++] = t;
+        int row = atoi(field[0]);
+        if (k != 17 || row < 0 || row >= nrows) {
+            snprintf(why, len, "%s:%d: not a line of 17 fields for one of the %d rows", csv_path, n, nrows);
+            ok = false;
+        } else if (strcmp(field[4], library) || fabs(atof(field[5]) - rows[row].share) > 1e-9) {
+            snprintf(why, len, "%s:%d: library %s share %s, the table's are %s and %g (rule 1)", csv_path, n,
+                     field[4], field[5], library, rows[row].share);
+            ok = false;
+        } else if (atof(field[10]) < 1.00) {
+            snprintf(why, len, "%s:%d: ratio_lo %s < 1.00 (rule 2)", csv_path, n, field[10]);
+            ok = false;
+        } else if (!(atof(field[7]) > 0 && atof(field[8]) > 0)) {
+            snprintf(why, len, "%s:%d: split_s and base_s must be positive", csv_path, n);
+            ok = false;
+        } else {
+            bool pw = !strcmp(field[1], "pw.x"), bench = !strcmp(field[1], "bench_split");
+            if (!pw && !bench) {
+                snprintf(why, len, "%s:%d: source %s (rule 4)", csv_path, n, field[1]);
+                ok = false;
+            }
+            have[row] |= (pw && !strcmp(field[2], "A") && !strcmp(field[3], "8x1")) << 0 |
+                         (pw && !strcmp(field[2], "B") && !strcmp(field[3], "8x1")) << 1 |
+                         (bench && !strcmp(field[3], "1x8")) << 2 | (bench && !strcmp(field[3], "4x2")) << 3 |
+                         pw << 4 | bench << 5;
+            split[row] += atof(field[7]);
+            base[row] += atof(field[8]);
+            lines[row]++;
+        }
+    }
+    fclose(f);
+    for (int i = 0; ok && i < nrows; i++) {
+        if (!lines[i]) snprintf(why, len, "row %d has no evidence (rule 1)", i);
+        else if (base[i] / split[i] < 1.10)
+            snprintf(why, len, "row %d: pooled ratio %.3f < 1.10 (rule 3)", i, base[i] / split[i]);
+        else if ((have[i] & 16) && (have[i] & 3) != 3)
+            snprintf(why, len, "row %d: no pw.x evidence on A and B at 8x1 (rule 4)", i);
+        else if ((have[i] & 32) && (have[i] & 12) != 12)
+            snprintf(why, len, "row %d: no bench_split evidence at 1x8 and 4x2 (rule 4)", i);
+        else if (rows[i].scalars == 'a')
+            snprintf(why, len, "row %d: scalars=a in a built-in table (rule 5)", i);
+        else continue;
+        ok = false;
+    }
+    return ok ? NULL : why;
+}
+
+// Every built-in split table: its rows are those of its filed
+// split_table.txt and they keep the evidence rules; and the rules catch a
+// table made to break each of them.
+static void test_split_builtin_matches_evidence(void) {
+    char why[512], path[1024], err[256];
+    begin();
+    for (int i = 0; AB_SPLIT_BUILTIN_TABLES[i].chip; i++) {
+        const ab_split_table_t *t = &AB_SPLIT_BUILTIN_TABLES[i];
+        int n = 0;
+        while (t->rows[n].routine) n++;
+        snprintf(path, sizeof path, "%s/%s", AB_SOURCE_ROOT, t->data);
+        expect(!split_evidence_why(t->rows, n, t->library, path, why, sizeof why), "%s: %s", t->chip, why);
+        char *slash = strrchr(path, '/');
+        snprintf(slash + 1, sizeof path - (size_t)(slash + 1 - path), "split_table.txt");
+        ab_dispatch_config_t c = {0};
+        expect(ab_split_load_table(&c, path, err, sizeof err) && c.split_nrows == n &&
+               !memcmp(c.split_rows, t->rows, (size_t)n * sizeof *t->rows),
+               "%s: the built-in rows are not those of %s (%s)", t->chip, path, err);
+    }
+    // The checker itself, on a table of two rows.
+    ab_dispatch_config_t c = with_split_rows(AB_DISPATCH_AUTO, "zgemm N N N m=8192: scalars=u f=0.45; "
+                                                               "zgemm N N N m=2048: ratio=2 scalars=z f=0.6");
+    static const char *const H = "row,source,input,layout,library,share,pairs,split_s,base_s,ratio,"
+                                 "ratio_lo,ratio_hi,calls,kept,kept_4m,range,gpu_failed\n";
+    static const char *const GOOD =
+        "0,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n"
+        "0,pw.x,B,8x1,abc1234,0.45,6,70,80,1.14,1.08,1.20,100,99,0,1,0\n"
+        "1,bench_split,sq4096,1x8,abc1234,0.6,20,1.0,1.3,1.3,1.2,1.4,20,20,0,0,0\n"
+        "1,bench_split,sq4096,4x2,abc1234,0.6,20,1.0,1.2,1.2,1.1,1.3,20,20,0,0,0\n";
+    static const struct { const char *body; const char *rule; } BAD[] = {
+        {"0,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n"
+         "0,pw.x,B,8x1,abc1234,0.45,6,70,80,1.14,1.08,1.20,100,99,0,1,0\n", "rule 1"},           // row 1 none
+        {"0,pw.x,A,8x1,abc9999,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "rule 1"},        // library
+        {"0,pw.x,A,8x1,abc1234,0.50,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "rule 1"},        // share
+        {"0,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,0.99,1.25,100,100,0,0,0\n", "rule 2"},
+        {"0,pw.x,A,8x1,abc1234,0.45,6,80,84,1.05,1.01,1.10,100,100,0,0,0\n"
+         "0,pw.x,B,8x1,abc1234,0.45,6,70,80,1.14,1.08,1.20,100,99,0,1,0\n", "rule 3"},
+        {"0,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n"
+         "0,pw.x,B,4x2,abc1234,0.45,6,70,80,1.14,1.08,1.20,100,99,0,1,0\n", "rule 4"},
+        {"0,replay,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "rule 4"},
+    };
+    char doc[2048];
+    snprintf(doc, sizeof doc, "%s%s", H, GOOD);
+    expect(write_temp(doc, path, sizeof path), "mkstemp");
+    expect(!split_evidence_why(c.split_rows, 2, "abc1234", path, why, sizeof why), "good evidence: %s", why);
+    c.split_rows[0].scalars = 'a';
+    expect(split_evidence_why(c.split_rows, 2, "abc1234", path, why, sizeof why) && strstr(why, "rule 5"),
+           "scalars=a must break rule 5");
+    c.split_rows[0].scalars = 'u';
+    unlink(path);
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(BAD); i++) {
+        // the bad lines, then (except for the first case) the good lines of row 1
+        snprintf(doc, sizeof doc, "%s%s%s", H, BAD[i].body,
+                 i ? "1,bench_split,s,1x8,abc1234,0.6,20,1.0,1.3,1.3,1.2,1.4,20,20,0,0,0\n"
+                     "1,bench_split,s,4x2,abc1234,0.6,20,1.0,1.2,1.2,1.1,1.3,20,20,0,0,0\n" : "");
+        expect(write_temp(doc, path, sizeof path), "mkstemp");
+        const char *w = split_evidence_why(c.split_rows, 2, "abc1234", path, why, sizeof why);
+        expect(w && strstr(w, BAD[i].rule), "bad evidence %zu: expected %s, got %s", i, BAD[i].rule,
+               w ? w : "a pass");
+        unlink(path);
+    }
+    // A table without rows needs no evidence.
+    expect(write_temp(H, path, sizeof path), "mkstemp");
+    expect(!split_evidence_why(c.split_rows, 0, "none", path, why, sizeof why), "an empty table: %s", why);
+    unlink(path);
+    finish();
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 
@@ -679,6 +1236,15 @@ static const TestCase TESTS[] = {
     {"test_parse_header",                 test_parse_header},
     {"test_load_table",                   test_load_table},
     {"test_config_from_env",              test_config_from_env},
+    {"test_split_parse_row",              test_split_parse_row},
+    {"test_split_plan_rows",              test_split_plan_rows},
+    {"test_split_cut",                    test_split_cut},
+    {"test_split_parts",                  test_split_parts},
+    {"test_split_precedence",             test_split_precedence},
+    {"test_split_select_table",           test_split_select_table},
+    {"test_split_load_table",             test_split_load_table},
+    {"test_split_config_from_env",        test_split_config_from_env},
+    {"test_split_builtin_matches_evidence", test_split_builtin_matches_evidence},
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
 
@@ -702,8 +1268,11 @@ int main(void) {
     printf("\n═══════════════════════════════════════════════════════════════════\n");
     printf("Results: %d passed, %d failed\n", tests_passed, tests_failed);
     if (tests_failed == 0) {
-        printf("✓ All %d tests PASSED (%d built-in table%s, %d calibrated shapes checked)\n", tests_passed,
-               n_tables(), n_tables() == 1 ? "" : "s", shapes_checked);
+        int n_split = 0;
+        while (AB_SPLIT_BUILTIN_TABLES[n_split].chip) n_split++;
+        printf("✓ All %d tests PASSED (%d built-in table%s, %d calibrated shapes checked, %d built-in split "
+               "table%s)\n", tests_passed, n_tables(), n_tables() == 1 ? "" : "s", shapes_checked, n_split,
+               n_split == 1 ? "" : "s");
         return 0;
     }
     printf("✗ Some tests FAILED\n");
