@@ -85,7 +85,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
   - `tests/test_blas_abi.c` — 33 suites (1095 cases), see below
   - `tests/test_trace.c` — 7 tests of `AB_TRACE`, `AB_TEST_FAIL_STAGE`
     and the solvers' `AB_PROFILE` fallback lines, see below
-  - `tests/test_blas2.c` — 19 tests (957 cases) of DGEMV, ZGEMV and
+  - `tests/test_blas2.c` — 19 tests (973 cases) of DGEMV, ZGEMV and
     ZHEMV, see below
   - `tests/test_fft.c` — 14 tests of the double-float FFT, see below
   - `tests/test_strassen.c` — 11 tests of the opt-in Strassen-Winograd

@@ -72,11 +72,11 @@ All notable changes to this project will be documented in this file.
   - A range guard computed by the kernels from the FP64 exponents, at no
     extra memory traffic. A call it refuses runs on Accelerate, before y is
     written, counted as a `range` fallback (an A that cannot be mapped for
-    the GPU counts as `other`). It reads a complex element by its larger
-    part, so a part far below the other can lose bits, or all of its value,
-    with no fallback. Rule and limits:
+    the GPU counts as `other`). Each part of a complex output is held to its
+    own products, so a part far below the other sends the call to Accelerate
+    instead of losing its bits. Rule and limits:
     [Exponent range](docs/vv/LIMITATIONS.md#exponent-range).
-  - `tests/test_blas2.c` (19 tests, 957 cases; in `make test` and
+  - `tests/test_blas2.c` (19 tests, 973 cases; in `make test` and
     `make ci-local`, including a check of the `AB_MODE=auto` rule against
     its measurements and of the kernels' FP64-to-double-float conversion,
     bit for bit, on 4.2 million inputs) and `benchmarks/bench_gemv.c`
@@ -441,9 +441,10 @@ All notable changes to this project will be documented in this file.
 - **Some data passes the range guard and loses accuracy, with no fallback**
   (since 1.5.0 for GEMM). On an M2 Max at 8b48826:
   - imaginary parts far below the real parts, on the default routing for large
-    `zgemm_`, `zgemv_` and `zhemv_` calls: up to 3.7×10⁵ u² of the part's own
-    scale at 2⁻¹⁰⁰ of the real parts, where uniform data gives at most 2.3 u²,
-    and zero at 2⁻¹³⁰;
+    `zgemm_` calls: up to 1.4×10⁵ u² of the part's own scale at 2⁻¹⁰⁰ of the
+    real parts, where uniform data gives at most 2.3 u², and zero at 2⁻¹³⁰
+    (`zgemv_` and `zhemv_`, which returned up to 3.7×10⁵ u², now run such calls
+    on Accelerate);
   - in GEMM, values near 2⁻¹⁰⁶⁰ with products in range, which come back zero, on
     the default routing for `zgemm_` 'T','T' 4096³;
   - under `AB_MODE=gpu AB_MIN_GPU_DIM=0`, a DGEMM's small C with beta ≠ 0 in

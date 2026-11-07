@@ -210,11 +210,10 @@ ABStatus ab_dev_zgemm_offset(ABTranspose transA, ABTranspose transB,
 // most 1e-14 in tests/test_blas2.c, dot products up to 65536 long), about
 // ten times an FP64 BLAS's. Each call checks, at no extra memory traffic,
 // that its data stay in double-float's range (docs/vv/LIMITATIONS.md, Exponent
-// range). The check reads a complex element by its larger part, so a part far
-// below the other can lose bits, or all of its value, with no fallback (same
-// file, What the guard misses). A call that fails it, whose sum of products, x,
-// alpha or beta is not finite, and every call with m or n == 0 or alpha == 0,
-// runs on Accelerate instead, on the same memory, with Accelerate's results.
+// range), each part of a complex output against its own products. A call
+// that fails it, whose sum of products, x, alpha or beta is not finite, and
+// every call with m or n == 0 or alpha == 0, runs on Accelerate instead, on
+// the same memory, with Accelerate's results.
 // ab_get_last_dispatch_path() says which ran.
 //
 // Returns AB_OK when y holds the result, AB_ERROR_INVALID_ARG (y unchanged)

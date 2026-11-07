@@ -225,9 +225,8 @@ five runs ([data](benchmarks/results/2026-10-19-ba345df-gemv/), ZHEMV
   product, at no extra memory traffic, and a call whose data leave
   double-float's range, or whose sums of products, x, alpha or beta are not
   finite, runs on Accelerate instead, before y is written
-  ([rule](docs/vv/LIMITATIONS.md#exponent-range)). A part of a complex element
-  far below the other can lose bits with no fallback
-  ([what the guard misses](docs/vv/LIMITATIONS.md#what-the-guard-misses)).
+  ([rule](docs/vv/LIMITATIONS.md#exponent-range)); each part of a complex
+  output is held to its own products.
 - **One-shot calls** (`dgemv_`, `zgemv_`, `zhemv_`, `ab_*gemv_blas`) map A
   for the GPU on every call, at 10–22 ms/GB. On the M2 Max (38-core GPU),
   where this was measured, `AB_MODE=auto` sends one to the GPU only where it

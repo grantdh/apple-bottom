@@ -599,13 +599,15 @@ static void test_nonfinite_propagation(void) {
 // Range guard
 // =============================================================================
 
+// The kinds from RG_IMAG_TINY on change one part of complex data, and do not run for DGEMV.
 typedef enum { RG_HUGE_ELEM, RG_ALL_TINY, RG_NEAR_FLT_MAX, RG_SCALED_UP, RG_X_HUGE, RG_X_TINY,
                RG_X_WIDE, RG_ZEROS, RG_SUBNORMALS, RG_TINY_ROWS, RG_FLT_EDGE, RG_FLT_OVERFLOW,
-               RG_COUNT } RangeKind;
+               RG_IMAG_TINY, RG_REAL_TINY, RG_IMAG_SMALL, RG_IMAG_ZERO, RG_COUNT } RangeKind;
 // Where each must run (RG_TINY_ROWS: the guard may keep it on the GPU or not).
 static const Expect RG_WANT[] = {
     EXPECT_CPU, EXPECT_CPU, EXPECT_CPU, EXPECT_GPU, EXPECT_GPU, EXPECT_GPU,
     EXPECT_GPU, EXPECT_GPU, EXPECT_GPU, EXPECT_EITHER, EXPECT_GPU, EXPECT_CPU,
+    EXPECT_CPU, EXPECT_CPU, EXPECT_GPU, EXPECT_GPU,
 };
 
 // Multiplies every number in v (NaN stays NaN) by s.
@@ -613,9 +615,15 @@ static void scale_all(double *v, size_t n, double s) {
     for (size_t k = 0; k < n; k++) v[k] *= s;
 }
 
+// Multiplies one part, real (0) or imaginary (1), of every complex number in v (n doubles) by s.
+static void scale_part(double *v, size_t n, int part, double s) {
+    for (size_t k = (size_t)part; k < n; k += 2) v[k] *= s;
+}
+
 static void test_range_guard(void) {
     for (int f = 0; f < N_FAMILIES; f++)
         for (int rg = 0; rg < RG_COUNT; rg++) {
+            if (rg >= RG_IMAG_TINY && FAMILIES[f].rt == B2_DGEMV) continue;
             Case c = family_case(f, EP_DEV, 200, 150);
             Data d;
             make_data(&c, &d);
@@ -643,6 +651,16 @@ static void test_range_guard(void) {
                 for (int i = 0; i < d.rows; i += 3)
                     for (int j = 0; j < c.n; j++) scale_all(aelem(&d, i, j), d.w, 1e-25);
                 break;
+            case RG_IMAG_TINY:    // every imaginary part of A and x 2^-100 of its real part,
+            case RG_REAL_TINY:    // so that y's imaginary parts have no product above 2^-100
+            case RG_IMAG_SMALL:   // (RG_REAL_TINY: the same for the real parts); 2^-30, in
+            case RG_IMAG_ZERO: {  // range; zero (ZHEMV's NaN diagonal parts stay NaN)
+                const double t = rg == RG_IMAG_SMALL ? 0x1p-30 : rg == RG_IMAG_ZERO ? 0.0 : 0x1p-100;
+                const int part = rg == RG_REAL_TINY ? 0 : 1;
+                scale_part(d.A, d.na, part, t);
+                scale_part(d.x, d.nx, part, t);
+                break;
+            }
             case RG_FLT_EDGE:       // one element just under what rounds to 2^128 in FP32,
             case RG_FLT_OVERFLOW:   // or the least that does (hi Inf); x_9 small keeps pmax in range
                 aelem(&d, 9, 9)[0] = rg == RG_FLT_EDGE ? 0x1.fffffefffffffp+127 : 0x1.ffffffp+127;

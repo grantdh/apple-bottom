@@ -33,18 +33,21 @@
 //
 // Range guard. Double-float has FP32's exponent range, and the GPU flushes
 // FP32 subnormals to zero. The host scales x by an exact power of two so
-// that max |x_j| is in [1/2, 1). For each output the kernels also track,
-// from the FP64 exponents E(.), pmax = the largest E(a) + E(x_j) over
-// nonzero products and lmax = the same over products whose DD form may
-// lose bits under flushing (E(a) or E(x_j) < -78). With L = ceil(log2) of
-// the number of real products added into one accumulator, the host accepts
-// an output if it is finite and either no product was nonzero or
+// that max |x_j| is in [1/2, 1). The kernels also track, for each real sum
+// (an output, or one part of a complex output: the real part sums the
+// products ar xr and ai xi, the imaginary part ar xi and ai xr), from the
+// FP64 exponents E(.) of the factors, pmax = the largest E(a) + E(x) over
+// its nonzero products and lmax = the same over those whose DD form may
+// lose bits under flushing (E(a) or E(x) < -78). With L = ceil(log2) of the
+// number of real products added into one sum, the host accepts a sum if it
+// is finite and either had no nonzero product or
 //     L - 75 <= pmax <= 124 - L   and   lmax <= pmax - 51 - L,
 // which keeps overflow out and bounds what flushing can lose, at most
 // 2^-124 per term and all of a lossy term (< 2^(lmax+2)), by 2^-49 of the
-// largest product. (An element of A beyond FP32's range passes the pmax
-// test when its x_j is small enough; f64_to_dd makes it Inf or NaN, so its
-// output is not finite.) If any output fails, y is left alone and the
+// sum's largest product. A part far below the other is therefore held to
+// its own scale. (An element of A beyond FP32's range passes the pmax test
+// when its x_j is small enough; f64_to_dd makes it Inf or NaN, so its
+// output is not finite.) If any sum fails, y is left alone and the
 // caller runs the whole call on Accelerate: NaN and Inf therefore propagate
 // as Accelerate does.
 // =============================================================================
@@ -157,40 +160,72 @@ inline DD f64_to_dd(uint2 w) {
 inline int efield(uint2 w) { return int((w.y >> 20) & 0x7FFu); }      // biased FP64 exponent
 inline bool nonzero(uint2 w) { return ((w.y << 1) | w.x) != 0u; }
 
-// Range guard (header of blas2.m). xe[j] codes x_j as E(x_j) - 1023, or
-// XE_ZERO for 0, so that efield(a) + xe[j] = E(a) + E(x_j).
-constant int G_NONE = -(1 << 30);
+// Range guard (header of blas2.m), on exponent codes {e, l}. A part of an
+// element of A: e = its biased FP64 exponent, or XE_ZERO if it is zero. A
+// part of an x element: e = the host's code, E - 1023, or XE_ZERO for 0, so
+// that e_a + e_x = E(a) + E(x_j). Either: l = e if the part is lossy (E <
+// -78), else XE_ZERO. A product's e_a + e_x is then at least -2046 if both
+// factors are nonzero and below G_LOW otherwise, and max(l_a + e_x, e_a +
+// l_x) equals it if a factor is lossy and is below G_LOW if neither is.
+// pmax and lmax are therefore plain maxima (note), and the host reads a
+// value below G_LOW as no such product (sum_ok).
+constant int G_NONE = -(1 << 30);   // nothing noted
+constant int G_LOW = -(1 << 19);
 constant int XE_ZERO = -(1 << 20);
 constant int EA_LOSSY = 1023 - 78;
 constant int XE_LOSSY = -78 - 1023;
 
+struct Code { int e; int l; };
+struct Code2 { Code re; Code im; };
+
+inline Code acode(uint2 w) {
+    int e = nonzero(w) ? efield(w) : XE_ZERO;
+    return {e, e < EA_LOSSY ? e : XE_ZERO};
+}
+
+inline Code xcode(int xe) { return {xe, xe < XE_LOSSY ? xe : XE_ZERO}; }
+
+// A complex x_j's codes: two per element at xe, its parts', in one load.
+inline Code2 xcodes(device const int *xe, uint j) {
+    const int2 v = ((device const int2 *)xe)[j];
+    return {xcode(v.x), xcode(v.y)};
+}
+
 struct Guard { int pmax; int lmax; };
 
-inline void guard_note(thread Guard &g, int ea, bool anz, int xe) {
-    int pe = ea + xe;
-    bool nz = anz && xe != XE_ZERO;
-    bool lossy = ea < EA_LOSSY || xe < XE_LOSSY;
-    g.pmax = max(g.pmax, nz ? pe : G_NONE);
-    g.lmax = max(g.lmax, nz && lossy ? pe : G_NONE);
+inline void note(thread Guard &g, Code a, Code x) {
+    g.pmax = max(g.pmax, a.e + x.e);
+    g.lmax = max(g.lmax, max(a.l + x.e, a.e + x.l));
 }
 
 inline Guard guard_join(Guard a, Guard b) { return {max(a.pmax, b.pmax), max(a.lmax, b.lmax)}; }
 
-// Accumulators: real (x elements DD) and complex (x elements DD2).
+// Accumulators: a real sum with its guard, and a complex one as two of
+// them, one per part.
 struct AccD { DD s; Guard g; };
-struct AccZ { DD re; DD im; Guard g; };
+struct AccZ { AccD re; AccD im; };
 
 template <typename Acc> Acc acc_zero();
 template <> inline AccD acc_zero<AccD>() { return {{0.0f, 0.0f}, {G_NONE, G_NONE}}; }
-template <> inline AccZ acc_zero<AccZ>() { return {{0.0f, 0.0f}, {0.0f, 0.0f}, {G_NONE, G_NONE}}; }
+template <> inline AccZ acc_zero<AccZ>() { return {acc_zero<AccD>(), acc_zero<AccD>()}; }
 
 inline AccD join(AccD a, AccD b) { return {dd_add(a.s, b.s), guard_join(a.g, b.g)}; }
-inline AccZ join(AccZ a, AccZ b) { return {dd_add(a.re, b.re), dd_add(a.im, b.im), guard_join(a.g, b.g)}; }
+inline AccZ join(AccZ a, AccZ b) { return {join(a.re, b.re), join(a.im, b.im)}; }
 
 inline DD shuffle_down(DD a, ushort o) { return {simd_shuffle_down(a.hi, o), simd_shuffle_down(a.lo, o)}; }
 inline Guard shuffle_down(Guard g, ushort o) { return {simd_shuffle_down(g.pmax, o), simd_shuffle_down(g.lmax, o)}; }
 inline AccD shuffle_down(AccD a, ushort o) { return {shuffle_down(a.s, o), shuffle_down(a.g, o)}; }
-inline AccZ shuffle_down(AccZ a, ushort o) { return {shuffle_down(a.re, o), shuffle_down(a.im, o), shuffle_down(a.g, o)}; }
+inline AccZ shuffle_down(AccZ a, ushort o) { return {shuffle_down(a.re, o), shuffle_down(a.im, o)}; }
+
+// The products of a = ar + i ai and x into acc's guards: ar xr and ai xi
+// into the real part's, ar xi and ai xr into the imaginary part's, whatever
+// conjugation does to their signs.
+inline void note(thread AccZ &acc, Code ar, Code ai, Code2 x) {
+    note(acc.re.g, ar, x.re);
+    note(acc.re.g, ai, x.im);
+    note(acc.im.g, ar, x.im);
+    note(acc.im.g, ai, x.re);
+}
 
 // The sum of each aligned group of 2 FIRST lanes in its first lane (the
 // simdgroup's in lane 0 for FIRST = 16), by a fixed tree.
@@ -199,26 +234,28 @@ template <ushort FIRST = 16, typename Acc> inline Acc simd_tree(Acc a) {
     return a;
 }
 
-// acc += op(a) x_j for the element at a: one word (real) or two (complex,
-// a[0] + i a[1]); op(a) = conj(a) if CONJ.
-template <bool CONJ> inline void mac(thread AccD &acc, device const uint2 *a, DD x, int xe) {
+// acc += op(a) x_j for the element at a, x_j's codes at xe (xcodes): one
+// word (real) or two (complex, a[0] + i a[1]); op(a) = conj(a) if CONJ.
+template <bool CONJ>
+inline void mac(thread AccD &acc, device const uint2 *a, DD x, device const int *xe, uint j) {
     uint2 w = a[0];
-    guard_note(acc.g, efield(w), nonzero(w), xe);
+    note(acc.g, acode(w), xcode(xe[j]));
     acc.s = dd_fma(f64_to_dd(w), x, acc.s);
 }
 
 // acc += op(a) x for a = ar + i ai, without the guard.
 template <bool CONJ> inline void zmac(thread AccZ &acc, DD ar, DD ai, DD2 x) {
     if (CONJ) ai = dd_neg(ai);
-    acc.re = dd_fma(ar, x.re, acc.re);
-    acc.re = dd_fma(dd_neg(ai), x.im, acc.re);
-    acc.im = dd_fma(ar, x.im, acc.im);
-    acc.im = dd_fma(ai, x.re, acc.im);
+    acc.re.s = dd_fma(ar, x.re, acc.re.s);
+    acc.re.s = dd_fma(dd_neg(ai), x.im, acc.re.s);
+    acc.im.s = dd_fma(ar, x.im, acc.im.s);
+    acc.im.s = dd_fma(ai, x.re, acc.im.s);
 }
 
-template <bool CONJ> inline void mac(thread AccZ &acc, device const uint2 *a, DD2 x, int xe) {
+template <bool CONJ>
+inline void mac(thread AccZ &acc, device const uint2 *a, DD2 x, device const int *xe, uint j) {
     uint2 wr = a[0], wi = a[1];
-    guard_note(acc.g, max(efield(wr), efield(wi)), nonzero(wr) || nonzero(wi), xe);
+    note(acc, acode(wr), acode(wi), xcodes(xe, j));
     zmac<CONJ>(acc, f64_to_dd(wr), f64_to_dd(wi), x);
 }
 
@@ -246,7 +283,7 @@ template <typename Acc, typename X>
     Acc acc = acc_zero<Acc>();
     if (i < p.m && j0 < j1) {
         device const uint2 *a = A + p.a0 + W * (ulong)i + (ulong)j0 * p.lda;
-        for (uint j = j0; j < j1; j++, a += p.lda) mac<false>(acc, a, x[j], xe[j]);
+        for (uint j = j0; j < j1; j++, a += p.lda) mac<false>(acc, a, x[j], xe, j);
     }
     tmp[sg * 32 + lane] = acc;
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -270,7 +307,7 @@ template <typename Acc, typename X, bool CONJ>
     uint r0 = min(tg.y * p.chunk, p.m), r1 = min(r0 + p.chunk, p.m);
     Acc acc = acc_zero<Acc>();
     device const uint2 *col = A + p.a0 + (ulong)j * p.lda;
-    for (uint k = r0 + lane; k < r1; k += 32) mac<CONJ>(acc, col + W * k, x[k], xe[k]);
+    for (uint k = r0 + lane; k < r1; k += 32) mac<CONJ>(acc, col + W * k, x[k], xe, k);
     acc = simd_tree(acc);
     if (lane == 0) out[(ulong)tg.y * p.nout + j] = acc;
 }
@@ -303,36 +340,6 @@ struct HemvParams {
     uint panels, chunks;
 };
 
-// Guard codes. An element's: e = its larger biased FP64 exponent, or
-// XE_ZERO if it is zero, and l = e if lossy (e < EA_LOSSY), else XE_ZERO;
-// an x element's: e = xe[j] and l = xe[j] if lossy, else XE_ZERO. A
-// product's code e_a + e_x is then at least -2046 if both factors are
-// nonzero and below G_LOW otherwise, so pmax and lmax are plain maxima
-// (hemv_note), mapped back to G_NONE below G_LOW once an output's sum is
-// complete (hemv_final): the values guard_note gives. The mapping commutes
-// with max, so the partial results keep the raw codes.
-constant int G_LOW = -(1 << 19);
-
-struct Code { int e; int l; };
-
-inline Code acode(uint2 wr, uint2 wi) {
-    int e = nonzero(wr) || nonzero(wi) ? max(efield(wr), efield(wi)) : XE_ZERO;
-    return {e, e < EA_LOSSY ? e : XE_ZERO};
-}
-
-inline Code xcode(int xe) { return {xe, xe < XE_LOSSY ? xe : XE_ZERO}; }
-
-inline void hemv_note(thread Guard &g, Code a, Code x) {
-    g.pmax = max(g.pmax, a.e + x.e);
-    g.lmax = max(g.lmax, max(a.l + x.e, a.e + x.l));
-}
-
-inline AccZ hemv_final(AccZ a) {
-    a.g.pmax = a.g.pmax < G_LOW ? G_NONE : a.g.pmax;
-    a.g.lmax = a.g.lmax < G_LOW ? G_NONE : a.g.lmax;
-    return a;
-}
-
 // The packed partial results of blocks of B indices (a panel's rows or a
 // chunk's columns): block b holds the indices [b B, n) if TAIL, else
 // [0, min(n, (b + 1) B)), and its partial for index k sits at
@@ -348,16 +355,17 @@ template <bool TAIL> inline ulong band_base(uint b, uint n, uint B) {
 // row) nor the reads (lanes across rows) conflict.
 struct HemvTg {
     float rh[4][33], rl[4][33], ih[4][33], il[4][33];
-    int pm[4][33], lm[4][33];
+    int pmr[4][33], lmr[4][33], pmi[4][33], lmi[4][33];
 };
 
 inline void tg_put(threadgroup HemvTg &t, int c, ushort l, AccZ a) {
-    t.rh[c][l] = a.re.hi; t.rl[c][l] = a.re.lo; t.ih[c][l] = a.im.hi; t.il[c][l] = a.im.lo;
-    t.pm[c][l] = a.g.pmax; t.lm[c][l] = a.g.lmax;
+    t.rh[c][l] = a.re.s.hi; t.rl[c][l] = a.re.s.lo; t.ih[c][l] = a.im.s.hi; t.il[c][l] = a.im.s.lo;
+    t.pmr[c][l] = a.re.g.pmax; t.lmr[c][l] = a.re.g.lmax; t.pmi[c][l] = a.im.g.pmax; t.lmi[c][l] = a.im.g.lmax;
 }
 
 inline AccZ tg_get(threadgroup const HemvTg &t, int c, int l) {
-    return {{t.rh[c][l], t.rl[c][l]}, {t.ih[c][l], t.il[c][l]}, {t.pm[c][l], t.lm[c][l]}};
+    return {{{t.rh[c][l], t.rl[c][l]}, {t.pmr[c][l], t.lmr[c][l]}},
+            {{t.ih[c][l], t.il[c][l]}, {t.pmi[c][l], t.lmi[c][l]}}};
 }
 
 // Columns [j, j + 4) of the panel at row r0, adding into the lane's row
@@ -373,14 +381,14 @@ inline void hemv_cols(device const uint2 *A, device const DD2 *x, device const i
     for (int c = 0; c < 4; c++) {
         const uint jc = j + c, jl = !MASK || jc < jend ? jc : j;   // jl: a column to read
         const DD2 xj = x[jl];
-        const Code cx = xcode(xe[jl]);
+        const Code2 cx = xcodes(xe, jl);
         device const uint2 *col = A + p.a0 + (ulong)jl * p.lda;
         AccZ cs = acc_zero<AccZ>();
         for (int k = 0; k < R; k++) {
             const uint i = r0 + lane + 32 * k, il = MASK ? min(i, p.n - 1) : i;   // il: a row to read
             device const uint2 *a = col + 2 * il;
             DD2 xi = x[il];   // read here rather than kept: fewer registers
-            Code ci = xcode(xe[il]);
+            Code2 ci = xcodes(xe, il);
             uint2 wr, wi;
             if (MASK) {
                 bool stored = jl == jc && i < p.n && (UPPER ? i <= jc : i >= jc), diag = i == jc;
@@ -388,18 +396,18 @@ inline void hemv_cols(device const uint2 *A, device const DD2 *x, device const i
                 wi = stored && !diag ? a[1] : uint2(0u);   // a diagonal element's imaginary part: unread
                 if (diag) {   // counted once, in its row
                     xi = {{0.0f, 0.0f}, {0.0f, 0.0f}};
-                    ci = {XE_ZERO, XE_ZERO};
+                    ci = {{XE_ZERO, XE_ZERO}, {XE_ZERO, XE_ZERO}};
                 }
             } else {
                 wr = a[0];
                 wi = a[1];
             }
             const DD ar = f64_to_dd(wr), ai = f64_to_dd(wi);
-            const Code ca = acode(wr, wi);
+            const Code car = acode(wr), cai = acode(wi);
             zmac<false>(rows[k], ar, ai, xj);   // row i += a x_j
-            hemv_note(rows[k].g, ca, cx);
+            note(rows[k], car, cai, cx);
             zmac<true>(cs, ar, ai, xi);         // column j += conj(a) x_i
-            hemv_note(cs.g, ca, ci);
+            note(cs, car, cai, ci);
         }
         tg_put(tgs, c, lane, cs);
     }
@@ -481,7 +489,7 @@ template <bool UPPER>
         acc = join_band<true>(acc, dp, 0, k / W + 1, n, W, k);
         acc = join_band<false>(acc, part, k / H, p.panels, n, H, k);
     }
-    out[k] = hemv_final(acc);
+    out[k] = acc;
 }
 
 // For tests: element i converted as the kernels convert A's elements.
@@ -662,7 +670,7 @@ static id<MTLBuffer> scratch_buffer(id<MTLBuffer> __strong &slot, id<MTLDevice> 
 
 typedef struct { float hi, lo; } DDf;
 typedef struct { DDf s; int32_t pmax, lmax; } AccDHost;               // = MSL AccD
-typedef struct { DDf re, im; int32_t pmax, lmax; } AccZHost;          // = MSL AccZ
+typedef struct { AccDHost re, im; } AccZHost;                         // = MSL AccZ
 
 typedef struct {
     uint64_t a0, lda;
@@ -676,10 +684,10 @@ typedef struct {
 
 typedef struct {
     float rh[4][33], rl[4][33], ih[4][33], il[4][33];
-    int32_t pm[4][33], lm[4][33];
+    int32_t pmr[4][33], lmr[4][33], pmi[4][33], lmi[4][33];
 } HemvTgHost;                                                         // = MSL HemvTg
 
-static const int32_t kGuardNone = -(1 << 30);
+static const int32_t kGuardLow = -(1 << 19);   // = MSL G_LOW
 static const int32_t kXeZero = -(1 << 20);
 
 // Threads a call aims to keep in flight, and the fewest columns (rows) a
@@ -720,20 +728,17 @@ static bool x_scale(const ab_b2_call_t *c, int len, int w, int *sx) {
 
 // Stages x for the kernels: scaled by 2^-sx (exact: sx is in [-1022, 1024],
 // so 2^-sx is a double and the product rounds as ldexp does), as DD, and
-// the exponent codes xe = E(x_j) - 1023, or kXeZero for 0.
+// the exponent code of each part, E - 1023, or kXeZero for 0.
 static void x_stage(const ab_b2_call_t *c, int len, int w, int sx, DDf *xdd, int32_t *xe) {
     const double scale = ldexp(1.0, -sx);
     for (int i = 0; i < len; i++) {
         const double *v = c->x + vec_index(len, c->incx, i) * w;
-        int ex = -1;
         for (int k = 0; k < w; k++) {
             double s = v[k] * scale;
             float hi = (float)s;
             xdd[(size_t)i * w + k] = (DDf){hi, (float)(s - (double)hi)};
-            int e = s != 0.0 ? (int)((bits_of(s) >> 52) & 0x7FF) : -1;
-            ex = e > ex ? e : ex;
+            xe[(size_t)i * w + k] = s != 0.0 ? (int)((bits_of(s) >> 52) & 0x7FF) - 2046 : kXeZero;
         }
-        xe[i] = ex < 0 ? kXeZero : ex - 2046;
     }
 }
 
@@ -744,16 +749,17 @@ static int ceil_log2(uint64_t terms) {
     return l;
 }
 
-// The range guard's verdict on one output (header of this file); L is
-// ceil(log2) of the real products added into one accumulator.
-// Branch-free (int, not bool) so that the check of all outputs vectorizes.
-static inline int output_ok(int32_t pmax, int32_t lmax, int L) {
-    int none = pmax == kGuardNone, in_range = (pmax >= L - 75) & (pmax <= 124 - L);
-    int lossy_ok = (lmax == kGuardNone) | (lmax <= pmax - 51 - L);
-    return none | (in_range & lossy_ok);
-}
-
 static inline int dd_finite(DDf d) { return (int)isfinite(d.hi) & (int)isfinite(d.lo); }
+
+// The range guard's verdict on one sum, an output or a part of a complex
+// one (header of this file); L is ceil(log2) of the real products added
+// into it. pmax below kGuardLow: no nonzero product; lmax below it (no lossy
+// product) passes whenever pmax is in range. Branch-free (int, not bool) so
+// that the check of all sums vectorizes.
+static inline int sum_ok(AccDHost a, int L) {
+    int none = a.pmax < kGuardLow, in_range = (a.pmax >= L - 75) & (a.pmax <= 124 - L);
+    return dd_finite(a.s) & (none | (in_range & (a.lmax <= a.pmax - 51 - L)));
+}
 
 // 2^sx (hi + lo) in FP64: a multiply by the exact power, which rounds as
 // ldexp does, except for 2^1024, which is not a double.
@@ -886,7 +892,7 @@ static ab_b2_result_t run_gpu(const ab_b2_call_t *c, id<MTLCommandQueue> queue, 
     const uint32_t m = (uint32_t)c->m, n = (uint32_t)c->n;
     const int w = cplx ? 2 : 1;
     const uint32_t nx = rows_out ? n : m, nout = rows_out ? m : n;
-    const size_t acc_size = cplx ? sizeof(AccZHost) : sizeof(AccDHost);
+    const size_t acc_size = w * sizeof(AccDHost);   // an AccZHost is two
 
     Pass pass = {};
     HemvPlan hplan = {};
@@ -904,7 +910,7 @@ static ab_b2_result_t run_gpu(const ab_b2_call_t *c, id<MTLCommandQueue> queue, 
     Scratch *s = thread_scratch();
     ScratchTrim trim = {s};
     id<MTLBuffer> bx = scratch_buffer(s->x, dev, (size_t)nx * w * sizeof(DDf));
-    id<MTLBuffer> bxe = scratch_buffer(s->xe, dev, (size_t)nx * sizeof(int32_t));
+    id<MTLBuffer> bxe = scratch_buffer(s->xe, dev, (size_t)nx * w * sizeof(int32_t));
     id<MTLBuffer> bout = scratch_buffer(s->out, dev, (size_t)nout * acc_size);
     id<MTLBuffer> bpart = parts ? scratch_buffer(s->part, dev, (size_t)parts * acc_size) : bout;
     if (!bx || !bxe || !bout || !bpart) return AB_B2_FAILED;
@@ -949,17 +955,11 @@ static ab_b2_result_t run_gpu(const ab_b2_call_t *c, id<MTLCommandQueue> queue, 
         *mark = now;
     }
 
-    // Every output must pass the guard before y is touched.
+    // Every sum must pass the guard before y is touched (an AccZHost is two).
     const int L = ceil_log2((uint64_t)nx * w);
+    const AccDHost *sums = (const AccDHost *)bout.contents;
     int ok = 1;
-    if (cplx) {
-        const AccZHost *o = (const AccZHost *)bout.contents;
-        for (uint32_t i = 0; i < nout; i++)
-            ok &= dd_finite(o[i].re) & dd_finite(o[i].im) & output_ok(o[i].pmax, o[i].lmax, L);
-    } else {
-        const AccDHost *o = (const AccDHost *)bout.contents;
-        for (uint32_t i = 0; i < nout; i++) ok &= dd_finite(o[i].s) & output_ok(o[i].pmax, o[i].lmax, L);
-    }
+    for (uint32_t i = 0; i < nout * (uint32_t)w; i++) ok &= sum_ok(sums[i], L);
     if (!ok) return AB_B2_RANGE;
     ab_prof_stage_mark(stage_ns, mark, AB_PROF_STAGE_DOWNLOAD);
 
@@ -970,7 +970,7 @@ static ab_b2_result_t run_gpu(const ab_b2_call_t *c, id<MTLCommandQueue> queue, 
     if (cplx) {
         const AccZHost *o = (const AccZHost *)bout.contents;
         for (uint32_t i = 0; i < nout; i++) {
-            double tr = dd_value(o[i].re, sx, up), ti = dd_value(o[i].im, sx, up);
+            double tr = dd_value(o[i].re.s, sx, up), ti = dd_value(o[i].im.s, sx, up);
             double *yi = c->y + 2 * vec_index((int)nout, c->incy, (int)i);
             double nr = ar * tr - ai * ti, ni = ar * ti + ai * tr;
             if (!beta0) {

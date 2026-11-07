@@ -49,9 +49,8 @@ Accelerate.
 
 - **Calibrate the staged path.** `make calibrate` since 1.5.0 measures it;
   the built-in routing table still comes from 1.4.0's host path.
-- **Close the range guard's gaps**
-  ([what the guard misses](vv/LIMITATIONS.md#what-the-guard-misses)). BLAS-2's
-  guard needs its own change: it reads a complex element by its larger part.
+- **Close the range guard's remaining gaps**
+  ([what the guard misses](vv/LIMITATIONS.md#what-the-guard-misses)).
 - **Split one call between Accelerate and the GPU inside the library.**
   `bench_split` does it in user code
   ([split benchmark](../benchmarks/results/2026-10-28-415cb5d-hybrid-split/));
