@@ -7,8 +7,8 @@ Copies the source tree (without build/ and .git) into a scratch directory, build
 build/test_dispatch and build/test_split there, and checks that the catching tests pass on the clean
 copy. Then for each defect (or those named) it applies the defect's edits, rebuilds, runs the tests
 that should catch it, and restores the files: the defect counts as caught if one of those tests
-fails. Prints a line per defect and exits 1 if any defect went uncaught or an edit no longer matches
-the source. Needs the GPU (run it under the machine's build lock); about half an hour on an M2 Max.
+fails. Prints a line per defect and exits 1 if any defect went uncaught, or is stale: its edit no longer
+matches the source, or the source no longer builds with it. Needs the GPU; about half an hour.
 `make test-split-defects` runs it. Python 3.9, standard library only.
 """
 from __future__ import annotations
@@ -149,13 +149,14 @@ def main():
             with open(full, "w") as f:
                 f.write(cur.replace(old, new))
         caught = []
-        if ok:
-            if run(BUILD, tree, log):
-                caught.append("build")
-            else:
-                for cmd in tests:
-                    if run(cmd, tree, log):
-                        caught.append(" ".join(cmd))
+        if ok and run(BUILD, tree, log):
+            # a defect that does not build tests nothing: its edit has gone stale
+            print(f"  STALE   {name}: does not build")
+            ok = False
+        elif ok:
+            for cmd in tests:
+                if run(cmd, tree, log):
+                    caught.append(" ".join(cmd))
         for path, text in saved.items():
             with open(os.path.join(tree, path), "w") as f:
                 f.write(text)
