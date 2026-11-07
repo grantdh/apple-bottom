@@ -7,8 +7,9 @@
 // ab_zgemv_blas and ab_zhemv_blas. Those run a call on Accelerate when an
 // argument is invalid (cblas then rejects it as reference xerbla would), m or
 // n is 0, alpha is 0, or alpha or beta is NaN or Inf; otherwise routing
-// decides (dispatch.h steps 1-3: AB_MODE=cpu, AB_MIN_GPU_DIM, AB_MODE=gpu,
-// then AB_MODE=auto's measured rule, kRoutes below). A GPU call that cannot
+// decides (routes_gpu: AB_BLAS2_MIN_DIM, then dispatch.h steps 1-3: AB_MODE=cpu,
+// AB_MIN_GPU_DIM, AB_MODE=gpu, then AB_MODE=auto's measured rule, kRoutes
+// below). A GPU call that cannot
 // finish there (the range guard, no device, A not mappable, a failed
 // command buffer) reruns on Accelerate before y is touched, counted as a
 // fallback.
@@ -99,9 +100,14 @@ static const ab_dispatch_table_t kRoutesChip[] = {
     {NULL, 0, NULL, NULL, NULL},
 };
 
+// Below AB_BLAS2_MIN_DIM a call stays on Accelerate in every mode, even with
+// AB_MIN_GPU_DIM=0: at 256^2 the GPU ran at 0.01-0.09x Accelerate (sweep_square
+// above), and double-float results fail reference BLAS's small-size test ratio.
 static bool routes_gpu(const ab_b2_call_t *c) {
     const ab_dispatch_config_t *cfg = ab_dispatch_process_config();
-    int by_mode = ab_dispatch_mode_route(cfg, c->m < c->n ? c->m : c->n);
+    const int dim = c->m < c->n ? c->m : c->n;
+    if (dim < cfg->blas2_min_dim) return false;
+    int by_mode = ab_dispatch_mode_route(cfg, dim);
     if (by_mode >= 0) return by_mode;
     return ab_internal_b2_auto_gpu(c->routine, c->op, c->m, c->n) &&
            ab_dispatch_select_table(kRoutesChip, cfg->chip, cfg->gpu_cores);

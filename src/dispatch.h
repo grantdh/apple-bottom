@@ -4,8 +4,9 @@
 //
 // Where a raw-pointer BLAS-ABI call runs. GEMM (dgemm_, zgemm_, ab_dgemm_,
 // ab_zgemm_, ab_dgemm_blas, ab_zgemm_blas) is routed here entirely; BLAS-2
-// (dgemv_, zgemv_, zhemv_, ab_*gemv_blas, ab_zhemv_blas) shares steps 1-3
-// through ab_dispatch_mode_route() and has its own auto rule (blas2_abi.c).
+// (dgemv_, zgemv_, zhemv_, ab_*gemv_blas, ab_zhemv_blas) stays on Accelerate
+// below AB_BLAS2_MIN_DIM, then shares steps 1-3 through
+// ab_dispatch_mode_route() and has its own auto rule (blas2_abi.c).
 // The native ABMatrix and device APIs never come here. Calls with invalid
 // arguments or alpha == 0 run on Accelerate before routing (blas_wrapper.c,
 // blas2_abi.c).
@@ -80,12 +81,14 @@ typedef struct {
 
 #define AB_DISPATCH_MAX_ROWS        64
 #define AB_DISPATCH_DEFAULT_MIN_DIM 32
+#define AB_DISPATCH_DEFAULT_BLAS2_MIN_DIM 256
 #define AB_DISPATCH_CHIP_LEN        64
 #define AB_DISPATCH_LABEL_LEN       160
 
 typedef struct {
     ab_dispatch_mode_t mode;                // AB_MODE
     int min_dim;                            // AB_MIN_GPU_DIM
+    int blas2_min_dim;                      // AB_BLAS2_MIN_DIM
     uint64_t crossover_flops;               // AB_CROSSOVER_FLOPS, 0 = unset
     uint64_t crossover_flops_real;          // AB_CROSSOVER_FLOPS_REAL, 0 = unset
     char chip[AB_DISPATCH_CHIP_LEN];        // this machine's chip (AB_CHIP or sysctl); "" if unknown

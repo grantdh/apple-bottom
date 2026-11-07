@@ -391,7 +391,8 @@ By default
 measured at least 1.10× faster than Accelerate end to end (on 1.4.0's host
 path; the staged path has not been calibrated yet); everything else runs on
 Accelerate. `AB_MODE=gpu` sends every call with all dimensions above
-`AB_MIN_GPU_DIM` to the GPU, `AB_MODE=cpu` none. See
+`AB_MIN_GPU_DIM` to the GPU (BLAS-2 calls also need M and N at least
+`AB_BLAS2_MIN_DIM`), `AB_MODE=cpu` none. See
 [Routing](#routing-ab_modeauto).
 
 A matrix-vector product reads its matrix once, so a one-shot GPU call
@@ -515,8 +516,9 @@ to the native, BLAS-ABI and device-API GEMMs (below). `AB_DISPATCH_TABLE`, the F
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `AB_MODE` | `auto` | `cpu`: every call on Accelerate. `gpu`: on the GPU unless a dimension is ≤ `AB_MIN_GPU_DIM`. `auto` (or any other value): by the calibrated dispatch table, or by a FLOP threshold if one is set (see [Routing](#routing-ab_modeauto)). |
+| `AB_MODE` | `auto` | `cpu`: every call on Accelerate. `gpu`: on the GPU unless a dimension is ≤ `AB_MIN_GPU_DIM` (BLAS-2: or below `AB_BLAS2_MIN_DIM`). `auto` (or any other value): by the calibrated dispatch table, or by a FLOP threshold if one is set (see [Routing](#routing-ab_modeauto)). |
 | `AB_MIN_GPU_DIM` | `32` | Calls with M, N or K ≤ this run on Accelerate in every mode. |
+| `AB_BLAS2_MIN_DIM` | `256` | `dgemv_`, `zgemv_` and `zhemv_` calls with M or N below this run on Accelerate in every mode, even with `AB_MIN_GPU_DIM=0`: forced onto the GPU they run at 0.01–0.09× Accelerate's speed at 256² and fail the test ratio of Netlib's and LAPACK's small-size tests. |
 | `AB_PRECISION` | unset | `fast`: every GPU GEMM kernel accumulates lazily, Dot2-style (each product's high part goes into a running sum through TwoSum and every rounding error into a separate sum, renormalized once per 16 terms of K). On an M2 Max, 1.05–1.08× faster for DGEMM and ZGEMM of N = 2048 and 4096 ([data](../benchmarks/results/2026-11-06-8b48826-pretag/README.md#ab_precisionfast)). About 1 bit less accurate: on `tests/test_precision.c` the normwise error is 1.8-1.9× and the componentwise error 1.4-2.8× the default's (up to 2.2 √K·2⁻⁴⁸ of \|A\|\|B\|, default 1.0). The proven error bounds (`docs/vv/PRECISION_ENVELOPE.md` §1.2) cover the default kernels only; none is proven for this mode. Results differ from the default in the last bits; `ab_precision_mode()` returns the mode and the report and trace headers show `AB_PRECISION=fast`. Any other value: the default kernels, with the bits of 1.4.0. |
 | `AB_DISPATCH_TABLE` | unset | `auto`: read the dispatch table from this file (the `dispatch_table.txt` that `make calibrate` writes) instead of the built-in table for this chip. A file that cannot be read or parsed is reported on stderr and the built-in table for this chip is kept (none on an uncalibrated chip); a file calibrated on another chip or core count (its `# chip:` and `# gpu_cores:` header keys) is used with a note on stderr. |
 | `AB_CHIP` | unset | `auto`: the chip whose built-in table to use, in place of this machine's `machdep.cpu.brand_string` (e.g. `Apple M2 Max`). For tests, and to borrow another chip's table deliberately (with `AB_GPU_CORES` matching that table's count when it has one). |
@@ -543,12 +545,14 @@ with more than one GPU pass; larger batches run in groups that fit it.
 ### Routing (AB_MODE=auto)
 
 `src/dispatch.c` decides where each GEMM BLAS-ABI call runs, in this order
-(BLAS-2 calls share steps 1-4, below):
+(BLAS-2 calls share steps 1-4, with a floor of their own at step 3, below):
 
 1. Invalid arguments and `alpha == 0`: Accelerate (reference BLAS checks and
    quick return), in every mode.
 2. `AB_MODE=cpu`: Accelerate.
-3. M, N or K ≤ `AB_MIN_GPU_DIM`: Accelerate, in every mode.
+3. M, N or K ≤ `AB_MIN_GPU_DIM`: Accelerate, in every mode. BLAS-2 calls also
+   stay there with M or N below `AB_BLAS2_MIN_DIM` (256), whatever
+   `AB_MIN_GPU_DIM` says.
 4. `AB_MODE=gpu`: the GPU.
 5. `auto` with `AB_CROSSOVER_FLOPS_REAL` (DGEMM) or `AB_CROSSOVER_FLOPS`
    (ZGEMM, and DGEMM without `AB_CROSSOVER_FLOPS_REAL`) set: the GPU if the

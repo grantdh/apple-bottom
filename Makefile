@@ -365,8 +365,8 @@ test-fortran: $(BUILD)/test_fortran_blas $(BUILD)/test_fortran_blas_static
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "Running Fortran BLAS binding probe (dylib, static archive)"
 	@echo "═══════════════════════════════════════════════════════════════════"
-	AB_MODE=gpu ./$(BUILD)/test_fortran_blas
-	AB_MODE=gpu ./$(BUILD)/test_fortran_blas_static
+	AB_MODE=gpu AB_BLAS2_MIN_DIM=0 ./$(BUILD)/test_fortran_blas
+	AB_MODE=gpu AB_BLAS2_MIN_DIM=0 ./$(BUILD)/test_fortran_blas_static
 endif
 
 test-verification: $(BUILD)/test_convergence

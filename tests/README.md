@@ -404,7 +404,7 @@ solved in FP64 with one `FP64 LU fallback` line giving that reason.
 `tests/test_blas2.c` checks `ab_dev_dgemv` / `ab_dev_zgemv` /
 `ab_dev_zhemv` on `ab_dev_malloc()` and `ab_dev_register()` buffers,
 `ab_dgemv_blas` / `ab_zgemv_blas` / `ab_zhemv_blas` and the plain
-`dgemv_` / `zgemv_` / `zhemv_` symbols, in `AB_MODE=gpu`. A case passes
+`dgemv_` / `zgemv_` / `zhemv_` symbols, in `AB_MODE=gpu AB_BLAS2_MIN_DIM=0`. A case passes
 when y is within tol(K) = 16 K w u² + 8·2⁻⁵³ (u² = 2⁻⁴⁸, K the
 dot-product length, w = 2 for complex) of a compensated FP64 reference
 (`tests/test_blas2_ref.h`, shared with `benchmarks/bench_gemv.c`)
@@ -506,7 +506,7 @@ outcome.
 `tests/test_fortran_blas.f90` is a plain gfortran `CALL DGEMM` / `CALL
 ZGEMM` (the QE cegterg `'T'`/`'C'`, `'N'` pattern with M != K and padded
 leading dimensions). `make test-fortran` links it once against the dylib and
-once against the static archive and runs both with `AB_MODE=gpu`. Like QE,
+once against the static archive and runs both with `AB_MODE=gpu AB_BLAS2_MIN_DIM=0`. Like QE,
 it never calls `ab_init()`. Each call must reach the GPU path
 (`ab_get_last_dispatch_path()` is `"gpu"` and the `ab_get_stats()` GEMM
 counter advanced) and match a reference loop within 1e-11. Then `CALL DGEMV`,

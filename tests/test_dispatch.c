@@ -50,7 +50,7 @@ static void begin(void) { first_failure[0] = '\0'; }
 static void finish(void) { if (first_failure[0]) FAIL(first_failure); else PASS(); }
 
 static const char *const ENV_VARS[] = {
-    "AB_MODE", "AB_MIN_GPU_DIM", "AB_CROSSOVER_FLOPS", "AB_CROSSOVER_FLOPS_REAL",
+    "AB_MODE", "AB_MIN_GPU_DIM", "AB_BLAS2_MIN_DIM", "AB_CROSSOVER_FLOPS", "AB_CROSSOVER_FLOPS_REAL",
     "AB_DISPATCH_TABLE", "AB_CHIP", "AB_GPU_CORES",
 };
 
@@ -612,17 +612,25 @@ static void test_config_from_env(void) {
         ab_dispatch_config_from_env(&c);
         expect(c.mode == MODES[i].mode, "AB_MODE=%s", MODES[i].value);
     }
-    static const struct { const char *value; int min_dim; } DIMS[] = {
-        {"0", 0}, {"100", 100}, {"-5", AB_DISPATCH_DEFAULT_MIN_DIM},
-        {"", AB_DISPATCH_DEFAULT_MIN_DIM},
+    static const struct { const char *value; int min_dim, blas2_min_dim; } DIMS[] = {
+        {"0", 0, 0}, {"100", 100, 100},
+        {"-5", AB_DISPATCH_DEFAULT_MIN_DIM, AB_DISPATCH_DEFAULT_BLAS2_MIN_DIM},
+        {"", AB_DISPATCH_DEFAULT_MIN_DIM, AB_DISPATCH_DEFAULT_BLAS2_MIN_DIM},
     };
     for (size_t i = 0; i < TEST_REGISTRY_SIZE(DIMS); i++) {
         clear_env();
         setenv("AB_MIN_GPU_DIM", DIMS[i].value, 1);
+        setenv("AB_BLAS2_MIN_DIM", DIMS[i].value, 1);
         ab_dispatch_config_from_env(&c);
         expect(c.min_dim == DIMS[i].min_dim, "AB_MIN_GPU_DIM=%s gave %d", DIMS[i].value,
                c.min_dim);
+        expect(c.blas2_min_dim == DIMS[i].blas2_min_dim, "AB_BLAS2_MIN_DIM=%s gave %d",
+               DIMS[i].value, c.blas2_min_dim);
     }
+    clear_env();
+    ab_dispatch_config_from_env(&c);
+    expect(c.blas2_min_dim == AB_DISPATCH_DEFAULT_BLAS2_MIN_DIM, "AB_BLAS2_MIN_DIM unset gave %d",
+           c.blas2_min_dim);
     clear_env();
     setenv("AB_CROSSOVER_FLOPS", "100000000", 1);
     setenv("AB_CROSSOVER_FLOPS_REAL", "", 1);

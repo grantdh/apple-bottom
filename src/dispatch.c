@@ -260,6 +260,13 @@ static uint64_t env_flops(const char *name) {
     return s && *s ? strtoull(s, NULL, 10) : 0;
 }
 
+// A dimension from the environment: fallback if unset, empty or negative.
+static int env_dim(const char *name, int fallback) {
+    const char *s = getenv(name);
+    int v = s && *s ? atoi(s) : fallback;
+    return v < 0 ? fallback : v;
+}
+
 void ab_dispatch_config_from_env(ab_dispatch_config_t *c) {
     memset(c, 0, sizeof *c);
     const char *mode = getenv("AB_MODE");
@@ -267,9 +274,8 @@ void ab_dispatch_config_from_env(ab_dispatch_config_t *c) {
             : mode && (mode[0] == 'g' || mode[0] == 'G') ? AB_DISPATCH_GPU
             : AB_DISPATCH_AUTO;
 
-    const char *min_dim = getenv("AB_MIN_GPU_DIM");
-    c->min_dim = min_dim && *min_dim ? atoi(min_dim) : AB_DISPATCH_DEFAULT_MIN_DIM;
-    if (c->min_dim < 0) c->min_dim = AB_DISPATCH_DEFAULT_MIN_DIM;
+    c->min_dim = env_dim("AB_MIN_GPU_DIM", AB_DISPATCH_DEFAULT_MIN_DIM);
+    c->blas2_min_dim = env_dim("AB_BLAS2_MIN_DIM", AB_DISPATCH_DEFAULT_BLAS2_MIN_DIM);
 
     c->crossover_flops = env_flops("AB_CROSSOVER_FLOPS");
     c->crossover_flops_real = env_flops("AB_CROSSOVER_FLOPS_REAL");

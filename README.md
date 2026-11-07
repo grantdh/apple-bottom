@@ -300,7 +300,7 @@ LIBS = -L/path/to/apple-bottom/build -Wl,-rpath,/path/to/apple-bottom/build -lap
 | Variable | Effect |
 |----------|--------|
 | `AB_MODE=auto` (default) | GPU only for shapes measured ≥ 1.10× faster there on this chip (`src/dispatch_table.h`, one table per calibrated chip, the M2 Max's measured on 1.4.0's host path; an uncalibrated chip stays on Accelerate) |
-| `AB_MODE=cpu` / `AB_MODE=gpu` | everything on Accelerate / everything above `AB_MIN_GPU_DIM` on the GPU |
+| `AB_MODE=cpu` / `AB_MODE=gpu` | everything on Accelerate / everything above `AB_MIN_GPU_DIM` on the GPU, except BLAS-2 calls with M or N below `AB_BLAS2_MIN_DIM` (default 256) |
 | `AB_REPORT=1` | at exit: calls and time by route, GPU stage costs, fallbacks, and why calls left the staged path |
 | `AB_TRACE=<path>` | a line per call in `<path>.<pid>`: arguments, timestamps, route, GPU stages |
 | `AB_DISPATCH_TABLE=<file>` | route from another calibration, e.g. one from your own machine |

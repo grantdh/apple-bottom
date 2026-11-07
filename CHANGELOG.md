@@ -56,7 +56,9 @@ All notable changes to this project will be documented in this file.
     (Lanczos, Haydock, other Krylov methods).
   - `ab_dgemv_blas`, `ab_zgemv_blas`, `ab_zhemv_blas` and the Fortran
     symbols `dgemv_`, `zgemv_`, `zhemv_`, routed like GEMM (`AB_MODE`,
-    then `AB_MIN_GPU_DIM`, through `ab_dispatch_mode_route()`):
+    then `AB_MIN_GPU_DIM`, through `ab_dispatch_mode_route()`), except that a
+    call with M or N below `AB_BLAS2_MIN_DIM` (default 256) stays on Accelerate
+    in every mode:
     `AB_MODE=auto` sends a call to the GPU only on the M2 Max (38-core
     GPU) it was measured on, matched as the GEMM tables are, and only for
     shapes measured at least 1.10× faster end to end in two runs, mapping
@@ -450,11 +452,9 @@ All notable changes to this project will be documented in this file.
   `AB_MODE=cpu` keeps every case within 2 u². Triggers, reasons and each call's
   error: [What the guard misses](docs/vv/LIMITATIONS.md#what-the-guard-misses);
   `benchmarks/probe_guard_gaps.c` runs these calls.
-- **`AB_MODE=gpu AB_MIN_GPU_DIM=0` now fails more of Netlib's and LAPACK's
-  tests than in 1.5.1**, because it now sends BLAS-2 calls of every size to the
-  GPU, at double-float accuracy. DGEMV and ZHEMV now exceed Netlib's limit of 16,
-  as DGEMM and ZGEMM already did, and LAPACK's test suite counts 4365 failed tests
-  against 3134. With `AB_MODE` unset every Netlib routine passes and LAPACK fails
+- **`AB_MODE=gpu AB_MIN_GPU_DIM=0` still fails Netlib's DGEMM and ZGEMM tests**,
+  at double-float accuracy, as in 1.5.1. BLAS-2 calls below `AB_BLAS2_MIN_DIM` stay
+  on Accelerate in that mode. With `AB_MODE` unset every Netlib routine passes and LAPACK fails
   1 test of about 2.04 million, against 2 in 1.5.1 and 0 with Netlib's own BLAS
   ([runs and attribution](benchmarks/results/2026-11-06-8b48826-pretag/README.md#netlib-and-lapack)).
 - **The staged path is not calibrated.** `AB_MODE=auto` routes by 1.4.0's

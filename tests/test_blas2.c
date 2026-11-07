@@ -5,7 +5,7 @@
 // Entry points: ab_dev_dgemv / ab_dev_zgemv / ab_dev_zhemv on ab_dev_malloc()
 // and ab_dev_register() buffers, ab_dgemv_blas / ab_zgemv_blas /
 // ab_zhemv_blas, and the Fortran symbols dgemv_ / zgemv_ / zhemv_. This
-// process runs with AB_MODE=gpu; routing in the other modes, illegal
+// process runs with AB_MODE=gpu AB_BLAS2_MIN_DIM=0; routing in the other modes, illegal
 // arguments, forced GPU failures and AB_REPORT run in child processes.
 //
 // A case passes when
@@ -951,6 +951,10 @@ static void test_routing_modes(void) {
         {{"AB_MODE=gpu", NULL}, "600", "gpu", "gpu", "gpu"},
         {{"AB_MODE=gpu", NULL}, "32", "cpu", "cpu", "cpu"},
         {{"AB_MODE=gpu", "AB_MIN_GPU_DIM=700", NULL}, "600", "cpu", "cpu", "cpu"},
+        // BLAS-2's own floor, 256 by default (children get no AB_* from this
+        // process), holds under AB_MIN_GPU_DIM=0.
+        {{"AB_MODE=gpu", "AB_MIN_GPU_DIM=0", NULL}, "255", "cpu", "cpu", "cpu"},
+        {{"AB_MODE=gpu", NULL}, "256", "gpu", "gpu", "gpu"},
         // AB_MODE=auto (src/blas2_abi.c, kRoutes) on the M2 Max it was measured
         // on: below every row, then dgemv 'N' and zhemv on the GPU while
         // zgemv 'C' never is.
@@ -1115,6 +1119,7 @@ int main(int argc, char **argv) {
 
     clear_ab_env();
     setenv("AB_MODE", "gpu", 1);   // read once, at the first BLAS-ABI call
+    setenv("AB_BLAS2_MIN_DIM", "0", 1);   // the suite's shapes start at 1 x 1
     printf("╔══════════════════════════════════════════════════════════════════╗\n");
     printf("║  apple-bottom BLAS-2 Test Suite (GEMV, HEMV)                     ║\n");
     printf("╚══════════════════════════════════════════════════════════════════╝\n");

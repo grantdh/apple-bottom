@@ -3,7 +3,7 @@
 ! =============================================================================
 !
 ! A plain CALL DGEMM / CALL ZGEMM, as in QE or Yambo, linked against
-! libapplebottom. Run with AB_MODE=gpu. Like QE, the probe never calls
+! libapplebottom. Run with AB_MODE=gpu AB_BLAS2_MIN_DIM=0. Like QE, the probe never calls
 ! ab_init(): the first call must create the Metal context itself (H-P1-2).
 ! Each call must reach apple-bottom's GPU path: ab_get_last_dispatch_path()
 ! is "gpu" and the matching ab_get_stats() GEMM counter advanced by one. A

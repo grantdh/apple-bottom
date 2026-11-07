@@ -410,6 +410,7 @@ int main(int argc, char **argv) {
     }
     if (reps < 1) reps = 1;
     setenv("AB_MODE", "gpu", 1);   // the staged mode times the GPU path
+    setenv("AB_BLAS2_MIN_DIM", "0", 1);
     if (ab_init() != AB_OK) { fprintf(stderr, "no Metal device\n"); return 1; }
     printf("apple-bottom BLAS-2 benchmark: %s, %s\n", ab_build_info(), ab_device_name());
     if (csv) {
