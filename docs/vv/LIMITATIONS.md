@@ -101,9 +101,8 @@ A ZGEMM runs as 4M when ρ exceeds 4 (`AB_GAUSS3M_MAX_RHO`). That holds 3M's ima
 
 macOS can stop a long GPU command buffer while the display needs the GPU (`kIOGPUCommandBufferCallbackErrorImpactingInteractivity`). What a call then does:
 
-- Finish on the host path or on Accelerate, with a correct result: a BLAS-ABI call, `ab_dev_dgemv`, `ab_dev_zgemv`, `ab_dev_zhemv`.
-- Return `AB_ERROR_KERNEL_FAILED` with no fallback: `ab_fft_execute` (which may have written part of `out`), `ab_dev_dgemm`, `ab_dev_zgemm`, the native `ab_dgemm`, `ab_dgemm_scaled`, `ab_zgemm` and `ab_zgemm_ex`, `ab_batch_wait`, `ab_future_wait`.
-- Not check the command buffer and return `AB_OK`: `ab_dsyrk`, `ab_dgemm_batched`, `ab_matrix_add`, `ab_matrix_sub`, `ab_matrix_scale`, `ab_matrix_copy`, `ab_matrix_zero`. Also unchecked: `ab_zherk`'s transposes and the command buffers of `ab_zgemm_batched` before its last.
+- Finish on the host path or on Accelerate, with a correct result: a BLAS-ABI call, `ab_dev_dgemv`, `ab_dev_zgemv`, `ab_dev_zhemv`, `ab_dtrsm` and `ab_dgesv_mpir` (which redo a failed GPU GEMM step with `cblas_dgemm` in FP64).
+- Return `AB_ERROR_KERNEL_FAILED` with no fallback, the output's contents then unspecified: `ab_fft_execute` (which may have written part of `out`), `ab_dev_dgemm`, `ab_dev_zgemm`, the native `ab_dgemm`, `ab_dgemm_scaled`, `ab_zgemm`, `ab_zgemm_ex`, `ab_dsyrk`, `ab_zherk`, `ab_dgemm_batched`, `ab_zgemm_batched`, `ab_matrix_add`, `ab_matrix_sub`, `ab_matrix_scale`, `ab_matrix_copy`, `ab_matrix_zero`, `ab_batch_wait`, `ab_future_wait`. A batch stops at the failed command buffer, so later operations of it have not run.
 
 ## What this posture rules in and out
 

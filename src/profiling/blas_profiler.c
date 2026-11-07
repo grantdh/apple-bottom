@@ -12,6 +12,7 @@
 #include <os/lock.h>
 #include <stdarg.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/uio.h>
@@ -48,6 +49,8 @@ static int             g_reported     = 0;     // exit reports written
 static int             g_trace        = 0;     // AB_TRACE
 static int             g_trace_hash   = 0;     // AB_TRACE_HASH, with AB_TRACE
 static int             g_fail_stage   = -1;    // AB_TEST_FAIL_STAGE
+static long            g_fail_only    = 0;     // AB_TEST_FAIL_ONLY; 0: every command buffer
+static atomic_long     g_fail_seen;            // command buffers ab_test_fail_cmdbuf has seen
 static int             g_host_pack    = 0;     // AB_HOST_PACK
 static size_t          g_staging_cap  = (size_t)2048 << 20;   // AB_STAGING_MB, in bytes
 
@@ -132,6 +135,8 @@ static void read_env(void) {
     }
     g_trace_hash = g_trace && env_flag("AB_TRACE_HASH");
     g_fail_stage = parse_fail_stage(getenv("AB_TEST_FAIL_STAGE"));
+    const char* only = getenv("AB_TEST_FAIL_ONLY");
+    if (only) g_fail_only = atol(only);
     g_host_pack = env_flag("AB_HOST_PACK");
     const char* staging = getenv("AB_STAGING_MB");
     if (staging && *staging) {
@@ -168,6 +173,11 @@ int ab_trace_hash_enabled(void) {
 int ab_test_fail_stage(void) {
     pthread_once(&g_env_once, read_env);
     return g_fail_stage;
+}
+
+int ab_test_fail_cmdbuf(void) {
+    if (ab_test_fail_stage() != AB_PROF_STAGE_KERNEL) return 0;
+    return !g_fail_only || atomic_fetch_add(&g_fail_seen, 1) + 1 == g_fail_only;
 }
 
 int ab_host_pack(void) {

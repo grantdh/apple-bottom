@@ -416,6 +416,17 @@ All notable changes to this project will be documented in this file.
   anyway, and one with beta = 0 does not read C. `test_blas_abi` adds four
   cases, on the GPU epilogue's route and on the host epilogue's, and
   `test_staging`'s NaN and Inf cases now expect Accelerate.
+- **Native operations report a failed command buffer.** `ab_matrix_zero`,
+  `ab_matrix_copy`, `ab_matrix_add`, `ab_matrix_sub`, `ab_matrix_scale`,
+  `ab_dsyrk`, `ab_dgemm_batched`, `ab_zherk`'s transposes and the command buffers
+  of `ab_zgemm_batched` before its last waited for the GPU and returned `AB_OK`
+  without reading the command buffer's status, so a buffer that macOS stopped
+  left an unfinished output and no error. They now return
+  `AB_ERROR_KERNEL_FAILED`, and `ab_zgemm_batched` stops at the failed buffer.
+  Calls that succeed keep their bits. `AB_TEST_FAIL_STAGE=kernel` now reaches
+  every synchronous native call but `ab_fft_execute`, and the new test-only
+  `AB_TEST_FAIL_ONLY=n` fails only the n-th command buffer; `test_trace` adds
+  `test_fail_native`.
 
 ### Corrected claims
 - **"No silent errors outside FP32's exponent range" and "every product keeps
@@ -470,10 +481,11 @@ All notable changes to this project will be documented in this file.
   NaN or Inf in C runs there, and Accelerate and Netlib differ on the other part
   of some such elements ([Exponent range](docs/vv/LIMITATIONS.md#exponent-range)).
 - **macOS can stop a long GPU command buffer** while the display needs the GPU,
-  as under 1.5.0's Known issues. BLAS-ABI calls and the device BLAS-2 calls then
-  finish on the host path or on Accelerate, with a correct result. Other native
-  and device calls return `AB_ERROR_KERNEL_FAILED`, and some do not check and
-  return `AB_OK`: [the list](docs/vv/LIMITATIONS.md#command-buffers-stopped-by-macos).
+  as under 1.5.0's Known issues. BLAS-ABI calls, the device BLAS-2 calls,
+  `ab_dtrsm` and `ab_dgesv_mpir` then finish on the host path or on Accelerate,
+  with a correct result (the solvers redo the failed GEMM step with
+  `cblas_dgemm`). Other native and device calls return `AB_ERROR_KERNEL_FAILED`:
+  [the list](docs/vv/LIMITATIONS.md#command-buffers-stopped-by-macos).
 
 ## [1.5.1] - 2026-11-01
 

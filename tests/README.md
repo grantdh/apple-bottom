@@ -45,8 +45,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 221, every test but
-the chaos ones, and `make ci-local` all 239 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 222, every test but
+the chaos ones, and `make ci-local` all 240 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -83,7 +83,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
   - `tests/test_range_guard.c` — 7 tests of the exponent-range guards'
     stage 2 against the plain loops it replaced, no GPU, see below
   - `tests/test_blas_abi.c` — 33 suites (1095 cases), see below
-  - `tests/test_trace.c` — 7 tests of `AB_TRACE`, `AB_TEST_FAIL_STAGE`
+  - `tests/test_trace.c` — 8 tests of `AB_TRACE`, `AB_TEST_FAIL_STAGE`
     and the solvers' `AB_PROFILE` fallback lines, see below
   - `tests/test_blas2.c` — 19 tests (957 cases) of DGEMV, ZGEMV and
     ZHEMV, see below
@@ -369,9 +369,8 @@ referenced elements, column by column), so equal operands stored with
 other leading dimensions hash equal and a changed element does not.
 `test_trace_off` checks that no file appears with `AB_TRACE` unset or
 empty. `test_fail_stage_alloc` and `test_fail_stage_kernel` set
-`AB_TEST_FAIL_STAGE` (every `ab_matrix_create()` returns NULL, or the
-command buffer of every `ab_dgemm_scaled()` and `ab_zgemm()` reports an
-error) with `AB_REPORT=1`: a GPU-routed DGEMM and ZGEMM must give C bitwise
+`AB_TEST_FAIL_STAGE` (every `ab_matrix_create()` returns NULL, or every
+command buffer reports an error) with `AB_REPORT=1`: a GPU-routed DGEMM and ZGEMM must give C bitwise
 equal to cblas's, `ab_get_last_dispatch_path()` must say `"cpu"`,
 `ab_get_stats()` must count exactly the elements converted and the GEMM
 kernels of the GPU work before the failure (none for `alloc`; for
@@ -388,7 +387,10 @@ and none may fall back. Under the hook, which fails each GEMM after the GPU
 ran it, so that a solve using its result anyway would still be accurate,
 none may count as run, and each step must be reported as an `AB_PROFILE`
 fallback to cblas: for `ab_dtrsm` as many as the GPU ran the first time, for
-`ab_dgesv_mpir` one per residual.
+`ab_dgesv_mpir` one per residual. Then, with `AB_TEST_FAIL_ONLY=n` as well, for
+each n up to one past the GEMMs the GPU ran the first time, only the n-th
+fails: each solve must still return `AB_OK` with X within 10⁻¹², with one
+fallback line, from the solver that ran the n-th GEMM, and none past the last.
 `test_mpir_fallback_lines` runs three `ab_dgesv_mpir` solves in one child
 with `AB_PROFILE=1`, each of which must return `AB_OK` with a backward error
 ‖B − AX‖_F / (‖A‖_F ‖X‖_F + ‖B‖_F) below 10⁻¹⁴. A dense 256 × 256 A,
@@ -398,6 +400,16 @@ all ten), and print no fallback line. The 8 × 8
 Hilbert matrix (κ ≈ 1.5×10¹⁰), on which FP32 refinement fails, and
 [[1, 1], [1, 1 + 2⁻³⁰]], singular once rounded to FP32, must each be
 solved in FP64 with one `FP64 LU fallback` line giving that reason.
+`test_fail_native` runs the native operations that wait for command buffers
+(`ab_matrix_zero`, `_copy`, `_add`, `_sub` and `_scale`, `ab_dsyrk`, `ab_dgemm`,
+`ab_dgemm_batched`, `ab_zgemm_batched`, `ab_zgemm_ex`, `ab_zherk`): each must
+return `AB_OK` without the hook. Then, with `AB_TEST_FAIL_STAGE=kernel` and
+`AB_TEST_FAIL_ONLY=n`, one run per n up to one past their last command buffer,
+only the operation that waits for the n-th may return
+`AB_ERROR_KERNEL_FAILED`. That reaches what failing them all cannot:
+`ab_zherk`'s transposes, after its DSYRKs, and the buffer of `ab_zgemm_batched`
+before its last. These hooks change the status the library reads; no test
+makes macOS stop a command buffer.
 
 ## BLAS-2 (GEMV, HEMV)
 
