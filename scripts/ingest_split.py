@@ -235,7 +235,7 @@ class Table:
     def validate(self):
         """Rules 1-5 of the docstring."""
         by_row = {i: [] for i in range(len(self.rows))}
-        self.pooled = {}
+        self.pooled, self.label = {}, {}
         for e in self.evidence:
             where = f"{self.csv}:{e['line']}"
             try:
@@ -284,6 +284,8 @@ class Table:
             if r["scalars"] == "a":
                 raise Ingest(f"{self.txt}: {name}: scalars=a (or none) is not allowed in a built-in table (rule 5)")
             self.pooled[i] = pooled
+            self.label[i] = ("pw.x A/B 8x1" + (" and bench_split" if "bench_split" in sources else "")
+                             if "pw.x" in sources else "bench_split only: well-scaled synthetic data")
         self.nlines = {i: len(by_row[i]) for i in by_row}
 
 
@@ -332,7 +334,7 @@ def generate(tables):
         L.append("// -----------------------------------------------------------------------------")
         L.append(f"static const ab_split_row_t AB_SPLIT_ROWS_{ident}[] = {{")
         for i, r in enumerate(t.rows):
-            L.append(f"    {c_row(r)},   // {r['text']}: pooled {t.pooled[i]:.2f}x, "
+            L.append(f"    {c_row(r)},   // {r['text']}: {t.label[i]}, pooled {t.pooled[i]:.2f}x, "
                      f"{t.nlines[i]} line{'s' if t.nlines[i] != 1 else ''}")
         L.append("    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}," +
                  ("" if t.rows else "   // no rows: nothing is split"))
