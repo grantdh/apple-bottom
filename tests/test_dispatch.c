@@ -1250,6 +1250,22 @@ static const char *csv_line_why(const char *line, size_t m) {
     return is_utf8(line) ? NULL : "not UTF-8";
 }
 
+// The first line of the file at path that is not UTF-8, 0 if none, -1 if it
+// cannot be read: scripts/ingest_split.py requires UTF-8 of a filed
+// split_table.txt, and ab_split_load_table does not check it.
+static int first_non_utf8_line(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    char *line = NULL;
+    size_t cap = 0;
+    int bad = 0;
+    for (int n = 1; !bad && getline(&line, &cap, f) >= 0; n++)
+        if (!is_utf8(line)) bad = n;
+    free(line);
+    fclose(f);
+    return bad;
+}
+
 // The rules of scripts/ingest_split.py for a table (rows, library) against
 // its split_evidence.csv: NULL if they hold, else why.
 static const char *split_evidence_why(const ab_split_row_t *rows, int nrows, const char *library,
@@ -1381,17 +1397,16 @@ static void test_split_builtin_matches_evidence(void) {
         expect(ab_split_load_table(&c, path, err, sizeof err) && c.split_nrows == n &&
                !memcmp(c.split_rows, t->rows, (size_t)n * sizeof *t->rows),
                "%s: the built-in rows are not those of %s (%s)", t->chip, path, err);
-        // ... in UTF-8, as scripts/ingest_split.py requires (the loader does not check)
-        FILE *tf = fopen(path, "r");
-        char *tl = NULL;
-        size_t tcap = 0;
-        int bad = tf ? 0 : -1;
-        for (int ln = 1; !bad && getline(&tl, &tcap, tf) >= 0; ln++)
-            if (!is_utf8(tl)) bad = ln;
-        free(tl);
-        if (tf) fclose(tf);
+        int bad = first_non_utf8_line(path);
         expect(!bad, "%s: %s is not UTF-8 (line %d)", t->chip, path, bad);
     }
+    // That check itself: a Latin-1 byte on line 2, and the M2 Max's start table.
+    expect(write_temp("# chip: Apple M2 Max\n# date: x\xe9\nzgemm N N N f=0.5\n", path, sizeof path), "mkstemp");
+    int bad = first_non_utf8_line(path);
+    expect(bad == 2, "a Latin-1 byte on line 2: %d", bad);
+    unlink(path);
+    bad = first_non_utf8_line(AB_SOURCE_ROOT "/benchmarks/split/start_M2-Max-38c.txt");
+    expect(bad == 0, "benchmarks/split/start_M2-Max-38c.txt is not UTF-8 (line %d)", bad);
     // The checker itself, on a table of two rows.
     ab_dispatch_config_t c = with_split_rows(AB_DISPATCH_AUTO, "zgemm N N N m=8192: scalars=u f=0.45; "
                                                                "zgemm N N N m=2048: ratio=2 scalars=z f=0.6");
