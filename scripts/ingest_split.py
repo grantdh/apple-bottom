@@ -74,10 +74,13 @@ class Ingest(Exception):
 
 
 def chip_slug(chip, cores):
-    """As dispatch.c's ab_dispatch_chip_slug() and scripts/ingest_calibration.py."""
-    s = re.sub(r"^Apple\s*", "", chip or "", flags=re.I)
-    s = re.sub(r"[^A-Za-z0-9]+", "-", s).strip("-") or "unknown"
-    return f"{s}-{cores}c" if cores and s != "unknown" else s
+    """As dispatch.c's ab_dispatch_chip_slug(): "unknown" when nothing is left of the chip, and the core
+    count added to any other name, "unknown" included (scripts/ingest_calibration.py leaves it off a
+    chip named so)."""
+    s = re.sub(r"[^A-Za-z0-9]+", "-", re.sub(r"^Apple", "", chip or "", flags=re.I)).strip("-")
+    if not s:
+        return "unknown"
+    return f"{s}-{cores}c" if cores else s
 
 
 def split_trans(routine, t):
@@ -655,6 +658,14 @@ def self_test():
             print(f"ingest_split self-test: '{bad}' parsed")
         except ValueError:
             pass
+    # chip slugs as ab_dispatch_chip_slug() makes them (tests/test_dispatch.c has the same cases)
+    for chip, cores, want in (("Apple M2 Max", 38, "M2-Max-38c"), ("Apple M4 Pro", 0, "M4-Pro"),
+                              ("apple M1", 8, "M1-8c"), ("Apple M5 Max (Virtual)", 10, "M5-Max-Virtual-10c"),
+                              ("", 0, "unknown"), ("", 38, "unknown"), (None, 0, "unknown"),
+                              ("Apple ", 4, "unknown"), ("unknown", 38, "unknown-38c")):
+        if chip_slug(chip, cores) != want:
+            wrong += 1
+            print(f"ingest_split self-test: the slug of {chip!r}/{cores} is {chip_slug(chip, cores)}, not {want}")
     # key lines as ab_dispatch_parse_header() reads them: spaces and tabs trimmed, a "# note" cut, and no
     # other blank (a U+00A0 stays in the value, a U+3000 after the '#' makes no key)
     for line, want in (("#\tchip:\tApple M2 Max\t", ("chip", "Apple M2 Max")),

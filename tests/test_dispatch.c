@@ -365,6 +365,7 @@ static void test_host_chip_and_slug(void) {
         {"Apple M2 Max", 38, "M2-Max-38c"}, {"Apple M4 Pro", 0, "M4-Pro"}, {"Apple M5 Max", 40, "M5-Max-40c"},
         {"apple M1", 8, "M1-8c"}, {"Apple M5 Max (Virtual)", 10, "M5-Max-Virtual-10c"}, {"", 0, "unknown"},
         {"", 38, "unknown"}, {NULL, 0, "unknown"}, {"Apple ", 4, "unknown"},
+        {"unknown", 38, "unknown-38c"},   // scripts/ingest_split.py's chip_slug() has the same cases
     };
     char chip[AB_DISPATCH_CHIP_LEN], slug[AB_DISPATCH_CHIP_LEN], brand[256] = "";
     int cores = -1;
