@@ -263,7 +263,7 @@ class Table:
             raise Ingest(f"{self.txt}: {len(self.rows)} rows; the library takes at most {MAX_ROWS}")
         self.chip = self.keys["chip"]
         cores = self.keys["gpu_cores"]
-        if not cores.isdigit() or int(cores) == 0:
+        if not DIGITS.fullmatch(cores) or int(cores) == 0:
             raise Ingest(f"{self.txt}: '# gpu_cores: {cores}' is not a core count; a split table is "
                          f"measured on one variant of a chip")
         self.gpu_cores = int(cores)
@@ -541,6 +541,11 @@ def self_test():
          "split_table.txt:5: a control character"),
         ("tabs and CRLF in the table", head(r0="scalars=u\tf=0.45").replace("# chip: ", "#\tchip:\t")
          .replace("zgemm N N N m=8192:", "zgemm\tN\tN\tN\tm=8192:").replace("\n", "\r\n"), pw + sq, None),
+        # a core count in ASCII digits ('\u00b3' made int() raise; Arabic-Indic digits passed isdigit())
+        ("a superscript core count", head().replace("# gpu_cores: 38", "# gpu_cores: \u00b3"), pw + sq,
+         "is not a core count"),
+        ("Arabic-Indic digits in the core count", head().replace("# gpu_cores: 38", "# gpu_cores: \u0663\u0668"),
+         pw + sq, "is not a core count"),
         ("a NUL in the evidence", head(), pw.replace("pw.x,A", "pw.x,A\0") + sq, "split_evidence.csv:2: a NUL byte"),
         ("a tab in the evidence", head(), pw.replace("pw.x,A", "pw.x,A\t") + sq,
          "split_evidence.csv:2: a control character"),
