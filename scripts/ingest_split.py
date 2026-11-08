@@ -60,7 +60,11 @@ COLUMNS = ("row,source,input,layout,library,share,pairs,split_s,base_s,ratio,rat
            "calls,kept,kept_4m,range,gpu_failed").split(",")
 MAX_ROWS = 32               # AB_SPLIT_MAX_ROWS
 
-KEY_RE = re.compile(r"^\s*#\s*([a-z][a-z0-9_]*):\s*([^#]*?)\s*(?:#.*)?$")      # "# chip: Apple M2 Max  # note"
+# "# chip: Apple M2 Max  # note", spaces and tabs around as dispatch.c's ab_dispatch_parse_header() takes them
+KEY_RE = re.compile(r"^[ \t]*#[ \t]*([a-z][a-z0-9_]*):[ \t]*([^#]*?)[ \t]*(?:#.*)?$")
+# The ASCII control bytes refused in a split table's line (a tab separates fields) and in the CSV
+TABLE_CONTROL = re.compile(rb"[\x00-\x08\x0a-\x1f\x7f]")
+CSV_CONTROL = re.compile(rb"[\x00-\x1f\x7f]")
 
 
 class Ingest(Exception):
@@ -91,16 +95,32 @@ MAX_LINE = 1000          # bytes of a CSV line, its end aside (tests/test_dispat
 def csv_fields(raw, where):
     """A line of split_evidence.csv (bytes, without its "\\n") split as tests/test_dispatch.c splits it:
     on every ','. A line end may be "\\r\\n"; any other '\\r', a '"' (no quoting), a line over MAX_LINE
-    bytes or one that is not UTF-8 is refused."""
+    bytes, a NUL, another ASCII control byte or bytes that are not UTF-8 are refused."""
     if raw.endswith(b"\r"):
         raw = raw[:-1]
     if b"\r" in raw or b'"' in raw or len(raw) > MAX_LINE:
         raise Ingest(f"{where}: a quote, a bare carriage return or more than {MAX_LINE} bytes")
-    return utf8(raw, where).split(",")
+    return text(raw, where, CSV_CONTROL).split(",")
 
 
-def utf8(raw, where):
-    """raw (a line's bytes) as text; an Ingest error naming the line if it is not UTF-8."""
+def table_line(raw, where):
+    """A line of split_table.txt (bytes, without its "\\n") as text, without a "\\r" end. A '\\r' inside,
+    a NUL, an ASCII control byte other than a tab (comments included) or bytes that are not UTF-8 are
+    refused, as dispatch.c's split_line_why() refuses them (UTF-8 aside)."""
+    if raw.endswith(b"\r"):
+        raw = raw[:-1]
+    if b"\r" in raw:
+        raise Ingest(f"{where}: a carriage return inside the line")
+    return text(raw, where, TABLE_CONTROL)
+
+
+def text(raw, where, control):
+    """raw (a line's bytes) as text; an Ingest error naming the line for a NUL, a byte that control
+    matches, or bytes that are not UTF-8."""
+    if b"\0" in raw:
+        raise Ingest(f"{where}: a NUL byte")
+    if control.search(raw):
+        raise Ingest(f"{where}: a control character")
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -157,9 +177,9 @@ def parse_float_range(v):
 
 
 def parse_row(line):
-    """A row as dispatch.c's ab_split_parse_row() reads it: a dict, None for a blank or comment line;
-    ValueError if malformed."""
-    tok = line.split("#", 1)[0].split()
+    """A row as dispatch.c's ab_split_parse_row() reads it (up to its first '#', '\\r' or '\\n', fields
+    split on spaces and tabs only): a dict, None for a blank or comment line; ValueError if malformed."""
+    tok = [t for t in re.split("[ \t]+", re.split("[#\r\n]", line, maxsplit=1)[0]) if t]
     if not tok:
         return None
     if len(tok) < 5 or tok[0].lower() not in ("dgemm", "zgemm"):
@@ -225,7 +245,7 @@ class Table:
                 raise Ingest(f"{directory}: no {os.path.basename(p)}")
         self.keys, self.rows = {}, []
         for lineno, raw in enumerate(byte_lines(self.txt), 1):
-            line = utf8(raw, f"{self.txt}:{lineno}")
+            line = table_line(raw, f"{self.txt}:{lineno}")
             m = KEY_RE.match(line)
             if m:
                 self.keys[m.group(1)] = m.group(2)
@@ -507,6 +527,23 @@ def self_test():
         ("an overlong form", head(), pw.replace("pw.x,A", "pw.x,A\udcc0\udcaf") + sq, "not UTF-8"),
         ("a surrogate", head(), pw.replace("pw.x,A", "pw.x,A\udced\udca0\udc80") + sq, "not UTF-8"),
         ("a Latin-1 byte in the table", head().replace("# date: x", "# date: x\udce9"), pw + sq, "not UTF-8"),
+        # bytes refused whatever the line says, comments included, as dispatch.c refuses them: a '\r'
+        # inside a line (dispatch.c would read the row up to it, the chip as "Apple M2"), a NUL, a control
+        # character; a "\r\n" end and tabs are fine
+        ("a '\\r' inside a row", head(r0="scalars=u f=0.45\r m=8192:"), pw + sq,
+         "split_table.txt:7: a carriage return inside the line"),
+        ("a '\\r' inside the chip", head().replace("Apple M2 Max", "Apple M2\r Max"), pw + sq,
+         "split_table.txt:1: a carriage return inside the line"),
+        ("a NUL in a comment", head().replace("# method: self-test", "# method: self\0test"), pw + sq,
+         "split_table.txt:6: a NUL byte"),
+        ("a control character in a row", head(r0="scalars=u\vf=0.45"), pw + sq, "split_table.txt:7: a control character"),
+        ("a control character in a comment", head().replace("# date: x", "# date: x\v"), pw + sq,
+         "split_table.txt:5: a control character"),
+        ("tabs and CRLF in the table", head(r0="scalars=u\tf=0.45").replace("# chip: ", "#\tchip:\t")
+         .replace("zgemm N N N m=8192:", "zgemm\tN\tN\tN\tm=8192:").replace("\n", "\r\n"), pw + sq, None),
+        ("a NUL in the evidence", head(), pw.replace("pw.x,A", "pw.x,A\0") + sq, "split_evidence.csv:2: a NUL byte"),
+        ("a tab in the evidence", head(), pw.replace("pw.x,A", "pw.x,A\t") + sq,
+         "split_evidence.csv:2: a control character"),
     ]
     # generate()'s evidence labels for the rows of a filed case
     labels = {"pw.x for the QE row, bench_split for the square":
@@ -519,7 +556,9 @@ def self_test():
     good = [("zgemm N N N gf=1e-3 mn=2.5e-1:+4E+2 f=5e-1", {"gf": 1e-3, "mn": (0.25, 400.0), "f": 0.5}),
             ("zgemm N N N gf=0e-400 mn=2.2250738585072014e-308: f=0", {"gf": 0.0, "mn": (sys.float_info.min, 0.0)}),
             ("zgemm N N N m=" + "0" * 36 + "8192: mn=" + "0" * 70 + ".5: f=0.5", {"m": (8192, 0), "mn": (0.5, 0.0)}),
-            ("zgemm C N K" + " " * 682 + "f=0.5", {"axis": "K", "f": 0.5})]
+            ("zgemm C N K" + " " * 682 + "f=0.5", {"axis": "K", "f": 0.5}),
+            # fields split on spaces and tabs only, the row read up to its first '#', '\r' or '\n'
+            ("zgemm\tN\tN\tN\tf=0.5", {"f": 0.5}), ("zgemm N N N scalars=u f=0.45\r m=8192:", {"m": (0, 0)})]
     for line, want in good:
         r = parse_row(line)
         if any(r[k] != v for k, v in want.items()):
@@ -529,13 +568,20 @@ def self_test():
     for bad in ("zgemm N N N f=-0", "zgemm N N N f=0x1p-1", "zgemm N N N f=nan", "zgemm N N N gf=1e999 f=0.5",
                 "zgemm N N N gf=1e-310 f=0.5", "zgemm N N N mn=1e-400: f=0.5",
                 "zgemm N N N gf=2.2250738585072e-308 f=0.5", "zgemm N N N m=+8192: f=0.5",
-                "zgemm N N N m=-0: f=0.5", "zgemm N N N n=:+5 f=0.5", "zgemm N N N k=\v8192: f=0.5"):
+                "zgemm N N N m=-0: f=0.5", "zgemm N N N n=:+5 f=0.5", "zgemm N N N k=\v8192: f=0.5",
+                "zgemm N N N f=0.45\u00a0m=8192:"):
         try:
             parse_row(bad)
             wrong += 1
             print(f"ingest_split self-test: '{bad}' parsed")
         except ValueError:
             pass
+    # key lines as ab_dispatch_parse_header() reads them: spaces and tabs trimmed, a "# note" cut
+    for line in ("#\tchip:\tApple M2 Max\t", "# chip: Apple M2 Max  # note"):
+        m = KEY_RE.match(line)
+        if not m or m.groups() != ("chip", "Apple M2 Max"):
+            wrong += 1
+            print(f"ingest_split self-test: {line!r} read as {m and m.groups()}")
     with tempfile.TemporaryDirectory() as d:
         for what, table, body, reason in cases:
             with open(os.path.join(d, "split_table.txt"), "w", encoding="utf-8", errors="surrogateescape") as f:

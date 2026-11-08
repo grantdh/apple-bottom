@@ -440,6 +440,22 @@ int ab_split_parse_row(const char *line, ab_split_row_t *row) {
     return got;
 }
 
+// Why a split table's line (n bytes as read, its "\n" included) is refused
+// whatever it says, or NULL: a '\r' other than one that ends it, a NUL, or an
+// ASCII control character other than a tab, comments included
+// (scripts/ingest_split.py refuses the same).
+static const char *split_line_why(const char *line, size_t n) {
+    if (n && line[n - 1] == '\n') n--;
+    if (n && line[n - 1] == '\r') n--;
+    if (memchr(line, '\r', n)) return "a carriage return inside the line";
+    if (memchr(line, '\0', n)) return "a NUL byte";
+    for (size_t i = 0; i < n; i++) {
+        unsigned char ch = (unsigned char)line[i];
+        if ((ch < 0x20 && ch != '\t') || ch == 0x7f) return "a control character";
+    }
+    return NULL;
+}
+
 bool ab_split_load_table(ab_dispatch_config_t *c, const char *path, char *err, size_t err_len) {
     FILE *f = fopen(path, "r");
     if (!f) {
@@ -454,6 +470,7 @@ bool ab_split_load_table(ab_dispatch_config_t *c, const char *path, char *err, s
     const char *why = NULL;
     while (!why && (len = getline(&line, &cap, f)) >= 0) {   // lines of any length
         lineno++;
+        if ((why = split_line_why(line, (size_t)len))) break;
         if (ab_dispatch_parse_header(line, key, sizeof key, value, sizeof value)) {
             if (!strcmp(key, "chip")) snprintf(chip, sizeof chip, "%s", value);
             else if (!strcmp(key, "gpu_cores")) cores = atoi(value) > 0 ? atoi(value) : 0;

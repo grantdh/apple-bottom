@@ -67,6 +67,8 @@
 // Fields are separated by spaces or tabs, and a line may be of any length.
 // m, n and k are ASCII digits; the other values ASCII numbers (digits, a
 // point, an exponent, no sign but '+'), finite, and 0 or at least DBL_MIN.
+// A file with a '\r' other than at a line's end, a NUL, or an ASCII control
+// character other than a tab, in a comment as elsewhere, is refused.
 // TRANS is exact ('N', 'T' or 'C', case-folded; a DGEMM 'C' is 'T'); axis
 // 'N' cuts C's columns, 'M' its rows, 'K' the sum. Ranges are inclusive and
 // either end may be left out (hi 0 or absent: no limit); mn bounds M*N,

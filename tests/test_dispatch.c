@@ -140,14 +140,19 @@ static void expect_routes(const ab_dispatch_config_t *c, bool want_gpu,
         expect_routes(c, gpu, calls_, TEST_REGISTRY_SIZE(calls_), what); \
     } while (0)
 
-static bool write_temp_in(const char *dir, const char *content, char *path, size_t len) {
+// A new file in dir that holds the n bytes of content (NULs included); its
+// name in path.
+static bool write_temp_n(const char *dir, const char *content, size_t n, char *path, size_t len) {
     snprintf(path, len, "%s/test_dispatch.XXXXXX", dir);
     int fd = mkstemp(path);
     if (fd < 0) return false;
-    size_t n = strlen(content);
     bool ok = write(fd, content, n) == (ssize_t)n;
     close(fd);
     return ok;
+}
+
+static bool write_temp_in(const char *dir, const char *content, char *path, size_t len) {
+    return write_temp_n(dir, content, strlen(content), path, len);
 }
 
 static const char *temp_dir(void) {
@@ -987,6 +992,34 @@ static void test_split_load_table(void) {
     expect(write_temp("zgemm T T 4096 4096 4096\n", path, sizeof path), "mkstemp");
     expect(!ab_split_load_table(&c, path, err, sizeof err), "a routing-table row must be refused");
     unlink(path);
+    // Bytes refused whatever the line says, comments included, as
+    // scripts/ingest_split.py refuses them: a '\r' inside a line (the row
+    // would be read up to it, the chip "Apple M2"), a NUL, a control character.
+    static const char CR_ROW[] = "zgemm N N N scalars=u f=0.45\r m=8192:\n",
+                      CR_CHIP[] = "# chip: Apple M2\r Max\nzgemm N N N f=0.5\n",
+                      NUL_NOTE[] = "# a note\0 with a NUL\nzgemm N N N f=0.5\n",
+                      VT_ROW[] = "zgemm N N N\vf=0.5\n", VT_NOTE[] = "# a note\v\nzgemm N N N f=0.5\n";
+    static const struct { const char *doc; size_t n; const char *why; } BYTES[] = {
+        {CR_ROW, sizeof CR_ROW - 1, "line 1: a carriage return"},
+        {CR_CHIP, sizeof CR_CHIP - 1, "line 1: a carriage return"},
+        {NUL_NOTE, sizeof NUL_NOTE - 1, "line 1: a NUL byte"},
+        {VT_ROW, sizeof VT_ROW - 1, "line 1: a control character"},
+        {VT_NOTE, sizeof VT_NOTE - 1, "line 1: a control character"},
+    };
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(BYTES); i++) {
+        expect(write_temp_n(temp_dir(), BYTES[i].doc, BYTES[i].n, path, sizeof path), "mkstemp");
+        err[0] = '\0';
+        expect(!ab_split_load_table(&c, path, err, sizeof err) && strstr(err, BYTES[i].why),
+               "refused bytes %zu: expected '%s', got '%s'", i, BYTES[i].why, err);
+        unlink(path);
+    }
+    // A "\r\n" end and tabs, between fields and around a key's value, are fine.
+    expect(write_temp("#\tchip:\tApple M5 Max\t\r\nzgemm\tN\tN\tN\tm=8192:\tf=0.5\r\n", path, sizeof path),
+           "mkstemp");
+    expect(ab_split_load_table(&c, path, err, sizeof err) && c.split_nrows == 1 && c.split_rows[0].min_m == 8192 &&
+           !strcmp(c.split_table_chip, "Apple M5 Max"), "CRLF and tabs: %d rows, chip '%s' (%s)", c.split_nrows,
+           c.split_table_chip, err);
+    unlink(path);
 
     char many[(AB_SPLIT_MAX_ROWS + 1) * 24 + 32] = "";
     for (int i = 0; i <= AB_SPLIT_MAX_ROWS; i++) strcat(many, "zgemm N N N f=0.5\n");
@@ -1053,6 +1086,13 @@ static void test_split_load_table(void) {
                                        "zgemm N N N gf=2.2250738585072e-308 f=0.5"};
     for (size_t i = 0; i < TEST_REGISTRY_SIZE(TINY); i++)
         expect(ab_split_parse_row(TINY[i], &r) == -1, "'%s' must be malformed", TINY[i]);
+    // Fields split on spaces and tabs only, and a row read up to its first
+    // '#', '\r' or '\n', as scripts/ingest_split.py reads it: U+00A0 is no
+    // separator (ab_split_load_table refuses a '\r' inside a line).
+    expect(ab_split_parse_row("zgemm\tN\tN\tN\tf=0.5", &r) == 1 && r.share == 0.5, "tabs must separate fields");
+    expect(ab_split_parse_row("zgemm N N N f=0.45\xc2\xa0m=8192:", &r) == -1, "U+00A0 must not separate fields");
+    expect(ab_split_parse_row("zgemm N N N scalars=u f=0.45\r m=8192:", &r) == 1 && !r.min_m,
+           "a row must end at a '\\r'");
     // Range ends of any length (40 and 70 characters here).
     char wide[256];
     snprintf(wide, sizeof wide, "zgemm N N N m=%0*d: mn=%0*d.5: f=0.5", 40, 8192, 70, 0);
@@ -1180,6 +1220,19 @@ static bool is_utf8(const char *str) {
     return true;
 }
 
+// Why a line of split_evidence.csv (m bytes, its end cut off) is refused as
+// scripts/ingest_split.py's csv_fields() refuses it, or NULL: more than 1000
+// bytes, a '\r', a '"', a NUL, another ASCII control character, or bytes
+// that are not UTF-8.
+static const char *csv_line_why(const char *line, size_t m) {
+    if (m > 1000 || memchr(line, '\r', m) || memchr(line, '"', m))
+        return "a quote, a bare carriage return or more than 1000 bytes";
+    if (memchr(line, '\0', m)) return "a NUL byte";
+    for (size_t i = 0; i < m; i++)
+        if ((unsigned char)line[i] < 0x20 || line[i] == 0x7f) return "a control character";
+    return is_utf8(line) ? NULL : "not UTF-8";
+}
+
 // The rules of scripts/ingest_split.py for a table (rows, library) against
 // its split_evidence.csv: NULL if they hold, else why.
 static const char *split_evidence_why(const ab_split_row_t *rows, int nrows, const char *library,
@@ -1191,26 +1244,23 @@ static const char *split_evidence_why(const ab_split_row_t *rows, int nrows, con
         snprintf(why, len, "cannot read %s", csv_path);
         return why;
     }
-    char line[1024];
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t got;
     double base[AB_SPLIT_MAX_ROWS] = {0}, split[AB_SPLIT_MAX_ROWS] = {0};
     int lines[AB_SPLIT_MAX_ROWS] = {0};
     unsigned have[AB_SPLIT_MAX_ROWS] = {0};      // bits: pw.x A 8x1, pw.x B 8x1, bench 1x8, bench 4x2, pw.x, bench
     bool ok = true, header = false;
-    // Lines as scripts/ingest_split.py's csv_fields() reads them: a "\n" or
-    // "\r\n" end, no other '\r', no '"', at most 1000 bytes, UTF-8, split on
-    // every ','.
-    for (int n = 1; ok && fgets(line, sizeof line, f); n++) {
-        size_t m = strlen(line);
-        bool ended = m && line[m - 1] == '\n';
-        if (ended) line[--m] = '\0';
+    // Lines as scripts/ingest_split.py's csv_fields() reads them: of any
+    // length as read, a "\n" or "\r\n" end, the bytes csv_line_why() takes,
+    // split on every ','.
+    for (int n = 1; ok && (got = getline(&line, &cap, f)) >= 0; n++) {
+        size_t m = (size_t)got;
+        if (m && line[m - 1] == '\n') line[--m] = '\0';
         if (m && line[m - 1] == '\r') line[--m] = '\0';
-        if ((!ended && !feof(f)) || m > 1000 || strchr(line, '\r') || strchr(line, '"')) {
-            snprintf(why, len, "%s:%d: a quote, a bare carriage return or more than 1000 bytes", csv_path, n);
-            ok = false;
-            break;
-        }
-        if (!is_utf8(line)) {
-            snprintf(why, len, "%s:%d: not UTF-8", csv_path, n);
+        const char *bad = csv_line_why(line, m);
+        if (bad) {
+            snprintf(why, len, "%s:%d: %s", csv_path, n, bad);
             ok = false;
             break;
         }
@@ -1272,6 +1322,7 @@ static const char *split_evidence_why(const ab_split_row_t *rows, int nrows, con
             lines[row]++;
         }
     }
+    free(line);
     fclose(f);
     if (ok && !header) {
         snprintf(why, len, "%s: the columns are not %s", csv_path, HEADER);
@@ -1369,6 +1420,7 @@ static void test_split_builtin_matches_evidence(void) {
         // quoting, carriage returns, long lines: refused, not split or cut
         {"0,\"pw.x\",A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "quote"},
         {"0,pw.x\r,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "carriage"},
+        {"0,pw.x,A\t,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", ":2: a control character"},
         // a Latin-1 byte, an overlong '/', a surrogate: not UTF-8
         {"0,pw.x,A\xe9,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "not UTF-8"},
         {"0,pw.x,A\xc0\xaf,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "not UTF-8"},
@@ -1394,6 +1446,16 @@ static void test_split_builtin_matches_evidence(void) {
                w ? w : "a pass");
         unlink(path);
     }
+    // A NUL is refused, not read as the line's end.
+    static const char NUL_LINE[] = "0,pw.x,A\0,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n";
+    size_t nul_at = (size_t)snprintf(doc, sizeof doc, "%s", H);
+    memcpy(doc + nul_at, NUL_LINE, sizeof NUL_LINE - 1);
+    nul_at += sizeof NUL_LINE - 1;
+    nul_at += (size_t)snprintf(doc + nul_at, sizeof doc - nul_at, "%s", strchr(GOOD, '\n') + 1);
+    expect(write_temp_n(temp_dir(), doc, nul_at, path, sizeof path), "mkstemp");
+    const char *wn = split_evidence_why(c.split_rows, 2, "abc1234", path, why, sizeof why);
+    expect(wn && strstr(wn, ":2: a NUL byte"), "a NUL in the evidence: %s", wn ? wn : "a pass");
+    unlink(path);
     // A line longer than 1000 bytes is refused, not cut: 1100 'A', or 600
     // two-byte characters (U+00E9).
     for (int pass = 0; pass < 2; pass++) {
