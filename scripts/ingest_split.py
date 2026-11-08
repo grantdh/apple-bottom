@@ -24,8 +24,8 @@ tests/test_dispatch.c on the built-in tables):
      layouts; no other source counts;
   5. no row has scalars=a (or leaves scalars out).
 Counts must be ASCII digits and every other number finite in NUMBER's grammar. Each line of the CSV is
-split on every ',' (no quoting: a '"' is refused), ends in \n or \r\n (no other '\r'), is at most
-MAX_LINE characters and has the 17 fields; tests/test_dispatch.c reads it the same way.
+split on every ',' (no quoting: a '"' is refused), ends in \n or \r\n (no other '\r'), is UTF-8 of at
+most MAX_LINE bytes and has the 17 fields; tests/test_dispatch.c reads it the same way.
 A table without rows passes. A table is filed under benchmarks/split/tables/<slug>/ (the chip without
 "Apple " plus the GPU core count: M2-Max-38c), and src/split_table.h is regenerated from every filed
 directory, in slug order. Commit both. A chip's earlier table is replaced only with --force; nothing
@@ -85,17 +85,34 @@ DIGITS = re.compile(r"[0-9]+", re.ASCII)
 # in the C locale over the characters 0-9 + - . e E, no leading '-') and tests/test_dispatch.c's
 # checker the same characters; table values must also not be negative or subnormal (parse_number).
 NUMBER = re.compile(r"\+?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?", re.ASCII)
-MAX_LINE = 1000          # characters of a CSV line, its end aside (tests/test_dispatch.c: the same)
+MAX_LINE = 1000          # bytes of a CSV line, its end aside (tests/test_dispatch.c: the same)
 
 
-def csv_fields(line, where):
-    """A line of split_evidence.csv split as tests/test_dispatch.c splits it: on every ','. A line end
-    may be "\\r\\n"; any other '\\r', a '"' (no quoting) or a line over MAX_LINE is refused."""
-    if line.endswith("\r"):
-        line = line[:-1]
-    if "\r" in line or '"' in line or len(line) > MAX_LINE:
-        raise Ingest(f"{where}: a quote, a bare carriage return or more than {MAX_LINE} characters")
-    return line.split(",")
+def csv_fields(raw, where):
+    """A line of split_evidence.csv (bytes, without its "\\n") split as tests/test_dispatch.c splits it:
+    on every ','. A line end may be "\\r\\n"; any other '\\r', a '"' (no quoting), a line over MAX_LINE
+    bytes or one that is not UTF-8 is refused."""
+    if raw.endswith(b"\r"):
+        raw = raw[:-1]
+    if b"\r" in raw or b'"' in raw or len(raw) > MAX_LINE:
+        raise Ingest(f"{where}: a quote, a bare carriage return or more than {MAX_LINE} bytes")
+    return utf8(raw, where).split(",")
+
+
+def utf8(raw, where):
+    """raw (a line's bytes) as text; an Ingest error naming the line if it is not UTF-8."""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Ingest(f"{where}: not UTF-8") from None
+
+
+def byte_lines(path):
+    """path's lines as bytes, split after each "\\n" as fgets() splits them (the last may lack one)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    lines = data.split(b"\n")
+    return lines[:-1] if data.endswith(b"\n") else lines
 
 
 def parse_int_range(v):
@@ -207,18 +224,18 @@ class Table:
             if not os.path.isfile(p):
                 raise Ingest(f"{directory}: no {os.path.basename(p)}")
         self.keys, self.rows = {}, []
-        with open(self.txt, encoding="utf-8") as f:
-            for lineno, line in enumerate(f, 1):
-                m = KEY_RE.match(line)
-                if m:
-                    self.keys[m.group(1)] = m.group(2)
-                    continue
-                try:
-                    r = parse_row(line)
-                except ValueError:
-                    raise Ingest(f"{self.txt}:{lineno}: not a split row or a comment: {line.rstrip()!r}")
-                if r:
-                    self.rows.append(r)
+        for lineno, raw in enumerate(byte_lines(self.txt), 1):
+            line = utf8(raw, f"{self.txt}:{lineno}")
+            m = KEY_RE.match(line)
+            if m:
+                self.keys[m.group(1)] = m.group(2)
+                continue
+            try:
+                r = parse_row(line)
+            except ValueError:
+                raise Ingest(f"{self.txt}:{lineno}: not a split row or a comment: {line.rstrip()!r}")
+            if r:
+                self.rows.append(r)
         missing = [k for k in KEYS if not self.keys.get(k)]
         if missing:
             raise Ingest(f"{self.txt}: no {', '.join('# ' + k + ':' for k in missing)} key")
@@ -239,10 +256,8 @@ class Table:
             raise Ingest(f"{self.txt}: rows need the library commit they were measured on")
         self.slug = chip_slug(self.chip, self.gpu_cores)
         self.evidence = []
-        with open(self.csv, encoding="utf-8", newline="") as f:
-            text = f.read()
-        for n, line in enumerate(text.split("\n")[:-1] if text.endswith("\n") else text.split("\n"), 1):
-            fields = csv_fields(line, f"{self.csv}:{n}")
+        for n, raw in enumerate(byte_lines(self.csv), 1):
+            fields = csv_fields(raw, f"{self.csv}:{n}")
             if n == 1:
                 if fields != COLUMNS:
                     raise Ingest(f"{self.csv}: the first line must be {','.join(COLUMNS)}")
@@ -485,7 +500,13 @@ def self_test():
         ("a blank line", head(), "\n" + pw + sq, "fields, expected 17"),
         ("a quoted field", head(), pw.replace("pw.x,A", '"pw.x",A') + sq, "quote"),
         ("a bare carriage return", head(), pw.replace("pw.x,A", "pw.x\r,A") + sq, "carriage return"),
-        ("a line over the limit", head(), pw.replace(",A,", "," + "A" * 1100 + ",") + sq, "characters"),
+        ("a line over the limit", head(), pw.replace(",A,", "," + "A" * 1100 + ",") + sq, "bytes"),
+        ("600 two-byte characters", head(), pw.replace(",A,", "," + "\u00e9" * 600 + ",") + sq, "bytes"),
+        # a Latin-1 byte, an overlong '/', a surrogate (bytes written through surrogateescape)
+        ("a Latin-1 byte in the evidence", head(), pw.replace("pw.x,A", "pw.x,A\udce9") + sq, "not UTF-8"),
+        ("an overlong form", head(), pw.replace("pw.x,A", "pw.x,A\udcc0\udcaf") + sq, "not UTF-8"),
+        ("a surrogate", head(), pw.replace("pw.x,A", "pw.x,A\udced\udca0\udc80") + sq, "not UTF-8"),
+        ("a Latin-1 byte in the table", head().replace("# date: x", "# date: x\udce9"), pw + sq, "not UTF-8"),
     ]
     wrong = 0
     # the row grammar of dispatch.c's ab_split_parse_row(): signed exponents, no '-' value, no hex
@@ -509,9 +530,10 @@ def self_test():
             pass
     with tempfile.TemporaryDirectory() as d:
         for what, table, body, reason in cases:
-            with open(os.path.join(d, "split_table.txt"), "w") as f:
+            with open(os.path.join(d, "split_table.txt"), "w", encoding="utf-8", errors="surrogateescape") as f:
                 f.write(table)
-            with open(os.path.join(d, "split_evidence.csv"), "w", newline="") as f:
+            with open(os.path.join(d, "split_evidence.csv"), "w", encoding="utf-8", errors="surrogateescape",
+                      newline="") as f:
                 f.write(",".join(COLUMNS) + ("\r\n" if "\r\n" in body else "\n") + body)
             try:
                 t = Table(d)

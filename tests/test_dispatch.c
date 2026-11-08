@@ -1148,6 +1148,26 @@ static void test_split_config_from_env(void) {
     finish();
 }
 
+// Whether s is UTF-8 as Python's strict decoder takes it: no overlong form,
+// surrogate or code point past U+10FFFF.
+static bool is_utf8(const char *str) {
+    for (const unsigned char *s = (const unsigned char *)str; *s;) {
+        unsigned c = *s++, n, cp;
+        if (c < 0x80) continue;
+        if (c >= 0xC2 && c <= 0xDF) n = 1, cp = c & 0x1F;
+        else if (c >= 0xE0 && c <= 0xEF) n = 2, cp = c & 0x0F;
+        else if (c >= 0xF0 && c <= 0xF4) n = 3, cp = c & 0x07;
+        else return false;
+        for (unsigned i = 0; i < n; i++, s++) {
+            if ((*s & 0xC0) != 0x80) return false;   // the terminator included
+            cp = cp << 6 | (*s & 0x3F);
+        }
+        if ((n == 2 && (cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF))) || (n == 3 && (cp < 0x10000 || cp > 0x10FFFF)))
+            return false;
+    }
+    return true;
+}
+
 // The rules of scripts/ingest_split.py for a table (rows, library) against
 // its split_evidence.csv: NULL if they hold, else why.
 static const char *split_evidence_why(const ab_split_row_t *rows, int nrows, const char *library,
@@ -1165,7 +1185,7 @@ static const char *split_evidence_why(const ab_split_row_t *rows, int nrows, con
     unsigned have[AB_SPLIT_MAX_ROWS] = {0};      // bits: pw.x A 8x1, pw.x B 8x1, bench 1x8, bench 4x2, pw.x, bench
     bool ok = true, header = false;
     // Lines as scripts/ingest_split.py's csv_fields() reads them: a "\n" or
-    // "\r\n" end, no other '\r', no '"', at most 1000 characters, split on
+    // "\r\n" end, no other '\r', no '"', at most 1000 bytes, UTF-8, split on
     // every ','.
     for (int n = 1; ok && fgets(line, sizeof line, f); n++) {
         size_t m = strlen(line);
@@ -1173,7 +1193,12 @@ static const char *split_evidence_why(const ab_split_row_t *rows, int nrows, con
         if (ended) line[--m] = '\0';
         if (m && line[m - 1] == '\r') line[--m] = '\0';
         if ((!ended && !feof(f)) || m > 1000 || strchr(line, '\r') || strchr(line, '"')) {
-            snprintf(why, len, "%s:%d: a quote, a bare carriage return or more than 1000 characters", csv_path, n);
+            snprintf(why, len, "%s:%d: a quote, a bare carriage return or more than 1000 bytes", csv_path, n);
+            ok = false;
+            break;
+        }
+        if (!is_utf8(line)) {
+            snprintf(why, len, "%s:%d: not UTF-8", csv_path, n);
             ok = false;
             break;
         }
@@ -1332,6 +1357,10 @@ static void test_split_builtin_matches_evidence(void) {
         // quoting, carriage returns, long lines: refused, not split or cut
         {"0,\"pw.x\",A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "quote"},
         {"0,pw.x\r,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "carriage"},
+        // a Latin-1 byte, an overlong '/', a surrogate: not UTF-8
+        {"0,pw.x,A\xe9,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "not UTF-8"},
+        {"0,pw.x,A\xc0\xaf,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "not UTF-8"},
+        {"0,pw.x,A\xed\xa0\x80,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "not UTF-8"},
     };
     char doc[2048];
     snprintf(doc, sizeof doc, "%s%s", H, GOOD);
@@ -1353,16 +1382,19 @@ static void test_split_builtin_matches_evidence(void) {
                w ? w : "a pass");
         unlink(path);
     }
-    // A line longer than 1000 characters is refused, not cut.
-    char longdoc[2048];
-    int at = snprintf(longdoc, sizeof longdoc, "%s0,pw.x,", H);
-    memset(longdoc + at, 'A', 1100);
-    snprintf(longdoc + at + 1100, sizeof longdoc - (size_t)at - 1100,
-             ",8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n");
-    expect(write_temp(longdoc, path, sizeof path), "mkstemp");
-    const char *w0 = split_evidence_why(c.split_rows, 2, "abc1234", path, why, sizeof why);
-    expect(w0 && strstr(w0, "characters"), "a line of 1100 characters: %s", w0 ? w0 : "a pass");
-    unlink(path);
+    // A line longer than 1000 bytes is refused, not cut: 1100 'A', or 600
+    // two-byte characters (U+00E9).
+    for (int pass = 0; pass < 2; pass++) {
+        char longdoc[2048];
+        int at = snprintf(longdoc, sizeof longdoc, "%s0,pw.x,", H);
+        for (int i = 0; i < (pass ? 600 : 1100); i++)
+            at += snprintf(longdoc + at, sizeof longdoc - (size_t)at, "%s", pass ? "\xc3\xa9" : "A");
+        snprintf(longdoc + at, sizeof longdoc - (size_t)at, ",8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n");
+        expect(write_temp(longdoc, path, sizeof path), "mkstemp");
+        const char *w0 = split_evidence_why(c.split_rows, 2, "abc1234", path, why, sizeof why);
+        expect(w0 && strstr(w0, "bytes"), "a line of %s: %s", pass ? "600 U+00E9" : "1100 'A'", w0 ? w0 : "a pass");
+        unlink(path);
+    }
     // Line ends in "\r\n" read as "\n".
     snprintf(doc, sizeof doc, "row,source,input,layout,library,share,pairs,split_s,base_s,ratio,ratio_lo,"
                               "ratio_hi,calls,kept,kept_4m,range,gpu_failed\r\n%s", GOOD);
