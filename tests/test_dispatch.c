@@ -562,6 +562,14 @@ static void test_parse_header(void) {
            ab_dispatch_parse_header("# :x", key, sizeof key, value, sizeof value) == 0, "empty comment, empty key");
     expect(ab_dispatch_parse_header("# chip: Apple M2 Max with a very long name indeed", key, sizeof key, value, 8) == 1 &&
            strlen(value) == 7, "a long value is truncated to the buffer");
+    // Blanks are spaces and tabs only, as for scripts/ingest_split.py's KEY_RE:
+    // a U+00A0 stays, around the value as inside it, and a U+3000 after the
+    // '#' makes no key.
+    expect(ab_dispatch_parse_header("# chip:\xc2\xa0" "Apple\xc2\xa0M2 Max\xc2\xa0", key, sizeof key, value,
+                                    sizeof value) == 1 && !strcmp(value, "\xc2\xa0" "Apple\xc2\xa0M2 Max\xc2\xa0"),
+           "U+00A0 must stay in the value: '%s'", value);
+    expect(ab_dispatch_parse_header("#\xe3\x80\x80" "chip: x", key, sizeof key, value, sizeof value) == 0,
+           "a U+3000 after the '#' must make no key");
     finish();
 }
 
@@ -1019,6 +1027,12 @@ static void test_split_load_table(void) {
     expect(ab_split_load_table(&c, path, err, sizeof err) && c.split_nrows == 1 && c.split_rows[0].min_m == 8192 &&
            !strcmp(c.split_table_chip, "Apple M5 Max"), "CRLF and tabs: %d rows, chip '%s' (%s)", c.split_nrows,
            c.split_table_chip, err);
+    unlink(path);
+    // A U+3000 after the '#' is no blank: no chip key (the script refuses
+    // such a table for its missing '# chip:').
+    expect(write_temp("#\xe3\x80\x80" "chip: Apple M2 Max\nzgemm N N N f=0.5\n", path, sizeof path), "mkstemp");
+    expect(ab_split_load_table(&c, path, err, sizeof err) && c.split_nrows == 1 && !c.split_table_chip[0],
+           "'#<U+3000>chip:' must name no chip: '%s' (%s)", c.split_table_chip, err);
     unlink(path);
 
     char many[(AB_SPLIT_MAX_ROWS + 1) * 24 + 32] = "";

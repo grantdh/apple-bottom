@@ -571,6 +571,8 @@ def self_test():
         ("a control character in a row", head(r0="scalars=u\vf=0.45"), pw + sq, "split_table.txt:7: a control character"),
         ("a control character in a comment", head().replace("# date: x", "# date: x\v"), pw + sq,
          "split_table.txt:5: a control character"),
+        ("a U+3000 after the chip line's '#'", head().replace("# chip: ", "#\u3000chip: "), pw + sq,
+         "no # chip: key"),
         ("tabs and CRLF in the table", head(r0="scalars=u\tf=0.45").replace("# chip: ", "#\tchip:\t")
          .replace("zgemm N N N m=8192:", "zgemm\tN\tN\tN\tm=8192:").replace("\n", "\r\n"), pw + sq, None),
         # a core count in ASCII digits ('\u00b3' made int() raise; Arabic-Indic digits passed isdigit())
@@ -613,10 +615,14 @@ def self_test():
             print(f"ingest_split self-test: '{bad}' parsed")
         except ValueError:
             pass
-    # key lines as ab_dispatch_parse_header() reads them: spaces and tabs trimmed, a "# note" cut
-    for line in ("#\tchip:\tApple M2 Max\t", "# chip: Apple M2 Max  # note"):
+    # key lines as ab_dispatch_parse_header() reads them: spaces and tabs trimmed, a "# note" cut, and no
+    # other blank (a U+00A0 stays in the value, a U+3000 after the '#' makes no key)
+    for line, want in (("#\tchip:\tApple M2 Max\t", ("chip", "Apple M2 Max")),
+                       ("# chip: Apple M2 Max  # note", ("chip", "Apple M2 Max")),
+                       ("# chip:\u00a0Apple\u00a0M2 Max\u00a0", ("chip", "\u00a0Apple\u00a0M2 Max\u00a0")),
+                       ("#\u3000chip: x", None)):
         m = KEY_RE.match(line)
-        if not m or m.groups() != ("chip", "Apple M2 Max"):
+        if (m and m.groups()) != want:
             wrong += 1
             print(f"ingest_split self-test: {line!r} read as {m and m.groups()}")
     with tempfile.TemporaryDirectory() as d:
