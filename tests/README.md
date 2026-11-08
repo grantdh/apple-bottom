@@ -134,8 +134,9 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     the bits; `VECLIB_MAXIMUM_THREADS` 1, 2 and 8 repeating; `fork()` with
     `_exit` and `exit`; the reports (counts that add up, a line per row,
     trace stages that sum exactly, the JSON fields); `AB_PRECISION=fast`
-    within 4x the default error; the native, batched, asynchronous, device and BLAS-2 APIs
-    unchanged; no memory growth; and calibrate, replay and bench_split
+    within 4x the default error; the native, batched, asynchronous, device
+    and BLAS-2 APIs unchanged at shapes the table covers, every call
+    returning AB_OK; no memory growth; and calibrate, replay and bench_split
     refusing to run
 
 - **Not yet registry-based (one `main`, no ghost guard):**

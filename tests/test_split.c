@@ -865,39 +865,48 @@ static int child_fork(bool use_exit) {
     return 0;
 }
 
-// Child: the other APIs a split never touches, hashed: native ab_dgemm and
-// ab_zgemm, a batch, ab_dgemm_async, ab_dev_dgemm on registered memory, and
-// dgemv_.
+// Child: the other APIs a split never touches, hashed, each with its status:
+// native ab_dgemm and ab_zgemm, a batch, ab_dgemm_async, ab_dev_dgemm on
+// registered memory, and dgemv_; first the status of making and uploading
+// the matrices.
 static void child_other(void) {
-    const int n = 600;          // a shape TABLE's dgemm N N row covers (m=512:, K <= M)
+    const int n = 600;                         // a shape TABLE's dgemm N N row covers (m=512:, K <= M)
+    const int zm = 1200, zn = 128, zk = 64;    // and its zgemm N N N row 0 (m=1024: n=96:, K <= M)
     double *a = malloc((size_t)n * n * sizeof *a), *b = malloc((size_t)n * n * sizeof *b);
     g_seed = 77;
     for (int i = 0; i < n * n; i++) { a[i] = uniform(); b[i] = uniform(); }
+    // DGEMM's A, B and C; the real and imaginary parts of ZGEMM's
     ABMatrix A = ab_matrix_create(n, n), B = ab_matrix_create(n, n), C = ab_matrix_create(n, n),
-             Ai = ab_matrix_create(n, n), Bi = ab_matrix_create(n, n), Ci = ab_matrix_create(n, n);
-    ab_matrix_upload(A, a, true);
-    ab_matrix_upload(B, b, true);
-    ab_matrix_upload(Ai, b, true);
-    ab_matrix_upload(Bi, a, true);
+             Ar = ab_matrix_create(zm, zk), Ai = ab_matrix_create(zm, zk), Br = ab_matrix_create(zk, zn),
+             Bi = ab_matrix_create(zk, zn), Cr = ab_matrix_create(zm, zn), Ci = ab_matrix_create(zm, zn);
+    const ABMatrix all[] = {A, B, C, Ar, Ai, Br, Bi, Cr, Ci}, to[] = {A, B, Ar, Ai, Br, Bi};
+    const double *from[] = {a, b, a, b, b, a};
+    ABStatus st = AB_OK;
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(all); i++)
+        if (!all[i]) st = AB_ERROR_ALLOC_FAILED;
+    for (size_t i = 0; st == AB_OK && i < TEST_REGISTRY_SIZE(to); i++) st = ab_matrix_upload(to[i], from[i], true);
+    printf("setup %d\n", (int)st);
+    if (st != AB_OK) return;
     double *c = malloc((size_t)n * n * sizeof *c);
-    ab_dgemm(A, B, C);
-    ab_matrix_download(C, c, true);
-    printf("ab_dgemm %016llx\n", (unsigned long long)hash_doubles(c, (size_t)n * n));
-    ab_zgemm(A, Ai, B, Bi, C, Ci);
-    ab_matrix_download(Ci, c, true);
-    printf("ab_zgemm %016llx\n", (unsigned long long)hash_doubles(c, (size_t)n * n));
+    st = ab_dgemm(A, B, C);
+    if (st == AB_OK) st = ab_matrix_download(C, c, true);
+    printf("ab_dgemm %d %016llx\n", (int)st, (unsigned long long)hash_doubles(c, (size_t)n * n));
+    st = ab_zgemm(Ar, Ai, Br, Bi, Cr, Ci);
+    if (st == AB_OK) st = ab_matrix_download(Cr, c, true);
+    if (st == AB_OK) st = ab_matrix_download(Ci, c + (size_t)zm * zn, true);
+    printf("ab_zgemm %d %016llx\n", (int)st, (unsigned long long)hash_doubles(c, 2 * (size_t)zm * zn));
     ABBatch batch = ab_batch_create();
-    ab_batch_dgemm(batch, B, A, C);
-    ab_batch_commit(batch);
-    ab_batch_wait(batch);
-    ab_batch_destroy(batch);
-    ab_matrix_download(C, c, true);
-    printf("ab_batch_dgemm %016llx\n", (unsigned long long)hash_doubles(c, (size_t)n * n));
+    st = batch ? ab_batch_dgemm(batch, B, A, C) : AB_ERROR_ALLOC_FAILED;
+    if (st == AB_OK) st = ab_batch_commit(batch);
+    if (st == AB_OK) st = ab_batch_wait(batch);
+    if (batch) ab_batch_destroy(batch);
+    if (st == AB_OK) st = ab_matrix_download(C, c, true);
+    printf("ab_batch_dgemm %d %016llx\n", (int)st, (unsigned long long)hash_doubles(c, (size_t)n * n));
     ABFuture fut = ab_dgemm_async(B, B, C);
-    ABStatus ast = fut ? ab_future_wait(fut) : AB_ERROR_ALLOC_FAILED;
+    st = fut ? ab_future_wait(fut) : AB_ERROR_ALLOC_FAILED;
     if (fut) ab_future_destroy(fut);
-    ab_matrix_download(C, c, true);
-    printf("ab_dgemm_async %d %016llx\n", (int)ast, (unsigned long long)hash_doubles(c, (size_t)n * n));
+    if (st == AB_OK) st = ab_matrix_download(C, c, true);
+    printf("ab_dgemm_async %d %016llx\n", (int)st, (unsigned long long)hash_doubles(c, (size_t)n * n));
     size_t bytes;
     double *da = page_alloc((size_t)n * n, &bytes), *db = page_alloc((size_t)n * n, &bytes),
            *dc = page_alloc((size_t)n * n, &bytes);
@@ -914,8 +923,7 @@ static void child_other(void) {
     int nn = n, inc = 1;
     fortran_dgemv("N", &nn, &nn, &one, a, &nn, b, &inc, &zero, y, &inc);
     printf("dgemv_ %016llx\n", (unsigned long long)hash_doubles(y, (size_t)n));
-    ab_matrix_destroy(A); ab_matrix_destroy(B); ab_matrix_destroy(C);
-    ab_matrix_destroy(Ai); ab_matrix_destroy(Bi); ab_matrix_destroy(Ci);
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(all); i++) ab_matrix_destroy(all[i]);
     free(a); free(b); free(c); free(y);
 }
 
@@ -1447,9 +1455,13 @@ static void test_split_interactions(void) {
     int st_off = status;
     const char *catch_all[] = {"AB_SPLIT=1", table_env, NULL};
     char *on = run_child("other", catch_all, &status);
-    check(st_off == 0 && status == 0 && off && on && strstr(off, "dgemv_ ") && strstr(off, "ab_dev_dgemm 0 ") &&
-          strstr(off, "ab_dgemm_async 0 ") && !strcmp(off, on),
-          "the other APIs differ with AB_SPLIT on:\n%.300s\nvs\n%.300s", off ? off : "", on ? on : "");
+    // every call made and AB_OK in the run without AB_SPLIT, and the same lines with it
+    static const char *const OK_LINES[] = {"setup 0\n", "\nab_dgemm 0 ", "\nab_zgemm 0 ", "\nab_batch_dgemm 0 ",
+                                           "\nab_dgemm_async 0 ", "\nab_dev_dgemm 0 ", "\ndgemv_ "};
+    bool all_ok = st_off == 0 && status == 0 && off && on;
+    for (size_t i = 0; all_ok && i < TEST_REGISTRY_SIZE(OK_LINES); i++) all_ok = strstr(off, OK_LINES[i]) != NULL;
+    check(all_ok && !strcmp(off, on), "the other APIs failed or differ with AB_SPLIT on:\n%.400s\nvs\n%.400s",
+          off ? off : "", on ? on : "");
     free(off);
     free(on);
     // the drivers refuse
