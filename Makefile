@@ -508,17 +508,26 @@ SAN_TARGET = $(MAKE) --no-print-directory BUILD=$(BUILD)/$(1) \
 	LDFLAGS="$(LDFLAGS) -fsanitize=$(2)" DYLIB_LDFLAGS="$(DYLIB_LDFLAGS) -fsanitize=$(2)" \
 	$(BUILD)/$(1)/test_correctness
 
+# Runs a command, killing it after $(1) seconds. Where AddressSanitizer's
+# runtime does not start it hangs (tests/README.md), so test-asan first runs an
+# empty program built with it, and each sanitizer test run has a time limit.
+WITHIN = perl -e 'alarm $(1); exec @ARGV'
+
 test-asan:
+	@mkdir -p $(BUILD)/asan
+	@printf 'int main(void) { return 0; }\n' | $(CC) -fsanitize=address -x c - -o $(BUILD)/asan/probe
+	@$(call WITHIN,30) ./$(BUILD)/asan/probe || \
+	  { echo "AddressSanitizer's runtime did not start within 30 s on this host (tests/README.md)"; exit 2; }
 	@echo "Building with AddressSanitizer..."
 	+$(call SAN_TARGET,asan,address)
 	@echo "Running tests with ASan..."
-	ASAN_OPTIONS=halt_on_error=1 ./$(BUILD)/asan/test_correctness
+	ASAN_OPTIONS=halt_on_error=1 $(call WITHIN,1800) ./$(BUILD)/asan/test_correctness
 
 test-ubsan:
 	@echo "Building with UndefinedBehaviorSanitizer..."
 	+$(call SAN_TARGET,ubsan,undefined)
 	@echo "Running tests with UBSan..."
-	UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./$(BUILD)/ubsan/test_correctness
+	UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 $(call WITHIN,1800) ./$(BUILD)/ubsan/test_correctness
 
 $(BUILD)/bench_dsyrk: benchmarks/bench_dsyrk.c lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)

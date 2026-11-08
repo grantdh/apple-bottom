@@ -65,6 +65,13 @@ STATUS: PASS
       `make ci-local`
 - [ ] Convergence study generated 7 data points (N ∈ {64, 128, 256, 512, 1024, 2048, 4096})
 - [ ] Review `build/convergence_data.csv` for expected error ranges (Frobenius ~10⁻¹⁴ to 5×10⁻¹⁴)
+- [ ] `make test-ubsan` passed, with no runtime error
+- [ ] `make test-asan` passed, or stopped at its start-up check because
+      AddressSanitizer's runtime does not start on this host (`tests/README.md`,
+      sanitizer row) and the waiver is recorded below
+- Waivers: 1.6.0, no AddressSanitizer run (the maintainer's decision of
+  2026-11-08: its runtime does not start on the release machine); `make test-ubsan`
+  must pass.
 
 ### 3. GitHub Actions Validation
 

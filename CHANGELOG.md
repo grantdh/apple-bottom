@@ -426,6 +426,11 @@ All notable changes to this project will be documented in this file.
   anyway, and one with beta = 0 does not read C. `test_blas_abi` adds four
   cases, on the GPU epilogue's route and on the host epilogue's, and
   `test_staging`'s NaN and Inf cases now expect Accelerate.
+- **`make test-asan` no longer hangs where AddressSanitizer's runtime does not
+  start.** On macOS 27.0.1, with Apple clang 17.0.0 or Homebrew clang 19.1.7, it
+  hangs in its own initialization, before `main()`. `test-asan` now runs an empty
+  program built with it first and stops after 30 s, and each sanitizer test run
+  stops after 30 minutes ([`tests/README.md`](tests/README.md)).
 
 ### Corrected claims
 - **"No silent errors outside FP32's exponent range" and "every product keeps
@@ -450,6 +455,8 @@ All notable changes to this project will be documented in this file.
   (`benchmarks/bench_split.c`).
 
 ### Known issues
+- **No AddressSanitizer run.** Its runtime does not start on the release machine
+  (Fixed, above), so 1.6.0 is checked under UndefinedBehaviorSanitizer only.
 - **`AB_MODE=gpu AB_MIN_GPU_DIM=0` still fails Netlib's DGEMM and ZGEMM tests**,
   at double-float accuracy, as in 1.5.1. BLAS-2 calls below `AB_BLAS2_MIN_DIM` stay
   on Accelerate in that mode. With `AB_MODE` unset every Netlib routine passes and LAPACK fails
