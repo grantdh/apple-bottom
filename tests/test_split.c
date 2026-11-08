@@ -865,10 +865,11 @@ static int child_fork(bool use_exit) {
     return 0;
 }
 
-// Child: the other APIs a split never touches, hashed, each with its status:
-// native ab_dgemm and ab_zgemm, a batch, ab_dgemm_async, ab_dev_dgemm on
-// registered memory, and dgemv_; first the status of making and uploading
-// the matrices.
+// Child: the other APIs a split never touches, hashed, each GEMM with its
+// status: native ab_dgemm and ab_zgemm, a batch, ab_dgemm_async and
+// ab_dev_dgemm on registered memory, at shapes the table covers; and dgemv_,
+// which returns no status (no row covers BLAS-2). First the status of making
+// and uploading the matrices.
 static void child_other(void) {
     const int n = 600;                         // a shape TABLE's dgemm N N row covers (m=512:, K <= M)
     const int zm = 1200, zn = 128, zk = 64;    // and its zgemm N N N row 0 (m=1024: n=96:, K <= M)

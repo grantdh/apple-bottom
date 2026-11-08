@@ -36,7 +36,8 @@ All notable changes to this project will be documented in this file.
   `none:uncalibrated-chip`).
   The library and `test_dispatch` now link IOKit (a static link adds
   `-framework IOKit`; pkg-config carries it); `test_dispatch` checks
-  every built-in table against its own measurements (13 tests, were 9).
+  every built-in table against its own measurements (23 tests, were 9;
+  `test_split` has 12).
 
 - **BLAS-2 on the GPU: DGEMV, ZGEMV (`'N'`, `'T'`, `'C'`) and ZHEMV**
   (`src/blas2.m`, `src/blas2_abi.c`). The kernels read the caller's
