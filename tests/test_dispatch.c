@@ -108,6 +108,27 @@ static int n_rows(const ab_dispatch_row_t *rows) {
     return n;
 }
 
+// The first n rows of a and b, field by field: memcmp() would also compare
+// padding bytes, which C leaves unspecified whenever a row is stored. Written
+// for these layouts: a field added to either struct is compared here too.
+_Static_assert(sizeof(ab_dispatch_row_t) == 16 && sizeof(ab_split_row_t) == 80, "update same_rows()");
+static bool same_rows(const ab_dispatch_row_t *a, const ab_dispatch_row_t *b, int n) {
+    for (int i = 0; i < n; i++)
+        if (a[i].routine != b[i].routine || a[i].ta != b[i].ta || a[i].tb != b[i].tb || a[i].m != b[i].m ||
+            a[i].n != b[i].n || a[i].k != b[i].k)
+            return false;
+    return true;
+}
+static bool same_split_rows(const ab_split_row_t *a, const ab_split_row_t *b, int n) {
+    for (const ab_split_row_t *x = a, *y = b; x < a + n; x++, y++)
+        if (x->routine != y->routine || x->ta != y->ta || x->tb != y->tb || x->axis != y->axis ||
+            x->min_m != y->min_m || x->max_m != y->max_m || x->min_n != y->min_n || x->max_n != y->max_n ||
+            x->min_k != y->min_k || x->max_k != y->max_k || x->min_mn != y->min_mn || x->max_mn != y->max_mn ||
+            x->ratio != y->ratio || x->min_gf != y->min_gf || x->scalars != y->scalars || x->share != y->share)
+            return false;
+    return true;
+}
+
 static ab_dispatch_config_t with_rows(ab_dispatch_mode_t mode, const char *rows) {
     ab_dispatch_config_t c = {.mode = mode, .min_dim = AB_DISPATCH_DEFAULT_MIN_DIM};
     char buf[512], *save = NULL;
@@ -241,7 +262,7 @@ static void test_builtin_tables_load(void) {
         snprintf(label, sizeof label, "builtin:%s", slug);
         expect(c.mode == AB_DISPATCH_AUTO && c.min_dim == AB_DISPATCH_DEFAULT_MIN_DIM &&
                !c.crossover_flops && !c.crossover_flops_real, "%s: defaults are not auto/32/no override", slug);
-        expect(c.nrows == n_rows(t->rows) && !memcmp(c.rows, t->rows, (size_t)c.nrows * sizeof c.rows[0]),
+        expect(c.nrows == n_rows(t->rows) && same_rows(c.rows, t->rows, c.nrows),
                "%s: a machine with this chip gets %d rows, the table has %d", slug, c.nrows, n_rows(t->rows));
         expect(!strcmp(c.table, label) && !strcmp(c.table_chip, t->chip) && c.table_gpu_cores == t->gpu_cores,
                "%s: table label '%s', chip '%s'/%d", slug, c.table, c.table_chip, c.table_gpu_cores);
@@ -253,7 +274,7 @@ static void test_builtin_tables_load(void) {
         snprintf(slash + 1, sizeof txt - (size_t)(slash + 1 - txt), "dispatch_table.txt");
         ab_dispatch_config_t filed = {0};
         expect(ab_dispatch_load_table(&filed, txt, err, sizeof err) && filed.nrows == n_rows(t->rows) &&
-               !memcmp(filed.rows, t->rows, (size_t)filed.nrows * sizeof filed.rows[0]) &&
+               same_rows(filed.rows, t->rows, filed.nrows) &&
                !strcmp(filed.table_chip, t->chip) && filed.table_gpu_cores == t->gpu_cores,
                "%s: %s does not load to the built-in rows and identity (%s)", slug, txt, err);
     }
@@ -651,7 +672,7 @@ static void test_load_table(void) {
     const ab_dispatch_table_t *m2 = ab_dispatch_builtin_table("Apple M2 Max", 38);
     expect(m2 && ab_dispatch_load_table(&c, AB_SOURCE_ROOT "/benchmarks/results/2026-10-14-52f1880-calibrate/"
                                             "dispatch_table.txt", err, sizeof err) &&
-           c.nrows == n_rows(m2->rows) && !memcmp(c.rows, m2->rows, (size_t)c.nrows * sizeof c.rows[0]),
+           c.nrows == n_rows(m2->rows) && same_rows(c.rows, m2->rows, c.nrows),
            "the M2 Max's calibration run must load to the built-in rows: %d rows (%s)", c.nrows, err);
 
     expect(write_temp("# no rows: everything on Accelerate\n", path, sizeof path), "mkstemp");
@@ -720,7 +741,7 @@ static void test_config_from_env(void) {
     fprintf(stderr, "(expected warning follows) ");
     ab_dispatch_config_from_env(&c);
     expect(c.nrows == builtin.nrows &&
-           !memcmp(c.rows, builtin.rows, (size_t)c.nrows * sizeof c.rows[0]) && !strcmp(c.table, builtin.table),
+           same_rows(c.rows, builtin.rows, c.nrows) && !strcmp(c.table, builtin.table),
            "an unreadable AB_DISPATCH_TABLE must keep the built-in rows and label");
     clear_env();
     finish();
@@ -1114,7 +1135,7 @@ static void test_split_load_table(void) {
     // The M2 Max's starting values: the rows of START_ROWS, with its identity.
     ab_dispatch_config_t start = with_split_rows(AB_DISPATCH_AUTO, START_ROWS);
     expect(ab_split_load_table(&c, AB_SOURCE_ROOT "/benchmarks/split/start_M2-Max-38c.txt", err, sizeof err) &&
-           c.split_nrows == 5 && !memcmp(c.split_rows, start.split_rows, 5 * sizeof c.split_rows[0]) &&
+           c.split_nrows == 5 && same_split_rows(c.split_rows, start.split_rows, 5) &&
            !strcmp(c.split_table_chip, "Apple M2 Max") && c.split_table_gpu_cores == 38,
            "benchmarks/split/start_M2-Max-38c.txt: %s", err);
     // The table for trying a chip: the same shapes at f = 0.50, naming no chip.
@@ -1123,7 +1144,7 @@ static void test_split_load_table(void) {
            "benchmarks/split/start_table.txt: %s", err);
     for (int i = 0; i < c.split_nrows && i < 5; i++) {
         start.split_rows[i].share = 0.5;
-        expect(!memcmp(&c.split_rows[i], &start.split_rows[i], sizeof c.split_rows[i]),
+        expect(same_split_rows(&c.split_rows[i], &start.split_rows[i], 1),
                "start_table.txt row %d is not the M2 Max's shape at f = 0.50", i);
     }
     // A number reads the same in a locale with a decimal comma.
@@ -1239,7 +1260,7 @@ static void test_split_config_from_env(void) {
     setenv("AB_SPLIT", "1", 1);
     if (!ab_split_builtin_table(off.chip, off.gpu_cores)) fprintf(stderr, "(expected note follows) ");
     ab_dispatch_config_from_env(&c);
-    expect(c.nrows == off.nrows && !memcmp(c.rows, off.rows, (size_t)c.nrows * sizeof c.rows[0]) &&
+    expect(c.nrows == off.nrows && same_rows(c.rows, off.rows, c.nrows) &&
            !strcmp(c.table, off.table) && c.mode == off.mode && c.min_dim == off.min_dim,
            "AB_SPLIT changed the routing table");
     // Each built-in split table is what a machine with its chip gets.
@@ -1256,7 +1277,7 @@ static void test_split_config_from_env(void) {
         ab_dispatch_config_from_env(&c);
         ab_dispatch_chip_slug(t->chip, t->gpu_cores, slug, sizeof slug);
         snprintf(want, sizeof want, "builtin:%s@%s", slug, t->library);
-        expect(c.split_nrows == n && !memcmp(c.split_rows, t->rows, (size_t)n * sizeof *t->rows) &&
+        expect(c.split_nrows == n && same_split_rows(c.split_rows, t->rows, n) &&
                !strcmp(c.split_table, want), "%s: %d split rows, '%s'", slug, c.split_nrows, c.split_table);
     }
     clear_env();
@@ -1441,7 +1462,7 @@ static void test_split_builtin_matches_evidence(void) {
         snprintf(slash + 1, sizeof path - (size_t)(slash + 1 - path), "split_table.txt");
         ab_dispatch_config_t c = {0};
         expect(ab_split_load_table(&c, path, err, sizeof err) && c.split_nrows == n &&
-               !memcmp(c.split_rows, t->rows, (size_t)n * sizeof *t->rows),
+               same_split_rows(c.split_rows, t->rows, n),
                "%s: the built-in rows are not those of %s (%s)", t->chip, path, err);
         int bad = first_non_utf8_line(path);
         expect(!bad, "%s: %s is not UTF-8 (line %d)", t->chip, path, bad);
