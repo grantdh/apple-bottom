@@ -72,6 +72,20 @@ const char* const ab_prof_staged_names[AB_PROF_STAGED_COUNT] = {
     "kept", "kept_4m", "host_pack", "fpcr", "scalar", "alloc", "gpu_failed", "nonfinite", "range"
 };
 
+const char* const ab_prof_split_decline_names[AB_PROF_SPLIT_DECLINE_COUNT] = {
+    "no_device", "too_large", "host_pack", "fpcr", "scalar", "scratch", "thread"
+};
+
+// AB_SPLIT: per row of the split table, the calls it covered (also those it
+// did not cut) and what became of them (AB_REPORT's split_row lines).
+typedef struct {
+    uint64_t calls, split, kept, kept_4m, range, gpu_failed;
+    uint64_t wall_ns, first_ns, cpu_ns, gpu_ns, wait_cpu_ns, wait_gpu_ns, redo_ns, sum_ns;
+    double gf, gf_cpu, gf_gpu;
+} split_row_stats_t;
+
+static split_row_stats_t g_split_rows[AB_SPLIT_MAX_ROWS];   // under g_lock
+
 // =============================================================================
 // Init, fork & env-var handling
 // =============================================================================
@@ -86,6 +100,7 @@ static void ab_prof_atfork_child(void) {
     g_trace_lock = OS_UNFAIR_LOCK_INIT;
     memset(g_entries, 0, sizeof(g_entries[0]) * (size_t)g_entry_count);
     g_entry_count = 0;
+    memset(g_split_rows, 0, sizeof g_split_rows);
     g_forked_child = 1;
     g_reported = 0;
     if (g_trace_fd >= 0) close(g_trace_fd);
@@ -104,13 +119,22 @@ static int env_flag(const char* name) {
     return e && *e && *e != '0';
 }
 
-// AB_TEST_FAIL_STAGE names a GPU step that can fail: alloc or kernel.
+// AB_TEST_FAIL_STAGE names a GPU step that can fail: alloc or kernel, or one
+// of the other failures of blas_profiler.h.
 static int parse_fail_stage(const char* name) {
+    static const struct { const char* name; int stage; } OTHER[] = {
+        {"kernel_once", AB_PROF_FAIL_KERNEL_ONCE}, {"redo_4m", AB_PROF_FAIL_REDO_4M},
+        {"scales", AB_PROF_FAIL_SCALES}, {"split_thread", AB_PROF_FAIL_SPLIT_THREAD},
+        {"split_scratch", AB_PROF_FAIL_SPLIT_SCRATCH}, {"split_fpcr", AB_PROF_FAIL_SPLIT_FPCR},
+        {"split_poison", AB_PROF_FAIL_SPLIT_POISON}, {"nonfinite", AB_PROF_FAIL_NONFINITE},
+    };
     if (!name || !*name) return -1;
     if (!strcmp(name, ab_prof_stage_names[AB_PROF_STAGE_ALLOC])) return AB_PROF_STAGE_ALLOC;
     if (!strcmp(name, ab_prof_stage_names[AB_PROF_STAGE_KERNEL])) return AB_PROF_STAGE_KERNEL;
-    fprintf(stderr, "apple-bottom: AB_TEST_FAIL_STAGE=%s: expected alloc or kernel; ignored\n",
-            name);
+    for (size_t i = 0; i < sizeof OTHER / sizeof OTHER[0]; i++)
+        if (!strcmp(name, OTHER[i].name)) return OTHER[i].stage;
+    fprintf(stderr, "apple-bottom: AB_TEST_FAIL_STAGE=%s: expected alloc, kernel, kernel_once, "
+                    "redo_4m, scales, split_thread, split_scratch, split_fpcr, split_poison or nonfinite; ignored\n", name);
     return -1;
 }
 
@@ -259,9 +283,122 @@ void ab_prof_record(const char* routine, uint64_t elapsed_ns,
     os_unfair_lock_unlock(&g_lock);
 }
 
+void ab_prof_record_split(const char* routine, uint64_t elapsed_ns, size_t m, size_t n, size_t k,
+                          const ab_prof_split_t* s) {
+    if (!ab_prof_enabled() || s->row < 0 || s->row >= AB_SPLIT_MAX_ROWS) return;
+    if (elapsed_ns < g_threshold_ns) return;
+    const double gf = (routine[0] == 'z' ? 8.0 : 2.0) * (double)m * (double)n * (double)k / 1e9;
+    os_unfair_lock_lock(&g_lock);
+    split_row_stats_t* r = &g_split_rows[s->row];
+    if (!r->calls) r->first_ns = elapsed_ns;
+    r->calls++;
+    r->wall_ns += elapsed_ns;
+    r->gf += gf;
+    ab_prof_entry_t* e = find_or_create_locked(routine);
+    if (e && s->kept) {   // the call itself, as ab_prof_record counts a call
+        e->call_count++;
+        e->total_ns += elapsed_ns;
+        e->split_calls++;
+        e->split_ns += elapsed_ns;
+        size_t max_mn = m > n ? m : n;
+        int bin = dim_to_bin(max_mn);
+        e->dim_histogram[bin]++;
+        e->ns_by_bin[bin] += elapsed_ns;
+        if (m > e->max_m) e->max_m = m;
+        if (n > e->max_n) e->max_n = n;
+        if (k > e->max_k) e->max_k = k;
+        e->sum_m += m;
+        e->sum_n += n;
+        e->sum_k += k;
+    }
+    ab_prof_split_stats_t* x = e ? &e->split : NULL;
+    if (x && (s->split || s->declined > AB_PROF_SPLIT_DECLINE_NONE)) x->calls++;
+    if (x && s->declined > AB_PROF_SPLIT_DECLINE_NONE && s->declined < AB_PROF_SPLIT_DECLINE_COUNT)
+        x->declined[s->declined]++;
+    if (s->split) {
+        bool k4 = s->staged == AB_PROF_STAGED_KEPT_4M, range = s->staged == AB_PROF_STAGED_RANGE;
+        r->split++;
+        r->kept += s->kept && !k4;
+        r->kept_4m += s->kept && k4;
+        r->range += !s->kept && range;
+        r->gpu_failed += !s->kept && !range;
+        r->cpu_ns += s->cpu_part_ns;
+        r->gpu_ns += s->gpu_wall_ns;
+        r->wait_cpu_ns += s->wait_cpu_ns;
+        r->wait_gpu_ns += s->wait_gpu_ns;
+        r->redo_ns += s->redo_ns;
+        r->sum_ns += s->sum_ns;
+        r->gf_cpu += s->gf_cpu;
+        r->gf_gpu += s->gf_gpu;
+    }
+    if (x && s->split) {
+        bool k4 = s->staged == AB_PROF_STAGED_KEPT_4M, range = s->staged == AB_PROF_STAGED_RANGE;
+        x->kept += s->kept && !k4;
+        x->kept_4m += s->kept && k4;
+        x->range += !s->kept && range;
+        x->gpu_failed += !s->kept && !range;
+        x->scales += !s->kept && s->scales;
+        x->alloc += !s->kept && s->staged == AB_PROF_STAGED_ALLOC;
+        x->nonfinite += !s->kept && s->staged == AB_PROF_STAGED_NONFINITE;
+        x->fpcr += !s->kept && s->staged == AB_PROF_STAGED_FPCR;
+        x->retries += (uint64_t)s->retries;
+        x->retry_kept += s->retry_kept;
+        x->axis[s->axis == 'N' ? 0 : s->axis == 'M' ? 1 : 2]++;
+        x->init_ns += s->init_ns;
+        x->cpu_ns += s->cpu_part_ns;
+        x->gpu_ns += s->gpu_wall_ns;
+        x->wait_cpu_ns += s->wait_cpu_ns;
+        x->wait_gpu_ns += s->wait_gpu_ns;
+        x->redo_ns += s->redo_ns;
+        x->sum_ns += s->sum_ns;
+        if (!s->kept) x->wasted_gpu_ns += s->gpu_wall_ns;
+        x->gf_cpu += s->gf_cpu;
+        x->gf_gpu += s->gf_gpu;
+    }
+    os_unfair_lock_unlock(&g_lock);
+}
+
 // =============================================================================
 // Shared report helpers
 // =============================================================================
+
+// " AB_SPLIT=1 split_table=<source>" for the report headers when AB_SPLIT is
+// on, else nothing, so that default reports read as before.
+static const char* split_token(void) {
+    static char token[AB_DISPATCH_LABEL_LEN + 32];
+    const ab_dispatch_config_t* dc = ab_dispatch_process_config();
+    if (!dc->split_on) return "";
+    snprintf(token, sizeof token, " AB_SPLIT=1 split_table=%s", dc->split_table);
+    return token;
+}
+
+static bool split_on(void) { return ab_dispatch_process_config()->split_on; }
+
+#define LLU(x) ((unsigned long long)(x))
+
+// One report line (or a trace line, or the trace header), built in a buffer
+// and written with a single call, so the lines of MPI ranks that share
+// stderr do not interleave mid-line.
+typedef struct { char buf[2048]; size_t n; } report_line_t;
+
+static void line_add(report_line_t* l, const char* fmt, ...) {
+    if (l->n >= sizeof l->buf - 1) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int k = vsnprintf(l->buf + l->n, sizeof l->buf - l->n, fmt, ap);
+    va_end(ap);
+    if (k > 0) l->n += (size_t)k;
+    if (l->n > sizeof l->buf - 1) l->n = sizeof l->buf - 1;
+}
+
+static void line_emit(report_line_t* l, FILE* out) {
+    fputs(l->buf, out);
+    l->n = 0;
+    l->buf[0] = '\0';
+}
+
+static void report_split(report_line_t* l, FILE* out, const char* prefix, const ab_prof_entry_t* e);
+static void report_split_rows(report_line_t* l, FILE* out, const char* prefix);
 
 static double pct(uint64_t part, uint64_t whole) {
     return whole ? 100.0 * (double)part / (double)whole : 0.0;
@@ -348,7 +485,8 @@ static const char* precision_token(void) {
 }
 
 void ab_prof_dump(FILE* out) {
-    fprintf(out, "=== %s%s BLAS profile, pid %d", ab_build_info(), precision_token(), (int)getpid());
+    fprintf(out, "=== %s%s%s BLAS profile, pid %d", ab_build_info(), precision_token(), split_token(),
+            (int)getpid());
     if (g_threshold_ns)
         fprintf(out, ", calls under %llu ns not counted", (unsigned long long)g_threshold_ns);
     fprintf(out, " ===\n");
@@ -419,6 +557,21 @@ void ab_prof_dump(FILE* out) {
     dump_counts(out, "Fallbacks: GPU-routed calls that ran on cblas (in cpu_ms)", &FALLBACKS, idx);
     dump_counts(out, "Staged path: GPU-routed calls that kept its result, else by why not",
                 &STAGED, idx);
+    if (split_on()) {
+        // AB_SPLIT: the split calls are in neither gpu_calls nor cpu_calls.
+        report_line_t l = {.n = 0};
+        l.buf[0] = '\0';
+        fprintf(out, "\nAB_SPLIT: calls whose GPU part stood (split_calls), the executor by routine, "
+                     "the split table's rows:\n");
+        for (int i = 0; i < g_entry_count; i++) {
+            const ab_prof_entry_t* e = &g_entries[idx[i]];
+            if (e->split_calls || e->split.calls)
+                fprintf(out, "%s split_calls=%llu split_ms=%.3f\n", e->name, LLU(e->split_calls),
+                        e->split_ns / 1e6);
+            report_split(&l, out, "", e);
+        }
+        report_split_rows(&l, out, "");
+    }
 
     fprintf(out, "\nTotal BLAS time: %.1f ms across %d routines\n",
             grand_total_ns / 1e6, g_entry_count);
@@ -444,27 +597,6 @@ void ab_prof_dump(FILE* out) {
 // Exit summary (AB_REPORT)
 // =============================================================================
 
-// One report line (or a trace line, or the trace header), built in a buffer
-// and written with a single call, so the lines of MPI ranks that share
-// stderr do not interleave mid-line.
-typedef struct { char buf[2048]; size_t n; } report_line_t;
-
-static void line_add(report_line_t* l, const char* fmt, ...) {
-    if (l->n >= sizeof l->buf - 1) return;
-    va_list ap;
-    va_start(ap, fmt);
-    int k = vsnprintf(l->buf + l->n, sizeof l->buf - l->n, fmt, ap);
-    va_end(ap);
-    if (k > 0) l->n += (size_t)k;
-    if (l->n > sizeof l->buf - 1) l->n = sizeof l->buf - 1;
-}
-
-static void line_emit(report_line_t* l, FILE* out) {
-    fputs(l->buf, out);
-    l->n = 0;
-    l->buf[0] = '\0';
-}
-
 // A routine's AB_REPORT line of one kind of counts, if it has any.
 static void report_counts(report_line_t* l, FILE* out, int pid, const ab_prof_entry_t* e,
                           const char* what, const counts_t* k) {
@@ -474,6 +606,45 @@ static void report_counts(report_line_t* l, FILE* out, int pid, const ab_prof_en
         line_add(l, " %s=%llu", k->names[r], (unsigned long long)k->of(e)[r]);
     line_add(l, "\n");
     line_emit(l, out);
+}
+
+// A routine's AB_SPLIT line, if a row cut any of its calls, after prefix.
+static void report_split(report_line_t* l, FILE* out, const char* prefix, const ab_prof_entry_t* e) {
+    const ab_prof_split_stats_t* x = &e->split;
+    if (!x->calls) return;
+    line_add(l, "%s%s split calls=%llu kept=%llu kept_4m=%llu range=%llu gpu_failed=%llu scales=%llu "
+                "alloc=%llu nonfinite=%llu fpcr=%llu retries=%llu retry_kept=%llu",
+             prefix, e->name, LLU(x->calls), LLU(x->kept), LLU(x->kept_4m), LLU(x->range),
+             LLU(x->gpu_failed), LLU(x->scales), LLU(x->alloc), LLU(x->nonfinite), LLU(x->fpcr),
+             LLU(x->retries), LLU(x->retry_kept));
+    for (int d = 0; d < AB_PROF_SPLIT_DECLINE_COUNT; d++)
+        line_add(l, " declined_%s=%llu", ab_prof_split_decline_names[d], LLU(x->declined[d]));
+    line_add(l, " axis_N=%llu axis_M=%llu axis_K=%llu init_ms=%.3f cpu_ms=%.3f gpu_ms=%.3f "
+                "wait_cpu_ms=%.3f wait_gpu_ms=%.3f redo_ms=%.3f sum_ms=%.3f wasted_gpu_ms=%.3f "
+                "gf_cpu=%.3f gf_gpu=%.3f\n",
+             LLU(x->axis[0]), LLU(x->axis[1]), LLU(x->axis[2]), x->init_ns / 1e6, x->cpu_ns / 1e6,
+             x->gpu_ns / 1e6, x->wait_cpu_ns / 1e6, x->wait_gpu_ns / 1e6, x->redo_ns / 1e6,
+             x->sum_ns / 1e6, x->wasted_gpu_ns / 1e6, x->gf_cpu, x->gf_gpu);
+    line_emit(l, out);
+}
+
+// A line per row of the split table, f = 0 rows and rows without calls
+// included, so that a report names every share it ran with.
+static void report_split_rows(report_line_t* l, FILE* out, const char* prefix) {
+    const ab_dispatch_config_t* dc = ab_dispatch_process_config();
+    for (int i = 0; i < dc->split_nrows && i < AB_SPLIT_MAX_ROWS; i++) {
+        const ab_split_row_t* row = &dc->split_rows[i];
+        const split_row_stats_t* r = &g_split_rows[i];
+        line_add(l, "%ssplit_row i=%d routine=%cgemm axis=%c f=%g calls=%llu split=%llu wall_ms=%.3f "
+                    "first_ms=%.3f cpu_ms=%.3f gpu_ms=%.3f wait_cpu_ms=%.3f wait_gpu_ms=%.3f "
+                    "redo_ms=%.3f sum_ms=%.3f gf=%.3f gf_cpu=%.3f gf_gpu=%.3f kept=%llu kept_4m=%llu "
+                    "range=%llu gpu_failed=%llu\n",
+                 prefix, i, row->routine, row->axis, row->share, LLU(r->calls), LLU(r->split),
+                 r->wall_ns / 1e6, r->first_ns / 1e6, r->cpu_ns / 1e6, r->gpu_ns / 1e6,
+                 r->wait_cpu_ns / 1e6, r->wait_gpu_ns / 1e6, r->redo_ns / 1e6, r->sum_ns / 1e6, r->gf,
+                 r->gf_cpu, r->gf_gpu, LLU(r->kept), LLU(r->kept_4m), LLU(r->range), LLU(r->gpu_failed));
+        line_emit(l, out);
+    }
 }
 
 // Line-oriented key=value lines, each tagged with the pid so MPI ranks that
@@ -490,8 +661,8 @@ void ab_prof_report(FILE* out) {
     // The chip and the table auto routed by (dispatch.h), so a report from
     // another machine says what routed it.
     const ab_dispatch_config_t* dc = ab_dispatch_process_config();
-    line_add(&l, " chip=\"%s\" gpu_cores=%d table=%s", dc->chip[0] ? dc->chip : "unknown", dc->gpu_cores,
-             dc->table);
+    line_add(&l, " chip=\"%s\" gpu_cores=%d table=%s%s", dc->chip[0] ? dc->chip : "unknown", dc->gpu_cores,
+             dc->table, split_token());
     line_add(&l, "\n");
     line_emit(&l, out);
     if (g_entry_count == 0) {
@@ -500,6 +671,8 @@ void ab_prof_report(FILE* out) {
         return;
     }
 
+    char prefix[32];
+    snprintf(prefix, sizeof prefix, "AB_REPORT[%d] ", pid);
     int idx[AB_PROF_MAX_ROUTINES];
     sort_by_time(idx);
     for (int i = 0; i < g_entry_count; i++) {
@@ -507,7 +680,7 @@ void ab_prof_report(FILE* out) {
         if (e->call_count == 0) continue;
         line_add(&l, "AB_REPORT[%d] %s calls=%llu gpu_calls=%llu cpu_calls=%llu "
                      "gpu_calls%%=%.1f total_ms=%.3f gpu_ms=%.3f cpu_ms=%.3f "
-                     "gpu_time%%=%.1f fallbacks=%llu\n",
+                     "gpu_time%%=%.1f fallbacks=%llu",
                  pid, e->name,
                  (unsigned long long)e->call_count,
                  (unsigned long long)e->gpu_calls,
@@ -516,6 +689,9 @@ void ab_prof_report(FILE* out) {
                  e->total_ns / 1e6, e->gpu_ns / 1e6, e->cpu_ns / 1e6,
                  pct(e->gpu_ns, e->total_ns),
                  (unsigned long long)fallback_total(e));
+        if (split_on())
+            line_add(&l, " split_calls=%llu split_ms=%.3f", LLU(e->split_calls), e->split_ns / 1e6);
+        line_add(&l, "\n");
         line_emit(&l, out);
         if (e->gpu_calls) {
             line_add(&l, "AB_REPORT[%d] %s gpu_stages_ms", pid, e->name);
@@ -526,7 +702,9 @@ void ab_prof_report(FILE* out) {
         }
         report_counts(&l, out, pid, e, "fallbacks", &FALLBACKS);
         report_counts(&l, out, pid, e, "staged", &STAGED);
+        report_split(&l, out, prefix, e);
     }
+    if (split_on()) report_split_rows(&l, out, prefix);
 }
 
 // =============================================================================
@@ -581,6 +759,37 @@ void ab_prof_print_gpu_call(const char* routine, int m, int n, int k, uint64_t t
     fputs(line, stderr);
 }
 
+// The GPU part's thread time outside its named stages.
+static uint64_t split_gpu_other(const ab_prof_split_t* s) {
+    return other_ns(s->gpu_wall_ns, s->gpu_stage_ns);
+}
+
+// The caller's time outside its named split stages.
+static uint64_t split_other(uint64_t total_ns, const ab_prof_split_t* s) {
+    uint64_t t = s->init_ns + s->cpu_part_ns + s->join_ns + s->redo_ns + s->sum_ns;
+    return total_ns > t ? total_ns - t : 0;
+}
+
+void ab_prof_print_split_call(const char* routine, int m, int n, int k, uint64_t total_ns,
+                              const ab_prof_split_t* s) {
+    if (!ab_prof_verbose()) return;
+    report_line_t l = {.n = 0};
+    l.buf[0] = '\0';
+    line_add(&l, "AB_PROFILE %s M=%d N=%d K=%d  split row=%d axis=%c g=%d  init=%.3f cpu_part=%.3f "
+                 "join=%.3f redo=%.3f sum=%.3f other=%.3f  total=%.3f ms  gpu_wall=%.3f",
+             routine, m, n, k, s->row, s->axis, s->g, s->init_ns / 1e6, s->cpu_part_ns / 1e6,
+             s->join_ns / 1e6, s->redo_ns / 1e6, s->sum_ns / 1e6, split_other(total_ns, s) / 1e6,
+             total_ns / 1e6, s->gpu_wall_ns / 1e6);
+    for (int st = 0; st < AB_PROF_STAGE_COUNT; st++)
+        line_add(&l, " %s=%.3f", ab_prof_stage_names[st], s->gpu_stage_ns[st] / 1e6);
+    line_add(&l, " other=%.3f  %s", split_gpu_other(s) / 1e6, s->kept ? "kept" : "made again on Accelerate");
+    if (s->staged > AB_PROF_STAGED_NONE && s->staged < AB_PROF_STAGED_COUNT)
+        line_add(&l, "  staged=%s", ab_prof_staged_names[s->staged]);
+    if (s->retries) line_add(&l, "  retries=%d", s->retries);
+    line_add(&l, "\n");
+    fputs(l.buf, stderr);
+}
+
 void ab_prof_print_fallback(const char* routine, int m, int n, int k, const char* why) {
     if (ab_prof_verbose())
         fprintf(stderr, "AB_PROFILE %s M=%d N=%d K=%d  GPU fallback to cblas: %s\n", routine, m, n,
@@ -600,8 +809,8 @@ static void trace_header(int fd, pid_t pid) {
     // The chip and the routing table auto used (dispatch.h): a trace from
     // another machine then says what routed it. A replay routes by its own
     // machine's table.
-    line_add(&l, "# chip=\"%s\" gpu_cores=%d table=%s\n", dc->chip[0] ? dc->chip : "unknown", dc->gpu_cores,
-             dc->table);
+    line_add(&l, "# chip=\"%s\" gpu_cores=%d table=%s%s\n", dc->chip[0] ? dc->chip : "unknown", dc->gpu_cores,
+             dc->table, split_token());
     // The MPI rank and size one launcher exported (Open MPI, else PMI), so a
     // replay can map the files of one run to its ranks; -1 when not under MPI.
     const char *rank = getenv("OMPI_COMM_WORLD_RANK"), *size = getenv("OMPI_COMM_WORLD_SIZE");
@@ -629,6 +838,21 @@ static void trace_header(int fd, pid_t pid) {
                  "#   FNV-1a over the 64-bit words of the referenced elements, column by "
                  "column:\n"
                  "#   from the 64-bit offset basis, h = (h ^ word) * FNV prime per word\n");
+    if (dc->split_on) {             // in a write of its own: the header fills the buffer
+        (void)write(fd, l.buf, l.n);
+        l.n = 0;
+        l.buf[0] = '\0';
+        line_add(&l, "# AB_SPLIT: a split call's path is split (the GPU's part stood) or fallback:<reason> "
+                     "(made again on Accelerate),\n"
+                     "#   then row axis g retries staged, the caller's stages init_ns cpu_part_ns join_ns "
+                     "redo_ns sum_ns other_ns\n"
+                     "#   (sum: t1_ns - t0_ns), and the GPU part's thread:");
+        for (int s = 0; s < AB_PROF_STAGE_COUNT; s++) line_add(&l, " gpu_%s_ns", ab_prof_stage_names[s]);
+        line_add(&l, " gpu_other_ns\n"
+                     "#   (sum: gpu_wall_ns), gpu_wall_ns wait_cpu_ns wait_gpu_ns; a call a row covers "
+                     "without splitting adds\n"
+                     "#   row axis g (0: not cut) and declined=<why> when declined\n");
+    }
     (void)write(fd, l.buf, l.n);
 }
 
@@ -668,14 +892,33 @@ static const char* trans_text(char t, char out[8]) {
     return out;
 }
 
+// A split call's fields (ab_trace_record_split): path, row, the caller's
+// stages, which sum to t1_ns - t0_ns, and the GPU part's thread, whose stages
+// sum to gpu_wall_ns.
+static void trace_split_fields(report_line_t* l, uint64_t elapsed_ns, const ab_prof_split_t* s) {
+    if (s->kept) line_add(l, " path=split");
+    else line_add(l, " path=fallback:%s", fallback_names[s->staged == AB_PROF_STAGED_RANGE
+                                                         ? AB_PROF_FB_RANGE : AB_PROF_FB_GPU_FAILED]);
+    line_add(l, " row=%d axis=%c g=%d retries=%d", s->row, s->axis, s->g, s->retries);
+    if (s->staged > AB_PROF_STAGED_NONE && s->staged < AB_PROF_STAGED_COUNT)
+        line_add(l, " staged=%s", ab_prof_staged_names[s->staged]);
+    line_add(l, " init_ns=%llu cpu_part_ns=%llu join_ns=%llu redo_ns=%llu sum_ns=%llu other_ns=%llu",
+             LLU(s->init_ns), LLU(s->cpu_part_ns), LLU(s->join_ns), LLU(s->redo_ns), LLU(s->sum_ns),
+             LLU(split_other(elapsed_ns, s)));
+    for (int st = 0; st < AB_PROF_STAGE_COUNT; st++)
+        line_add(l, " gpu_%s_ns=%llu", ab_prof_stage_names[st], LLU(s->gpu_stage_ns[st]));
+    line_add(l, " gpu_other_ns=%llu gpu_wall_ns=%llu wait_cpu_ns=%llu wait_gpu_ns=%llu",
+             LLU(split_gpu_other(s)), LLU(s->gpu_wall_ns), LLU(s->wait_cpu_ns), LLU(s->wait_gpu_ns));
+}
+
 // Fields as key=value, in the order of the header's legend. GPU calls add
 // the stages, which sum to t1_ns - t0_ns as in AB_PROFILE (other_ns is the
 // remainder), and split other_ns so that the parts sum to it exactly:
 // rest_ns is what the kernel step's split leaves, and may be a few ns below
 // zero from rounding between the host and GPU clocks.
-void ab_trace_record(const ab_trace_call_t* c, uint64_t t0_ns, uint64_t elapsed_ns,
-                     const uint64_t* stage_ns, ab_prof_fallback_t fallback,
-                     ab_prof_staged_t staged) {
+static void trace_line(const ab_trace_call_t* c, uint64_t t0_ns, uint64_t elapsed_ns,
+                       const uint64_t* stage_ns, ab_prof_fallback_t fallback,
+                       ab_prof_staged_t staged, const ab_prof_split_t* split) {
     static const char* const hash_keys[3] = {"hash_a", "hash_b", "hash_c"};
     bool z = c->routine[0] == 'z';
     char ta[8], tb[8];
@@ -690,7 +933,9 @@ void ab_trace_record(const ab_trace_call_t* c, uint64_t t0_ns, uint64_t elapsed_
     line_add(&l, " beta=%a", c->beta[0]);
     if (z) line_add(&l, ",%a", c->beta[1]);
 
-    if (stage_ns) {
+    if (split && split->split) {
+        trace_split_fields(&l, elapsed_ns, split);
+    } else if (stage_ns) {
         line_add(&l, " path=gpu");
         for (int s = 0; s < AB_PROF_STAGE_COUNT; s++)
             line_add(&l, " %s_ns=%llu", ab_prof_stage_names[s], (unsigned long long)stage_ns[s]);
@@ -709,13 +954,30 @@ void ab_trace_record(const ab_trace_call_t* c, uint64_t t0_ns, uint64_t elapsed_
     } else {
         line_add(&l, " path=cpu");
     }
-    if (staged > AB_PROF_STAGED_NONE && staged < AB_PROF_STAGED_COUNT)
+    if (!(split && split->split) && staged > AB_PROF_STAGED_NONE && staged < AB_PROF_STAGED_COUNT)
         line_add(&l, " staged=%s", ab_prof_staged_names[staged]);
+    if (split && !split->split) {   // a call its row covered without splitting it
+        line_add(&l, " row=%d axis=%c g=%d", split->row, split->axis, split->g);
+        if (split->declined > AB_PROF_SPLIT_DECLINE_NONE && split->declined < AB_PROF_SPLIT_DECLINE_COUNT)
+            line_add(&l, " declined=%s", ab_prof_split_decline_names[split->declined]);
+    }
     for (int h = 0; h < 3; h++)
         if (c->hashed[h])
             line_add(&l, " %s=%016llx", hash_keys[h], (unsigned long long)c->hash[h]);
     line_add(&l, "\n");
     trace_write(&l);
+}
+
+void ab_trace_record(const ab_trace_call_t* c, uint64_t t0_ns, uint64_t elapsed_ns,
+                     const uint64_t* stage_ns, ab_prof_fallback_t fallback,
+                     ab_prof_staged_t staged) {
+    trace_line(c, t0_ns, elapsed_ns, stage_ns, fallback, staged, NULL);
+}
+
+void ab_trace_record_split(const ab_trace_call_t* c, uint64_t t0_ns, uint64_t elapsed_ns,
+                           const uint64_t* stage_ns, ab_prof_fallback_t fallback,
+                           ab_prof_staged_t staged, const ab_prof_split_t* s) {
+    trace_line(c, t0_ns, elapsed_ns, stage_ns, fallback, staged, s);
 }
 
 // =============================================================================
@@ -748,6 +1010,14 @@ void ab_prof_dump_json(const char* path) {
     fprintf(f, "  \"timestamp\": \"%s\",\n", ts);
     fprintf(f, "  \"pid\": %d,\n", (int)getpid());
     fprintf(f, "  \"threshold_ns\": %llu,\n", (unsigned long long)g_threshold_ns);
+    if (split_on()) {
+        fprintf(f, "  \"split_table\": \"");
+        for (const char* p = ab_dispatch_process_config()->split_table; *p; p++) {
+            if (*p == '"' || *p == '\\') fputc('\\', f);
+            fputc((unsigned char)*p < 0x20 ? '?' : *p, f);
+        }
+        fprintf(f, "\",\n");
+    }
     fprintf(f, "  \"routines\": [\n");
 
     int first = 1;
@@ -784,6 +1054,25 @@ void ab_prof_dump_json(const char* path) {
         json_counts(f, e, &FALLBACKS);
         fprintf(f, "},\n      \"staged\": {");
         json_counts(f, e, &STAGED);
+        if (split_on()) {
+            const ab_prof_split_stats_t* x = &e->split;
+            fprintf(f, "},\n      \"split_calls\": %llu, \"split_ns\": %llu,\n      \"split\": {"
+                       "\"calls\": %llu, \"kept\": %llu, \"kept_4m\": %llu, \"range\": %llu, "
+                       "\"gpu_failed\": %llu, \"scales\": %llu, \"alloc\": %llu, \"nonfinite\": %llu, "
+                       "\"fpcr\": %llu, \"retries\": %llu, \"retry_kept\": %llu",
+                    LLU(e->split_calls), LLU(e->split_ns), LLU(x->calls), LLU(x->kept), LLU(x->kept_4m),
+                    LLU(x->range), LLU(x->gpu_failed), LLU(x->scales), LLU(x->alloc), LLU(x->nonfinite),
+                    LLU(x->fpcr), LLU(x->retries), LLU(x->retry_kept));
+            for (int d = 0; d < AB_PROF_SPLIT_DECLINE_COUNT; d++)
+                fprintf(f, ", \"declined_%s\": %llu", ab_prof_split_decline_names[d], LLU(x->declined[d]));
+            fprintf(f, ", \"axis_N\": %llu, \"axis_M\": %llu, \"axis_K\": %llu, \"init_ns\": %llu, "
+                       "\"cpu_ns\": %llu, \"gpu_ns\": %llu, \"wait_cpu_ns\": %llu, \"wait_gpu_ns\": %llu, "
+                       "\"redo_ns\": %llu, \"sum_ns\": %llu, \"wasted_gpu_ns\": %llu, \"gf_cpu\": %.6f, "
+                       "\"gf_gpu\": %.6f",
+                    LLU(x->axis[0]), LLU(x->axis[1]), LLU(x->axis[2]), LLU(x->init_ns), LLU(x->cpu_ns),
+                    LLU(x->gpu_ns), LLU(x->wait_cpu_ns), LLU(x->wait_gpu_ns), LLU(x->redo_ns),
+                    LLU(x->sum_ns), LLU(x->wasted_gpu_ns), x->gf_cpu, x->gf_gpu);
+        }
         fprintf(f,
             "},\n"
             "      \"max_m\": %zu, \"max_n\": %zu, \"max_k\": %zu,\n"
@@ -804,7 +1093,27 @@ void ab_prof_dump_json(const char* path) {
         fprintf(f, "]\n    }");
     }
 
-    fprintf(f, "\n  ]\n}\n");
+    fprintf(f, "\n  ]");
+    if (split_on()) {
+        const ab_dispatch_config_t* dc = ab_dispatch_process_config();
+        fprintf(f, ",\n  \"split_rows\": [");
+        for (int i = 0; i < dc->split_nrows && i < AB_SPLIT_MAX_ROWS; i++) {
+            const ab_split_row_t* row = &dc->split_rows[i];
+            const split_row_stats_t* r = &g_split_rows[i];
+            fprintf(f, "%s\n    {\"i\": %d, \"routine\": \"%cgemm\", \"axis\": \"%c\", \"f\": %g, "
+                       "\"calls\": %llu, \"split\": %llu, \"wall_ns\": %llu, \"first_ns\": %llu, "
+                       "\"cpu_ns\": %llu, \"gpu_ns\": %llu, \"wait_cpu_ns\": %llu, \"wait_gpu_ns\": %llu, "
+                       "\"redo_ns\": %llu, \"sum_ns\": %llu, \"gf\": %.6f, \"gf_cpu\": %.6f, "
+                       "\"gf_gpu\": %.6f, \"kept\": %llu, \"kept_4m\": %llu, \"range\": %llu, "
+                       "\"gpu_failed\": %llu}",
+                    i ? "," : "", i, row->routine, row->axis, row->share, LLU(r->calls), LLU(r->split),
+                    LLU(r->wall_ns), LLU(r->first_ns), LLU(r->cpu_ns), LLU(r->gpu_ns), LLU(r->wait_cpu_ns),
+                    LLU(r->wait_gpu_ns), LLU(r->redo_ns), LLU(r->sum_ns), r->gf, r->gf_cpu, r->gf_gpu,
+                    LLU(r->kept), LLU(r->kept_4m), LLU(r->range), LLU(r->gpu_failed));
+        }
+        fprintf(f, "\n  ]");
+    }
+    fprintf(f, "\n}\n");
     fclose(f);
 }
 

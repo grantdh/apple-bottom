@@ -20,6 +20,7 @@
 //   AB_TRACE=/path/to/trace                 a line per call in /path/to/trace.<pid>
 //   AB_TRACE_HASH=1                         with AB_TRACE: hash the operands read
 //   AB_TEST_FAIL_STAGE=alloc|kernel         test-only: fail GPU allocations or GEMMs
+//                                           (and the other failures below)
 //   AB_HOST_PACK=1                          GPU calls take the host path (gpu_stage.h)
 //   AB_STAGING_MB=n                         the GPU buffer pool keeps at most n MB
 //
@@ -94,6 +95,63 @@ typedef enum {
     AB_PROF_STAGED_COUNT
 } ab_prof_staged_t;
 
+// Why an AB_SPLIT call a row covered was not split (it then takes its own
+// route, as with AB_SPLIT unset), in the order the executor checks.
+typedef enum {
+    AB_PROF_SPLIT_DECLINE_NONE = -1,
+    AB_PROF_SPLIT_DECLINE_NO_DEVICE,   // no Metal context: no device, or a fork()ed child
+    AB_PROF_SPLIT_DECLINE_TOO_LARGE,   // an operand beyond the ABMatrix size limits
+    AB_PROF_SPLIT_DECLINE_HOST_PACK,   // AB_HOST_PACK=1
+    AB_PROF_SPLIT_DECLINE_FPCR,        // the caller's floating-point control is not the default
+    AB_PROF_SPLIT_DECLINE_SCALAR,      // a DGEMM alpha or beta the staged path does not take
+    AB_PROF_SPLIT_DECLINE_SCRATCH,     // no memory for the K axis's partial product
+    AB_PROF_SPLIT_DECLINE_THREAD,      // no thread for the GPU's part
+    AB_PROF_SPLIT_DECLINE_COUNT
+} ab_prof_split_decline_t;
+
+// AB_SPLIT's counts and times for one routine (AB_REPORT's "<routine> split"
+// line). calls = kept + kept_4m + range + gpu_failed + the declined.
+typedef struct {
+    uint64_t calls;                     // calls a row cut: split, or declined
+    uint64_t kept, kept_4m;             // the GPU's part stood (by 4M)
+    uint64_t range, gpu_failed;         // it was made again on Accelerate: the guard; a failure
+    uint64_t scales, alloc, nonfinite, fpcr;   // among gpu_failed: line scales unlike the host's,
+                                               // no buffers, Inf/NaN, the thread's FP control
+    uint64_t retries, retry_kept;       // staged runs repeated after a failed command buffer
+    uint64_t declined[AB_PROF_SPLIT_DECLINE_COUNT];
+    uint64_t axis[3];                   // calls split on N, M, K
+    uint64_t init_ns, cpu_ns, gpu_ns;   // the caller until the tail's thread ran; the head; the
+                                        // tail's thread
+    uint64_t wait_cpu_ns, wait_gpu_ns;  // the head done, waiting for the tail; and the reverse
+    uint64_t redo_ns, sum_ns;           // tails made again on Accelerate; the K axis's sums
+    uint64_t wasted_gpu_ns;             // the threads of tails that did not stand
+    double gf_cpu, gf_gpu;              // GFLOP of the heads and of the tails
+} ab_prof_split_stats_t;
+
+// One BLAS-ABI call a row of the split table covered, as the executor
+// (blas_wrapper.c) records it for the reports.
+typedef struct {
+    int row;                            // the split table's row; -1 if none covered the call
+    char axis;
+    int L, g;                           // g = 0: the row did not cut the call
+    bool split;                         // the executor ran both parts
+    bool kept;                          // ... and the GPU's stood: the call counts as split
+    ab_prof_split_decline_t declined;   // why a cut call was not split
+    ab_prof_staged_t staged;            // the GPU part's staged-path outcome
+    bool scales;                        // ... line scales unlike the host's
+    int retries;
+    bool retry_kept;
+    // The caller's stages; with the call's other_ns they sum to its wall time.
+    // join_ns is the wait for the GPU part and the reading of how it ended
+    // (the scan of a part stopped on NaN or Inf); redo_ns only Accelerate's
+    // remaking of a part that did not stand.
+    uint64_t init_ns, cpu_part_ns, join_ns, redo_ns, sum_ns;
+    // The GPU part's thread: its stages, and with gpu_other its wall time.
+    uint64_t gpu_stage_ns[AB_PROF_STAGE_COUNT], gpu_wall_ns;
+    uint64_t wait_cpu_ns, wait_gpu_ns;
+    double gf_cpu, gf_gpu;
+} ab_prof_split_t;
+
 // Dimension bins (by max(M,N)):
 //   [0] 1-32     [1] 33-128   [2] 129-512   [3] 513-1024
 //   [4] 1025-2048 [5] 2049-4096 [6] 4097-8192 [7] 8193+
@@ -106,6 +164,9 @@ typedef struct {
     uint64_t stage_ns[AB_PROF_STAGE_COUNT]; // GPU calls only; the rest of gpu_ns is "other"
     uint64_t fallbacks[AB_PROF_FB_COUNT];   // counted in cpu_calls
     uint64_t staged[AB_PROF_STAGED_COUNT];  // calls that reached the staged path, by outcome
+    uint64_t split_calls, split_ns;         // AB_SPLIT: calls whose GPU part stood, and their
+                                            // wall time (calls = gpu + cpu + split)
+    ab_prof_split_stats_t split;            // AB_SPLIT: the executor's counts and times
 
     // Dimension histogram — by max(M,N)
     uint64_t dim_histogram[AB_PROF_HISTOGRAM_BINS];
@@ -126,6 +187,20 @@ void ab_prof_record(const char* routine, uint64_t elapsed_ns,
                     size_t m, size_t n, size_t k, int used_gpu,
                     const uint64_t* stage_ns, ab_prof_fallback_t fallback,
                     ab_prof_staged_t staged);
+
+// Record a call a row of the AB_SPLIT table covered (s->row >= 0): its row's
+// and its routine's split counts and times, and, when its GPU part stood
+// (s->kept), the call itself as a split call (ab_prof_record is not called
+// for it). No-op unless AB_PROFILE or AB_REPORT is set.
+void ab_prof_record_split(const char* routine, uint64_t elapsed_ns, size_t m, size_t n, size_t k,
+                          const ab_prof_split_t* s);
+
+// Under AB_PROFILE, on stderr: the line of a call the executor split, with
+// its caller's stages, its GPU part's thread and outcome.
+void ab_prof_print_split_call(const char* routine, int m, int n, int k, uint64_t total_ns,
+                              const ab_prof_split_t* s);
+
+extern const char* const ab_prof_split_decline_names[AB_PROF_SPLIT_DECLINE_COUNT];
 
 // Dump the AB_PROFILE table to an open stream.
 void ab_prof_dump(FILE* out);
@@ -231,11 +306,31 @@ void ab_trace_record(const ab_trace_call_t* call, uint64_t t0_ns, uint64_t elaps
                      const uint64_t* stage_ns, ab_prof_fallback_t fallback,
                      ab_prof_staged_t staged);
 
+// The same for a call a row of the AB_SPLIT table covered: a split call's
+// line (path=split, or fallback:<reason> for a GPU part made again on
+// Accelerate) with s's stages, or, for one the row did not split, the line
+// ab_trace_record writes with the row added.
+void ab_trace_record_split(const ab_trace_call_t* call, uint64_t t0_ns, uint64_t elapsed_ns,
+                           const uint64_t* stage_ns, ab_prof_fallback_t fallback,
+                           ab_prof_staged_t staged, const ab_prof_split_t* s);
+
 // AB_TEST_FAIL_STAGE (test-only): AB_PROF_STAGE_ALLOC makes every
 // ab_matrix_create() fail, AB_PROF_STAGE_KERNEL the command buffer of every
 // ab_dgemm_scaled() and ab_zgemm() (apple_bottom.m), as real failures there
-// would; -1 when unset.
+// would; -1 when unset. The values below go past the stages.
 int  ab_test_fail_stage(void);
+
+enum {
+    AB_PROF_FAIL_KERNEL_ONCE = AB_PROF_STAGE_COUNT,  // kernel_once: the process's first command
+                                                     // buffer fails, no other
+    AB_PROF_FAIL_REDO_4M,        // redo_4m: every staged ZGEMM's 4M run fails
+    AB_PROF_FAIL_SCALES,         // scales: the staged path's line scales read as unlike the host's
+    AB_PROF_FAIL_SPLIT_THREAD,   // split_thread: AB_SPLIT cannot make its thread
+    AB_PROF_FAIL_SPLIT_SCRATCH,  // split_scratch: AB_SPLIT cannot allocate the K axis's product
+    AB_PROF_FAIL_SPLIT_FPCR,     // split_fpcr: AB_SPLIT's thread runs with flush to zero
+    AB_PROF_FAIL_SPLIT_POISON,   // split_poison: AB_SPLIT fills the K axis's product with 1.0 once made
+    AB_PROF_FAIL_NONFINITE,      // nonfinite: every staged run ends as if its epilogue met a NaN
+};
 
 // AB_HOST_PACK=1 (as the other flags: set, not empty, not starting with 0):
 // every GPU-routed BLAS-ABI call takes the host path. AB_STAGING_MB=n: the

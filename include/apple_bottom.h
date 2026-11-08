@@ -376,8 +376,16 @@ void ab_zhemv_blas(char uplo, int N, double _Complex alpha,
 // Returns the dispatch path taken by the most recent ab_*_blas (or dgemm_/zgemm_,
 // dgemv_/zgemv_/zhemv_, ab_dev_*gemv / ab_dev_zhemv) call on this thread: "gpu"
 // only if the GPU computed the result, "cpu" if cblas did (including a fallback
-// after a GPU failure), or "none" before any call. Thread-local.
+// after a GPU failure), "split" if AB_SPLIT made it partly on each and the GPU's
+// part stood, or "none" before any call. Thread-local.
 const char* ab_get_last_dispatch_path(void);
+
+// Where AB_SPLIT's rows come from in this process (read once, with the other
+// routing settings): "off" (AB_SPLIT unset, empty or 0), "builtin:<chip>@<commit>"
+// (the built-in table for this chip, measured on that commit), "file:<path>"
+// (AB_SPLIT_TABLE), "none:uncalibrated-chip" or "none:unknown-chip" (on, but
+// no table: nothing is split).
+const char* ab_split_source(void);
 
 // Zero-copy operands for the BLAS-ABI entry points. A GPU-routed call copies
 // each operand into GPU buffers the library reuses (memcpy speed, ~50-100

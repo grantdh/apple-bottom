@@ -8,6 +8,7 @@
 #include <limits.h>
 #include <math.h>
 #include <dispatch/dispatch.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
@@ -23,6 +24,7 @@
 #include "dispatch.h"
 #include "gpu_stage.h"
 #include "profiling/blas_profiler.h"
+#include "split_slice.h"
 
 // Thread-local record of the path the last BLAS-ABI call on this thread
 // actually took, for bench harnesses and the profiler (prof_end). Only the
@@ -845,12 +847,20 @@ bool ab_range_guard_c(const ab_line_stats_t* sa, const ab_line_stats_t* sb, ab_r
 // The gate of dgemm_blas and zgemm_blas (dispatch.h): Accelerate where the
 // routing says so, and for the BLAS quick return for alpha == 0 (A and B must
 // not be read) and invalid arguments.
-bool ab_internal_blas_routes_gpu(char routine, char transA, char transB, int M, int N, int K,
-                                 int ldA, int ldB, int ldC, bool alpha_nonzero) {
+// The same under a configuration the caller already holds (dgemm_blas and
+// zgemm_blas fetch it once per call).
+static bool blas_routes_gpu(const ab_dispatch_config_t *cfg, char routine, char transA, char transB,
+                            int M, int N, int K, int ldA, int ldB, int ldC, bool alpha_nonzero) {
     bool z = routine == 'z';
     return ab_blas_args_valid(ab_blas_trans(transA, z), ab_blas_trans(transB, z),
                               M, N, K, ldA, ldB, ldC) &&
-           alpha_nonzero && ab_dispatch_route_gpu(routine, transA, transB, M, N, K);
+           alpha_nonzero && ab_dispatch_gpu(cfg, routine, transA, transB, M, N, K);
+}
+
+bool ab_internal_blas_routes_gpu(char routine, char transA, char transB, int M, int N, int K,
+                                 int ldA, int ldB, int ldC, bool alpha_nonzero) {
+    return blas_routes_gpu(ab_dispatch_process_config(), routine, transA, transB, M, N, K, ldA, ldB,
+                           ldC, alpha_nonzero);
 }
 
 // Whole-call CPU paths (Accelerate cblas, column-major). Used for calls the
@@ -889,6 +899,7 @@ typedef struct {
     ab_prof_staged_t staged;                   // whether it kept the staged result, or why not
     bool trace;                                // AB_TRACE: write the call's trace line
     ab_trace_call_t call;                      // its arguments, hashes and kernel split
+    ab_prof_split_t split;                     // AB_SPLIT: the call's row and split (row -1: none)
 } CallProf;
 
 static CallProf *prof_begin(CallProf *p) {
@@ -896,6 +907,7 @@ static CallProf *prof_begin(CallProf *p) {
     memset(p, 0, sizeof *p);
     p->fallback = AB_PROF_FB_NONE;
     p->staged = AB_PROF_STAGED_NONE;
+    p->split.row = -1;
     p->trace = ab_trace_enabled();
     p->t0 = p->mark = ab_prof_now_ticks();
     (void)ab_internal_take_gpu_seconds(NULL); // drop GPU time of earlier native-API calls
@@ -918,17 +930,27 @@ static void prof_kernel(CallProf *p) {
 }
 
 // Records the finished call; under AB_PROFILE also prints the stages of a GPU
-// call, under AB_TRACE writes its trace line.
+// call, under AB_TRACE writes its trace line. A call an AB_SPLIT row covered
+// is also recorded by its row; a split call whose GPU part stood is recorded
+// as a split call only, one whose GPU part was made again on Accelerate as a
+// CPU call with that fallback.
 static void prof_end(CallProf *p, const char *routine, int M, int N, int K) {
     if (!p) return;
     uint64_t ns = ab_prof_ticks_to_ns(ab_prof_now_ticks() - p->t0);
     bool gpu = !strcmp(_ab_last_path, "gpu");
-    ab_prof_record(routine, ns, M > 0 ? (size_t)M : 0, N > 0 ? (size_t)N : 0,
-                   K > 0 ? (size_t)K : 0, gpu, gpu ? p->stage_ns : NULL, p->fallback, p->staged);
-    if (p->trace)
+    const ab_prof_split_t *s = p->split.row >= 0 ? &p->split : NULL;
+    size_t m = M > 0 ? (size_t)M : 0, n = N > 0 ? (size_t)N : 0, k = K > 0 ? (size_t)K : 0;
+    if (!s || !s->kept)
+        ab_prof_record(routine, ns, m, n, k, gpu, gpu ? p->stage_ns : NULL, p->fallback, p->staged);
+    if (s) ab_prof_record_split(routine, ns, m, n, k, s);
+    if (p->trace && s)
+        ab_trace_record_split(&p->call, ab_prof_ticks_to_ns(p->t0), ns, gpu ? p->stage_ns : NULL,
+                              p->fallback, p->staged, s);
+    else if (p->trace)
         ab_trace_record(&p->call, ab_prof_ticks_to_ns(p->t0), ns, gpu ? p->stage_ns : NULL,
                         p->fallback, p->staged);
     if (gpu) ab_prof_print_gpu_call(routine, M, N, K, ns, p->stage_ns, p->staged);
+    if (s && s->split) ab_prof_print_split_call(routine, M, N, K, ns, s);
 }
 
 // A GPU-routed call that has to run on cblas instead. The path record says
@@ -1100,8 +1122,9 @@ bool ab_internal_last_staged(int *in_place) {
 // CPU, so the bits agree only under the CPU's default floating-point
 // control: round to nearest, no flush to zero, no default NaN (FPCR RMode,
 // FZ, DN, and FIZ/AH where implemented, all clear). A caller that changed it
-// keeps the host path, as does AB_HOST_PACK=1.
-static bool staged_path(CallProf *p) {
+// keeps the host path, as does AB_HOST_PACK=1. AB_PROF_STAGED_NONE if this
+// thread may take the staged path, else why not.
+static ab_prof_staged_t staged_why(void) {
     ab_prof_staged_t why = ab_host_pack() ? AB_PROF_STAGED_HOST_PACK : AB_PROF_STAGED_NONE;
 #if defined(__aarch64__)
     uint64_t fpcr;
@@ -1109,9 +1132,19 @@ static bool staged_path(CallProf *p) {
     if (why == AB_PROF_STAGED_NONE && (fpcr & ((3ULL << 22) | (1ULL << 24) | (1ULL << 25) | 3ULL)))
         why = AB_PROF_STAGED_FPCR;
 #endif
+    return why;
+}
+
+static bool staged_path(CallProf *p) {
+    ab_prof_staged_t why = staged_why();
     if (p) p->staged = why;
     return why == AB_PROF_STAGED_NONE;
 }
+
+// Whether this thread's last run_staged() stopped on a failed command buffer
+// (ab_internal_stage_run or _redo_4m), not on line scales unlike the host's:
+// both are AB_PROF_STAGED_GPU_FAILED, but only the first depends on timing.
+static __thread bool t_stage_cb_failed;
 
 static bool staged_kept(ab_prof_staged_t why) {
     return why == AB_PROF_STAGED_KEPT || why == AB_PROF_STAGED_KEPT_4M;
@@ -1201,8 +1234,10 @@ static ab_prof_staged_t staged_refusal(ab_stage_t *s, const ab_stage_gemm_t *g, 
     bool scaled = ra || rb;
     *re = scaled ? sa.e : NULL;
     *ce = scaled ? sb.e : NULL;
+    // AB_TEST_FAIL_STAGE=scales (test-only): as if the GPU's scales differed.
     if (memcmp(sa.e, gpu, (size_t)g->M * sizeof *gpu) ||
-        memcmp(sb.e, gpu + g->M, (size_t)g->N * sizeof *gpu))
+        memcmp(sb.e, gpu + g->M, (size_t)g->N * sizeof *gpu) ||
+        ab_test_fail_stage() == AB_PROF_FAIL_SCALES)
         return AB_PROF_STAGED_GPU_FAILED;
     if (!ab_range_guard(g->K, &sa, &sb, z ? 0 : ilogb(g->alpha[0]), &va, &vb) ||
         (!z && g->c_in && !ab_range_guard_c(&sa, &sb, c, g->alpha[0], g->beta[0], C->ptr, C->ld,
@@ -1234,6 +1269,7 @@ static void stage_copy_in(ab_stage_t *s, const ab_stage_gemm_t *g, ab_stage_oper
 // holds the result, else why not, C as it was.
 static ab_prof_staged_t run_staged(CallProf *p, const ab_stage_gemm_t *g) {
     size_t elem = g->routine == 'z' ? sizeof(double complex) : sizeof(double);
+    t_stage_cb_failed = false;
     ab_stage_t *s = ab_internal_stage_acquire(g);
     prof_stage(p, AB_PROF_STAGE_ALLOC);
     if (!s) return AB_PROF_STAGED_ALLOC;
@@ -1245,7 +1281,9 @@ static ab_prof_staged_t run_staged(CallProf *p, const ab_stage_gemm_t *g) {
 
     bool four_m = false;
     const int *re = NULL, *ce = NULL;
-    ab_prof_staged_t why = stage_result_why(ab_internal_stage_run(s, g));
+    ab_stage_result_t ran = ab_internal_stage_run(s, g);
+    t_stage_cb_failed = ran == AB_STAGE_FAILED;
+    ab_prof_staged_t why = stage_result_why(ran);
     prof_kernel(p);
     if (why == AB_PROF_STAGED_KEPT) why = staged_refusal(s, g, &four_m, &re, &ce);
     prof_stage(p, AB_PROF_STAGE_PACK);
@@ -1258,7 +1296,9 @@ static ab_prof_staged_t run_staged(CallProf *p, const ab_stage_gemm_t *g) {
             in_ms += ms_since(t);
             prof_stage(p, AB_PROF_STAGE_UPLOAD);
         }
-        why = stage_result_why(ab_internal_stage_redo_4m(s, g));
+        ran = ab_internal_stage_redo_4m(s, g);
+        t_stage_cb_failed = ran == AB_STAGE_FAILED;
+        why = stage_result_why(ran);
         prof_kernel(p);
         if (why == AB_PROF_STAGED_KEPT) why = AB_PROF_STAGED_KEPT_4M;
     }
@@ -1301,26 +1341,57 @@ static char op_char(enum CBLAS_TRANSPOSE t) {
     return t == CblasNoTrans ? 'N' : t == CblasConjTrans ? 'C' : 'T';
 }
 
+// A ZGEMM as the staged path runs it, into *g: AB_PROF_STAGED_NONE to run
+// it, or AB_PROF_STAGED_RANGE for one whose host epilogue would read a NaN or
+// Inf in C (the GPU epilogue flags those itself, and that call comes back to
+// the host path's check).
+static ab_prof_staged_t zgemm_stage_begin(ab_stage_gemm_t *g, enum CBLAS_TRANSPOSE ta,
+                                          enum CBLAS_TRANSPOSE tb, int M, int N, int K,
+                                          double complex alpha, const double complex *A, int ldA,
+                                          const double complex *B, int ldB, double complex beta,
+                                          double complex *C, int ldC) {
+    bool beta0 = creal(beta) == 0.0 && cimag(beta) == 0.0;
+    bool beta1 = creal(beta) == 1.0 && cimag(beta) == 0.0;
+    bool gpu_epi = creal(alpha) == 1.0 && cimag(alpha) == 0.0 && (beta0 || beta1);
+    *g = (ab_stage_gemm_t){
+        .routine = 'z', .ta = op_char(ta), .tb = op_char(tb), .M = M, .N = N, .K = K,
+        .x = {stored_matrix(A, ldA, ta, M, K), stored_matrix(B, ldB, tb, K, N), {C, ldC, M, N}},
+        .c_in = gpu_epi && beta1, .split = !gpu_epi,
+        .alpha = {creal(alpha), cimag(alpha)}, .beta = {creal(beta), cimag(beta)},
+    };
+    return !gpu_epi && zgemm_reads_nonfinite_c(beta, C, ldC, M, N) ? AB_PROF_STAGED_RANGE
+                                                                   : AB_PROF_STAGED_NONE;
+}
+
+// A DGEMM as the staged path runs it, into *g: AB_PROF_STAGED_NONE to run it,
+// or AB_PROF_STAGED_SCALAR for an alpha or beta the host path would fold into
+// C's scale, or one it rejects: those are its own to handle.
+static ab_prof_staged_t dgemm_stage_begin(ab_stage_gemm_t *g, enum CBLAS_TRANSPOSE ta,
+                                          enum CBLAS_TRANSPOSE tb, int M, int N, int K,
+                                          double alpha, const double *A, int ldA, const double *B,
+                                          int ldB, double beta, double *C, int ldC) {
+    if (!isfinite(alpha) || !isfinite(beta) || ab_scalar_exp(alpha, AB_SCALAR_WINDOW) ||
+        ab_scalar_exp(beta, AB_SCALAR_WINDOW))
+        return AB_PROF_STAGED_SCALAR;
+    *g = (ab_stage_gemm_t){
+        .routine = 'd', .ta = op_char(ta), .tb = op_char(tb), .M = M, .N = N, .K = K,
+        .x = {stored_matrix(A, ldA, ta, M, K), stored_matrix(B, ldB, tb, K, N), {C, ldC, M, N}},
+        .c_in = beta != 0.0, .alpha = {alpha, 0.0}, .beta = {beta, 0.0},
+    };
+    return AB_PROF_STAGED_NONE;
+}
+
 // The staged path's try at a GPU-routed call: true if it is done (staged_done),
 // false for the host path to make it.
 static bool zgemm_staged(CallProf *p, enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
                          int M, int N, int K, double complex alpha,
                          const double complex *A, int ldA, const double complex *B, int ldB,
                          double complex beta, double complex *C, int ldC) {
-    bool beta0 = creal(beta) == 0.0 && cimag(beta) == 0.0;
-    bool beta1 = creal(beta) == 1.0 && cimag(beta) == 0.0;
-    bool gpu_epi = creal(alpha) == 1.0 && cimag(alpha) == 0.0 && (beta0 || beta1);
-    ab_stage_gemm_t g = {
-        .routine = 'z', .ta = op_char(ta), .tb = op_char(tb), .M = M, .N = N, .K = K,
-        .x = {stored_matrix(A, ldA, ta, M, K), stored_matrix(B, ldB, tb, K, N), {C, ldC, M, N}},
-        .c_in = gpu_epi && beta1, .split = !gpu_epi,
-        .alpha = {creal(alpha), cimag(alpha)}, .beta = {creal(beta), cimag(beta)},
-    };
-    // C as the host epilogue would read it. The GPU epilogue flags a NaN or Inf
-    // itself, and that call comes back to the host path's check.
-    bool c_nonfinite = !gpu_epi && zgemm_reads_nonfinite_c(beta, C, ldC, M, N);
+    ab_stage_gemm_t g;
+    ab_prof_staged_t why = zgemm_stage_begin(&g, ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C,
+                                             ldC);
     prof_stage(p, AB_PROF_STAGE_PACK);
-    ab_prof_staged_t why = c_nonfinite ? AB_PROF_STAGED_RANGE : run_staged(p, &g);
+    if (why == AB_PROF_STAGED_NONE) why = run_staged(p, &g);
     // The guard's verdict on the same statistics is the host path's too.
     if (why == AB_PROF_STAGED_RANGE) {
         note_gpu_fallback(p, "zgemm", M, N, K, AB_PROF_FB_RANGE, AB_RANGE_WHY);
@@ -1332,22 +1403,420 @@ static bool zgemm_staged(CallProf *p, enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSP
 static bool dgemm_staged(CallProf *p, enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
                          int M, int N, int K, double alpha, const double *A, int ldA,
                          const double *B, int ldB, double beta, double *C, int ldC) {
-    // An alpha or beta the host path would fold into C's scale, or one it
-    // rejects, is its own to handle.
-    if (!isfinite(alpha) || !isfinite(beta) || ab_scalar_exp(alpha, AB_SCALAR_WINDOW) ||
-        ab_scalar_exp(beta, AB_SCALAR_WINDOW))
-        return staged_done(p, AB_PROF_STAGED_SCALAR);
-    ab_stage_gemm_t g = {
-        .routine = 'd', .ta = op_char(ta), .tb = op_char(tb), .M = M, .N = N, .K = K,
-        .x = {stored_matrix(A, ldA, ta, M, K), stored_matrix(B, ldB, tb, K, N), {C, ldC, M, N}},
-        .c_in = beta != 0.0, .alpha = {alpha, 0.0}, .beta = {beta, 0.0},
-    };
-    ab_prof_staged_t why = run_staged(p, &g);
+    ab_stage_gemm_t g;
+    ab_prof_staged_t why = dgemm_stage_begin(&g, ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C,
+                                             ldC);
+    if (why != AB_PROF_STAGED_NONE) return staged_done(p, why);
+    why = run_staged(p, &g);
     if (why == AB_PROF_STAGED_RANGE) {      // as for ZGEMM
         note_gpu_fallback(p, "dgemm", M, N, K, AB_PROF_FB_RANGE, AB_RANGE_WHY);
         ab_internal_dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
     }
     return staged_done(p, why);
+}
+
+// =============================================================================
+// AB_SPLIT: one call cut between Accelerate and the GPU (split_slice.h)
+// =============================================================================
+// The calling thread runs the head on Accelerate while a thread made for the
+// call, and joined before it returns, runs the tail on the staged path. A
+// tail the staged path does not keep is made again on Accelerate here, after
+// the join, so that the two Accelerate calls of one split never overlap
+// (Accelerate's bits depend on its thread count). The tail takes classical
+// products: Strassen's bound is normwise only. Nothing outlives the call.
+
+// One part of a call, as cblas takes it.
+typedef struct {
+    char routine;
+    enum CBLAS_TRANSPOSE ta, tb;
+    int M, N, K;
+    double complex alpha, beta;     // a DGEMM's in the real parts
+    const void *A, *B;
+    void *C;
+    int ldA, ldB, ldC;
+} gemm_part_t;
+
+// The part on Accelerate; nothing for an empty one.
+static void part_cblas(const gemm_part_t *q) {
+    if (q->M == 0 || q->N == 0) return;
+    if (q->routine == 'z')
+        ab_internal_zgemm_cpu(q->ta, q->tb, q->M, q->N, q->K, q->alpha, q->A, q->ldA, q->B, q->ldB,
+                              q->beta, q->C, q->ldC);
+    else
+        ab_internal_dgemm_cpu(q->ta, q->tb, q->M, q->N, q->K, creal(q->alpha), q->A, q->ldA, q->B,
+                              q->ldB, creal(q->beta), q->C, q->ldC);
+}
+
+// The part as the staged path takes it (zgemm_stage_begin, dgemm_stage_begin).
+static ab_prof_staged_t part_stage_begin(ab_stage_gemm_t *g, const gemm_part_t *q) {
+    if (q->routine == 'z')
+        return zgemm_stage_begin(g, q->ta, q->tb, q->M, q->N, q->K, q->alpha, q->A, q->ldA, q->B,
+                                 q->ldB, q->beta, q->C, q->ldC);
+    return dgemm_stage_begin(g, q->ta, q->tb, q->M, q->N, q->K, creal(q->alpha), q->A, q->ldA, q->B,
+                             q->ldB, creal(q->beta), q->C, q->ldC);
+}
+
+// Whether a staged call reads a NaN or Inf: in op(A), op(B), or C when its
+// epilogue (GPU or host) reads C. A run ends NONFINITE either on such data,
+// which the host path's guard sends to Accelerate as out of range, or on a
+// value the GPU made; only the first is a data condition.
+static bool stage_reads_nonfinite(const ab_stage_gemm_t *g) {
+    const size_t w = g->routine == 'z' ? 2 : 1;
+    const bool c_read = g->c_in || (g->split && (g->beta[0] != 0.0 || g->beta[1] != 0.0));
+    uint32_t mx = 0;
+    for (int i = 0; i < 2 + c_read; i++) {
+        const ab_stage_matrix_t *x = &g->x[i];
+        for (size_t j = 0; j < (size_t)x->cols; j++) {
+            const double *col = (const double *)x->ptr + w * j * (size_t)x->ld;
+            for (size_t k = 0; k < w * (size_t)x->rows; k++) AB_HIWORD_MAX(ab_abs_hiword(col[k]), mx);
+        }
+    }
+    return mx >= AB_HIWORD_NONFINITE;
+}
+
+// The tail and what became of it, on the caller's stack.
+typedef struct {
+    gemm_part_t tail;
+    ab_stage_gemm_t g;                  // the tail on the staged path (engine 0)
+    int engine, order;                  // as ab_split_forced_t
+    dispatch_semaphore_t head_done;     // order 1: the tail starts once the head is done
+    ab_prof_staged_t why;               // the staged path's outcome, or why it did not run
+    int retries;                        // runs repeated after a failed command buffer
+    bool retry_kept;                    // ... and the repeat stood
+    bool scales;                        // line scales unlike the host's
+    int in_place;                       // operands the staged run used in place
+    uint64_t t0, t1;                    // ticks: the tail's start and end
+    bool prof_on;                       // the call is profiled: so is the tail's staged run
+    CallProf prof;                      // ... its stages, on this thread's GPU time
+} split_job_t;
+
+// AB_TEST_FAIL_STAGE=split_fpcr (test-only): this thread flushes subnormals
+// to zero (FPCR.FZ), as a caller's setting would if the thread inherited it.
+static void split_test_fpcr(void) {
+#if defined(__aarch64__)
+    if (ab_test_fail_stage() != AB_PROF_FAIL_SPLIT_FPCR) return;
+    uint64_t fpcr;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+    fpcr |= 1ULL << 24;
+    __asm__ volatile("msr fpcr, %0" : : "r"(fpcr));
+#endif
+}
+
+// The tail on the staged path, again once if a command buffer failed (a
+// second attempt usually works; the line scales' verdict does not change).
+static void split_run_gpu(split_job_t *j) {
+    split_test_fpcr();
+    j->why = staged_why();              // this thread's own floating-point control
+    if (j->why != AB_PROF_STAGED_NONE) return;
+    CallProf *p = j->prof_on ? prof_begin(&j->prof) : NULL;
+    if (p) p->trace = false;            // the caller writes the call's one line
+    t_last_stage.in_place = 0;
+    j->why = run_staged(p, &j->g);
+    if (j->why == AB_PROF_STAGED_GPU_FAILED && t_stage_cb_failed) {
+        j->retries = 1;
+        j->why = run_staged(p, &j->g);
+        j->retry_kept = staged_kept(j->why);
+    }
+    j->scales = j->why == AB_PROF_STAGED_GPU_FAILED && !t_stage_cb_failed;
+    j->in_place = t_last_stage.in_place;
+}
+
+static void *split_worker(void *arg) {
+    split_job_t *j = arg;
+    if (j->head_done) dispatch_semaphore_wait(j->head_done, DISPATCH_TIME_FOREVER);
+    j->t0 = ab_prof_now_ticks();
+    if (j->engine == 1) part_cblas(&j->tail);
+    else split_run_gpu(j);
+    j->t1 = ab_prof_now_ticks();
+    return NULL;
+}
+
+static __thread ab_split_record_t t_last_split;
+static __thread bool t_last_split_valid;
+
+bool ab_internal_last_split(ab_split_record_t *out) {
+    if (t_last_split_valid && out) *out = t_last_split;
+    return t_last_split_valid;
+}
+
+static ab_split_outcome_t split_declined(ab_split_record_t *rec, ab_prof_split_decline_t why) {
+    rec->declined = why;
+    return rec->outcome = AB_SPLIT_DECLINED;
+}
+
+// A profiled call's split stage: the time since its last mark, into field.
+#define SPLIT_MARK(p, field) do {                                     \
+        if (p) {                                                      \
+            uint64_t now_ = ab_prof_now_ticks();                      \
+            (p)->split.field += ab_prof_ticks_to_ns(now_ - (p)->mark); \
+            (p)->mark = now_;                                         \
+        }                                                             \
+    } while (0)
+
+static double part_gflop(const gemm_part_t *q) {
+    return (q->routine == 'z' ? 8.0 : 2.0) * q->M * (double)q->N * q->K / 1e9;
+}
+
+// The call w cut at g (0 < g <= L) on axis: the head on Accelerate here, the
+// tail on a thread of its own by the staged path (engine 0) or by cblas
+// (engine 1), in the order asked for (split_slice.h). A declined call is not
+// touched. Fills *rec, and for a profiled call (p) the stages of p->split.
+static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis, int g, int order,
+                                    int engine, ab_split_record_t *rec) {
+    *rec = (ab_split_record_t){.outcome = AB_SPLIT_DECLINED, .declined = AB_PROF_SPLIT_DECLINE_NONE,
+                               .staged = AB_PROF_STAGED_NONE, .row = rec->row, .axis = axis, .g = g,
+                               .L = axis == 'N' ? w->N : axis == 'M' ? w->M : w->K};
+    const size_t e = w->routine == 'z' ? sizeof(double complex) : sizeof(double);
+    ab_split_part_t hc, tc;
+    ab_split_parts(axis, g, op_char(w->ta), op_char(w->tb), w->M, w->N, w->K, w->ldA, w->ldB,
+                   w->ldC, &hc, &tc);
+    gemm_part_t head = *w;
+    head.M = hc.M;
+    head.N = hc.N;
+    head.K = hc.K;
+    split_job_t j = {.tail = *w, .engine = engine, .order = order, .why = AB_PROF_STAGED_NONE,
+                     .prof_on = p != NULL};
+    gemm_part_t *tail = &j.tail;
+    tail->M = tc.M;
+    tail->N = tc.N;
+    tail->K = tc.K;
+    tail->A = (const char *)w->A + tc.a * e;
+    tail->B = (const char *)w->B + tc.b * e;
+    tail->C = (char *)w->C + tc.c * e;
+    // The K axis's tail writes its product into P (M x N, ld M, beta 0), which
+    // is made below once the staged path takes the tail; it reads no C.
+    if (tc.into_p) {
+        tail->C = NULL;
+        tail->ldC = w->M;
+        tail->beta = 0.0;
+    }
+
+    // The staged path takes the tail, or the whole call takes its own route.
+    bool run_tail = true;
+    if (engine == 0) {
+        ABStatus st = gpu_ready(w->M, w->N, w->K);
+        if (st != AB_OK)
+            return split_declined(rec, st == AB_ERROR_TOO_LARGE ? AB_PROF_SPLIT_DECLINE_TOO_LARGE
+                                                                : AB_PROF_SPLIT_DECLINE_NO_DEVICE);
+        ab_prof_staged_t why = staged_why();
+        if (why != AB_PROF_STAGED_NONE)
+            return split_declined(rec, why == AB_PROF_STAGED_HOST_PACK ? AB_PROF_SPLIT_DECLINE_HOST_PACK
+                                                                       : AB_PROF_SPLIT_DECLINE_FPCR);
+        why = part_stage_begin(&j.g, tail);
+        if (why == AB_PROF_STAGED_SCALAR) return split_declined(rec, AB_PROF_SPLIT_DECLINE_SCALAR);
+        j.g.classical = true;
+        j.g.c_staged = axis == 'M';
+        // A ZGEMM tail reading NaN or Inf in C goes to Accelerate without a run.
+        if (why == AB_PROF_STAGED_RANGE) {
+            j.why = why;
+            run_tail = false;
+        }
+    }
+    void *P = NULL;
+    if (tc.into_p) {
+        // AB_TEST_FAIL_STAGE=split_scratch (test-only): as if malloc failed.
+        P = ab_test_fail_stage() == AB_PROF_FAIL_SPLIT_SCRATCH ? NULL : malloc((size_t)w->M * w->N * e);
+        if (!P) return split_declined(rec, AB_PROF_SPLIT_DECLINE_SCRATCH);
+        // AB_TEST_FAIL_STAGE=split_poison (test-only): a P that must never reach C.
+        if (ab_test_fail_stage() == AB_PROF_FAIL_SPLIT_POISON)
+            for (size_t i = 0; i < (size_t)w->M * w->N * (e / sizeof(double)); i++) ((double *)P)[i] = 1.0;
+        tail->C = P;
+        j.g.x[AB_STAGE_C].ptr = P;
+    }
+    pthread_t worker = NULL;
+    j.head_done = run_tail && order == 1 ? dispatch_semaphore_create(0) : NULL;
+    // The worker uses this frame until the join: no cancellation of the caller
+    // (pthread_join is a cancellation point) may unwind it before then.
+    int cancel_state = 0;
+    if (run_tail) pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancel_state);
+    // AB_TEST_FAIL_STAGE=split_thread (test-only): as if pthread_create failed.
+    if (run_tail && (ab_test_fail_stage() == AB_PROF_FAIL_SPLIT_THREAD ||
+                     pthread_create(&worker, NULL, split_worker, &j) != 0)) {
+        pthread_setcancelstate(cancel_state, NULL);
+        if (j.head_done) dispatch_release(j.head_done);
+        free(P);
+        return split_declined(rec, AB_PROF_SPLIT_DECLINE_THREAD);
+    }
+
+    SPLIT_MARK(p, init_ns);
+
+    // The head, before or after the tail as asked; the join.
+    bool joined = !run_tail;
+    if (order == 2 && !joined) {
+        pthread_join(worker, NULL);
+        joined = true;
+        SPLIT_MARK(p, join_ns);
+    }
+    part_cblas(&head);
+    SPLIT_MARK(p, cpu_part_ns);
+    uint64_t head_end = p ? p->mark : 0;
+    if (j.head_done) dispatch_semaphore_signal(j.head_done);
+    if (!joined) {
+        pthread_join(worker, NULL);
+        if (p) {
+            uint64_t before = p->split.join_ns;
+            SPLIT_MARK(p, join_ns);
+            p->split.wait_cpu_ns = p->split.join_ns - before;
+        }
+    }
+    if (run_tail) pthread_setcancelstate(cancel_state, NULL);
+    if (j.head_done) dispatch_release(j.head_done);
+    // A tail the GPU epilogue stopped on a NaN or Inf it read is a data
+    // condition, as the host path's guard reports it without AB_SPLIT: range.
+    // The scan's time is the join's (join_ns), not the redo's.
+    if (j.why == AB_PROF_STAGED_NONFINITE && stage_reads_nonfinite(&j.g)) j.why = AB_PROF_STAGED_RANGE;
+    SPLIT_MARK(p, join_ns);
+    if (p && run_tail) {
+        p->split.gpu_wall_ns = ab_prof_ticks_to_ns(j.t1 - j.t0);
+        p->split.wait_gpu_ns = head_end > j.t1 ? ab_prof_ticks_to_ns(head_end - j.t1) : 0;
+        if (j.prof.t0) memcpy(p->split.gpu_stage_ns, j.prof.stage_ns, sizeof j.prof.stage_ns);
+    }
+    if (p) {
+        p->split.gf_cpu = part_gflop(&head);
+        p->split.gf_gpu = part_gflop(tail);
+    }
+
+    // A tail not kept is made again here, on Accelerate: on the K axis into C
+    // with beta 1, P ignored. A kept one on the K axis is added to C in FP64.
+    bool kept = engine == 1 || staged_kept(j.why);
+    if (!kept && P) {
+        tail->C = w->C;
+        tail->ldC = w->ldC;
+        tail->beta = 1.0;
+    }
+    if (!kept) {
+        part_cblas(tail);
+        SPLIT_MARK(p, redo_ns);
+    } else if (P && w->routine == 'z') {
+        const double complex *pz = P;
+        double complex *c = w->C;
+        for (size_t col = 0; col < (size_t)w->N; col++)
+            for (size_t i = 0; i < (size_t)w->M; i++) c[col * w->ldC + i] += pz[col * w->M + i];
+        SPLIT_MARK(p, sum_ns);
+    } else if (P) {
+        const double *pd = P;
+        double *c = w->C;
+        for (size_t col = 0; col < (size_t)w->N; col++)
+            for (size_t i = 0; i < (size_t)w->M; i++) c[col * w->ldC + i] += pd[col * w->M + i];
+        SPLIT_MARK(p, sum_ns);
+    }
+    free(P);
+    rec->staged = engine == 0 ? j.why : AB_PROF_STAGED_NONE;
+    rec->retries = j.retries;
+    rec->retry_kept = j.retry_kept;
+    rec->scales = j.scales;
+    rec->in_place = kept ? j.in_place : 0;
+    rec->outcome = engine == 1                         ? AB_SPLIT_CPU
+                 : j.why == AB_PROF_STAGED_KEPT        ? AB_SPLIT_KEPT
+                 : j.why == AB_PROF_STAGED_KEPT_4M     ? AB_SPLIT_KEPT_4M
+                 : j.why == AB_PROF_STAGED_RANGE       ? AB_SPLIT_RANGE
+                                                       : AB_SPLIT_GPU_FAILED;
+    return rec->outcome;
+}
+
+// Where the call's result came from, for ab_get_last_dispatch_path() and
+// ab_internal_last_staged(): "split" if the GPU's part stood, else "cpu".
+static void split_note_path(const ab_split_record_t *rec) {
+    bool gpu = rec->outcome == AB_SPLIT_KEPT || rec->outcome == AB_SPLIT_KEPT_4M;
+    _ab_last_path = gpu ? "split" : "cpu";
+    t_last_stage.staged = gpu;
+    t_last_stage.in_place = gpu ? rec->in_place : 0;
+}
+
+// The seam: the call cut as f says.
+static int split_seam(const ab_split_forced_t *f, const gemm_part_t *w) {
+    t_last_split_valid = false;
+    t_last_stage.staged = false;
+    if (!f || f->order < 0 || f->order > 2 || f->engine < 0 || f->engine > 1 ||
+        !ab_blas_args_valid(w->ta, w->tb, w->M, w->N, w->K, w->ldA, w->ldB, w->ldC) ||
+        w->alpha == 0.0)
+        return AB_SPLIT_INVALID;
+    if (f->axis != 'N' && f->axis != 'M' && f->axis != 'K') return AB_SPLIT_INVALID;
+    int L = f->axis == 'N' ? w->N : f->axis == 'M' ? w->M : w->K;
+    if (f->g < 0 || f->g > L) return AB_SPLIT_INVALID;
+    ab_split_record_t *rec = &t_last_split;
+    rec->row = -1;
+    if (f->g == 0 || w->M == 0 || w->N == 0 || w->K == 0) {
+        *rec = (ab_split_record_t){.outcome = AB_SPLIT_CPU, .declined = AB_PROF_SPLIT_DECLINE_NONE,
+                                   .staged = AB_PROF_STAGED_NONE, .row = -1, .axis = f->axis, .L = L};
+        part_cblas(w);
+    } else if (split_run(NULL, w, f->axis, f->g, f->order, f->engine, rec) == AB_SPLIT_DECLINED) {
+        part_cblas(w);
+    }
+    t_last_split_valid = true;
+    split_note_path(rec);
+    return rec->outcome;
+}
+
+// AB_SPLIT's step in dgemm_blas and zgemm_blas (dispatch.h): the call cut as
+// the split table's row says. True if it is done; false for its own route,
+// with AB_SPLIT unset's bits: no row, a row that does not cut it (attributed
+// to the row), or a declined call.
+static bool gemm_split(CallProf *p, const ab_dispatch_config_t *cfg, char transA, char transB,
+                       const gemm_part_t *w) {
+    t_last_split_valid = false;
+    if (!ab_blas_args_valid(w->ta, w->tb, w->M, w->N, w->K, w->ldA, w->ldB, w->ldC) ||
+        w->alpha == 0.0)
+        return false;
+    double ar = creal(w->alpha), ai = cimag(w->alpha), br = creal(w->beta), bi = cimag(w->beta);
+    ab_split_plan_t plan;
+    if (!ab_dispatch_split_plan(cfg, w->routine, transA, transB, w->M, w->N,
+                                w->K, ar == 1.0 && ai == 0.0, br == 0.0 && bi == 0.0,
+                                br == 1.0 && bi == 0.0,
+                                isfinite(ar) && isfinite(ai) && isfinite(br) && isfinite(bi), &plan))
+        return false;
+    ab_split_record_t *rec = &t_last_split;
+    t_last_split_valid = true;
+    if (p) {   // the reports attribute the call to its row whatever becomes of it
+        p->split.row = plan.row;
+        p->split.axis = plan.axis;
+        p->split.L = plan.L;
+        p->split.g = plan.g;
+        p->split.declined = AB_PROF_SPLIT_DECLINE_NONE;
+        p->split.staged = AB_PROF_STAGED_NONE;
+    }
+    if (plan.g == 0) {
+        *rec = (ab_split_record_t){.outcome = AB_SPLIT_NOT_CUT, .declined = AB_PROF_SPLIT_DECLINE_NONE,
+                                   .staged = AB_PROF_STAGED_NONE, .row = plan.row, .axis = plan.axis,
+                                   .L = plan.L};
+        return false;
+    }
+    rec->row = plan.row;
+    ab_split_outcome_t o = split_run(p, w, plan.axis, plan.g, 0, 0, rec);
+    if (o == AB_SPLIT_DECLINED) {
+        if (p) p->split.declined = rec->declined;
+        return false;
+    }
+    if (p) {
+        p->split.split = true;
+        p->split.kept = o == AB_SPLIT_KEPT || o == AB_SPLIT_KEPT_4M;
+        p->split.staged = rec->staged;
+        p->split.scales = rec->scales;
+        p->split.retries = rec->retries;
+        p->split.retry_kept = rec->retry_kept;
+        // A tail made again on Accelerate: a CPU call, with its reason.
+        if (!p->split.kept)
+            p->fallback = o == AB_SPLIT_RANGE ? AB_PROF_FB_RANGE : AB_PROF_FB_GPU_FAILED;
+    }
+    split_note_path(rec);
+    return true;
+}
+
+int ab_internal_dgemm_split(const ab_split_forced_t *f, char ta, char tb, int M, int N, int K,
+                            double alpha, const double *A, int ldA, const double *B, int ldB,
+                            double beta, double *C, int ldC) {
+    gemm_part_t w = {'d', ab_blas_trans(ta, false), ab_blas_trans(tb, false), M, N, K, alpha, beta,
+                     A, B, C, ldA, ldB, ldC};
+    return split_seam(f, &w);
+}
+
+int ab_internal_zgemm_split(const ab_split_forced_t *f, char ta, char tb, int M, int N, int K,
+                            double complex alpha, const double complex *A, int ldA,
+                            const double complex *B, int ldB, double complex beta,
+                            double complex *C, int ldC) {
+    gemm_part_t w = {'z', ab_blas_trans(ta, true), ab_blas_trans(tb, true), M, N, K, alpha, beta,
+                     A, B, C, ldA, ldB, ldC};
+    return split_seam(f, &w);
 }
 
 // =============================================================================
@@ -1368,7 +1837,14 @@ static void zgemm_blas(
     enum CBLAS_TRANSPOSE tb = ab_blas_trans(transB, true);
     t_last_stage.staged = false;
 
-    if (!ab_internal_blas_routes_gpu('z', transA, transB, M, N, K, ldA, ldB, ldC, alpha != 0.0)) {
+    // AB_SPLIT (opt-in) comes before the routing table (dispatch.h).
+    const ab_dispatch_config_t *cfg = ab_dispatch_process_config();   // once per call
+    if (cfg->split_on &&
+        gemm_split(p, cfg, transA, transB, &(gemm_part_t){'z', ta, tb, M, N, K, alpha, beta, A, B, C,
+                                                          ldA, ldB, ldC}))
+        return;
+
+    if (!blas_routes_gpu(cfg, 'z', transA, transB, M, N, K, ldA, ldB, ldC, alpha != 0.0)) {
         ab_internal_zgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }
@@ -1506,7 +1982,14 @@ static void dgemm_blas(
     enum CBLAS_TRANSPOSE tb = ab_blas_trans(transB, false);
     t_last_stage.staged = false;
 
-    if (!ab_internal_blas_routes_gpu('d', transA, transB, M, N, K, ldA, ldB, ldC, alpha != 0.0)) {
+    // AB_SPLIT (opt-in) comes before the routing table (dispatch.h).
+    const ab_dispatch_config_t *cfg = ab_dispatch_process_config();   // once per call
+    if (cfg->split_on &&
+        gemm_split(p, cfg, transA, transB, &(gemm_part_t){'d', ta, tb, M, N, K, alpha, beta, A, B, C,
+                                                          ldA, ldB, ldC}))
+        return;
+
+    if (!blas_routes_gpu(cfg, 'd', transA, transB, M, N, K, ldA, ldB, ldC, alpha != 0.0)) {
         ab_internal_dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }

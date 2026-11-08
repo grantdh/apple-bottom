@@ -4,7 +4,7 @@
 
 The registry-based test runners (`test_correctness.c`, `test_chaos.c`,
 `test_device_api.c`, `test_dispatch.c`, `test_trace.c`, `test_blas2.c`, `test_fft.c`,
-`test_strassen.c`) dispatch via a
+`test_strassen.c`, `test_split.c`) dispatch via a
 `TESTS[]` registry array of `{name, fn}` pairs declared just above
 `main()`. To add a test:
 
@@ -45,8 +45,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 221, every test but
-the chaos ones, and `make ci-local` all 239 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 243, every test but
+the chaos ones, and `make ci-local` all 261 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -78,8 +78,8 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     gives its first bits again right after NaN data (which a beta = 0
     call must not read), after larger and smaller shapes, and from 4
     threads at once
-  - `tests/test_dispatch.c` — 13 tests of the BLAS-ABI routing, no GPU,
-    see below
+  - `tests/test_dispatch.c` — 23 tests of the BLAS-ABI routing and the
+    `AB_SPLIT` plan, no GPU, see below
   - `tests/test_range_guard.c` — 7 tests of the exponent-range guards'
     stage 2 against the plain loops it replaced, no GPU, see below
   - `tests/test_blas_abi.c` — 33 suites (1095 cases), see below
@@ -108,6 +108,38 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     classical componentwise bound on both paths, and that ZHERK, a
     one-element ZGEMM batch, DTRSM and `ab_dgesv_mpir` give the same bits
     with `AB_STRASSEN=1` and every size routed as without it
+  - `tests/test_split.c` — 12 tests of `AB_SPLIT`. Through the executor's
+    seam (`ab_internal_dgemm_split`, `ab_internal_zgemm_split`), on the GPU:
+    a call cut at g is, bit for bit, cblas on the head slice and the staged
+    path on the tail slice alone, in every completion order, over every
+    TRANS pair, scalar set and a range of cuts, padded operands untouched;
+    errors against cblas (1e-11) and, for DGEMM with alpha 1 and beta 0,
+    against Dot2 within (3K + 13) u² |A||B|, with cuts at 1 and L − 1, NaN
+    padding, beta = 0 over NaN in C, signed zeros, cancellation and QE's
+    K = 143666 on the K axis; NaN, Inf and scaled lines in the head only or
+    the tail only (a refused tail is the cblas parts, with nothing added on
+    K); repeats after other shapes, on registered and misaligned memory,
+    under background load and from 8 threads at once; registered memory in
+    place except C on the M axis; a caller with flush to zero declined. In
+    child processes through `dgemm_` / `zgemm_`, with a split table covering
+    their calls: `AB_SPLIT` unset, empty and 0 alike with no split field in
+    any report or trace; `AB_MODE=cpu` bitwise cblas with no GPU GEMM; each
+    `AB_TEST_FAIL_STAGE` failure (`alloc`, `kernel`, `kernel_once`,
+    `redo_4m`, `scales`, `split_thread`, `split_scratch`, `split_fpcr`,
+    `nonfinite` for a NaN the GPU made, and `split_poison` for a refused K
+    tail) and
+    `AB_HOST_PACK` with the outcome, retries and bits it calls for (the
+    cblas parts, the GPU's bits, or the whole call's as with `AB_SPLIT`
+    unset); `AB_STRASSEN`, `AB_STAGING_MB=0` and `AB_MIN_GPU_DIM=0` keeping
+    the bits; `VECLIB_MAXIMUM_THREADS` 1, 2 and 8 repeating; `fork()` with
+    `_exit` and `exit`; the reports (counts that add up, a line per row,
+    trace stages that sum exactly, the JSON fields; which stage a piece of
+    work is charged to, such as the NaN scan's time to `join_ns`, is checked
+    by reading `src/blas_wrapper.c`, not by a test); `AB_PRECISION=fast`
+    within 4x the default error; the native, batched, asynchronous and
+    device GEMMs unchanged at shapes the table covers, each returning AB_OK,
+    and `dgemv_` unchanged (it returns no status, and no row covers BLAS-2);
+    no memory growth; and calibrate, replay and bench_split refusing to run
 
 - **Not yet registry-based (one `main`, no ghost guard):**
   - `tests/test_precision.c` — 17 tests (the last compares
@@ -124,7 +156,9 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 
 | Target | What it runs |
 |---|---|
-| `make ci-local` | `make version-check`, `make dispatch-table-check` (the built-in routing tables against `benchmarks/calibration/`), every suite of `make test`, the chaos tests and the V-2 convergence study (the DGEMM error-versus-N study of `docs/vv/VV_REPORT.md`, `tests/verification/test_convergence.c`); writes `build/CI_REPORT.txt` |
+| `make ci-local` | `make version-check`, `make dispatch-table-check` (the built-in routing tables against `benchmarks/calibration/`), `make split-table-check` (the filing rules' self-test, and the built-in split tables against `benchmarks/split/tables/`), every suite of `make test`, the chaos tests and the V-2 convergence study (the DGEMM error-versus-N study of `docs/vv/VV_REPORT.md`, `tests/verification/test_convergence.c`); writes `build/CI_REPORT.txt` |
+| `make split-table` | `scripts/ingest_split.py --regenerate`: rebuilds `src/split_table.h` from the tables filed under `benchmarks/split/tables/` (no GPU) |
+| `make test-split-defects` | `tests/split_defects.py`: plants each defect it lists in a copy of the tree, one at a time, rebuilds, and requires one of the suites named for it to fail; a defect whose edit no longer applies or does not build counts as stale (GPU, about 30 min) |
 | `make test-chaos` | pathological inputs, IEEE edge cases, concurrent threads |
 | `make test-verification` | the V-2 convergence study alone |
 | `make test-rectangular` | `test_rectangular.c`: tall, wide, thin-K and conjugate-transposed shapes up to 18277 × 150 × 18277, componentwise against cblas, then timings (peaks at ~21 GB) |
@@ -132,7 +166,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 | `make test-dd-bound` | `test_dd_fma_bound.cpp`: cuts the shader's `DD` primitives out of `src/apple_bottom.m`, compiles them on the CPU without contraction, and checks `dd_fma` on 5×10⁶ adversarial and cancelling triples against MPFR and the bound of `docs/vv/PRECISION_ENVELOPE.md` §1.2 (`DD_BOUND_N=` to change the count; needs `brew install mpfr`, else SKIP; ~5 s) |
 | `make test-python` | the Python bindings (`tests/python/`) |
 | `make test-replay` | `tests/test_replay.py`: the QE call-mix replay (`benchmarks/replay.c`) on a synthetic 2-rank trace, in every mode, with the trace header's `AB_MIN_GPU_DIM`, a killed and a hung worker, and `benchmarks/replay_summary.py` |
-| `make test-asan`, `make test-ubsan` | the library and `test_correctness` under AddressSanitizer / UndefinedBehaviorSanitizer, in `build/asan`, `build/ubsan`, each run stopped after 30 minutes. On macOS 27.0.1, with Apple clang 17.0.0 or Homebrew clang 19.1.7, the AddressSanitizer runtime hangs in its own initialization, before `main()`, even for an empty program, so `test-asan` first runs an empty program built with it and stops after 30 s if it does not exit; `test-ubsan` runs |
+| `make test-asan`, `make test-ubsan` | the library, `test_correctness` and `test_split` under AddressSanitizer / UndefinedBehaviorSanitizer, in `build/asan`, `build/ubsan`, each run stopped after 30 minutes (`test_split` skips its memory-growth check under ASan, whose zone statistics count the bytes ever allocated). There is no ThreadSanitizer target: with `-fsanitize=thread`, `test_staging`, which has no `AB_SPLIT` code, crashes at start as `test_split` does. On macOS 27.0.1, with Apple clang 17.0.0 or Homebrew clang 19.1.7, the AddressSanitizer runtime hangs in its own initialization, before `main()`, even for an empty program, so `test-asan` first runs an empty program built with it and stops after 30 s if it does not exit; `test-ubsan` runs |
 
 ## BLAS-ABI conformance harness
 
@@ -472,8 +506,9 @@ hold NaN.
 ## Routing unit tests
 
 `tests/test_dispatch.c` tests the routing decision of the BLAS-ABI entry
-points (`src/dispatch.c`, see `dispatch.h`), built from that file alone,
-without the library or a GPU. It checks every built-in table
+points (`src/dispatch.c`, see `dispatch.h`), without a GPU (it links the
+library only for the split executor's Accelerate-only engine, below). It
+checks every built-in table
 (`src/dispatch_table.h`, one per calibrated chip, generated from
 `benchmarks/calibration/<chip>/` by `scripts/ingest_calibration.py`) against
 the `calibrate_summary.csv` it was derived from: every measured shape routes
@@ -487,6 +522,23 @@ It also checks the precedence of `AB_MODE`, `AB_MIN_GPU_DIM` and
 `AB_CROSSOVER_FLOPS[_REAL]` over the table, the row bounds and TRANS
 classes (`'C'` is `'T'`), and the `AB_DISPATCH_TABLE` format: parsing,
 loading, malformed and missing files.
+
+For `AB_SPLIT` it checks the split table's row format and file loading
+(`AB_SPLIT_TABLE`, `benchmarks/split/start_table.txt` and `start_M2-Max-38c.txt`), the plan of a
+call (window edges, exact TRANS, scalar classes, GFLOP and ratio limits,
+the code's K limits, first match, the cut, its clamps and floors, huge
+shapes), that `AB_MODE=cpu` and `AB_MIN_GPU_DIM` come before it and
+`AB_MODE=gpu` and the FLOP overrides after, the choice of split table by
+chip, the slices of each axis, and every built-in split table
+(`src/split_table.h`) against its filed `split_evidence.csv` by the rules
+of `scripts/ingest_split.py`, which it also checks on tables made to break
+each rule. `test_split_slices_cblas` runs the executor with both parts on
+Accelerate (the seam's engine 1, the tail on its own thread) in each
+completion order: C, padding included, must be bitwise the two parts made
+one after the other by cblas on slices the test works out itself (the K
+axis: the head into C, the tail's product added in FP64), A and B
+unchanged, beta = 0 never reading C, and cuts it cannot make refused with C
+untouched.
 
 ## Range guard, stage 2
 

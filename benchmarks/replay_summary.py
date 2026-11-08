@@ -99,8 +99,8 @@ class Source:
         if not files:
             sys.exit(f"replay_summary: no trace.<pid> files in {self.dir}")
         self.ranks = len(files)
-        self.calls = self.gpu_calls = 0
-        self.wall = self.calls_s = self.acc_s = self.gpu_s = 0.0
+        self.calls = self.gpu_calls = self.split_calls = 0
+        self.wall = self.calls_s = self.acc_s = self.gpu_s = self.split_s = 0.0
         self.stage = {k: 0.0 for k in STAGES + SPLIT}
         self.kernels, spans = [], []
         for f in files:
@@ -121,6 +121,10 @@ class Source:
             s = (t1 - t0) / 1e9
             self.calls += 1
             self.calls_s += s
+            if c["path"] == "split":            # AB_SPLIT: both engines; neither column
+                self.split_calls += 1
+                self.split_s += s
+                continue
             if c["path"] != "gpu":
                 self.acc_s += s
                 continue
@@ -192,6 +196,9 @@ def print_group(group, sources):
     for s in sources:
         if s.pw_wall is not None:
             print(f"- {s.label}: pw.x wall {s.pw_wall:.2f} s (results.csv)")
+        if s.split_calls:
+            print(f"- {s.label}: {s.split_calls} AB_SPLIT calls whose GPU part stood, Σ {s.split_s:.2f} s "
+                  f"(in Σ calls s, in neither Σ Accelerate s nor Σ GPU calls s)")
 
     traced = {s.mode: s for s in sources if not s.replay}
     replays = [s for s in sources if s.replay]
