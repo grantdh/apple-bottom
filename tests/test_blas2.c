@@ -117,6 +117,11 @@ static double urand(void) { return (double)(splitmix(g_rng++) >> 11) * 0x1p-52 -
 // Element (i, j) of A as stored, its real part first.
 static double *aelem(const Data *d, int i, int j) { return &d->A[((size_t)j * d->lda + i) * d->w]; }
 
+// Whether ZHEMV leaves A(i, j) unread: the triangle opposite c->op's.
+static bool hemv_unread(const Case *c, int i, int j) {
+    return c->rt == B2_ZHEMV && (c->op == 'U' ? i > j : i < j);
+}
+
 // The case's data: random, with NaN where nothing may be read.
 static void make_data(const Case *c, Data *d) {
     d->w = c->rt == B2_DGEMV ? 1 : 2;
@@ -132,8 +137,7 @@ static void make_data(const Case *c, Data *d) {
     d->y0 = malloc(d->ny * sizeof(double));
     for (int j = 0; j < imax(1, c->n); j++)
         for (int i = 0; i < d->lda; i++) {
-            bool unread = i >= d->rows ||
-                          (c->rt == B2_ZHEMV && (c->op == 'U' ? i > j : i < j));
+            bool unread = i >= d->rows || hemv_unread(c, i, j);
             for (int k = 0; k < d->w; k++)
                 aelem(d, i, j)[k] = unread || (c->rt == B2_ZHEMV && i == j && k == 1) ? NAN : urand();
         }
@@ -602,13 +606,33 @@ static void test_nonfinite_propagation(void) {
 // The kinds from RG_IMAG_TINY on change one part of complex data, and do not run for DGEMV.
 typedef enum { RG_HUGE_ELEM, RG_ALL_TINY, RG_NEAR_FLT_MAX, RG_SCALED_UP, RG_X_HUGE, RG_X_TINY,
                RG_X_WIDE, RG_ZEROS, RG_SUBNORMALS, RG_TINY_ROWS, RG_FLT_EDGE, RG_FLT_OVERFLOW,
-               RG_IMAG_TINY, RG_REAL_TINY, RG_IMAG_SMALL, RG_IMAG_ZERO, RG_COUNT } RangeKind;
+               RG_LOSSY_ONE, RG_IMAG_TINY, RG_REAL_TINY, RG_IMAG_SMALL, RG_IMAG_ZERO, RG_IMAG_ONE,
+               RG_COUNT } RangeKind;
 // Where each must run (RG_TINY_ROWS: the guard may keep it on the GPU or not).
 static const Expect RG_WANT[] = {
     EXPECT_CPU, EXPECT_CPU, EXPECT_CPU, EXPECT_GPU, EXPECT_GPU, EXPECT_GPU,
     EXPECT_GPU, EXPECT_GPU, EXPECT_GPU, EXPECT_EITHER, EXPECT_GPU, EXPECT_CPU,
-    EXPECT_CPU, EXPECT_CPU, EXPECT_GPU, EXPECT_GPU,
+    EXPECT_CPU, EXPECT_CPU, EXPECT_CPU, EXPECT_GPU, EXPECT_GPU, EXPECT_CPU,
 };
+_Static_assert(sizeof RG_WANT / sizeof *RG_WANT == RG_COUNT, "one route per kind");
+
+// Zeroes the stored rest of row and column q, then sets A(p, q) = ar + i ai and
+// x_p = xr, so output q's only product is A(p, q) x_p, added in lane 31, which
+// crosses every stage of the kernels' shuffle trees (63 = 32 + 31 puts ZHEMV's
+// on the column path, through the scratch).
+static void isolate(const Case *c, Data *d, double ar, double ai, double xr) {
+    const int p = c->op == 'L' ? 63 : 31, q = c->op == 'U' ? 63 : 31;
+    for (int j = 0; j < c->n; j++)
+        for (int i = 0; i < d->rows; i++)
+            if ((i == q || j == q) && !hemv_unread(c, i, j)) memset(aelem(d, i, j), 0, d->w * sizeof(double));
+    double *a = aelem(d, p, q), *x = &d->x[b2_vidx(d->xlen, c->incx, p) * d->w];
+    a[0] = ar;
+    x[0] = xr;
+    if (d->w == 2) {
+        a[1] = ai;
+        x[1] = 0;
+    }
+}
 
 // Multiplies every number in v (NaN stays NaN) by s.
 static void scale_all(double *v, size_t n, double s) {
@@ -665,6 +689,12 @@ static void test_range_guard(void) {
             case RG_FLT_OVERFLOW:   // or the least that does (hi Inf); x_9 small keeps pmax in range
                 aelem(&d, 9, 9)[0] = rg == RG_FLT_EDGE ? 0x1.fffffefffffffp+127 : 0x1.ffffffp+127;
                 for (int k = 0; k < d.w; k++) d.x[b2_vidx(d.xlen, c.incx, 9) * d.w + k] = 0x1.8p-71;
+                break;
+            case RG_LOSSY_ONE:   // 2^30 x 2^-85: in range, but lossy with no larger product (lmax)
+                isolate(&c, &d, 0x1p30, 0, 0x1p-85);
+                break;
+            case RG_IMAG_ONE:    // 1 + 2^-100 i times a real x_p: only the imaginary part is out of range
+                isolate(&c, &d, 1, 0x1p-100, 0.75);
                 break;
             }
             check(&c, &d, RG_WANT[rg], -1, NULL);

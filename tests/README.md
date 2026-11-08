@@ -85,7 +85,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
   - `tests/test_blas_abi.c` — 33 suites (1095 cases), see below
   - `tests/test_trace.c` — 7 tests of `AB_TRACE`, `AB_TEST_FAIL_STAGE`
     and the solvers' `AB_PROFILE` fallback lines, see below
-  - `tests/test_blas2.c` — 19 tests (973 cases) of DGEMV, ZGEMV and
+  - `tests/test_blas2.c` — 19 tests (983 cases) of DGEMV, ZGEMV and
     ZHEMV, see below
   - `tests/test_fft.c` — 14 tests of the double-float FFT, see below
   - `tests/test_strassen.c` — 11 tests of the opt-in Strassen-Winograd
@@ -443,7 +443,13 @@ hold NaN.
   stay on the GPU and within tol; with its x element 1.5 × 2⁻⁷¹, so that
   the exponents pass, an element just under what FP32 rounds to 2¹²⁸ stays
   on the GPU, and the least that rounds to it (hi = Inf) runs on
-  Accelerate;
+  Accelerate; for complex data, imaginary or real parts 2⁻¹⁰⁰ of the
+  others run on Accelerate, and imaginary parts 2⁻³⁰ of the real parts, or
+  zero, stay on the GPU; one output whose only product is added in lane 31,
+  so that the guard sees it only through the kernels' shuffle trees and
+  ZHEMV's threadgroup scratch, runs on Accelerate when that product is
+  2³⁰ × 2⁻⁸⁵ (in range, but lossy with no larger product) or its imaginary
+  part is 2⁻¹⁰⁰ of its real part;
 - m or n = 0 and alpha = 0, with A and x all NaN, give Accelerate's result
   bitwise;
 - determinism (two device-API calls and a BLAS-ABI call give the same
