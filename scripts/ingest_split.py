@@ -513,19 +513,23 @@ def self_test():
               ("pw.x A/B 8x1, pooled", "bench_split only: well-scaled synthetic data, pooled"),
               "the square also with pw.x": ("pw.x A/B 8x1, pooled", "pw.x A/B 8x1 and bench_split, pooled")}
     wrong = 0
-    # the row grammar of dispatch.c's ab_split_parse_row(): signed exponents, no '-' value, no hex
-    r = parse_row("zgemm N N N gf=1e-3 mn=2.5e-1:+4E+2 f=5e-1")
-    if (r["gf"], r["mn"], r["f"]) != (1e-3, (0.25, 400.0), 0.5):
-        wrong += 1
-        print(f"ingest_split self-test: signed exponents read as {r}")
-    # 0 and DBL_MIN, but no subnormal value or nonzero digits that underflow to 0 (strtod_l's ERANGE)
-    r = parse_row("zgemm N N N gf=0e-400 mn=2.2250738585072014e-308: f=0")
-    if (r["gf"], r["mn"]) != (0.0, (sys.float_info.min, 0.0)):
-        wrong += 1
-        print(f"ingest_split self-test: 0e-400 and DBL_MIN read as {r}")
+    # the row grammar of dispatch.c's ab_split_parse_row() (tests/test_dispatch.c has the same cases):
+    # signed exponents; 0 and DBL_MIN, but no subnormal value or nonzero digits that underflow to 0
+    # (strtod_l's ERANGE); range ends and lines of any length
+    good = [("zgemm N N N gf=1e-3 mn=2.5e-1:+4E+2 f=5e-1", {"gf": 1e-3, "mn": (0.25, 400.0), "f": 0.5}),
+            ("zgemm N N N gf=0e-400 mn=2.2250738585072014e-308: f=0", {"gf": 0.0, "mn": (sys.float_info.min, 0.0)}),
+            ("zgemm N N N m=" + "0" * 36 + "8192: mn=" + "0" * 70 + ".5: f=0.5", {"m": (8192, 0), "mn": (0.5, 0.0)}),
+            ("zgemm C N K" + " " * 682 + "f=0.5", {"axis": "K", "f": 0.5})]
+    for line, want in good:
+        r = parse_row(line)
+        if any(r[k] != v for k, v in want.items()):
+            wrong += 1
+            print(f"ingest_split self-test: '{line[:60]}' read as {r}")
+    # no '-' value, no hex, no tiny value, and m, n and k in ASCII digits only
     for bad in ("zgemm N N N f=-0", "zgemm N N N f=0x1p-1", "zgemm N N N f=nan", "zgemm N N N gf=1e999 f=0.5",
                 "zgemm N N N gf=1e-310 f=0.5", "zgemm N N N mn=1e-400: f=0.5",
-                "zgemm N N N gf=2.2250738585072e-308 f=0.5"):
+                "zgemm N N N gf=2.2250738585072e-308 f=0.5", "zgemm N N N m=+8192: f=0.5",
+                "zgemm N N N m=-0: f=0.5", "zgemm N N N n=:+5 f=0.5", "zgemm N N N k=\v8192: f=0.5"):
         try:
             parse_row(bad)
             wrong += 1

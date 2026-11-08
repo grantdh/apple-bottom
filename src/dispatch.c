@@ -327,23 +327,25 @@ bool ab_dispatch_split_plan(const ab_dispatch_config_t *c, char routine, char ta
     return false;
 }
 
-// Copies the part of s before its ':' into buf (len bytes); NULL if there is
-// no colon or it does not fit, else the text after the colon.
-static const char *split_colon(const char *s, char *buf, size_t len) {
-    const char *colon = strchr(s, ':');
-    if (!colon || (size_t)(colon - s) >= len) return NULL;
-    memcpy(buf, s, (size_t)(colon - s));
-    buf[colon - s] = '\0';
+// The text after s's ':', which is cut to end s; NULL if there is none. s is
+// the row's own copy (ab_split_parse_row), of any length.
+static char *cut_colon(char *s) {
+    char *colon = strchr(s, ':');
+    if (!colon) return NULL;
+    *colon = '\0';
     return colon + 1;
 }
 
-// "lo:hi", "lo:" or ":hi" (the colon is required), ints >= 0; hi 0 or absent
-// is no limit.
-static bool parse_range(const char *s, int *lo, int *hi) {
-    char buf[32];
-    const char *rest = split_colon(s, buf, sizeof buf);
+// "lo:hi", "lo:" or ":hi" (the colon is required) in ASCII digits: parse_min(),
+// which the routing table's rows share, alone would take a sign or a leading
+// space. hi 0 or absent is no limit.
+static bool parse_range(char *s, int *lo, int *hi) {
+    static const char DIGITS[] = "0123456789";
+    const char *rest = cut_colon(s);
     *lo = *hi = 0;
-    if (!rest || (buf[0] && !parse_min(buf, lo)) || (*rest && !parse_min(rest, hi))) return false;
+    if (!rest || strspn(s, DIGITS) != strlen(s) || strspn(rest, DIGITS) != strlen(rest) ||
+        (*s && !parse_min(s, lo)) || (*rest && !parse_min(rest, hi)))
+        return false;
     return *hi == 0 || *hi >= *lo;
 }
 
@@ -366,22 +368,20 @@ static bool parse_double(const char *s, double *out) {
     return true;
 }
 
-static bool parse_drange(const char *s, double *lo, double *hi) {
-    char buf[64];
-    const char *rest = split_colon(s, buf, sizeof buf);
+static bool parse_drange(char *s, double *lo, double *hi) {
+    const char *rest = cut_colon(s);
     *lo = *hi = 0;
-    if (!rest || (buf[0] && !parse_double(buf, lo)) || (*rest && !parse_double(rest, hi)))
-        return false;
+    if (!rest || (*s && !parse_double(s, lo)) || (*rest && !parse_double(rest, hi))) return false;
     return *hi == 0 || *hi >= *lo;
 }
 
-int ab_split_parse_row(const char *line, ab_split_row_t *row) {
+// The fields of a split row in buf, the line before its comment (changed in
+// place): as ab_split_parse_row().
+static int parse_split_fields(char *buf, ab_split_row_t *row) {
     static const char *const KEYS[] = {"m", "n", "k", "mn", "ratio", "gf", "scalars", "f"};
     enum { NKEYS = sizeof KEYS / sizeof KEYS[0], KEY_F = NKEYS - 1 };
-    char buf[512], *tok[4 + NKEYS], *save = NULL;
+    char *tok[4 + NKEYS], *save = NULL;
     int n = 0;
-    snprintf(buf, sizeof buf, "%s", line);
-    buf[strcspn(buf, "#\r\n")] = '\0';
     for (char *t = strtok_r(buf, " \t", &save); t; t = strtok_r(NULL, " \t", &save)) {
         if (n == 4 + NKEYS) return -1;
         tok[n++] = t;
@@ -405,7 +405,7 @@ int ab_split_parse_row(const char *line, ab_split_row_t *row) {
         char *eq = strchr(tok[i], '=');
         if (!eq || eq == tok[i]) return -1;
         *eq = '\0';
-        const char *v = eq + 1;
+        char *v = eq + 1;
         int key = -1;
         for (int k = 0; k < NKEYS; k++)
             if (!strcmp(tok[i], KEYS[k])) key = k;
@@ -429,6 +429,17 @@ int ab_split_parse_row(const char *line, ab_split_row_t *row) {
     return 1;
 }
 
+int ab_split_parse_row(const char *line, ab_split_row_t *row) {
+    size_t n = strcspn(line, "#\r\n");                   // the row, whatever its length
+    char *buf = malloc(n + 1);
+    if (!buf) return -1;
+    memcpy(buf, line, n);
+    buf[n] = '\0';
+    int got = parse_split_fields(buf, row);
+    free(buf);
+    return got;
+}
+
 bool ab_split_load_table(ab_dispatch_config_t *c, const char *path, char *err, size_t err_len) {
     FILE *f = fopen(path, "r");
     if (!f) {
@@ -436,22 +447,20 @@ bool ab_split_load_table(ab_dispatch_config_t *c, const char *path, char *err, s
         return false;
     }
     ab_split_row_t rows[AB_SPLIT_MAX_ROWS];
-    char line[512], chip[AB_DISPATCH_CHIP_LEN] = "", key[32], value[AB_DISPATCH_CHIP_LEN];
+    char *line = NULL, chip[AB_DISPATCH_CHIP_LEN] = "", key[32], value[AB_DISPATCH_CHIP_LEN];
+    size_t cap = 0;
+    ssize_t len;
     int nrows = 0, lineno = 0, cores = 0;
     const char *why = NULL;
-    while (!why && fgets(line, sizeof line, f)) {
+    while (!why && (len = getline(&line, &cap, f)) >= 0) {   // lines of any length
         lineno++;
-        // A line longer than the buffer is allowed only as a comment.
-        bool whole = strchr(line, '\n') || feof(f);
-        bool comment = line[strspn(line, " \t")] == '#';
-        for (int ch = 0; !whole && ch != '\n' && ch != EOF; ) ch = fgetc(f);
-        if (comment && ab_dispatch_parse_header(line, key, sizeof key, value, sizeof value)) {
+        if (ab_dispatch_parse_header(line, key, sizeof key, value, sizeof value)) {
             if (!strcmp(key, "chip")) snprintf(chip, sizeof chip, "%s", value);
             else if (!strcmp(key, "gpu_cores")) cores = atoi(value) > 0 ? atoi(value) : 0;
             continue;
         }
         ab_split_row_t r;
-        int got = whole || comment ? ab_split_parse_row(line, &r) : -1;
+        int got = ab_split_parse_row(line, &r);
         if (got < 0)
             why = "expected '<dgemm|zgemm> <N|T|C> <N|T|C> <N|M|K> [m=lo:hi] [n=lo:hi] [k=lo:hi] "
                   "[mn=lo:hi] [ratio=r] [gf=g] [scalars=u|z|a] f=<share>'";
@@ -461,6 +470,7 @@ bool ab_split_load_table(ab_dispatch_config_t *c, const char *path, char *err, s
             rows[nrows++] = r;
     }
     if (!why && ferror(f)) why = "read error";
+    free(line);
     fclose(f);
     if (why) {
         snprintf(err, err_len, "line %d: %s", lineno, why);

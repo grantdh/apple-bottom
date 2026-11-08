@@ -754,6 +754,9 @@ static void test_split_parse_row(void) {
         "zgemm N N N k=3000000000: f=0.5", "zgemm N Q N f=0.5", "zgemm N N NK f=0.5",
         "zgemm N N N mn=9:1 f=0.5", "zgemm N N N gf=-1 f=0.5", "zgemm,N,N,N,f=0.5",
         "zgemm N N N m=1: m=2: n=1: k=1: mn=1: ratio=2 gf=1 scalars=u f=0.5 x=1",
+        // m, n and k in ASCII digits only, as scripts/ingest_split.py reads them
+        "zgemm N N N m=+8192: f=0.5", "zgemm N N N m=-0: f=0.5", "zgemm N N N n=:+5 f=0.5",
+        "zgemm N N N k=\v8192: f=0.5",
     };
     begin();
     ab_split_row_t r;
@@ -992,6 +995,8 @@ static void test_split_load_table(void) {
            "more than %d rows must fail: %s", AB_SPLIT_MAX_ROWS, err);
     unlink(path);
 
+    // Lines of any length (scripts/ingest_split.py has no limit either): a
+    // comment of 698 bytes, then a row padded to as many.
     char longline[700], doc[800];
     memset(longline, 'x', sizeof longline - 2);
     longline[0] = '#';
@@ -1000,11 +1005,14 @@ static void test_split_load_table(void) {
     snprintf(doc, sizeof doc, "%szgemm C N K f=0.5\n", longline);
     expect(write_temp(doc, path, sizeof path), "mkstemp");
     expect(ab_split_load_table(&c, path, err, sizeof err) && c.split_nrows == 1 && !c.split_table_chip[0] &&
-           !c.split_table_gpu_cores, "an over-long comment is skipped, no identity keys clear the chip: %s", err);
+           !c.split_table_gpu_cores, "a long comment is skipped, no identity keys clear the chip: %s", err);
     unlink(path);
-    longline[0] = 'z';
+    memset(longline, ' ', sizeof longline - 2);
+    memcpy(longline, "zgemm C N K", strlen("zgemm C N K"));
+    memcpy(longline + sizeof longline - 2 - strlen("f=0.5"), "f=0.5", strlen("f=0.5"));
     expect(write_temp(longline, path, sizeof path), "mkstemp");
-    expect(!ab_split_load_table(&c, path, err, sizeof err), "an over-long row must fail");
+    expect(ab_split_load_table(&c, path, err, sizeof err) && c.split_nrows == 1 && c.split_rows[0].axis == 'K' &&
+           c.split_rows[0].share == 0.5, "a row of 698 bytes must load: %s", err);
     unlink(path);
 
     expect(!ab_split_load_table(&c, "/nonexistent/split_table.txt", err, sizeof err), "a missing file must fail");
@@ -1045,6 +1053,10 @@ static void test_split_load_table(void) {
                                        "zgemm N N N gf=2.2250738585072e-308 f=0.5"};
     for (size_t i = 0; i < TEST_REGISTRY_SIZE(TINY); i++)
         expect(ab_split_parse_row(TINY[i], &r) == -1, "'%s' must be malformed", TINY[i]);
+    // Range ends of any length (40 and 70 characters here).
+    char wide[256];
+    snprintf(wide, sizeof wide, "zgemm N N N m=%0*d: mn=%0*d.5: f=0.5", 40, 8192, 70, 0);
+    expect(ab_split_parse_row(wide, &r) == 1 && r.min_m == 8192 && r.min_mn == 0.5, "'%s' must parse", wide);
     finish();
 }
 

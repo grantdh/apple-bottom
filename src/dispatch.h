@@ -64,6 +64,9 @@
 // Split table format, '#' starts a comment:
 //   <dgemm|zgemm> <ta> <tb> <axis> [m=lo:hi] [n=lo:hi] [k=lo:hi] [mn=lo:hi]
 //                 [ratio=r] [gf=g] [scalars=u|z|a] f=<share>
+// Fields are separated by spaces or tabs, and a line may be of any length.
+// m, n and k are ASCII digits; the other values ASCII numbers (digits, a
+// point, an exponent, no sign but '+'), finite, and 0 or at least DBL_MIN.
 // TRANS is exact ('N', 'T' or 'C', case-folded; a DGEMM 'C' is 'T'); axis
 // 'N' cuts C's columns, 'M' its rows, 'K' the sum. Ranges are inclusive and
 // either end may be left out (hi 0 or absent: no limit); mn bounds M*N,
