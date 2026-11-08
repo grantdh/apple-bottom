@@ -508,6 +508,10 @@ def self_test():
         ("a surrogate", head(), pw.replace("pw.x,A", "pw.x,A\udced\udca0\udc80") + sq, "not UTF-8"),
         ("a Latin-1 byte in the table", head().replace("# date: x", "# date: x\udce9"), pw + sq, "not UTF-8"),
     ]
+    # generate()'s evidence labels for the rows of a filed case
+    labels = {"pw.x for the QE row, bench_split for the square":
+              ("pw.x A/B 8x1, pooled", "bench_split only: well-scaled synthetic data, pooled"),
+              "the square also with pw.x": ("pw.x A/B 8x1, pooled", "pw.x A/B 8x1 and bench_split, pooled")}
     wrong = 0
     # the row grammar of dispatch.c's ab_split_parse_row(): signed exponents, no '-' value, no hex
     r = parse_row("zgemm N N N gf=1e-3 mn=2.5e-1:+4E+2 f=5e-1")
@@ -545,12 +549,12 @@ def self_test():
                 wrong += 1
                 print(f"ingest_split self-test: {what}: {'filed' if why is None else 'refused: ' + why}"
                       f" (expected {'filing' if reason is None else 'refusal: ' + reason})")
-            elif why is None and what.startswith("pw.x for"):
+            elif why is None and what in labels:
                 text = generate([t])
-                for label in ("pw.x A/B 8x1, pooled", "bench_split only: well-scaled synthetic data, pooled"):
+                for label in labels[what]:
                     if label not in text:
                         wrong += 1
-                        print(f"ingest_split self-test: generate() does not label a row '{label}'")
+                        print(f"ingest_split self-test: {what}: generate() does not label a row '{label}'")
     return wrong
 
 

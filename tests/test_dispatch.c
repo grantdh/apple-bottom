@@ -1414,14 +1414,20 @@ static void test_split_builtin_matches_evidence(void) {
     expect(w && strstr(w, "row 1: no pw.x evidence"), "ratio=300 on bench_split alone: %s", w ? w : "a pass");
     c.split_rows[1].ratio = 2;
     unlink(path);
-    snprintf(doc, sizeof doc, "%s%s"
-             "1,pw.x,A,8x1,abc1234,0.6,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n"
-             "1,pw.x,B,8x1,abc1234,0.6,6,70,80,1.14,1.08,1.20,100,99,0,1,0\n", H,
+    static const char *const PW1 = "1,pw.x,A,8x1,abc1234,0.6,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n"
+                                   "1,pw.x,B,8x1,abc1234,0.6,6,70,80,1.14,1.08,1.20,100,99,0,1,0\n";
+    snprintf(doc, sizeof doc, "%s%s%s", H,
              "0,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n"
-             "0,pw.x,B,8x1,abc1234,0.45,6,70,80,1.14,1.08,1.20,100,99,0,1,0\n");
+             "0,pw.x,B,8x1,abc1234,0.45,6,70,80,1.14,1.08,1.20,100,99,0,1,0\n", PW1);
     expect(write_temp(doc, path, sizeof path), "mkstemp");
     w = split_evidence_why(c.split_rows, 2, "abc1234", path, why, sizeof why);
     expect(w && strstr(w, "row 1: no bench_split evidence"), "a square on pw.x alone: %s", w ? w : "a pass");
+    unlink(path);
+    // A square with pw.x evidence as well as bench_split's passes.
+    snprintf(doc, sizeof doc, "%s%s%s", H, GOOD, PW1);
+    expect(write_temp(doc, path, sizeof path), "mkstemp");
+    expect(!split_evidence_why(c.split_rows, 2, "abc1234", path, why, sizeof why),
+           "a square with pw.x and bench_split: %s", why);
     unlink(path);
     // A table without rows needs no evidence.
     expect(write_temp(H, path, sizeof path), "mkstemp");
