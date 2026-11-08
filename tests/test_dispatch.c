@@ -29,6 +29,7 @@
 #include <Accelerate/Accelerate.h>
 #include <complex.h>
 #include <errno.h>
+#include <float.h>
 #include <limits.h>
 #include <locale.h>
 #include <math.h>
@@ -1036,6 +1037,14 @@ static void test_split_load_table(void) {
            "hex and negative shares must be malformed");
     expect(ab_split_parse_row("zgemm N N N gf=1e-3 mn=2.5e-1:+4E+2 f=5e-1", &r) == 1 && r.min_gf == 1e-3 &&
            r.min_mn == 0.25 && r.max_mn == 400 && r.share == 0.5, "signed exponents must parse");
+    // 0 and DBL_MIN parse; a subnormal value, or nonzero digits that underflow
+    // to 0, do not (strtod_l's ERANGE; scripts/ingest_split.py refuses them too).
+    expect(ab_split_parse_row("zgemm N N N gf=0e-400 mn=2.2250738585072014e-308: f=0", &r) == 1 &&
+           r.min_gf == 0 && r.min_mn == DBL_MIN && !r.max_mn, "0e-400 and DBL_MIN must parse");
+    static const char *const TINY[] = {"zgemm N N N gf=1e-310 f=0.5", "zgemm N N N mn=1e-400: f=0.5",
+                                       "zgemm N N N gf=2.2250738585072e-308 f=0.5"};
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(TINY); i++)
+        expect(ab_split_parse_row(TINY[i], &r) == -1, "'%s' must be malformed", TINY[i]);
     finish();
 }
 

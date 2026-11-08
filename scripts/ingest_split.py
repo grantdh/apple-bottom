@@ -83,7 +83,7 @@ DIGITS = re.compile(r"[0-9]+", re.ASCII)
 # A number in a split row or the evidence: ASCII digits, an optional point, an optional exponent with
 # its sign, and an optional leading '+'; finite. dispatch.c's parse_double() takes the same (strtod_l
 # in the C locale over the characters 0-9 + - . e E, no leading '-') and tests/test_dispatch.c's
-# checker the same characters; table values must also not be negative (parse_number).
+# checker the same characters; table values must also not be negative or subnormal (parse_number).
 NUMBER = re.compile(r"\+?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?", re.ASCII)
 MAX_LINE = 1000          # characters of a CSV line, its end aside (tests/test_dispatch.c: the same)
 
@@ -119,9 +119,12 @@ def finite(v):
 
 
 def parse_number(v):
-    """A table value: finite and not negative."""
+    """A table value: finite, not negative, and 0 or at least DBL_MIN. dispatch.c's strtod_l sets ERANGE
+    for a subnormal value and for nonzero digits that underflow to 0, and refuses both."""
     x = finite(v)
     if x < 0 or v.startswith("-"):
+        raise ValueError(v)
+    if 0 < x < sys.float_info.min or (x == 0 and re.search("[1-9]", re.split("[eE]", v)[0])):
         raise ValueError(v)
     return x
 
@@ -490,7 +493,14 @@ def self_test():
     if (r["gf"], r["mn"], r["f"]) != (1e-3, (0.25, 400.0), 0.5):
         wrong += 1
         print(f"ingest_split self-test: signed exponents read as {r}")
-    for bad in ("zgemm N N N f=-0", "zgemm N N N f=0x1p-1", "zgemm N N N f=nan", "zgemm N N N gf=1e999 f=0.5"):
+    # 0 and DBL_MIN, but no subnormal value or nonzero digits that underflow to 0 (strtod_l's ERANGE)
+    r = parse_row("zgemm N N N gf=0e-400 mn=2.2250738585072014e-308: f=0")
+    if (r["gf"], r["mn"]) != (0.0, (sys.float_info.min, 0.0)):
+        wrong += 1
+        print(f"ingest_split self-test: 0e-400 and DBL_MIN read as {r}")
+    for bad in ("zgemm N N N f=-0", "zgemm N N N f=0x1p-1", "zgemm N N N f=nan", "zgemm N N N gf=1e999 f=0.5",
+                "zgemm N N N gf=1e-310 f=0.5", "zgemm N N N mn=1e-400: f=0.5",
+                "zgemm N N N gf=2.2250738585072e-308 f=0.5"):
         try:
             parse_row(bad)
             wrong += 1
