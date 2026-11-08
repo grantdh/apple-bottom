@@ -946,8 +946,9 @@ static void child_k_refused(void) {
     }
 }
 
-// Child: the bytes in use after 60 more split calls of every axis, once
-// the pool has grown (MallocNanoZone pinned by the parent).
+// Child: the bytes in use after 50 more split calls (10 rounds of TCALLS'
+// first 5, every axis), once 10 have grown the pool (MallocNanoZone pinned by
+// the parent).
 static void child_memory(void) {
     malloc_statistics_t s0, s1;
     for (int pass = 0; pass < 2; pass++) {
