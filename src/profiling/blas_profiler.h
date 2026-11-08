@@ -142,6 +142,9 @@ typedef struct {
     int retries;
     bool retry_kept;
     // The caller's stages; with the call's other_ns they sum to its wall time.
+    // join_ns is the wait for the GPU part and the reading of how it ended
+    // (the scan of a part stopped on NaN or Inf); redo_ns only Accelerate's
+    // remaking of a part that did not stand.
     uint64_t init_ns, cpu_part_ns, join_ns, redo_ns, sum_ns;
     // The GPU part's thread: its stages, and with gpu_other its wall time.
     uint64_t gpu_stage_ns[AB_PROF_STAGE_COUNT], gpu_wall_ns;

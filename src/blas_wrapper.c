@@ -1663,7 +1663,9 @@ static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis
     if (j.head_done) dispatch_release(j.head_done);
     // A tail the GPU epilogue stopped on a NaN or Inf it read is a data
     // condition, as the host path's guard reports it without AB_SPLIT: range.
+    // The scan's time is the join's (join_ns), not the redo's.
     if (j.why == AB_PROF_STAGED_NONFINITE && stage_reads_nonfinite(&j.g)) j.why = AB_PROF_STAGED_RANGE;
+    SPLIT_MARK(p, join_ns);
     if (p && run_tail) {
         p->split.gpu_wall_ns = ab_prof_ticks_to_ns(j.t1 - j.t0);
         p->split.wait_gpu_ns = head_end > j.t1 ? ab_prof_ticks_to_ns(head_end - j.t1) : 0;
