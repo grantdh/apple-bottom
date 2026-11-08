@@ -571,6 +571,9 @@ def self_test():
         ("a control character in a row", head(r0="scalars=u\vf=0.45"), pw + sq, "split_table.txt:7: a control character"),
         ("a control character in a comment", head().replace("# date: x", "# date: x\v"), pw + sq,
          "split_table.txt:5: a control character"),
+        ("a DEL in a row", head(r0="scalars=u\x7f f=0.45"), pw + sq, "split_table.txt:7: a control character"),
+        ("a DEL in a comment", head().replace("# date: x", "# date: x\x7f"), pw + sq,
+         "split_table.txt:5: a control character"),
         ("a U+3000 after the chip line's '#'", head().replace("# chip: ", "#\u3000chip: "), pw + sq,
          "no # chip: key"),
         ("tabs and CRLF in the table", head(r0="scalars=u\tf=0.45").replace("# chip: ", "#\tchip:\t")
@@ -582,6 +585,10 @@ def self_test():
          pw + sq, "is not a core count"),
         ("a NUL in the evidence", head(), pw.replace("pw.x,A", "pw.x,A\0") + sq, "split_evidence.csv:2: a NUL byte"),
         ("a tab in the evidence", head(), pw.replace("pw.x,A", "pw.x,A\t") + sq,
+         "split_evidence.csv:2: a control character"),
+        ("an ESC in the evidence", head(), pw.replace("pw.x,A", "pw.x,A\x1b") + sq,
+         "split_evidence.csv:2: a control character"),
+        ("a DEL in the evidence", head(), pw.replace("pw.x,A", "pw.x,A\x7f") + sq,
          "split_evidence.csv:2: a control character"),
     ]
     # generate()'s evidence labels for the rows of a filed case

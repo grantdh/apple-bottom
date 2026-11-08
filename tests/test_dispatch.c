@@ -1006,13 +1006,16 @@ static void test_split_load_table(void) {
     static const char CR_ROW[] = "zgemm N N N scalars=u f=0.45\r m=8192:\n",
                       CR_CHIP[] = "# chip: Apple M2\r Max\nzgemm N N N f=0.5\n",
                       NUL_NOTE[] = "# a note\0 with a NUL\nzgemm N N N f=0.5\n",
-                      VT_ROW[] = "zgemm N N N\vf=0.5\n", VT_NOTE[] = "# a note\v\nzgemm N N N f=0.5\n";
+                      VT_ROW[] = "zgemm N N N\vf=0.5\n", VT_NOTE[] = "# a note\v\nzgemm N N N f=0.5\n",
+                      DEL_ROW[] = "zgemm N N N\x7f f=0.5\n", DEL_NOTE[] = "# a note\x7f\nzgemm N N N f=0.5\n";
     static const struct { const char *doc; size_t n; const char *why; } BYTES[] = {
         {CR_ROW, sizeof CR_ROW - 1, "line 1: a carriage return"},
         {CR_CHIP, sizeof CR_CHIP - 1, "line 1: a carriage return"},
         {NUL_NOTE, sizeof NUL_NOTE - 1, "line 1: a NUL byte"},
         {VT_ROW, sizeof VT_ROW - 1, "line 1: a control character"},
         {VT_NOTE, sizeof VT_NOTE - 1, "line 1: a control character"},
+        {DEL_ROW, sizeof DEL_ROW - 1, "line 1: a control character"},
+        {DEL_NOTE, sizeof DEL_NOTE - 1, "line 1: a control character"},
     };
     for (size_t i = 0; i < TEST_REGISTRY_SIZE(BYTES); i++) {
         expect(write_temp_n(temp_dir(), BYTES[i].doc, BYTES[i].n, path, sizeof path), "mkstemp");
@@ -1451,6 +1454,8 @@ static void test_split_builtin_matches_evidence(void) {
         {"0,\"pw.x\",A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "quote"},
         {"0,pw.x\r,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "carriage"},
         {"0,pw.x,A\t,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", ":2: a control character"},
+        {"0,pw.x,A\x1b,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", ":2: a control character"},
+        {"0,pw.x,A\x7f,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", ":2: a control character"},
         // a Latin-1 byte, an overlong '/', a surrogate: not UTF-8
         {"0,pw.x,A\xe9,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", ":2: not UTF-8"},
         {"0,pw.x,A\xc0\xaf,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", ":2: not UTF-8"},
