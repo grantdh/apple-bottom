@@ -769,7 +769,7 @@ static void test_split_parse_row(void) {
         "zgemm N N N m=1: m=2: n=1: k=1: mn=1: ratio=2 gf=1 scalars=u f=0.5 x=1",
         // m, n and k in ASCII digits only, as scripts/ingest_split.py reads them
         "zgemm N N N m=+8192: f=0.5", "zgemm N N N m=-0: f=0.5", "zgemm N N N n=:+5 f=0.5",
-        "zgemm N N N k=\v8192: f=0.5",
+        "zgemm N N N k=\v8192: f=0.5", "zgemm N N N m=99999999999: f=0.5",
     };
     begin();
     ab_split_row_t r;
@@ -1037,6 +1037,19 @@ static void test_split_load_table(void) {
     expect(ab_split_load_table(&c, path, err, sizeof err) && c.split_nrows == 1 && !c.split_table_chip[0],
            "'#<U+3000>chip:' must name no chip: '%s' (%s)", c.split_table_chip, err);
     unlink(path);
+    // "# gpu_cores:" is ASCII digits up to INT_MAX, as the script files it;
+    // anything else reads as unstated (atoi() took "+38", "38x" and overflows).
+    static const struct { const char *value; int cores; } CORES[] = {
+        {"0038", 38}, {"2147483647", 2147483647}, {"+38", 0}, {"38x", 0}, {"2147483648", 0}, {"99999999999", 0},
+    };
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(CORES); i++) {
+        char cores_doc[128];
+        snprintf(cores_doc, sizeof cores_doc, "# gpu_cores: %s\nzgemm N N N f=0.5\n", CORES[i].value);
+        expect(write_temp(cores_doc, path, sizeof path), "mkstemp");
+        expect(ab_split_load_table(&c, path, err, sizeof err) && c.split_table_gpu_cores == CORES[i].cores,
+               "'# gpu_cores: %s' read as %d (%s)", CORES[i].value, c.split_table_gpu_cores, err);
+        unlink(path);
+    }
 
     char many[(AB_SPLIT_MAX_ROWS + 1) * 24 + 32] = "";
     for (int i = 0; i <= AB_SPLIT_MAX_ROWS; i++) strcat(many, "zgemm N N N f=0.5\n");
@@ -1110,10 +1123,14 @@ static void test_split_load_table(void) {
     expect(ab_split_parse_row("zgemm N N N f=0.45\xc2\xa0m=8192:", &r) == -1, "U+00A0 must not separate fields");
     expect(ab_split_parse_row("zgemm N N N scalars=u f=0.45\r m=8192:", &r) == 1 && !r.min_m,
            "a row must end at a '\\r'");
-    // Range ends of any length (40 and 70 characters here).
+    // Range ends of any length (40 and 70 characters here), and leading zeros
+    // past the 4300 digits Python's int() takes.
     char wide[256];
     snprintf(wide, sizeof wide, "zgemm N N N m=%0*d: mn=%0*d.5: f=0.5", 40, 8192, 70, 0);
     expect(ab_split_parse_row(wide, &r) == 1 && r.min_m == 8192 && r.min_mn == 0.5, "'%s' must parse", wide);
+    char zeros[5100];
+    snprintf(zeros, sizeof zeros, "zgemm N N N m=%0*d: f=0.5", 5004, 8192);
+    expect(ab_split_parse_row(zeros, &r) == 1 && r.min_m == 8192, "5000 leading zeros must parse");
     finish();
 }
 

@@ -59,6 +59,7 @@ KEYS = ("chip", "gpu_cores", "cpu_matrix", "library", "date", "method")
 COLUMNS = ("row,source,input,layout,library,share,pairs,split_s,base_s,ratio,ratio_lo,ratio_hi,"
            "calls,kept,kept_4m,range,gpu_failed").split(",")
 MAX_ROWS = 32               # AB_SPLIT_MAX_ROWS
+INT_MAX = 2**31 - 1         # an int in dispatch.c and the generated header
 
 # "# chip: Apple M2 Max  # note", spaces and tabs around as dispatch.c's ab_dispatch_parse_header() takes them
 KEY_RE = re.compile(r"^[ \t]*#[ \t]*([a-z][a-z0-9_]*):[ \t]*([^#]*?)[ \t]*(?:#.*)?$")
@@ -135,12 +136,20 @@ def byte_lines(path):
     return lines[:-1] if data.endswith(b"\n") else lines
 
 
+def ascii_int(v):
+    """v, ASCII digits (DIGITS), as an int; None if more than 10 digits follow its leading zeros, which
+    is past any int. dispatch.c's strtol reads leading zeros of any count, and int() refuses more than
+    4300 digits."""
+    s = v.lstrip("0")
+    return None if len(s) > 10 else int(s or "0")
+
+
 def parse_int_range(v):
     lo, sep, hi = v.partition(":")
     if not sep or (lo and not DIGITS.fullmatch(lo)) or (hi and not DIGITS.fullmatch(hi)):
         raise ValueError(v)
-    lo, hi = int(lo or 0), int(hi or 0)
-    if lo > 2**31 - 1 or hi > 2**31 - 1 or (hi and hi < lo):
+    lo, hi = ascii_int(lo or "0"), ascii_int(hi or "0")
+    if lo is None or hi is None or lo > INT_MAX or hi > INT_MAX or (hi and hi < lo):
         raise ValueError(v)
     return lo, hi
 
@@ -263,10 +272,10 @@ class Table:
             raise Ingest(f"{self.txt}: {len(self.rows)} rows; the library takes at most {MAX_ROWS}")
         self.chip = self.keys["chip"]
         cores = self.keys["gpu_cores"]
-        if not DIGITS.fullmatch(cores) or int(cores) == 0:
+        self.gpu_cores = ascii_int(cores) if DIGITS.fullmatch(cores) else None
+        if not self.gpu_cores or self.gpu_cores > INT_MAX:
             raise Ingest(f"{self.txt}: '# gpu_cores: {cores}' is not a core count; a split table is "
                          f"measured on one variant of a chip")
-        self.gpu_cores = int(cores)
         self.cpu_matrix = self.keys["cpu_matrix"]
         self.library = self.keys["library"]
         if not re.fullmatch(r"[0-9a-f]{7,40}|none", self.library):
@@ -581,6 +590,8 @@ def self_test():
         # a core count in ASCII digits ('\u00b3' made int() raise; Arabic-Indic digits passed isdigit())
         ("a superscript core count", head().replace("# gpu_cores: 38", "# gpu_cores: \u00b3"), pw + sq,
          "is not a core count"),
+        ("a core count past INT_MAX", head().replace("# gpu_cores: 38", "# gpu_cores: 2147483648"), pw + sq,
+         "is not a core count"),
         ("Arabic-Indic digits in the core count", head().replace("# gpu_cores: 38", "# gpu_cores: \u0663\u0668"),
          pw + sq, "is not a core count"),
         ("a NUL in the evidence", head(), pw.replace("pw.x,A", "pw.x,A\0") + sq, "split_evidence.csv:2: a NUL byte"),
@@ -603,6 +614,7 @@ def self_test():
             ("zgemm N N N gf=0e-400 mn=2.2250738585072014e-308: f=0", {"gf": 0.0, "mn": (sys.float_info.min, 0.0)}),
             ("zgemm N N N m=" + "0" * 36 + "8192: mn=" + "0" * 70 + ".5: f=0.5", {"m": (8192, 0), "mn": (0.5, 0.0)}),
             ("zgemm C N K" + " " * 682 + "f=0.5", {"axis": "K", "f": 0.5}),
+            ("zgemm N N N m=" + "0" * 5000 + "8192: f=0.5", {"m": (8192, 0)}),    # past int()'s 4300 digits
             # fields split on spaces and tabs only, the row read up to its first '#', '\r' or '\n'
             ("zgemm\tN\tN\tN\tf=0.5", {"f": 0.5}), ("zgemm N N N scalars=u f=0.45\r m=8192:", {"m": (0, 0)})]
     for line, want in good:
@@ -615,6 +627,7 @@ def self_test():
                 "zgemm N N N gf=1e-310 f=0.5", "zgemm N N N mn=1e-400: f=0.5",
                 "zgemm N N N gf=2.2250738585072e-308 f=0.5", "zgemm N N N m=+8192: f=0.5",
                 "zgemm N N N m=-0: f=0.5", "zgemm N N N n=:+5 f=0.5", "zgemm N N N k=\v8192: f=0.5",
+                "zgemm N N N k=3000000000: f=0.5", "zgemm N N N m=" + "9" * 11 + ": f=0.5",
                 "zgemm N N N f=0.45\u00a0m=8192:"):
         try:
             parse_row(bad)

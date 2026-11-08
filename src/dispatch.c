@@ -440,6 +440,14 @@ int ab_split_parse_row(const char *line, ab_split_row_t *row) {
     return got;
 }
 
+// A split table's "# gpu_cores:" value: ASCII digits, 1 to INT_MAX; 0
+// (unstated) otherwise, where atoi() took a sign, trailing text or an
+// overflow.
+static int parse_cores(const char *v) {
+    int n = 0;
+    return *v && strspn(v, "0123456789") == strlen(v) && parse_min(v, &n) ? n : 0;
+}
+
 // Why a split table's line (n bytes as read, its "\n" included) is refused
 // whatever it says, or NULL: a '\r' other than one that ends it, a NUL, or an
 // ASCII control character other than a tab, comments included
@@ -473,7 +481,7 @@ bool ab_split_load_table(ab_dispatch_config_t *c, const char *path, char *err, s
         if ((why = split_line_why(line, (size_t)len))) break;
         if (ab_dispatch_parse_header(line, key, sizeof key, value, sizeof value)) {
             if (!strcmp(key, "chip")) snprintf(chip, sizeof chip, "%s", value);
-            else if (!strcmp(key, "gpu_cores")) cores = atoi(value) > 0 ? atoi(value) : 0;
+            else if (!strcmp(key, "gpu_cores")) cores = parse_cores(value);
             continue;
         }
         ab_split_row_t r;
