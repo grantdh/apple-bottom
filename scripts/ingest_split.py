@@ -60,6 +60,7 @@ COLUMNS = ("row,source,input,layout,library,share,pairs,split_s,base_s,ratio,rat
            "calls,kept,kept_4m,range,gpu_failed").split(",")
 MAX_ROWS = 32               # AB_SPLIT_MAX_ROWS
 INT_MAX = 2**31 - 1         # an int in dispatch.c and the generated header
+CHIP_LEN = 64               # AB_DISPATCH_CHIP_LEN: dispatch.c reads a key's value into this many bytes
 
 # "# chip: Apple M2 Max  # note", spaces and tabs around as dispatch.c's ab_dispatch_parse_header() takes them
 KEY_RE = re.compile(r"^[ \t]*#[ \t]*([a-z][a-z0-9_]*):[ \t]*([^#]*?)[ \t]*(?:#.*)?$")
@@ -268,6 +269,14 @@ class Table:
         missing = [k for k in KEYS if not self.keys.get(k)]
         if missing:
             raise Ingest(f"{self.txt}: no {', '.join('# ' + k + ':' for k in missing)} key")
+        for k in ("chip", "gpu_cores"):     # the keys dispatch.c reads back, which it would cut
+            n = len(self.keys[k].encode("utf-8"))
+            if n >= CHIP_LEN:
+                raise Ingest(f"{self.txt}: '# {k}:' is {n} bytes; dispatch.c reads at most {CHIP_LEN - 1}")
+        for k in ("chip", "cpu_matrix"):    # C string literals in the generated header
+            if any(bad in self.keys[k] for bad in ('"', "\\", "??")):
+                raise Ingest(f"{self.txt}: '# {k}: {self.keys[k]}' holds a '\"', '\\' or '??', which the "
+                             f"generated header's C string would not keep")
         if len(self.rows) > MAX_ROWS:
             raise Ingest(f"{self.txt}: {len(self.rows)} rows; the library takes at most {MAX_ROWS}")
         self.chip = self.keys["chip"]
@@ -590,6 +599,17 @@ def self_test():
         # a core count in ASCII digits ('\u00b3' made int() raise; Arabic-Indic digits passed isdigit())
         ("a superscript core count", head().replace("# gpu_cores: 38", "# gpu_cores: \u00b3"), pw + sq,
          "is not a core count"),
+        # key values dispatch.c cuts (64 bytes or more), and characters a C string literal changes
+        ("a chip of 63 bytes", head().replace("Apple M2 Max", "Apple M2 Max" + "x" * 51), pw + sq, None),
+        ("a chip of 64 bytes", head().replace("Apple M2 Max", "Apple M2 Max" + "x" * 52), pw + sq,
+         "'# chip:' is 64 bytes"),
+        ("a core count of 64 bytes", head().replace("# gpu_cores: 38", "# gpu_cores: " + "0" * 62 + "38"),
+         pw + sq, "'# gpu_cores:' is 64 bytes"),
+        ("a core count of 5000 leading zeros", head().replace("# gpu_cores: 38", "# gpu_cores: " + "0" * 5000 + "38"),
+         pw + sq, "'# gpu_cores:' is 5002 bytes"),
+        ("a '\"' in the chip", head().replace("Apple M2 Max", 'Apple "M2" Max'), pw + sq, "C string"),
+        ("a '\\' in cpu_matrix", head().replace("# cpu_matrix: AMX", "# cpu_matrix: AMX\\"), pw + sq, "C string"),
+        ("a trigraph in the chip", head().replace("Apple M2 Max", "Apple M2 Max??/"), pw + sq, "C string"),
         ("a core count past INT_MAX", head().replace("# gpu_cores: 38", "# gpu_cores: 2147483648"), pw + sq,
          "is not a core count"),
         ("Arabic-Indic digits in the core count", head().replace("# gpu_cores: 38", "# gpu_cores: \u0663\u0668"),
