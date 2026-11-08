@@ -149,9 +149,13 @@ static bool write_temp_in(const char *dir, const char *content, char *path, size
     return ok;
 }
 
-static bool write_temp(const char *content, char *path, size_t len) {
+static const char *temp_dir(void) {
     const char *tmp = getenv("TMPDIR");
-    return write_temp_in(tmp && *tmp ? tmp : "/tmp", content, path, len);
+    return tmp && *tmp ? tmp : "/tmp";
+}
+
+static bool write_temp(const char *content, char *path, size_t len) {
+    return write_temp_in(temp_dir(), content, path, len);
 }
 
 // =============================================================================
@@ -1085,12 +1089,14 @@ static void test_split_config_from_env(void) {
     // A path the label cannot hold whole is refused, not cut short: an existing
     // table reached through AB_SPLIT_PATH_MAX + 1 bytes (padded with "/." and
     // "//"), and through exactly AB_SPLIT_PATH_MAX, which loads. The table is
-    // in /tmp, so that neither TMPDIR nor the tree's path can be too long.
-    expect(write_temp_in("/tmp", "zgemm N N N m=8192: scalars=u f=0.45\n", path, sizeof path), "mkstemp in /tmp");
+    // in TMPDIR, or in /tmp if TMPDIR and the file's name pass the limit.
+    const char *dir = temp_dir();
+    if (strlen(dir) + strlen("/test_dispatch.XXXXXX") > AB_SPLIT_PATH_MAX) dir = "/tmp";
+    expect(write_temp_in(dir, "zgemm N N N m=8192: scalars=u f=0.45\n", path, sizeof path), "mkstemp in %s", dir);
     for (int extra = 1; extra >= 0; extra--) {
-        const char *file = path + strlen("/tmp");
+        const char *file = path + strlen(dir);
         char padded[AB_DISPATCH_LABEL_LEN + 16], want_label[AB_DISPATCH_LABEL_LEN + 8];
-        size_t want = AB_SPLIT_PATH_MAX + (size_t)extra, n = strlen("/tmp"), tail = strlen(file);
+        size_t want = AB_SPLIT_PATH_MAX + (size_t)extra, n = strlen(dir), tail = strlen(file);
         memcpy(padded, path, n);
         for (; n + tail + 2 <= want; n += 2) memcpy(padded + n, "/.", 2);
         if (n + tail < want) padded[n++] = '/';
