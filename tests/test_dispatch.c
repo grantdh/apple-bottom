@@ -1364,6 +1364,16 @@ static void test_split_builtin_matches_evidence(void) {
         expect(ab_split_load_table(&c, path, err, sizeof err) && c.split_nrows == n &&
                !memcmp(c.split_rows, t->rows, (size_t)n * sizeof *t->rows),
                "%s: the built-in rows are not those of %s (%s)", t->chip, path, err);
+        // ... in UTF-8, as scripts/ingest_split.py requires (the loader does not check)
+        FILE *tf = fopen(path, "r");
+        char *tl = NULL;
+        size_t tcap = 0;
+        int bad = tf ? 0 : -1;
+        for (int ln = 1; !bad && getline(&tl, &tcap, tf) >= 0; ln++)
+            if (!is_utf8(tl)) bad = ln;
+        free(tl);
+        if (tf) fclose(tf);
+        expect(!bad, "%s: %s is not UTF-8 (line %d)", t->chip, path, bad);
     }
     // The checker itself, on a table of two rows.
     ab_dispatch_config_t c = with_split_rows(AB_DISPATCH_AUTO, "zgemm N N N m=8192: scalars=u f=0.45; "
@@ -1428,9 +1438,17 @@ static void test_split_builtin_matches_evidence(void) {
         {"0,pw.x\r,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "carriage"},
         {"0,pw.x,A\t,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", ":2: a control character"},
         // a Latin-1 byte, an overlong '/', a surrogate: not UTF-8
-        {"0,pw.x,A\xe9,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "not UTF-8"},
-        {"0,pw.x,A\xc0\xaf,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "not UTF-8"},
-        {"0,pw.x,A\xed\xa0\x80,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "not UTF-8"},
+        {"0,pw.x,A\xe9,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", ":2: not UTF-8"},
+        {"0,pw.x,A\xc0\xaf,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", ":2: not UTF-8"},
+        {"0,pw.x,A\xed\xa0\x80,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", ":2: not UTF-8"},
+        // rule 4 with part of a source: the square with bench_split and pw.x A
+        // only, the QE-shaped row with pw.x and bench_split at 1x8 only
+        {"0,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n"
+         "0,pw.x,B,8x1,abc1234,0.45,6,70,80,1.14,1.08,1.20,100,99,0,1,0\n"
+         "1,pw.x,A,8x1,abc1234,0.6,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n", "row 1: no pw.x evidence"},
+        {"0,pw.x,A,8x1,abc1234,0.45,6,80,95,1.19,1.12,1.25,100,100,0,0,0\n"
+         "0,pw.x,B,8x1,abc1234,0.45,6,70,80,1.14,1.08,1.20,100,99,0,1,0\n"
+         "0,bench_split,qe,1x8,abc1234,0.45,20,1.0,1.3,1.3,1.2,1.4,20,20,0,0,0\n", "row 0: no bench_split evidence"},
     };
     char doc[2048];
     snprintf(doc, sizeof doc, "%s%s", H, GOOD);
@@ -1475,6 +1493,28 @@ static void test_split_builtin_matches_evidence(void) {
         expect(w0 && strstr(w0, "bytes"), "a line of %s: %s", pass ? "600 U+00E9" : "1100 'A'", w0 ? w0 : "a pass");
         unlink(path);
     }
+    // The limit is 1000 bytes, not characters: row 1's 1x8 line, its input
+    // padded with U+00E9 (and an 'A' if odd), passes at 1000 bytes with "\n"
+    // or "\r\n", and at 1001 (533 characters) is refused.
+#define BENCH_1X8 "1,bench_split,%s,1x8,abc1234,0.6,20,1.0,1.3,1.3,1.2,1.4,20,20,0,0,0"
+    const char *b4x2 = strstr(GOOD, "1,bench_split,sq4096,4x2");
+    int pw0 = (int)(strstr(GOOD, "1,bench_split") - GOOD);
+    for (int bytes = 1000; bytes <= 1001; bytes++)
+        for (int crlf = 0; crlf < 2; crlf++) {
+            char pad[1024], line_k[1100];
+            int fill = bytes - snprintf(NULL, 0, BENCH_1X8, ""), at = fill % 2 ? snprintf(pad, sizeof pad, "A") : 0;
+            pad[at] = '\0';
+            for (int i = 0; i < fill / 2; i++) at += snprintf(pad + at, sizeof pad - (size_t)at, "\xc3\xa9");
+            expect(snprintf(line_k, sizeof line_k, BENCH_1X8, pad) == bytes, "a line of %d bytes", bytes);
+            snprintf(doc, sizeof doc, "%s%.*s%s%s%s", H, pw0, GOOD, line_k, crlf ? "\r\n" : "\n", b4x2);
+            expect(write_temp(doc, path, sizeof path), "mkstemp");
+            const char *wk = split_evidence_why(c.split_rows, 2, "abc1234", path, why, sizeof why);
+            expect(bytes == 1000 ? !wk
+                                 : wk && strstr(wk, ":4: a quote, a bare carriage return or more than 1000 bytes"),
+                   "a line of %d bytes%s: %s", bytes, crlf ? " and CRLF" : "", wk ? wk : "a pass");
+            unlink(path);
+        }
+#undef BENCH_1X8
     // Line ends in "\r\n" read as "\n".
     snprintf(doc, sizeof doc, "row,source,input,layout,library,share,pairs,split_s,base_s,ratio,ratio_lo,"
                               "ratio_hi,calls,kept,kept_4m,range,gpu_failed\r\n%s", GOOD);

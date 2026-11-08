@@ -477,8 +477,10 @@ def ingest(directory, force):
 
 def self_test():
     """Files made-up tables and checks each verdict: filed, or refused for the expected reason (a
-    substring of the error). tests/test_dispatch.c's split_evidence_why() runs the same cases in C.
-    Also checks generate()'s evidence labels. Returns the number of wrong verdicts."""
+    substring of the error). In tests/test_dispatch.c, the evidence cases have counterparts in the
+    tests of split_evidence_why(), and the row, key and line cases in those of ab_split_parse_row()
+    and ab_split_load_table(); C checks the table's UTF-8 on the filed tables only, and the core count
+    and generate()'s evidence labels are checked here only. Returns the number of wrong verdicts."""
     def head(r0="scalars=u f=0.45", r1="ratio=2 scalars=z f=0.6"):
         return ("# chip: Apple M2 Max\n# gpu_cores: 38\n# cpu_matrix: AMX\n# library: abc1234\n# date: x\n"
                 f"# method: self-test\nzgemm N N N m=8192: {r0}\nzgemm N N N m=2048: {r1}\n")
@@ -489,6 +491,13 @@ def self_test():
     pw1 = pw.replace("0,pw.x", "1,pw.x").replace("0.45", "0.6")      # pw.x evidence for row 1
     qe_bench = sq.replace("1,bench", "0,bench").replace("0.6", "0.45")
     a_line = pw.splitlines(True)[0]
+
+    def bench_1x8(nbytes):
+        """Row 1's bench_split line at 1x8, its input padded with U+00E9 (and an 'A' if odd) to nbytes."""
+        line = "1,bench_split,{},1x8,abc1234,0.6,20,1.0,1.3,1.3,1.2,1.4,20,20,0,0,0"
+        pad = nbytes - len(line.format(""))
+        return line.format("A" * (pad % 2) + "\u00e9" * (pad // 2)) + "\n"
+    sq_4x2 = sq.splitlines(True)[1]
     cases = [  # (what, table, evidence after the header line, None if filed, else the reason)
         ("pw.x for the QE row, bench_split for the square", head(), pw + sq, None),
         ("CRLF line ends", head(), (pw + sq).replace("\n", "\r\n"), None),
@@ -509,6 +518,10 @@ def self_test():
          "rule 3"),
         ("rule 4: a QE-shaped row on bench_split alone", head(), qe_bench + sq, "no pw.x evidence on input A"),
         ("rule 4: a QE-shaped row with pw.x A only", head(), qe_bench + a_line + sq, "no pw.x evidence on input B"),
+        ("rule 4: a square with bench_split and pw.x A only", head(), pw + sq + pw1.splitlines(True)[0],
+         "no pw.x evidence on input B"),
+        ("rule 4: a QE-shaped row with pw.x and bench_split at 1x8 only", head(),
+         pw + qe_bench.splitlines(True)[0] + sq, "no bench_split evidence at 4x2"),
         ("rule 4: ratio=300 is not square", head(r1="ratio=300 scalars=z f=0.6"), pw + sq,
          "no pw.x evidence on input A"),
         ("rule 4: a square on pw.x alone", head(), pw + pw1, "no bench_split evidence at 1x8"),
@@ -533,10 +546,19 @@ def self_test():
         ("a line over the limit", head(), pw.replace(",A,", "," + "A" * 1100 + ",") + sq, "bytes"),
         ("600 two-byte characters", head(), pw.replace(",A,", "," + "\u00e9" * 600 + ",") + sq, "bytes"),
         # a Latin-1 byte, an overlong '/', a surrogate (bytes written through surrogateescape)
-        ("a Latin-1 byte in the evidence", head(), pw.replace("pw.x,A", "pw.x,A\udce9") + sq, "not UTF-8"),
-        ("an overlong form", head(), pw.replace("pw.x,A", "pw.x,A\udcc0\udcaf") + sq, "not UTF-8"),
-        ("a surrogate", head(), pw.replace("pw.x,A", "pw.x,A\udced\udca0\udc80") + sq, "not UTF-8"),
-        ("a Latin-1 byte in the table", head().replace("# date: x", "# date: x\udce9"), pw + sq, "not UTF-8"),
+        ("a Latin-1 byte in the evidence", head(), pw.replace("pw.x,A", "pw.x,A\udce9") + sq,
+         "split_evidence.csv:2: not UTF-8"),
+        ("an overlong form", head(), pw.replace("pw.x,A", "pw.x,A\udcc0\udcaf") + sq,
+         "split_evidence.csv:2: not UTF-8"),
+        ("a surrogate", head(), pw.replace("pw.x,A", "pw.x,A\udced\udca0\udc80") + sq,
+         "split_evidence.csv:2: not UTF-8"),
+        ("a Latin-1 byte in the table", head().replace("# date: x", "# date: x\udce9"), pw + sq,
+         "split_table.txt:5: not UTF-8"),
+        # the limit is 1000 bytes, not characters: 1000 pass, with "\n" or "\r\n"; 1001 in 533 characters do not
+        ("a line of 1000 bytes", head(), pw + bench_1x8(1000) + sq_4x2, None),
+        ("a line of 1000 bytes and CRLF", head(), (pw + bench_1x8(1000) + sq_4x2).replace("\n", "\r\n"), None),
+        ("a line of 1001 bytes", head(), pw + bench_1x8(1001) + sq_4x2,
+         "split_evidence.csv:4: a quote, a bare carriage return or more than 1000 bytes"),
         # bytes refused whatever the line says, comments included, as dispatch.c refuses them: a '\r'
         # inside a line (dispatch.c would read the row up to it, the chip as "Apple M2"), a NUL, a control
         # character; a "\r\n" end and tabs are fine
