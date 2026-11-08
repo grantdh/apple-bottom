@@ -135,15 +135,23 @@ bool ab_dispatch_load_table(ab_dispatch_config_t *c, const char *path,
         return false;
     }
     ab_dispatch_row_t rows[AB_DISPATCH_MAX_ROWS];
-    char line[256], chip[AB_DISPATCH_CHIP_LEN] = "", key[32], value[AB_DISPATCH_CHIP_LEN];
+    char *line = NULL, chip[AB_DISPATCH_CHIP_LEN] = "", key[32], value[AB_DISPATCH_CHIP_LEN];
+    size_t cap = 0;
+    ssize_t len;
     int nrows = 0, lineno = 0, cores = 0;
     const char *why = NULL;
-    while (!why && fgets(line, sizeof line, f)) {
+    while (!why && (len = getline(&line, &cap, f)) >= 0) {
         lineno++;
-        // A line longer than the buffer is allowed only as a comment.
-        bool whole = strchr(line, '\n') || feof(f);
+        // A NUL is refused: the parsers below would read the line only up to it
+        // (with fgets() it also made the loader skip the next line).
+        if (memchr(line, '\0', (size_t)len)) {
+            why = "a NUL byte";
+            break;
+        }
+        // A line of 255 bytes or more before its "\n" (more than the row
+        // parser's buffer holds) is allowed only as a comment.
+        bool whole = (size_t)len - (line[len - 1] == '\n') < 255;
         bool comment = line[strspn(line, " \t")] == '#';
-        for (int ch = 0; !whole && ch != '\n' && ch != EOF; ) ch = fgetc(f);
         if (comment && ab_dispatch_parse_header(line, key, sizeof key, value, sizeof value)) {
             if (!strcmp(key, "chip")) snprintf(chip, sizeof chip, "%s", value);
             else if (!strcmp(key, "gpu_cores")) cores = atoi(value) > 0 ? atoi(value) : 0;
@@ -159,6 +167,7 @@ bool ab_dispatch_load_table(ab_dispatch_config_t *c, const char *path,
             rows[nrows++] = r;
     }
     if (!why && ferror(f)) why = "read error";
+    free(line);
     fclose(f);
     if (why) {
         snprintf(err, err_len, "line %d: %s", lineno, why);

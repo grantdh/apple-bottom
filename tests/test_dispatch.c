@@ -245,6 +245,17 @@ static void test_builtin_tables_load(void) {
                "%s: a machine with this chip gets %d rows, the table has %d", slug, c.nrows, n_rows(t->rows));
         expect(!strcmp(c.table, label) && !strcmp(c.table_chip, t->chip) && c.table_gpu_cores == t->gpu_cores,
                "%s: table label '%s', chip '%s'/%d", slug, c.table, c.table_chip, c.table_gpu_cores);
+        // Its filed dispatch_table.txt, beside the summary, loads to the same
+        // rows and identity.
+        char txt[1024], err[160] = "";
+        snprintf(txt, sizeof txt, "%s/%s", AB_SOURCE_ROOT, t->data);
+        char *slash = strrchr(txt, '/');
+        snprintf(slash + 1, sizeof txt - (size_t)(slash + 1 - txt), "dispatch_table.txt");
+        ab_dispatch_config_t filed = {0};
+        expect(ab_dispatch_load_table(&filed, txt, err, sizeof err) && filed.nrows == n_rows(t->rows) &&
+               !memcmp(filed.rows, t->rows, (size_t)filed.nrows * sizeof filed.rows[0]) &&
+               !strcmp(filed.table_chip, t->chip) && filed.table_gpu_cores == t->gpu_cores,
+               "%s: %s does not load to the built-in rows and identity (%s)", slug, txt, err);
     }
     finish();
 }
@@ -627,6 +638,21 @@ static void test_load_table(void) {
 
     expect(!ab_dispatch_load_table(&c, "/nonexistent/dispatch_table.txt", err, sizeof err),
            "a missing file must fail");
+
+    // A NUL is refused with its line number; it used to drop the next row
+    // and load the rest.
+    static const char NUL_NOTE[] = "# a note\0 with a NUL\nzgemm N N 64 64 64\ndgemm N N 1 1 1\n";
+    expect(write_temp_n(temp_dir(), NUL_NOTE, sizeof NUL_NOTE - 1, path, sizeof path), "mkstemp");
+    err[0] = '\0';
+    expect(!ab_dispatch_load_table(&c, path, err, sizeof err) && strstr(err, "line 1: a NUL byte"),
+           "a NUL in a comment must fail at line 1: %s", err);
+    unlink(path);
+    // The calibration run the M2 Max's table was filed from loads to its rows.
+    const ab_dispatch_table_t *m2 = ab_dispatch_builtin_table("Apple M2 Max", 38);
+    expect(m2 && ab_dispatch_load_table(&c, AB_SOURCE_ROOT "/benchmarks/results/2026-10-14-52f1880-calibrate/"
+                                            "dispatch_table.txt", err, sizeof err) &&
+           c.nrows == n_rows(m2->rows) && !memcmp(c.rows, m2->rows, (size_t)c.nrows * sizeof c.rows[0]),
+           "the M2 Max's calibration run must load to the built-in rows: %d rows (%s)", c.nrows, err);
 
     expect(write_temp("# no rows: everything on Accelerate\n", path, sizeof path), "mkstemp");
     expect(ab_dispatch_load_table(&c, path, err, sizeof err) && c.nrows == 0,
