@@ -60,7 +60,7 @@ COLUMNS = ("row,source,input,layout,library,share,pairs,split_s,base_s,ratio,rat
            "calls,kept,kept_4m,range,gpu_failed").split(",")
 MAX_ROWS = 32               # AB_SPLIT_MAX_ROWS
 INT_MAX = 2**31 - 1         # an int in dispatch.c and the generated header
-CHIP_LEN = 64               # AB_DISPATCH_CHIP_LEN: dispatch.c reads a key's value into this many bytes
+CHIP_LEN = 64               # AB_DISPATCH_CHIP_LEN: dispatch.c keeps a key's value, and a slug, in this many bytes
 
 # "# chip: Apple M2 Max  # note", spaces and tabs around as dispatch.c's ab_dispatch_parse_header() takes them
 KEY_RE = re.compile(r"^[ \t]*#[ \t]*([a-z][a-z0-9_]*):[ \t]*([^#]*?)[ \t]*(?:#.*)?$")
@@ -275,7 +275,7 @@ class Table:
         for k in ("chip", "gpu_cores"):     # the keys dispatch.c reads back, which it would cut
             n = len(self.keys[k].encode("utf-8"))
             if n >= CHIP_LEN:
-                raise Ingest(f"{self.txt}: '# {k}:' is {n} bytes; dispatch.c reads at most {CHIP_LEN - 1}")
+                raise Ingest(f"{self.txt}: '# {k}:' is {n} bytes; dispatch.c keeps at most {CHIP_LEN - 1}")
         for k in ("chip", "cpu_matrix"):    # C string literals in the generated header
             if any(bad in self.keys[k] for bad in ('"', "\\", "??")):
                 raise Ingest(f"{self.txt}: '# {k}: {self.keys[k]}' holds a '\"', '\\' or '??', which the "
@@ -296,6 +296,9 @@ class Table:
         if self.library == "none" and self.rows:
             raise Ingest(f"{self.txt}: rows need the library commit they were measured on")
         self.slug = chip_slug(self.chip, self.gpu_cores)
+        if len(self.slug) >= CHIP_LEN:     # ASCII
+            raise Ingest(f"{self.txt}: the slug {self.slug} is {len(self.slug)} bytes; dispatch.c keeps at "
+                         f"most {CHIP_LEN - 1}")
         self.evidence = []
         for n, raw in enumerate(byte_lines(self.csv), 1):
             fields = csv_fields(raw, f"{self.csv}:{n}")
@@ -606,6 +609,10 @@ def self_test():
         ("a chip of 63 bytes", head().replace("Apple M2 Max", "Apple M2 Max" + "x" * 51), pw + sq, None),
         ("a chip of 64 bytes", head().replace("Apple M2 Max", "Apple M2 Max" + "x" * 52), pw + sq,
          "'# chip:' is 64 bytes"),
+        # a chip without "Apple " of under 64 bytes whose slug, with "-38c", is 63 or 64
+        ("a slug of 63 bytes", head().replace("Apple M2 Max", "M2 Max" + "x" * 53), pw + sq, None),
+        ("a slug of 64 bytes", head().replace("Apple M2 Max", "M2 Max" + "x" * 54), pw + sq,
+         "is 64 bytes; dispatch.c keeps at most 63"),
         ("a core count of 64 bytes", head().replace("# gpu_cores: 38", "# gpu_cores: " + "0" * 62 + "38"),
          pw + sq, "'# gpu_cores:' is 64 bytes"),
         ("a core count of 5000 leading zeros", head().replace("# gpu_cores: 38", "# gpu_cores: " + "0" * 5000 + "38"),
