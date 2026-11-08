@@ -65,8 +65,11 @@
 //   <dgemm|zgemm> <ta> <tb> <axis> [m=lo:hi] [n=lo:hi] [k=lo:hi] [mn=lo:hi]
 //                 [ratio=r] [gf=g] [scalars=u|z|a] f=<share>
 // Fields are separated by spaces or tabs, and a line may be of any length.
-// m, n and k are ASCII digits; the other values ASCII numbers (digits, a
-// point, an exponent, no sign but '+'), finite, and 0 or at least DBL_MIN.
+// The ends of m, n and k are ASCII digits, at most INT_MAX. mn, ratio, gf
+// and f are ASCII decimal numbers: an optional leading '+', digits with an
+// optional point (1, 1., 1.5 or .5), and an optional exponent (e or E, an
+// optional sign, digits); finite, and 0 or at least DBL_MIN. ratio is at
+// least 1, and f at most 1.
 // A file with a '\r' other than at a line's end, a NUL, or an ASCII control
 // character other than a tab, in a comment as elsewhere, is refused.
 // TRANS is exact ('N', 'T' or 'C', case-folded; a DGEMM 'C' is 'T'); axis

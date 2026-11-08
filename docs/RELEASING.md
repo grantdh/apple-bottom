@@ -90,8 +90,9 @@ Check that CI passed on the latest commit:
       tables stay as they are until someone recalibrates them
       (`make dispatch-table-check` confirms the header matches the filed
       tables)
-- [ ] For every filed split table (`benchmarks/split/tables/<chip>/`), on a
-      full clone that has its `# library:` commit:
+- [ ] For every filed split table with rows (`benchmarks/split/tables/<chip>/`;
+      a table without rows has `# library: none`, and `make split-table-check`
+      skips it too), on a full clone that has its `# library:` commit:
       `git diff --quiet <library> HEAD -- src ':!src/split_table.h'`. If it
       exits 1, `src/` changed since the table's shares were measured:
       re-measure its rows on that chip and re-file them
