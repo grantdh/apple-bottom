@@ -323,7 +323,12 @@ class Table:
             lines, name = by_row[i], f"row {i} ({r['text']})"
             if not lines:
                 raise Ingest(f"{self.txt}: {name} has no evidence (rule 1)")
-            pooled = sum(float(e["base_s"]) for e in lines) / sum(float(e["split_s"]) for e in lines)
+            # plain sums in file order, as tests/test_dispatch.c adds them (sum() compensates from 3.12)
+            base_sum = split_sum = 0.0
+            for e in lines:
+                base_sum += float(e["base_s"])
+                split_sum += float(e["split_s"])
+            pooled = base_sum / split_sum
             if not (math.isfinite(pooled) and pooled >= MIN_POOLED):
                 raise Ingest(f"{self.txt}: {name}: pooled ratio {pooled:.3f} < {MIN_POOLED:.2f} (rule 3)")
             have = {(e["source"], e["input"], e["layout"]) for e in lines}
@@ -496,6 +501,11 @@ def self_test():
         ("rule 3: pooled overflows", head(), pw.replace(",80,95,", ",80,1e308,").replace(",70,80,", ",70,1e308,") + sq,
          "rule 3"),
         ("rule 3: subnormal split_s", head(), pw.replace(",80,95,", ",1e-310,95,").replace(",70,80,", ",1e-310,80,") + sq,
+         "rule 3"),
+        # 1.1e16 - 2 then three 0.9 over 1e16 in file order is 1.0999999999999999 (compensated: 1.1)
+        ("rule 3: plain sums in file order", head(),
+         "0,pw.x,A,8x1,abc1234,0.45,6,1e16,10999999999999998,1.19,1.12,1.25,100,100,0,0,0\n"
+         + "".join(f"0,pw.x,{i},8x1,abc1234,0.45,6,1e-300,0.9,1.19,1.12,1.25,100,100,0,0,0\n" for i in "BAB") + sq,
          "rule 3"),
         ("rule 4: a QE-shaped row on bench_split alone", head(), qe_bench + sq, "no pw.x evidence on input A"),
         ("rule 4: a QE-shaped row with pw.x A only", head(), qe_bench + a_line + sq, "no pw.x evidence on input B"),
