@@ -1087,11 +1087,18 @@ static void test_split_load_table(void) {
     expect(ab_split_load_table(&c, path, err, sizeof err) && c.split_nrows == 1 && !c.split_table_chip[0],
            "'#<U+3000>chip:' must name no chip: '%s' (%s)", c.split_table_chip, err);
     unlink(path);
-    // "# gpu_cores:" is ASCII digits up to INT_MAX, as the script files it;
-    // anything else reads as unstated (atoi() took "+38", "38x" and overflows).
+    // "# gpu_cores:" is ASCII digits up to INT_MAX in at most 63 bytes, as the
+    // script files it; anything else reads as unstated (atoi() took "+38",
+    // "38x", overflows and a value ab_dispatch_parse_header() cut).
+#define Z10 "0000000000"
+#define CORES_LONGEST Z10 Z10 Z10 Z10 Z10 Z10 "038"
+    _Static_assert(sizeof CORES_LONGEST == AB_DISPATCH_CHIP_LEN, "the longest value a key holds");
     static const struct { const char *value; int cores; } CORES[] = {
         {"0038", 38}, {"2147483647", 2147483647}, {"+38", 0}, {"38x", 0}, {"2147483648", 0}, {"99999999999", 0},
+        {CORES_LONGEST, 38}, {"0" CORES_LONGEST, 0},
     };
+#undef CORES_LONGEST
+#undef Z10
     for (size_t i = 0; i < TEST_REGISTRY_SIZE(CORES); i++) {
         char cores_doc[128];
         snprintf(cores_doc, sizeof cores_doc, "# gpu_cores: %s\nzgemm N N N f=0.5\n", CORES[i].value);

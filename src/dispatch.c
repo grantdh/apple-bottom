@@ -480,7 +480,8 @@ bool ab_split_load_table(ab_dispatch_config_t *c, const char *path, char *err, s
         return false;
     }
     ab_split_row_t rows[AB_SPLIT_MAX_ROWS];
-    char *line = NULL, chip[AB_DISPATCH_CHIP_LEN] = "", key[32], value[AB_DISPATCH_CHIP_LEN];
+    // value holds a byte more than a key's value may, so a cut core count reads as unstated.
+    char *line = NULL, chip[AB_DISPATCH_CHIP_LEN] = "", key[32], value[AB_DISPATCH_CHIP_LEN + 1];
     size_t cap = 0;
     ssize_t len;
     int nrows = 0, lineno = 0, cores = 0;
@@ -490,7 +491,7 @@ bool ab_split_load_table(ab_dispatch_config_t *c, const char *path, char *err, s
         if ((why = split_line_why(line, (size_t)len))) break;
         if (ab_dispatch_parse_header(line, key, sizeof key, value, sizeof value)) {
             if (!strcmp(key, "chip")) snprintf(chip, sizeof chip, "%s", value);
-            else if (!strcmp(key, "gpu_cores")) cores = parse_cores(value);
+            else if (!strcmp(key, "gpu_cores")) cores = strlen(value) < sizeof value - 1 ? parse_cores(value) : 0;
             continue;
         }
         ab_split_row_t r;
