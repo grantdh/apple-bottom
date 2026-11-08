@@ -154,7 +154,9 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 
 | Target | What it runs |
 |---|---|
-| `make ci-local` | `make version-check`, `make dispatch-table-check` (the built-in routing tables against `benchmarks/calibration/`), every suite of `make test`, the chaos tests and the V-2 convergence study (the DGEMM error-versus-N study of `docs/vv/VV_REPORT.md`, `tests/verification/test_convergence.c`); writes `build/CI_REPORT.txt` |
+| `make ci-local` | `make version-check`, `make dispatch-table-check` (the built-in routing tables against `benchmarks/calibration/`), `make split-table-check` (the filing rules' self-test, and the built-in split tables against `benchmarks/split/tables/`), every suite of `make test`, the chaos tests and the V-2 convergence study (the DGEMM error-versus-N study of `docs/vv/VV_REPORT.md`, `tests/verification/test_convergence.c`); writes `build/CI_REPORT.txt` |
+| `make split-table` | `scripts/ingest_split.py --regenerate`: rebuilds `src/split_table.h` from the tables filed under `benchmarks/split/tables/` (no GPU) |
+| `make test-split-defects` | `tests/split_defects.py`: plants each defect it lists in a copy of the tree, one at a time, rebuilds, and requires one of the suites named for it to fail; a defect whose edit no longer applies or does not build counts as stale (GPU, about 30 min) |
 | `make test-chaos` | pathological inputs, IEEE edge cases, concurrent threads |
 | `make test-verification` | the V-2 convergence study alone |
 | `make test-rectangular` | `test_rectangular.c`: tall, wide, thin-K and conjugate-transposed shapes up to 18277 × 150 × 18277, componentwise against cblas, then timings (peaks at ~21 GB) |
