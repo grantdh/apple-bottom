@@ -651,6 +651,7 @@ def self_test():
                 "zgemm N N N gf=2.2250738585072e-308 f=0.5", "zgemm N N N m=+8192: f=0.5",
                 "zgemm N N N m=-0: f=0.5", "zgemm N N N n=:+5 f=0.5", "zgemm N N N k=\v8192: f=0.5",
                 "zgemm N N N k=3000000000: f=0.5", "zgemm N N N m=" + "9" * 11 + ": f=0.5",
+                "zgemm N N N mn=:1e400 f=0.5",
                 "zgemm N N N f=0.45\u00a0m=8192:"):
         try:
             parse_row(bad)

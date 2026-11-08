@@ -771,6 +771,8 @@ static void test_split_parse_row(void) {
         // m, n and k in ASCII digits only, as scripts/ingest_split.py reads them
         "zgemm N N N m=+8192: f=0.5", "zgemm N N N m=-0: f=0.5", "zgemm N N N n=:+5 f=0.5",
         "zgemm N N N k=\v8192: f=0.5", "zgemm N N N m=99999999999: f=0.5",
+        // values that overflow (scripts/ingest_split.py has the same cases)
+        "zgemm N N N gf=1e999 f=0.5", "zgemm N N N mn=:1e400 f=0.5",
     };
     begin();
     ab_split_row_t r;
