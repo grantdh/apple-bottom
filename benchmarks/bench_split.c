@@ -26,6 +26,7 @@
 // Power: the parent samples SMC keys (PDTR, the DC input = wall side on AC power, PSTR, PPBR and
 // the GPU rails) at 20 Hz and, for sustained runs, IOReport's GPU energy and clock residency, both
 // without root through undocumented interfaces; without them the power columns read nan.
+// SPLIT_SAMPLER=0 turns that sampler off (power columns nan), e.g. to run under benchmarks/powerlog.
 //
 // usage: bench_split run <case> <np> <outdir> [data]    data 0 = uniform [-1,1), 1 = QE-like row decay
 //        bench_split child <case> <np> <id> <shmfile> <data>   (internal)
@@ -570,6 +571,8 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
 }
 
 // ---------------------------------------------------------------- SMC power (parent, no root)
+// SPLIT_SAMPLER=0: no SMC or IOReport sampling here (another sampler, such as powerlog, runs instead)
+static bool sampler_on(void) { return envd("SPLIT_SAMPLER", 1) != 0; }
 typedef struct { char major, minor, build, reserved; UInt16 release; } SMCVers;
 typedef struct { UInt16 version, length; UInt32 cpuPLimit, gpuPLimit, memPLimit; } SMCPLimit;
 typedef struct { UInt32 dataSize; UInt32 dataType; char dataAttributes; } SMCKeyInfo;
@@ -913,7 +916,7 @@ static void report(const Case *c, int np, int data, bool smc, double idle_w) {
         printf("-- power, fixed block, mean over the timed calls (20 Hz SMC): idle %.1f W | ACC %.1f W (%d samples), GPU %.1f W (%d), split %.1f W (%d); GPU rails ACC %.1f GPU %.1f split %.1f W\n",
                idle_w, pw[0], pc[0], pw[1], pc[1], pw[2], pc[2], gw[0], gw[1], gw[2]);
         printf("   energy per call above idle (J): ACC %.2f, GPU %.2f, split %.2f (np procs together)\n", (pw[0] - idle_w) * La, (pw[1] - idle_w) * Lg, (pw[2] - idle_w) * Ls);
-    }
+    } else printf("-- power: not sampled (%s); power fields read nan\n", sampler_on() ? "SMC unavailable" : "SPLIT_SAMPLER=0");
     double sw[3] = {NAN, NAN, NAN}, sj[3] = {NAN, NAN, NAN};
     if (smc && shm->pw_n[0]) {  // sustained runs: trim SMC's ~1 s lag from each run's start
         printf("-- sustained power, %d/%d/%d calls per run x 3 interleaved rounds, mean over each run from 1 s after its start (wall = PDTR):\n",
@@ -993,7 +996,7 @@ static int sustain(const Case *c, const char *outdir, int g, double secs, double
     ok += ab_register_host_memory(x->B, x->nB * es) == AB_OK;
     ok += ab_register_host_memory(x->C, x->nC * es) == AB_OK;
     ok += ab_register_host_memory(x->P, nP * es) == AB_OK;
-    bool smc = smc_open(); g_ior = ior_init();
+    bool smc = sampler_on() && smc_open(); g_ior = sampler_on() && ior_init();
     sem_go = dispatch_semaphore_create(0); sem_done = dispatch_semaphore_create(0); sem_cpu_done = dispatch_semaphore_create(0);
     pthread_t th, st; pthread_create(&th, NULL, gpu_thread, NULL);
     if (smc || g_ior) pthread_create(&st, NULL, sampler, NULL);
@@ -1135,8 +1138,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "SPLIT_ROUNDS=%d needs %d records per process, more than MAXREC %d\n", rounds, need, MAXREC);
         unlink(path); return 2;
     }
-    bool smc = smc_open(); pthread_t st;
-    g_ior = envd("SPLIT_POWER_S", 0) > 0 && ior_init();   // GPU clock for sustained runs
+    bool smc = sampler_on() && smc_open(); pthread_t st;
+    g_ior = sampler_on() && envd("SPLIT_POWER_S", 0) > 0 && ior_init();   // GPU clock for sustained runs
     if (smc) pthread_create(&st, NULL, sampler, NULL);
     double idle_s = envd("SPLIT_IDLE_S", 1.0);   // mean over its second half
     double ti0 = now(); usleep((useconds_t)(idle_s * 1e6)); double ti1 = now(), tih = ti0 + 0.5 * idle_s;

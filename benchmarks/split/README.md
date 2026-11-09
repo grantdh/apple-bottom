@@ -71,8 +71,8 @@ same call through its seam (`SEAM`, below), which `AB_SPLIT` uses inside `dgemm_
     command, with IOReport's GPU and CPU clock-state residency by state name, its energy channels and
     each agent's DRAM bytes (the memory controller's counters: the CPU clusters, the GPU, DRAM), as TSV
     on the `AB_TRACE` clock, without root; `powerlog --list` shows which channels a machine reports.
-    `bench_split` still runs its own sampler, so do not run it under `powerlog` until it can be turned
-    off.
+    To run `bench_split` under `powerlog`, set `SPLIT_SAMPLER=0`: `bench_split` then samples nothing
+    itself, and its power fields read `nan`, so two samplers never run at once.
 - **Sustained mode** (`bench_split sustain <case> <outdir> <g>`): 80 s runs, back to back, after 30 s
   of idle each:
   1. the split at GPU part g;
