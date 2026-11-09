@@ -168,9 +168,9 @@ inline bool nonzero(uint2 w) { return ((w.y << 1) | w.x) != 0u; }
 // factors are nonzero and below G_LOW otherwise, and max(l_a + e_x, e_a +
 // l_x) equals it if a factor is lossy and is below G_LOW if neither is.
 // pmax and lmax are therefore plain maxima (note), and the host reads a
-// value below G_LOW as no such product (sum_ok). Every code lies in
-// [-12288, 2047] and every sum of an A code and an x code in [-24576, 2048],
-// so a guard holds them as 16-bit values.
+// value below G_LOW as no such product (sum_ok). An A code lies in
+// [-12288, 2047] and an x code in [-12288, 1], so every sum of the two lies
+// in [-24576, 2048], and a guard holds them as 16-bit values.
 constant short G_NONE = -32768;   // nothing noted
 constant int G_LOW = -8192;
 constant int XE_ZERO = -12288;
