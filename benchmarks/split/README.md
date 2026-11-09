@@ -100,7 +100,7 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
   not in the default run): the six squares and the seven QE-shaped cases of the 2026-10-28 results with
   copied operands (`SPLIT_NOREG=1`), at 1×8 and at 4×2, with `AB_STAGING_MB` 8192 and 2048, so that the
   library's seam and the user split meet the staged path's copies and a small pool. `ZGEMM 8192²` is not
-  run at 4×2 (see Memory).
+  run at 4×2 (see Memory). `g3.py` reads the results.
 - **Machine:** run on an otherwise idle Mac on AC power, from an adapter of at least 90 W
   (`SPLIT_MIN_W`). The script checks `pmset -g batt` and `pmset -g adapter` at the start and before each
   case, and stops with exit status 75 if either fails. A case that did not both start and end on AC power
@@ -157,3 +157,4 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 | `table.py <outdir>` | the results tables: medians [min–max] of the lockstep times, speedups, bits, errors, power state; with the arms, the seam and twin against the user split (paired medians), the slices alone and the seam's outcomes; sustained runs |
 | `classify_trace.py <dir>` | every traced GPU call as staged path, host path or fallback, by shape, with median stage times |
 | `power.py <dir>/<case>.np<N>.d<data> ...` | wall power by run of consecutive calls, trimming SMC's ~1 s lag |
+| `g3.py <dir> ... [--tsv FILE]` | G3 per case and layout: `SEAM` ÷ `S<g>` and `S<g>b` ÷ `S<g>` paired by (round, repeat), each as the median ratio, a BCa bootstrap interval and the Hodges-Lehmann estimate with its exact Wilcoxon interval; the verdict (the upper bound of `SEAM` ÷ `S<g>` against max(1.03, the twin's upper bound), on the BCa bounds, the Hodges-Lehmann ones as a check); and the seam's timeline per call (init, thread start, CPU and GPU parts, the wait for the GPU, submit, GPU execution, wake) beside the user split's parts. BCa needs scipy (`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3` on the M2 Max) |
