@@ -21,9 +21,15 @@ same call through its seam (`SEAM`, below), which `AB_SPLIT` uses inside `dgemm_
   - `N` splits the columns of C, `M` its rows.
   - `K` splits the sum: the GPU writes its partial product into a separate array, which is added to C
     after both slices finish, C = fl(fl(βC₀ + P_cpu) + P_gpu).
-- **Layouts:** `np` processes run every repeat in lockstep, with a barrier before each repeat. The
-  results use 1 process × 8 Accelerate threads, and 4 processes × 2 threads (the layout of Quantum
-  ESPRESSO runs with 4 ranks).
+- **Layouts:** `np` processes (1 to 8) run every repeat in lockstep, with a barrier before each
+  repeat. The results use 1 process × 8 Accelerate threads, and 4 processes × 2 threads (the layout of
+  Quantum ESPRESSO runs with 4 ranks). The `qe8x1` suite runs 8 processes × 1 thread, the layout of
+  pw.x at 8 ranks.
+- **pw.x's shapes at 8x1:** `A8_UN512` ('N','N' 9139×500×512, β = 1, N axis), `A8_RK512` ('C','N'
+  512×500×9139) and `A8_RK1000` ('C','N' 500×1000×9176, ldc 1000), both K axis, from input A;
+  `B8_UM1152` ('N','N' 8927×160×1152, β = 1, M axis) and `B8_RK1152` ('C','N' 1152×160×8988, K axis)
+  from input B. Shapes, leading dimensions and scalars are one rank's calls in 1.5.1's `AB_TRACE` of
+  pw.x at 8 ranks with `-nk 4`; each rank's M (or K) differs a little (8918-9176).
 - **One case:**
   1. a warm-up;
   2. a sweep over the GPU share f, 3 rounds with every configuration interleaved;

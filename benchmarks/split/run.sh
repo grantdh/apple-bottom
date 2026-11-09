@@ -5,6 +5,8 @@
 #   smoke          D2048, Z2048 at 1x8; UM160, RK160 at 4x2 (about 30 s)
 #   sq1x8          DGEMM and ZGEMM squares 2048-8192, 1 process x 8 Accelerate threads (about 10 min)
 #   qe4x2, qe1x8   the QE-shaped updates and overlaps at 4 processes x 2 threads, then 1 x 8 (3 + 2 min)
+#   qe8x1          pw.x's calls at 8 ranks x 1 thread, -nk 4 (input A: zUN.k1, zRK.t1, zRK.t2; B: zUM.k2,
+#                  zRK.t1), at 8 processes x 1 Accelerate thread
 #   qelike4x2      UN1000, UN512, RK500 with QE-like data (rows decaying over 9 decades), 4x2
 #   qelike4x2-low  the same updates at GPU shares 0.06-0.32
 #   noreg4x2       UN1000, UM160, RK500 with copied instead of registered operands
@@ -22,7 +24,7 @@ bin=${BENCH_SPLIT:-$here/../../build/bench_split}
 [ -x "$bin" ] || { echo "no $bin: run 'make build/bench_split' first" >&2; exit 2; }
 [ $# -ge 1 ] || { sed -n 2,18p "$0" >&2; exit 2; }
 out=$1; shift
-suites=${*:-sq1x8 qe4x2 qe1x8 qelike4x2 qelike4x2-low noreg4x2 power4x2 sustain}
+suites=${*:-sq1x8 qe4x2 qe1x8 qe8x1 qelike4x2 qelike4x2-low noreg4x2 power4x2 sustain}
 env_common=(AB_MODE=gpu AB_MIN_GPU_DIM=0 AB_STAGING_MB=8192 AB_REPORT=1)
 
 onac() { pmset -g batt | head -1 | grep -q "'AC Power'"; }
@@ -65,12 +67,14 @@ sus() {
 }
 
 QE="UN1000 UN512 UM160 UM320 UM1000 RK500 RK160"
+QE8="A8_UN512 A8_RK512 A8_RK1000 B8_UM1152 B8_RK1152"
 for s in $suites; do
     case $s in
     smoke)         one smoke 1 8 0 D2048; one smoke 1 8 0 Z2048; one smoke 4 2 0 UM160; one smoke 4 2 0 RK160 ;;
     sq1x8)         for c in D2048 D4096 D8192 Z2048 Z4096 Z8192; do one sq1x8 1 8 0 "$c"; done ;;
     qe4x2)         for c in $QE; do one qe4x2 4 2 0 "$c"; done ;;
     qe1x8)         for c in $QE; do one qe1x8 1 8 0 "$c"; done ;;
+    qe8x1)         for c in $QE8; do one qe8x1 8 1 0 "$c"; done ;;
     qelike4x2)     for c in UN1000 UN512 RK500; do one qelike4x2 4 2 1 "$c"; done ;;
     qelike4x2-low) for c in UN512L UN1000L; do one qelike4x2-low 4 2 1 "$c"; done ;;
     noreg4x2)      for c in UN1000 UM160 RK500; do one noreg4x2 4 2 0 "$c" SPLIT_NOREG=1; done ;;

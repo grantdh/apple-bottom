@@ -10,7 +10,7 @@
 //            in place (registration is setup, not timed; SPLIT_NOREG=1 skips it).
 // Axes: N splits columns of C, M splits rows of C, K splits the sum:
 //       C = fl(fl(beta C0 + P_cpu) + P_gpu), P_gpu computed into P with beta = 0, added after both.
-// np processes run every repeat in lockstep (barrier before each); np = 1 is one process.
+// np processes (1 to NPMAX = 8) run every repeat in lockstep (barrier before each); np = 1 is one process.
 // Per case: warm-up, a sweep over the GPU share (3 rounds, configs interleaved), then a fixed block
 // at the sweep's best share (SPLIT_ROUNDS rounds, default 3, of Accelerate / GPU / split, interleaved)
 // whose medians are the headline (so the choice of f does not bias them), bit checks, and Dot2 errors
@@ -64,7 +64,7 @@
 
 extern char **environ;
 typedef double _Complex zc;
-#define NPMAX 4
+#define NPMAX 8
 #define MAXCFG 16
 #define MAXREC 2048   // timed calls per process: the sweep, SPLIT_ROUNDS fixed rounds, 2 orders
 #define PG 16384
@@ -136,6 +136,14 @@ static const Case CASES[] = {
     // QE overlaps / reductions 'C','N', K = npw: A(npwx, M), B(npwx, N), C(M, N), beta = 0
     {"RK500",  'z', 'C', 'K',   500, 500, 18277, 18336, 18336,  500, 0, 64, QEF, 2, 3, 3, 4, 0},
     {"RK160",  'z', 'C', 'K',   160, 160, 18432, 18432, 18432,  160, 0, 64, QEF, 3, 3, 3, 4, 0},
+    // pw.x's own calls at 8 ranks x 1 thread with -nk 4 (si64 inputs A and B; shapes, leading dimensions
+    // and scalars from 1.5.1's AB_TRACE of those runs, one rank's of each class): A's zUN.k1 update and
+    // zRK.t1, zRK.t2 overlaps; B's zUM.k2 update and zRK.t1 overlap. Axes as design section 5's rows.
+    {"A8_UN512",  'z', 'N', 'N', 9139,  500,  512, 9160,  512, 9160, 1, 32, QEF, 2, 3, 3, 4, 0},
+    {"A8_RK512",  'z', 'C', 'K',  512,  500, 9139, 9160, 9160,  512, 0, 64, QEF, 2, 3, 3, 4, 0},
+    {"A8_RK1000", 'z', 'C', 'K',  500, 1000, 9176, 9176, 9176, 1000, 0, 64, QEF, 2, 3, 3, 4, 0},
+    {"B8_UM1152", 'z', 'N', 'M', 8927,  160, 1152, 9014, 1152, 9014, 1, 32, QEF, 2, 3, 3, 4, 0},
+    {"B8_RK1152", 'z', 'C', 'K', 1152,  160, 8988, 9014, 9014, 1152, 0, 64, QEF, 3, 3, 3, 4, 0},
 };
 #define NCASES (int)(sizeof CASES / sizeof CASES[0])
 static const Case *find_case(const char *n) { for (int i = 0; i < NCASES; i++) if (!strcmp(CASES[i].name, n)) return &CASES[i]; return NULL; }
