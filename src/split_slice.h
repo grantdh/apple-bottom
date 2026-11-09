@@ -25,6 +25,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "split_times.h"   // ab_split_times_t
+
 #define AB_SPLIT_ALIGN_NM 32
 #define AB_SPLIT_ALIGN_K  64
 
@@ -136,6 +138,7 @@ typedef struct {
     int row;            // the split table's row (dgemm_/zgemm_), -1 for the seam
     char axis;
     int L, g;
+    ab_split_times_t times;
 } ab_split_record_t;
 
 int ab_internal_dgemm_split(const ab_split_forced_t *f, char ta, char tb, int M, int N, int K,

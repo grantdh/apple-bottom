@@ -1488,6 +1488,7 @@ typedef struct {
     uint64_t t0, t1;                    // ticks: the tail's start and end
     bool prof_on;                       // the call is profiled: so is the tail's staged run
     CallProf prof;                      // ... its stages, on this thread's GPU time
+    ab_prof_kernel_split_t kernel;      // the tail's command buffers (the timeline), profiled or not
 } split_job_t;
 
 // AB_TEST_FAIL_STAGE=split_fpcr (test-only): this thread flushes subnormals
@@ -1519,6 +1520,10 @@ static void split_run_gpu(split_job_t *j) {
     }
     j->scales = j->why == AB_PROF_STAGED_GPU_FAILED && !t_stage_cb_failed;
     j->in_place = t_last_stage.in_place;
+    // The kernel steps took a profiled run's command buffers into its record;
+    // an unprofiled run's are this new thread's only ones.
+    if (p) j->kernel = p->call.split;
+    else (void)ab_internal_take_gpu_seconds(&j->kernel);
 }
 
 static void *split_worker(void *arg) {
@@ -1544,14 +1549,18 @@ static ab_split_outcome_t split_declined(ab_split_record_t *rec, ab_prof_split_d
     return rec->outcome = AB_SPLIT_DECLINED;
 }
 
-// A profiled call's split stage: the time since its last mark, into field.
-#define SPLIT_MARK(p, field) do {                                     \
+// One clock read: for a profiled call, the time since its last mark into its
+// split stage `field`; for every call, the time in ns into the timeline's `at`.
+#define SPLIT_AT(p, field, at) do {                                   \
+        uint64_t now_ = ab_prof_now_ticks();                          \
         if (p) {                                                      \
-            uint64_t now_ = ab_prof_now_ticks();                      \
             (p)->split.field += ab_prof_ticks_to_ns(now_ - (p)->mark); \
             (p)->mark = now_;                                         \
         }                                                             \
+        (at) = ab_prof_ticks_to_ns(now_);                             \
     } while (0)
+
+static inline uint64_t now_ns(void) { return ab_prof_ticks_to_ns(ab_prof_now_ticks()); }
 
 static double part_gflop(const gemm_part_t *q) {
     return (q->routine == 'z' ? 8.0 : 2.0) * q->M * (double)q->N * q->K / 1e9;
@@ -1565,7 +1574,9 @@ static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis
                                     int engine, ab_split_record_t *rec) {
     *rec = (ab_split_record_t){.outcome = AB_SPLIT_DECLINED, .declined = AB_PROF_SPLIT_DECLINE_NONE,
                                .staged = AB_PROF_STAGED_NONE, .row = rec->row, .axis = axis, .g = g,
-                               .L = axis == 'N' ? w->N : axis == 'M' ? w->M : w->K};
+                               .L = axis == 'N' ? w->N : axis == 'M' ? w->M : w->K,
+                               .times = {.cut_ns = now_ns()}};
+    ab_split_times_t *tm = &rec->times;
     const size_t e = w->routine == 'z' ? sizeof(double complex) : sizeof(double);
     ab_split_part_t hc, tc;
     ab_split_parts(axis, g, op_char(w->ta), op_char(w->tb), w->M, w->N, w->K, w->ldA, w->ldB,
@@ -1629,6 +1640,7 @@ static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis
     // (pthread_join is a cancellation point) may unwind it before then.
     int cancel_state = 0;
     if (run_tail) pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancel_state);
+    if (run_tail) tm->create_ns = now_ns();
     // AB_TEST_FAIL_STAGE=split_thread (test-only): as if pthread_create failed.
     if (run_tail && (ab_test_fail_stage() == AB_PROF_FAIL_SPLIT_THREAD ||
                      pthread_create(&worker, NULL, split_worker, &j) != 0)) {
@@ -1638,26 +1650,24 @@ static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis
         return split_declined(rec, AB_PROF_SPLIT_DECLINE_THREAD);
     }
 
-    SPLIT_MARK(p, init_ns);
+    SPLIT_AT(p, init_ns, tm->cpu0_ns);   // the head starts here unless it waits for the tail
 
     // The head, before or after the tail as asked; the join.
     bool joined = !run_tail;
     if (order == 2 && !joined) {
         pthread_join(worker, NULL);
         joined = true;
-        SPLIT_MARK(p, join_ns);
+        SPLIT_AT(p, join_ns, tm->join_ns);
+        tm->cpu0_ns = tm->join_ns;
     }
     part_cblas(&head);
-    SPLIT_MARK(p, cpu_part_ns);
-    uint64_t head_end = p ? p->mark : 0;
+    SPLIT_AT(p, cpu_part_ns, tm->cpu1_ns);
     if (j.head_done) dispatch_semaphore_signal(j.head_done);
     if (!joined) {
         pthread_join(worker, NULL);
-        if (p) {
-            uint64_t before = p->split.join_ns;
-            SPLIT_MARK(p, join_ns);
-            p->split.wait_cpu_ns = p->split.join_ns - before;
-        }
+        uint64_t before = p ? p->split.join_ns : 0;
+        SPLIT_AT(p, join_ns, tm->join_ns);
+        if (p) p->split.wait_cpu_ns = p->split.join_ns - before;
     }
     if (run_tail) pthread_setcancelstate(cancel_state, NULL);
     if (j.head_done) dispatch_release(j.head_done);
@@ -1665,10 +1675,15 @@ static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis
     // condition, as the host path's guard reports it without AB_SPLIT: range.
     // The scan's time is the join's (join_ns), not the redo's.
     if (j.why == AB_PROF_STAGED_NONFINITE && stage_reads_nonfinite(&j.g)) j.why = AB_PROF_STAGED_RANGE;
-    SPLIT_MARK(p, join_ns);
+    SPLIT_AT(p, join_ns, tm->end_ns);   // the end unless a redo or the K axis's sum follows
+    if (run_tail) {
+        tm->gpu0_ns = ab_prof_ticks_to_ns(j.t0);
+        tm->gpu1_ns = ab_prof_ticks_to_ns(j.t1);
+        tm->gpu = j.kernel;
+    }
     if (p && run_tail) {
         p->split.gpu_wall_ns = ab_prof_ticks_to_ns(j.t1 - j.t0);
-        p->split.wait_gpu_ns = head_end > j.t1 ? ab_prof_ticks_to_ns(head_end - j.t1) : 0;
+        p->split.wait_gpu_ns = tm->cpu1_ns > tm->gpu1_ns ? tm->cpu1_ns - tm->gpu1_ns : 0;
         if (j.prof.t0) memcpy(p->split.gpu_stage_ns, j.prof.stage_ns, sizeof j.prof.stage_ns);
     }
     if (p) {
@@ -1686,20 +1701,21 @@ static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis
     }
     if (!kept) {
         part_cblas(tail);
-        SPLIT_MARK(p, redo_ns);
+        SPLIT_AT(p, redo_ns, tm->end_ns);
     } else if (P && w->routine == 'z') {
         const double complex *pz = P;
         double complex *c = w->C;
         for (size_t col = 0; col < (size_t)w->N; col++)
             for (size_t i = 0; i < (size_t)w->M; i++) c[col * w->ldC + i] += pz[col * w->M + i];
-        SPLIT_MARK(p, sum_ns);
+        SPLIT_AT(p, sum_ns, tm->end_ns);
     } else if (P) {
         const double *pd = P;
         double *c = w->C;
         for (size_t col = 0; col < (size_t)w->N; col++)
             for (size_t i = 0; i < (size_t)w->M; i++) c[col * w->ldC + i] += pd[col * w->M + i];
-        SPLIT_MARK(p, sum_ns);
+        SPLIT_AT(p, sum_ns, tm->end_ns);
     }
+    if (p) p->split.times = *tm;
     free(P);
     rec->staged = engine == 0 ? j.why : AB_PROF_STAGED_NONE;
     rec->retries = j.retries;

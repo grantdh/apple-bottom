@@ -146,10 +146,19 @@ static std::atomic<bool> g_failed_once{false};
 
 static bool commit_and_wait(id<MTLCommandBuffer> cmdBuf, uint64_t encode_ns) {
     uint64_t commit_ns = host_ns();
-    t_kernel_split.encode_ns += commit_ns - encode_ns;
+    ab_prof_kernel_split_t *k = &t_kernel_split;
+    k->encode_ns += commit_ns - encode_ns;
+    if (!k->commit_ns) k->commit_ns = commit_ns;
     bool completed = run_cmd(cmdBuf);
-    note_gpu_time(cmdBuf, commit_ns, host_ns());
-    return completed && !(ab_test_fail_stage() == AB_PROF_FAIL_KERNEL_ONCE && !g_failed_once.exchange(true));
+    uint64_t done_ns = host_ns();
+    note_gpu_time(cmdBuf, commit_ns, done_ns);
+    k->done_ns = done_ns;
+    k->cmdbufs++;
+    bool ok = completed && !(ab_test_fail_stage() == AB_PROF_FAIL_KERNEL_ONCE && !g_failed_once.exchange(true));
+    if (!ok && !k->mtl_error)   // why, for AB_SPLIT's timeline
+        k->mtl_error = cmdBuf.status != MTLCommandBufferStatusError ? -2   // a test hook
+                     : cmdBuf.error ? (int32_t)cmdBuf.error.code : -1;
+    return ok;
 }
 
 extern "C" double ab_internal_take_gpu_seconds(ab_prof_kernel_split_t *split) {
@@ -2936,11 +2945,17 @@ static bool use_prefetch(ABContextImpl* ctx, uint32_t groups, uint32_t max_group
 }
 
 // Kernel kind's pipeline for a grid of `groups` threadgroups, its *_pf
-// instance by use_prefetch. Counts the dispatch, for the tests.
+// instance by use_prefetch. Counts the dispatch, for the tests, and adds it to
+// this thread's kernel split (AB_SPLIT's timeline: threadgroups per part).
 static id<MTLComputePipelineState> gemm_pipeline(ABContextImpl* ctx, ABKernel kind,
                                                   uint32_t groups, uint32_t max_groups) {
     bool pf = use_prefetch(ctx, groups, max_groups);
     __atomic_fetch_add(&g_kernel_dispatches[kind][pf], 1, __ATOMIC_RELAXED);
+    ab_prof_kernel_split_t *k = &t_kernel_split;
+    k->dispatches++;
+    k->groups += groups;
+    if (groups > k->groups_max) k->groups_max = groups;
+    k->kinds |= 1u << (2 * kind + pf);
     switch (kind) {
     case AB_KERNEL_DGEMM:
         return pf ? ctx.dgemmPFPipeline : ctx.dgemmPipeline;

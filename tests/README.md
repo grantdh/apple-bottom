@@ -112,7 +112,9 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     seam (`ab_internal_dgemm_split`, `ab_internal_zgemm_split`), on the GPU:
     a call cut at g is, bit for bit, cblas on the head slice and the staged
     path on the tail slice alone, in every completion order, over every
-    TRANS pair, scalar set and a range of cuts, padded operands untouched;
+    TRANS pair, scalar set and a range of cuts, padded operands untouched,
+    with each step of the call's timeline (`src/split_times.h`) recorded in
+    the order taken;
     errors against cblas (1e-11) and, for DGEMM with alpha 1 and beta 0,
     against Dot2 within (3K + 13) u² |A||B|, with cuts at 1 and L − 1, NaN
     padding, beta = 0 over NaN in C, signed zeros, cancellation and QE's
@@ -128,12 +130,14 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     `redo_4m`, `scales`, `split_thread`, `split_scratch`, `split_fpcr`,
     `nonfinite` for a NaN the GPU made, and `split_poison` for a refused K
     tail) and
-    `AB_HOST_PACK` with the outcome, retries and bits it calls for (the
+    `AB_HOST_PACK` with the outcome, retries, Metal error code (a test
+    hook's -2) and bits it calls for (the
     cblas parts, the GPU's bits, or the whole call's as with `AB_SPLIT`
     unset); `AB_STRASSEN`, `AB_STAGING_MB=0` and `AB_MIN_GPU_DIM=0` keeping
     the bits; `VECLIB_MAXIMUM_THREADS` 1, 2 and 8 repeating; `fork()` with
     `_exit` and `exit`; the reports (counts that add up, a line per row,
-    trace stages that sum exactly, the JSON fields; which stage a piece of
+    trace stages that sum exactly, every split line's timeline whole and in
+    order, the JSON fields; which stage a piece of
     work is charged to, such as the NaN scan's time to `join_ns`, is checked
     by reading `src/blas_wrapper.c`, not by a test); `AB_PRECISION=fast`
     within 4x the default error; the native, batched, asynchronous and

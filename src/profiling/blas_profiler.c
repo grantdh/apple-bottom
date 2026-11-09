@@ -737,6 +737,14 @@ uint64_t ab_prof_take_kernel_ns(uint64_t wall_ns, ab_prof_kernel_split_t* split)
     }
     if (!split->gpu_start_ns) split->gpu_start_ns = k.gpu_start_ns;
     if (k.gpu_end_ns) split->gpu_end_ns = k.gpu_end_ns;
+    if (!split->commit_ns) split->commit_ns = k.commit_ns;
+    if (k.done_ns) split->done_ns = k.done_ns;
+    split->groups += k.groups;
+    if (k.groups_max > split->groups_max) split->groups_max = k.groups_max;
+    split->dispatches += k.dispatches;
+    split->cmdbufs += k.cmdbufs;
+    split->kinds |= k.kinds;
+    if (!split->mtl_error) split->mtl_error = k.mtl_error;
     return ns;
 }
 
@@ -862,6 +870,22 @@ static void trace_header(int fd, pid_t pid) {
                      "#   (sum: gpu_wall_ns), gpu_wall_ns wait_cpu_ns wait_gpu_ns; a call a row covers "
                      "without splitting adds\n"
                      "#   row axis g (0: not cut) and declined=<why> when declined\n");
+        // The timeline (split_times.h) and the settings that shape it.
+        line_add(&l, "# AB_SPLIT timeline, ns on the clock above (0: did not happen): at_cut_ns at_create_ns "
+                     "at_cpu0_ns at_cpu1_ns\n"
+                     "#   at_gpu0_ns at_gpu1_ns at_join_ns at_end_ns; the GPU part's command buffers: "
+                     "at_commit_ns (first commit)\n"
+                     "#   gpu_start_ns gpu_end_ns at_done_ns (last completion), gpu_encode_ns gpu_submit_ns "
+                     "gpu_wake_ns gpu_temps_ns\n"
+                     "#   (summed), gpu_cmdbufs gpu_dispatches gpu_groups gpu_groups_max (GEMM-family "
+                     "threadgroups), gpu_kinds\n"
+                     "#   (bit 2*kind+prefetch), gpu_mtl_error (MTLCommandBufferError code; 0 none, -1 "
+                     "no code, -2 a test hook)\n");
+        // As passed, but the staging cap as in effect (AB_STAGING_MB, default 2048).
+        const char *vl = getenv("VECLIB_MAXIMUM_THREADS"), *omp = getenv("OMP_NUM_THREADS"),
+                   *pf = getenv("AB_PREFETCH");
+        line_add(&l, "# env VECLIB_MAXIMUM_THREADS=%s OMP_NUM_THREADS=%s AB_PREFETCH=%s staging_mb=%zu\n",
+                 vl ? vl : "unset", omp ? omp : "unset", pf ? pf : "unset", ab_staging_cap_bytes() >> 20);
     }
     (void)write(fd, l.buf, l.n);
 }
@@ -919,6 +943,20 @@ static void trace_split_fields(report_line_t* l, uint64_t elapsed_ns, const ab_p
         line_add(l, " gpu_%s_ns=%llu", ab_prof_stage_names[st], LLU(s->gpu_stage_ns[st]));
     line_add(l, " gpu_other_ns=%llu gpu_wall_ns=%llu wait_cpu_ns=%llu wait_gpu_ns=%llu",
              LLU(split_gpu_other(s)), LLU(s->gpu_wall_ns), LLU(s->wait_cpu_ns), LLU(s->wait_gpu_ns));
+    const ab_split_times_t* t = &s->times;
+    const ab_prof_kernel_split_t* k = &t->gpu;
+    line_add(l, " at_cut_ns=%llu at_create_ns=%llu at_cpu0_ns=%llu at_cpu1_ns=%llu at_gpu0_ns=%llu "
+                "at_gpu1_ns=%llu at_join_ns=%llu at_end_ns=%llu",
+             LLU(t->cut_ns), LLU(t->create_ns), LLU(t->cpu0_ns), LLU(t->cpu1_ns), LLU(t->gpu0_ns),
+             LLU(t->gpu1_ns), LLU(t->join_ns), LLU(t->end_ns));
+    line_add(l, " at_commit_ns=%llu gpu_start_ns=%llu gpu_end_ns=%llu at_done_ns=%llu gpu_encode_ns=%llu "
+                "gpu_submit_ns=%llu gpu_wake_ns=%llu gpu_temps_ns=%llu",
+             LLU(k->commit_ns), LLU(k->gpu_start_ns), LLU(k->gpu_end_ns), LLU(k->done_ns),
+             LLU(k->encode_ns), LLU(k->submit_ns), LLU(k->wake_ns), LLU(k->temps_ns));
+    line_add(l, " gpu_cmdbufs=%u gpu_dispatches=%u gpu_groups=%llu gpu_groups_max=%u gpu_kinds=%u "
+                "gpu_mtl_error=%d",
+             (unsigned)k->cmdbufs, (unsigned)k->dispatches, LLU(k->groups), (unsigned)k->groups_max,
+             (unsigned)k->kinds, (int)k->mtl_error);
 }
 
 // Fields as key=value, in the order of the header's legend. GPU calls add
