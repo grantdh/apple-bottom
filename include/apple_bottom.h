@@ -230,6 +230,7 @@ ABStatus ab_dsyrk(ABMatrix A, ABMatrix C);
 //   alpha:  scalar multiplier
 //   A:      triangular matrix (N × N)
 //   B:      right-hand side / solution matrix (M × N), overwritten with X
+// A panel update whose GPU step fails is done on Accelerate in FP64 instead.
 ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
                   double alpha, ABMatrix A, ABMatrix B);
 
@@ -453,8 +454,13 @@ const char* ab_precision_mode(void);
 //                 referenced elements, to spot repeated operands.
 //   AB_TEST_FAIL_STAGE=alloc|kernel  test-only: every ab_matrix_create() and
 //                 staging buffer (alloc), or the command buffer of every
-//                 ab_dgemm_scaled(), ab_zgemm() and staged call (kernel),
-//                 fails, so GPU-routed BLAS-ABI calls fall back to cblas.
+//                 staged, BLAS-2 and synchronous native call but
+//                 ab_fft_execute (kernel), fails, so GPU-routed BLAS-ABI
+//                 calls fall back to cblas and native calls return
+//                 AB_ERROR_KERNEL_FAILED (ab_dtrsm and ab_dgesv_mpir redo
+//                 the failed step on cblas).
+//   AB_TEST_FAIL_ONLY=n  test-only: with AB_TEST_FAIL_STAGE=kernel, only the
+//                 process's n-th of those command buffers fails.
 //   AB_HOST_PACK=1  every GPU call takes the host path (host pack,
 //                 conversion and epilogue) instead of the staged path.
 //   AB_STAGING_MB=n  the GPU buffers the staged path, the native ZGEMMs

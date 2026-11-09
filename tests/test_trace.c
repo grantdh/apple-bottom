@@ -33,12 +33,17 @@
 //           Under the hook every GPU panel update and residual fails and is
 //           done on cblas instead, each with an AB_PROFILE fallback line: for
 //           ab_dtrsm as many as the GEMMs the GPU ran without the hook.
+//           With AB_TEST_FAIL_ONLY=<n> too, only the n-th GEMM falls back.
 //   mpir    AB_PROFILE=1: ab_dgesv_mpir on a dense A that refinement solves
 //           (no fallback line, 3 to 5 GPU residuals), on the 8 x 8 Hilbert
 //           matrix, on which FP32 refinement fails, and on an A singular in
 //           FP32 only. The last two are solved in FP64 instead, each with one
 //           AB_PROFILE line saying why. All three return AB_OK with a backward
 //           error below 1e-14.
+//   native  AB_TEST_FAIL_STAGE=kernel, AB_TEST_FAIL_ONLY=<n> for each n: of the
+//           native operations that wait for command buffers, only the one
+//           that waits for the n-th of the run returns
+//           AB_ERROR_KERNEL_FAILED. Without the hook all return AB_OK.
 // =============================================================================
 
 #include "apple_bottom.h"
@@ -451,6 +456,68 @@ static int open_on(const char *path, int fd) {
     return got;
 }
 
+// The native operations that wait for command buffers, in the order
+// child_native() runs them, and how many each waits for when none fails.
+static const struct {
+    const char *name;
+    int buffers;
+} NATIVE_OPS[] = {
+    {"zero", 1},
+    {"copy", 1},
+    {"add", 1},
+    {"sub", 1},
+    {"scale", 1},
+    {"dsyrk", 1},
+    {"dgemm", 1},
+    {"dgemm_batched", 1},
+    {"zgemm_batched", 1},
+    {"zgemm_batched_mixed", 2},     // before the dimensions change, and the last
+    {"zgemm_ex", 3},                // op(A), op(B) and the product
+    {"zherk", 7},                   // 2 DSYRK, the add, the transposes, 2 DGEMM, the sub
+};
+#define N_NATIVE_OPS TEST_REGISTRY_SIZE(NATIVE_OPS)
+
+// A rows x cols matrix of value()s.
+static ABMatrix native_matrix(unsigned seed, int rows, int cols) {
+    double *x = fill(seed, stored('N', rows, cols, 0), false, false);
+    ABMatrix m = ab_matrix_create(rows, cols);
+    ab_matrix_upload(m, x, true);
+    free(x);
+    return m;
+}
+
+// Runs NATIVE_OPS once each, printing "native <name> status=<ab_status_string>".
+static void child_native(void) {
+    enum { N = 8, SMALL = 4 };
+    if (ab_init() != AB_OK) {
+        printf("native: ab_init failed\n");
+        return;
+    }
+    ABMatrix m[6], s[6];            // Ar, Ai, Br, Bi, Cr, Ci
+    for (int i = 0; i < 6; i++) {
+        m[i] = native_matrix(10 + i, N, N);
+        s[i] = native_matrix(20 + i, SMALL, SMALL);
+    }
+    ABMatrix Ar[] = {m[0], m[0]}, Ai[] = {m[1], m[1]}, Br[] = {m[2], m[2]},
+             Bi[] = {m[3], m[3]}, Cr[] = {m[4], m[4]}, Ci[] = {m[5], m[5]};
+    ABMatrix xAr[] = {m[0], s[0]}, xAi[] = {m[1], s[1]}, xBr[] = {m[2], s[2]},
+             xBi[] = {m[3], s[3]}, xCr[] = {m[4], s[4]}, xCi[] = {m[5], s[5]};
+#define NATIVE(name, call) printf("native %s status=%s\n", name, ab_status_string(call))
+    NATIVE("zero", ab_matrix_zero(m[4]));
+    NATIVE("copy", ab_matrix_copy(m[0], m[4]));
+    NATIVE("add", ab_matrix_add(m[0], m[1], m[4]));
+    NATIVE("sub", ab_matrix_sub(m[0], m[1], m[4]));
+    NATIVE("scale", ab_matrix_scale(2.0, m[4]));
+    NATIVE("dsyrk", ab_dsyrk(m[0], m[4]));
+    NATIVE("dgemm", ab_dgemm(m[0], m[2], m[4]));
+    NATIVE("dgemm_batched", ab_dgemm_batched(2, Ar, Br, Cr));
+    NATIVE("zgemm_batched", ab_zgemm_batched(2, Ar, Ai, Br, Bi, Cr, Ci));
+    NATIVE("zgemm_batched_mixed", ab_zgemm_batched(2, xAr, xAi, xBr, xBi, xCr, xCi));
+    NATIVE("zgemm_ex", ab_zgemm_ex(AB_TRANS, AB_CONJ_TRANS, m[0], m[1], m[2], m[3], m[4], m[5]));
+    NATIVE("zherk", ab_zherk(m[0], m[1], m[4], m[5]));
+#undef NATIVE
+}
+
 static int child_main(const char *scenario, const char *dir) {
     if (!strcmp(scenario, "lines")) {
         child_calls(LINE_CALLS, TEST_REGISTRY_SIZE(LINE_CALLS));
@@ -495,6 +562,10 @@ static int child_main(const char *scenario, const char *dir) {
     }
     if (!strcmp(scenario, "mpir")) {
         child_mpir();
+        return 0;
+    }
+    if (!strcmp(scenario, "native")) {
+        child_native();
         return 0;
     }
     return 2;
@@ -1046,53 +1117,72 @@ static int count_lines(const char *out, const char *prefix) {
     return n;
 }
 
-// The solve scenario under AB_PROFILE=1, first as is, then with
-// AB_TEST_FAIL_STAGE=kernel, which reports every GPU GEMM failed after the
-// GPU ran it: a solve that used such a result would still be accurate, so the
-// fallbacks are what tell. Every solve must return AB_OK with X to 1e-12. As
-// is, the GPU runs every GEMM step and nothing falls back; under the hook no
-// GEMM counts as run, and AB_PROFILE reports each step as a fallback to
-// cblas: for ab_dtrsm as many as the GPU ran before, for ab_dgesv_mpir one
-// per residual (1 to 10).
+// Runs the solve scenario with AB_PROFILE=1 and, if fail, with
+// AB_TEST_FAIL_STAGE=kernel and AB_TEST_FAIL_ONLY=only (0: every GEMM fails,
+// and the GPU must count none as run). Every solve must return AB_OK with X to
+// 1e-12, and print dtrsm_lines ab_dtrsm and mpir_lines ab_dgesv_mpir fallback
+// lines (negative: 1 to 10). If gpu is not NULL, the GPU must run GEMMs for
+// each solve, and gpu gets how many for ab_dtrsm's ([0]) and the MPIR's ([1]).
+static void check_solves(const char *dir, bool fail, unsigned long long only, int dtrsm_lines,
+                         int mpir_lines, unsigned long long gpu[2]) {
+    char how[64], only_env[48], mpir_want[16];
+    snprintf(only_env, sizeof only_env, "AB_TEST_FAIL_ONLY=%llu", only);
+    if (only) snprintf(how, sizeof how, "with GEMM %llu failing", only);
+    else snprintf(how, sizeof how, fail ? "under AB_TEST_FAIL_STAGE=kernel" : "without a failure");
+    if (mpir_lines < 0) snprintf(mpir_want, sizeof mpir_want, "1 to 10");
+    else snprintf(mpir_want, sizeof mpir_want, "%d", mpir_lines);
+    const bool none_run = fail && !only;
+    const char *env[] = {"AB_PROFILE=1", fail ? "AB_TEST_FAIL_STAGE=kernel" : NULL,
+                         only ? only_env : NULL, NULL};
+    const size_t n = TEST_REGISTRY_SIZE(SOLVES);
+    ChildRun r = {0};
+    if (run_child("solve", dir, env, &r)) {
+        for (size_t i = 0; i <= n && !first_failure[0]; i++) {
+            const char *tag = i < n ? SOLVES[i].tag : "mpir";
+            char prefix[32], line[256];
+            int st = -1, accurate = 0;
+            unsigned long long gemms = 0;
+            snprintf(prefix, sizeof prefix, "solve %s ", tag);
+            const char *l = find_line(r.out, prefix, line, sizeof line);
+            if (expect(l && sscanf(l + strlen(prefix), "status=%d accurate=%d gemms=%llu", &st,
+                                   &accurate, &gemms) == 3,
+                       "%s: no line for %s: %s", how, tag, r.out))
+                expect(st == AB_OK && accurate && (gpu ? gemms > 0 : !none_run || gemms == 0),
+                       "%s: '%s', expected AB_OK, X to 1e-12%s", how, l,
+                       gpu ? " and GEMMs run on the GPU" : none_run ? " and no GEMM counted as run" : "");
+            if (gpu) gpu[i == n] += gemms;
+        }
+        int dtrsm = count_lines(r.out, "AB_PROFILE ab_dtrsm ");
+        int mpir = count_lines(r.out, "AB_PROFILE ab_dgesv_mpir ");
+        if (!first_failure[0])
+            expect(dtrsm == dtrsm_lines &&
+                       (mpir_lines < 0 ? mpir >= 1 && mpir <= 10 : mpir == mpir_lines),
+                   "%s: %d ab_dtrsm and %d ab_dgesv_mpir fallback lines, expected %d and %s: %s",
+                   how, dtrsm, mpir, dtrsm_lines, mpir_want, r.out);
+    }
+    free(r.out);
+}
+
+// The solve scenario, first as is, then with every GEMM failing
+// (AB_TEST_FAIL_STAGE=kernel), which the hook reports after the GPU ran it: a
+// solve that used such a result would still be accurate, so the fallbacks are
+// what tell. As is, the GPU runs every GEMM step and nothing falls back; under
+// the hook no GEMM counts as run, and AB_PROFILE reports each step as a
+// fallback to cblas: for ab_dtrsm as many as the GPU ran before, for
+// ab_dgesv_mpir one per residual (1 to 10). Then AB_TEST_FAIL_ONLY=k fails only
+// the k-th GEMM, as when macOS stops one command buffer, for each k up to one
+// past the GEMMs the GPU ran the first time: one fallback line, from the
+// solver that ran the k-th, and none past the last.
 static void test_fail_stage_solvers(void) {
     begin();
     char dir[PATH_MAX];
     test_dir("solve", dir, sizeof dir);
-    const char *none[] = {"AB_PROFILE=1", NULL};
-    const char *kernel[] = {"AB_PROFILE=1", "AB_TEST_FAIL_STAGE=kernel", NULL};
-    const size_t n = TEST_REGISTRY_SIZE(SOLVES);
-    unsigned long long dtrsm_gemms = 0;
-    for (int fail = 0; fail < 2 && !first_failure[0]; fail++) {
-        const char *how = fail ? "under AB_TEST_FAIL_STAGE=kernel" : "without a failure";
-        ChildRun r = {0};
-        if (run_child("solve", dir, fail ? kernel : none, &r)) {
-            for (size_t i = 0; i <= n && !first_failure[0]; i++) {
-                const char *tag = i < n ? SOLVES[i].tag : "mpir";
-                char prefix[32], line[256];
-                int st = -1, accurate = 0;
-                unsigned long long gemms = 0;
-                snprintf(prefix, sizeof prefix, "solve %s ", tag);
-                const char *l = find_line(r.out, prefix, line, sizeof line);
-                if (expect(l && sscanf(l + strlen(prefix), "status=%d accurate=%d gemms=%llu",
-                                       &st, &accurate, &gemms) == 3,
-                           "%s: no line for %s: %s", how, tag, r.out))
-                    expect(st == AB_OK && accurate && (fail ? gemms == 0 : gemms > 0),
-                           "%s: '%s', expected AB_OK, X to 1e-12 and %s", how, l,
-                           fail ? "no GEMM counted as run" : "GEMMs run on the GPU");
-                if (!fail && i < n) dtrsm_gemms += gemms;
-            }
-            int dtrsm = count_lines(r.out, "AB_PROFILE ab_dtrsm ");
-            int mpir = count_lines(r.out, "AB_PROFILE ab_dgesv_mpir ");
-            if (!first_failure[0] && fail)
-                expect(dtrsm == (int)dtrsm_gemms && mpir >= 1 && mpir <= 10,
-                       "%s: %d ab_dtrsm and %d ab_dgesv_mpir fallback lines, expected %llu (the "
-                       "GEMMs the GPU ran without the failure) and 1 to 10: %s",
-                       how, dtrsm, mpir, dtrsm_gemms, r.out);
-            else if (!first_failure[0])
-                expect(dtrsm + mpir == 0, "%s: %d fallback lines: %s", how, dtrsm + mpir, r.out);
-        }
-        free(r.out);
-    }
+    unsigned long long gpu[2] = {0, 0};
+    check_solves(dir, false, 0, 0, 0, gpu);
+    if (!first_failure[0]) check_solves(dir, true, 0, (int)gpu[0], -1, NULL);
+    const unsigned long long total = gpu[0] + gpu[1];
+    for (unsigned long long k = 1; k <= total + 1 && !first_failure[0]; k++)
+        check_solves(dir, true, k, k <= gpu[0], k > gpu[0] && k <= total, NULL);
     clean_dir(dir);
     finish();
 }
@@ -1145,6 +1235,52 @@ static void test_mpir_fallback_lines(void) {
     finish();
 }
 
+// The native scenario under env: the operation that waits for its failing-th
+// command buffer must return AB_ERROR_KERNEL_FAILED, and the others AB_OK.
+static void check_native(const char *dir, const char *const *env, int failing) {
+    ChildRun r = {0};
+    if (run_child("native", dir, env, &r)) {
+        int first = 1;
+        for (size_t i = 0; i < N_NATIVE_OPS; i++) {
+            const int next = first + NATIVE_OPS[i].buffers;
+            const bool fails = failing >= first && failing < next;
+            char prefix[64], want[128], line[128] = "";
+            snprintf(prefix, sizeof prefix, "native %s status=", NATIVE_OPS[i].name);
+            snprintf(want, sizeof want, "%s%s", prefix,
+                     ab_status_string(fails ? AB_ERROR_KERNEL_FAILED : AB_OK));
+            if (!expect(find_line(r.out, prefix, line, sizeof line) && !strcmp(line, want),
+                        "with buffer %d failing: '%s', expected '%s': %s", failing, line, want,
+                        r.out))
+                break;
+            first = next;
+        }
+    }
+    free(r.out);
+}
+
+// One command buffer fails and the rest of the run goes on, as when macOS
+// stops one. All failing cannot show this: ab_zherk's first DSYRK would fail
+// before its transposes, and ab_zgemm_batched's last buffer would hide an
+// earlier one. Past the last buffer no operation fails, which also fixes how
+// many buffers are checked, so a wait with no check shows as a wrong count.
+static void test_fail_native(void) {
+    begin();
+    char dir[PATH_MAX];
+    test_dir("native", dir, sizeof dir);
+    const char *none[] = {NULL};
+    check_native(dir, none, 0);
+    int total = 0;
+    for (size_t i = 0; i < N_NATIVE_OPS; i++) total += NATIVE_OPS[i].buffers;
+    for (int n = 1; n <= total + 1 && !first_failure[0]; n++) {
+        char only[32];
+        snprintf(only, sizeof only, "AB_TEST_FAIL_ONLY=%d", n);
+        const char *env[] = {"AB_TEST_FAIL_STAGE=kernel", only, NULL};
+        check_native(dir, env, n);
+    }
+    clean_dir(dir);
+    finish();
+}
+
 // =============================================================================
 // Main
 // =============================================================================
@@ -1157,6 +1293,7 @@ static const TestCase TESTS[] = {
     {"test_fail_stage_kernel",  test_fail_stage_kernel},
     {"test_fail_stage_solvers", test_fail_stage_solvers},
     {"test_mpir_fallback_lines", test_mpir_fallback_lines},
+    {"test_fail_native",        test_fail_native},
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
 
