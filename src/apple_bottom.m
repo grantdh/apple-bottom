@@ -2739,9 +2739,11 @@ extern "C" ABStatus ab_internal_zgemm_epilogue(ABMatrix tr, ABMatrix ti, double*
     const bool use_c = beta[0] != 0.0 || beta[1] != 0.0;
     // C's parts (before the epilogue) and the result's (after), which take the
     // scales an upload gives them. Where a part's values below 2^-1042 lie
-    // within 2^78 of its largest, its round trips are exact whether or not
-    // those values count in its smallest magnitude, so no output depends on
-    // that choice: it follows the upload's to keep one rule.
+    // within 2^78 of its largest, every hi and lo part of it stays normal
+    // whether or not those values count in its smallest magnitude (they have
+    // at most 32 bits and are stored at 2^-86 or above), so each round trip
+    // gives the same value and no output depends on the choice. It follows
+    // the upload's, to keep one rule.
     const native_values_t vr = {x, rows, cols, 2 * ld, 2}, vi = {x + 1, rows, cols, 2 * ld, 2};
 
     // C's ranges, as its upload measures them

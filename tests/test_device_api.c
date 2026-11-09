@@ -1008,8 +1008,11 @@ static void test_native_tiny_span(void) {
 
     // Complex: Ai = 3/4 Ar and Bi = 1/2 Br, each part the counterexample's
     // pattern (both A parts centred at -1024); through handles, then device
-    // buffers with alpha = 1, beta = 0 and through the epilogue (alpha = 2;
-    // beta = 1 on C = that result), which must give exactly twice it.
+    // buffers with alpha = 1, beta = 0. Last, a regression check of the
+    // epilogue's alpha and beta on these operands (alpha = 2; beta = 1 on
+    // C = that result), which must give exactly twice it. It passes without
+    // the fix: no C can tell the epilogue's two scales apart (see
+    // ab_internal_zgemm_epilogue).
     {
         double Ai[TS * TS], Bi[TS * TS], Cr[TS * TS], Ci[TS * TS];
         for (int i = 0; i < TS * TS; i++) {
