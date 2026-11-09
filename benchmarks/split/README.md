@@ -73,14 +73,21 @@ same call through its seam (`SEAM`, below), which `AB_SPLIT` uses inside `dgemm_
     on the `AB_TRACE` clock, without root; `powerlog --list` shows which channels a machine reports.
     To run `bench_split` under `powerlog`, set `SPLIT_SAMPLER=0`: `bench_split` then samples nothing
     itself, and its power fields read `nan`, so two samplers never run at once.
-- **Sustained mode** (`bench_split sustain <case> <outdir> <g>`): 80 s runs, back to back, after 30 s
-  of idle each:
-  1. the split at GPU part g;
-  2. the GPU alone;
-  3. Accelerate alone;
-  4. the split at the share that balances the first run's steady state.
+- **Sustained mode** (`bench_split sustain <case> <outdir> <g> [secs] [idle] [steady_after]`): runs of
+  back-to-back calls, 80 s each after 30 s of idle:
+  1. Accelerate alone (a control);
+  2. in a shuffled order (`SPLIT_SEED=<n>` repeats one; the report prints the seed): the split at GPU
+     part g, the GPU alone, the CPU slice alone (`HEAD`) and the GPU slice alone (`TAIL`);
+  3. the split at the share that balances the split run's steady state;
+  4. Accelerate alone again (the control at the end).
 
-  It logs every call's throughput, the wall power and the GPU clock over time.
+  C is not reset between calls, so the GPU does not wait for a copy of C between them. With β = 0 every
+  call writes the same C, and every 5th is compared with the run's first; with β = 1 C accumulates and
+  is not compared. Every call is kept, however many (the records grow as needed). `SPLIT_NOREG=1`
+  copies the operands, as in the run mode. It logs every call's throughput, the wall power and the GPU
+  clock over time, and reports the slices alone against the split: (HEAD + TAIL) ÷ split, and how much
+  longer each slice takes in the split than alone. `SUSTAIN`'s first fields keep their order (split,
+  GPU alone, Accelerate alone at the start, rebalanced); the rest are added after them.
 
 ## Running it
 
@@ -129,7 +136,7 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 | `.power.tsv` | the SMC samples |
 | `.ior.tsv` | IOReport samples (power runs only) |
 | `.trace.<pid>` | `AB_TRACE`, one line per GPU-routed call |
-| `sustain/<case>.sustain.*` | report and `SUSTAIN` line, per-call TSV, run windows, SMC and IOReport samples |
+| `sustain/<case>.sustain.*` | report and `SUSTAIN` line, per-call TSV (`run` is the run's id: 0 split, 1 GPU alone, 2 Accelerate alone, 3 rebalanced, 4 `HEAD`, 5 `TAIL`, 6 Accelerate again; `name` the config), run windows in the order run (`position`), SMC and IOReport samples |
 | `power.log` | `pmset` and load before and after every case |
 
 ## Notes on the numbers

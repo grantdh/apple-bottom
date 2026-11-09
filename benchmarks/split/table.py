@@ -134,3 +134,7 @@ if sus:
             print(f"| {v['case']} | {name} | {share} | {bu[i]} | {st[i]} | {w[i]} | {mhz[i]} | {'AC' if on_ac(txt) else 'NOT AC'} |")
         print(f"| {v['case']} | steady split ÷ GPU alone, ÷ Accelerate alone | | | {v['sp_gpu']}×, {v['sp_acc']}× "
               f"(rebalanced {v['sp_gpu_bal']}×, {v['sp_acc_bal']}×) | | | |")
+        if "head_ms" in v:   # runs with the slices alone and the second control
+            print(f"| {v['case']} | Accelerate alone, again | – | – | {v['acc_end_gfs']} | {v['acc_end_w']} | – | {'AC' if on_ac(txt) else 'NOT AC'} |")
+            print(f"| {v['case']} | slices alone (steady ms per call): HEAD {v['head_ms']}, TAIL {v['tail_ms']}; split {v['split_steady_ms']} | | | "
+                  f"(HEAD + TAIL) ÷ split {v['overlap']}; cpu slice {v['cpu_x']}×, gpu slice {v['gpu_x']}× their time alone | | | order {v['order']} |")
