@@ -25,6 +25,7 @@
 
 #include "apple_bottom.h"
 #include "apple_bottom_device.h"
+#include "ab_internal.h"
 #include "gpu_stage.h"
 #include "test_registry.h"
 
@@ -847,6 +848,234 @@ static void test_gemm_registered(void) {
     }
 }
 
+// The native scale of a matrix holding values below 2^-1042, whose FP64 high
+// word is 0. They count at their own exponents when the whole span, theirs
+// included, is within 2^78 (exponents at most 78 apart), so that the matrix
+// is centred; a wider span keeps the scale the other values give it. The
+// 2x2x2 data is the ULP Fiction counterexample (A = [[0, t], [2^-997, 0]],
+// for which C_00 came back 2.0e5 times the bound with AB_OK) and variants of
+// it; each C entry has at most one product, checked against ULP Fiction's
+// bound for native ab_dgemm, (3K + 19) u^2 |A||B| + 2^-53 |C| + 2^-1074,
+// by Dot2.
+
+enum { TS = 2 };                                    // M = N = K
+#define TINY_T (177571.0 * 0x1p-1074)               // 0x1.5ad18p-1057: high word 0
+#define TS_BOUND ((3 * TS + 19) * U2)
+static const double TS_B[TS * TS] = {0x1p1023, 0.0, 0x1p945 * 1.7382651127463331, 0.0};
+
+// max over C of |C - A B| / ((3K + 19) u^2 |A||B| + 2^-53 |C| + 2^-1074),
+// row-major TS x TS, A B by Dot2.
+static double tiny_span_ratio(const double* A, const double* B, const double* C) {
+    double worst = 0.0;
+    for (int i = 0; i < TS; i++)
+        for (int j = 0; j < TS; j++) {
+            double s = 0.0, e = 0.0, ab = 0.0;
+            for (int k = 0; k < TS; k++) {
+                dot2_step(&s, &e, A[i * TS + k], B[k * TS + j]);
+                ab += fabs(A[i * TS + k] * B[k * TS + j]);
+            }
+            const double c = C[i * TS + j];
+            worst = fmax(worst, fabs((c - s) - e) / (TS_BOUND * ab + 0x1p-53 * fabs(c) + 0x1p-1074));
+        }
+    return worst;
+}
+
+// Whether Re(C) and Im(C), interleaved column-major, are each within GEMM_TOL
+// of A B (split complex, row-major TS x TS), in their own scales.
+static bool tiny_span_complex_ok(const double* Ar, const double* Ai, const double* Br,
+                                 const double* Bi, const double* C) {
+    double err[2];
+    dot2_zgemm_parts_err(TS, TS, TS, Ar, Ai, Br, Bi, 1.0, C, TS, err);
+    return err[0] <= GEMM_TOL && err[1] <= GEMM_TOL;
+}
+
+// C = A B through handles (row-major A, B, C); *ea receives A's scale.
+static ABStatus tiny_span_dgemm(const double* A, const double* B, double* C, int* ea) {
+    ABMatrix mA = ab_matrix_create(TS, TS), mB = ab_matrix_create(TS, TS);
+    ABMatrix mC = ab_matrix_create(TS, TS);
+    assert(mA && mB && mC);
+    ABStatus s = ab_matrix_upload(mA, A, false);
+    if (s == AB_OK) s = ab_matrix_upload(mB, B, false);
+    if (s == AB_OK) s = ab_dgemm(mA, mB, mC);
+    if (s == AB_OK) s = ab_matrix_download(mC, C, false);
+    *ea = ab_internal_matrix_scale(mA);
+    ab_matrix_destroy(mA); ab_matrix_destroy(mB); ab_matrix_destroy(mC);
+    return s;
+}
+
+// TS x TS X transposed into Xt, w doubles per element: row-major to
+// column-major and back.
+static void tiny_span_transpose(const double* X, double* Xt, int w) {
+    for (int i = 0; i < TS; i++)
+        for (int j = 0; j < TS; j++)
+            for (int p = 0; p < w; p++) Xt[(j * TS + i) * w + p] = X[(i * TS + j) * w + p];
+}
+
+static void test_native_tiny_span(void) {
+    printf("[GEMM-13] native scale of values below 2^-1042, handles and device buffers\n");
+    const double t = TINY_T;
+    const double cex[TS * TS] = {0.0, t, 0x1p-997, 0.0};        // span 2^59.6: centred
+    const double under[TS * TS] = {0.0, t, 0x1.8p-979, 0.0};    // exponents 78 apart: centred
+    const double over[TS * TS] = {0.0, t, 0x1.8p-978, 0.0};     // 79 apart: the others' scale
+    double C[TS * TS], Cref[TS * TS];
+    int ea = 0;
+
+    ABStatus s = tiny_span_dgemm(cex, TS_B, C, &ea);
+    CHECK(s == AB_OK && ea == -1024 &&
+          tiny_span_ratio(cex, TS_B, C) <= 1.0,
+          "ab_dgemm on the counterexample: A centred (scale -1024), C within the bound");
+    s = tiny_span_dgemm(under, TS_B, C, &ea);
+    CHECK(s == AB_OK && ea == -1018 &&
+          tiny_span_ratio(under, TS_B, C) <= 1.0,
+          "ab_dgemm, A's exponents 78 apart: centred (scale -1018), C within the bound");
+
+    // 79 apart: the scale 2^-978 alone gives (-976), and the bits of A
+    // stored at it with scale 0 (ab_internal_upload_scaled), times 2^-976
+    s = tiny_span_dgemm(over, TS_B, C, &ea);
+    {
+        ABMatrix mA = ab_matrix_create(TS, TS), mB = ab_matrix_create(TS, TS);
+        ABMatrix mC = ab_matrix_create(TS, TS);
+        assert(mA && mB && mC);
+        ABStatus r = ab_internal_upload_scaled(mA, over, NULL, NULL, -976, NULL);
+        if (r == AB_OK) r = ab_matrix_upload(mB, TS_B, false);
+        if (r == AB_OK) r = ab_dgemm(mA, mB, mC);
+        if (r == AB_OK) r = ab_matrix_download(mC, Cref, false);
+        for (int i = 0; i < TS * TS; i++) Cref[i] = ldexp(Cref[i], -976);
+        ab_matrix_destroy(mA); ab_matrix_destroy(mB); ab_matrix_destroy(mC);
+        CHECK(s == AB_OK && r == AB_OK && ea == -976 && !memcmp(C, Cref, sizeof C),
+              "ab_dgemm, A's exponents 79 apart: the others' scale (-976) and its bits");
+    }
+
+    // Only values below 2^-1042: centred on their own exponents
+    {
+        const double only[TS * TS] = {5 * 0x1p-1074, 0.0, 0.0, 5 * 0x1p-1074};
+        const double B[TS * TS] = {0x1p1000, 0.0, 0.0, 0x1p1000};
+        s = tiny_span_dgemm(only, B, C, &ea);
+        CHECK(s == AB_OK && ea == -1072 &&
+              tiny_span_ratio(only, B, C) <= 1.0,
+              "ab_dgemm, A only of values below 2^-1042: their own centre (scale -1072)");
+    }
+
+    // Ordinary values with one stray value below 2^-1042: scale 0 and the
+    // bits of the same A with that value 0 (stored as 0 either way); B at
+    // 2^10, so that a scale taking A to FP32's top would overflow
+    {
+        enum { S = 8 };
+        double A[S * S], A0[S * S], B[S * S], Cs[S * S], C0[S * S];
+        srand(13);
+        for (int i = 0; i < S * S; i++) {
+            A[i] = A0[i] = rand_double();
+            B[i] = 0x1p10 * rand_double();
+        }
+        A[3] = t;
+        A0[3] = 0.0;
+        ABMatrix mA = ab_matrix_create(S, S), mA0 = ab_matrix_create(S, S);
+        ABMatrix mB = ab_matrix_create(S, S), mC = ab_matrix_create(S, S);
+        assert(mA && mA0 && mB && mC);
+        s = ab_matrix_upload(mA, A, false);
+        if (s == AB_OK) s = ab_matrix_upload(mA0, A0, false);
+        if (s == AB_OK) s = ab_matrix_upload(mB, B, false);
+        if (s == AB_OK) s = ab_dgemm(mA, mB, mC);
+        if (s == AB_OK) s = ab_matrix_download(mC, Cs, false);
+        if (s == AB_OK) s = ab_dgemm(mA0, mB, mC);
+        if (s == AB_OK) s = ab_matrix_download(mC, C0, false);
+        CHECK(s == AB_OK && ab_internal_matrix_scale(mA) == 0 && !memcmp(Cs, C0, sizeof Cs),
+              "ab_dgemm, ordinary A with one value below 2^-1042: scale 0, the bits without it");
+        ab_matrix_destroy(mA); ab_matrix_destroy(mA0); ab_matrix_destroy(mB); ab_matrix_destroy(mC);
+    }
+
+    // The device API's operands go through handles. A row-major array is the
+    // column-major transpose: NN on (B^T, A^T) gives C^T, row-major C, and
+    // converts A^T by rows; TT on (A^T, B^T) converts them by columns.
+    {
+        double Cc[TS * TS];
+        const size_t b = sizeof Cc;
+        ab_dev_buffer_t dA = ab_dev_malloc(b), dB = ab_dev_malloc(b), dC = ab_dev_malloc(b);
+        assert(dA && dB && dC);
+        ab_dev_memcpy_h2d(dA, 0, cex, b);
+        ab_dev_memcpy_h2d(dB, 0, TS_B, b);
+        s = ab_dev_dgemm(AB_NO_TRANS, AB_NO_TRANS, TS, TS, TS, 1.0, dB, TS, dA, TS, 0.0, dC, TS);
+        ab_dev_memcpy_d2h(C, dC, 0, b);
+        CHECK(s == AB_OK && tiny_span_ratio(cex, TS_B, C) <= 1.0,
+              "ab_dev_dgemm NN on the counterexample: C within the bound");
+        s = ab_dev_dgemm(AB_TRANS, AB_TRANS, TS, TS, TS, 1.0, dA, TS, dB, TS, 0.0, dC, TS);
+        ab_dev_memcpy_d2h(Cc, dC, 0, b);
+        tiny_span_transpose(Cc, C, 1);
+        CHECK(s == AB_OK && tiny_span_ratio(cex, TS_B, C) <= 1.0,
+              "ab_dev_dgemm TT on the counterexample: C within the bound");
+        ab_dev_free(dA); ab_dev_free(dB); ab_dev_free(dC);
+    }
+
+    // Complex: Ai = 3/4 Ar and Bi = 1/2 Br, each part the counterexample's
+    // pattern (both A parts centred at -1024); through handles, then device
+    // buffers with alpha = 1, beta = 0 and through the epilogue (alpha = 2;
+    // beta = 1 on C = that result), which must give exactly twice it.
+    {
+        double Ai[TS * TS], Bi[TS * TS], Cr[TS * TS], Ci[TS * TS];
+        for (int i = 0; i < TS * TS; i++) {
+            Ai[i] = 0.75 * cex[i];
+            Bi[i] = 0.5 * TS_B[i];
+        }
+        ABMatrix h[6];
+        for (int i = 0; i < 6; i++) {
+            h[i] = ab_matrix_create(TS, TS);
+            assert(h[i]);
+        }
+        s = ab_matrix_upload(h[0], cex, false);
+        if (s == AB_OK) s = ab_matrix_upload(h[1], Ai, false);
+        if (s == AB_OK) s = ab_matrix_upload(h[2], TS_B, false);
+        if (s == AB_OK) s = ab_matrix_upload(h[3], Bi, false);
+        if (s == AB_OK) s = ab_zgemm(h[0], h[1], h[2], h[3], h[4], h[5]);
+        if (s == AB_OK) s = ab_matrix_download(h[4], Cr, false);
+        if (s == AB_OK) s = ab_matrix_download(h[5], Ci, false);
+        double Cz[2 * TS * TS];                                 // interleaved, column-major
+        for (int i = 0; i < TS; i++)
+            for (int j = 0; j < TS; j++) {
+                Cz[2 * (j * TS + i)] = Cr[i * TS + j];
+                Cz[2 * (j * TS + i) + 1] = Ci[i * TS + j];
+            }
+        CHECK(s == AB_OK && ab_internal_matrix_scale(h[0]) == -1024 &&
+              ab_internal_matrix_scale(h[1]) == -1024 &&
+              tiny_span_complex_ok(cex, Ai, TS_B, Bi, Cz),
+              "ab_zgemm on the complex counterexample: A's parts centred, C within tolerance");
+        for (int i = 0; i < 6; i++) ab_matrix_destroy(h[i]);
+
+        double A2[2 * TS * TS], B2[2 * TS * TS], Az[2 * TS * TS], Bz[2 * TS * TS];
+        double C1[2 * TS * TS], C2[2 * TS * TS];
+        for (int i = 0; i < TS * TS; i++) {
+            A2[2 * i] = cex[i];
+            A2[2 * i + 1] = Ai[i];
+            B2[2 * i] = TS_B[i];
+            B2[2 * i + 1] = Bi[i];
+        }
+        tiny_span_transpose(A2, Az, 2);
+        tiny_span_transpose(B2, Bz, 2);
+        const size_t b = sizeof Az;
+        ab_dev_buffer_t dA = ab_dev_malloc(b), dB = ab_dev_malloc(b), dC = ab_dev_malloc(b);
+        assert(dA && dB && dC);
+        ab_dev_memcpy_h2d(dA, 0, Az, b);
+        ab_dev_memcpy_h2d(dB, 0, Bz, b);
+        const double one[2] = {1.0, 0.0}, two[2] = {2.0, 0.0}, zero[2] = {0.0, 0.0};
+        s = ab_dev_zgemm(AB_NO_TRANS, AB_NO_TRANS, TS, TS, TS, one, dA, TS, dB, TS, zero, dC, TS);
+        ab_dev_memcpy_d2h(C1, dC, 0, b);
+        CHECK(s == AB_OK && tiny_span_complex_ok(cex, Ai, TS_B, Bi, C1),
+              "ab_dev_zgemm NN on the complex counterexample: C within tolerance");
+        ABStatus s2 =
+            ab_dev_zgemm(AB_NO_TRANS, AB_NO_TRANS, TS, TS, TS, two, dA, TS, dB, TS, zero, dC, TS);
+        ab_dev_memcpy_d2h(C2, dC, 0, b);
+        bool doubled = true;
+        for (int i = 0; i < 2 * TS * TS; i++) doubled = doubled && C2[i] == 2.0 * C1[i];
+        ab_dev_memcpy_h2d(dC, 0, C1, b);
+        ABStatus s3 =
+            ab_dev_zgemm(AB_NO_TRANS, AB_NO_TRANS, TS, TS, TS, one, dA, TS, dB, TS, one, dC, TS);
+        ab_dev_memcpy_d2h(C2, dC, 0, b);
+        for (int i = 0; i < 2 * TS * TS; i++) doubled = doubled && C2[i] == 2.0 * C1[i];
+        CHECK(s2 == AB_OK && s3 == AB_OK && doubled,
+              "ab_dev_zgemm through the epilogue (alpha = 2; beta = 1 on C = A B): exactly 2 A B");
+        ab_dev_free(dA); ab_dev_free(dB); ab_dev_free(dC);
+    }
+}
+
 // Test element-wise operations
 static void test_elementwise(void) {
     printf("[BLAS-3] element-wise ops\n");
@@ -908,6 +1137,7 @@ static const TestCase TESTS[] = {
     {"test_zgemm_imbalance",          test_zgemm_imbalance},
     {"test_gemm_pool",                test_gemm_pool},
     {"test_gemm_registered",          test_gemm_registered},
+    {"test_native_tiny_span",         test_native_tiny_span},
     {"test_elementwise",              test_elementwise},
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);

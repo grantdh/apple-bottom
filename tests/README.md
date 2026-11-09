@@ -45,8 +45,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 244, every test but
-the chaos ones, and `make ci-local` all 262 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 245, every test but
+the chaos ones, and `make ci-local` all 263 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -62,7 +62,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     return `AB_OK` (an A singular in FP64 too: `AB_ERROR_KERNEL_FAILED`,
     B unchanged)
   - `tests/test_chaos.c` — 18 tests
-  - `tests/test_device_api.c` — 19 tests (199 `CHECK`s); the GEMM
+  - `tests/test_device_api.c` — 20 tests (209 `CHECK`s); the GEMM
     tests compare `ab_dev_dgemm` / `ab_dev_zgemm` with column-major
     cblas over all trans pairs, non-square and tall-skinny shapes,
     `ld > rows`, buffer offsets and a C of 2²⁰ elements, and check that
@@ -77,12 +77,17 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     buffers: a call repeated leaves the pool as it was, and each call
     gives its first bits again right after NaN data (which a beta = 0
     call must not read), after larger and smaller shapes, and from 4
-    threads at once
+    threads at once; `test_native_tiny_span` checks the native scale of
+    a matrix holding values below 2⁻¹⁰⁴² (ULP Fiction's counterexample
+    and variants, through handles and device buffers, real and complex):
+    within 2⁷⁸ it must be centred and C within ULP Fiction's bound for
+    `ab_dgemm`, and a wider span (exponents 79 apart, or ordinary values
+    with one such value) must keep its earlier scale and bits
   - `tests/test_dispatch.c` — 23 tests of the BLAS-ABI routing and the
     `AB_SPLIT` plan, no GPU, see below
   - `tests/test_range_guard.c` — 7 tests of the exponent-range guards'
     stage 2 against the plain loops it replaced, no GPU, see below
-  - `tests/test_blas_abi.c` — 33 suites (1095 cases), see below
+  - `tests/test_blas_abi.c` — 33 suites (1098 cases), see below
   - `tests/test_trace.c` — 8 tests of `AB_TRACE`, `AB_TEST_FAIL_STAGE`
     and the solvers' `AB_PROFILE` fallback lines, see below
   - `tests/test_blas2.c` — 19 tests (995 cases) of DGEMV, ZGEMV and
@@ -264,8 +269,10 @@ with random signs, so the pattern alone sets the span.
   must be bit for bit that power of two times C of the unscaled data.
 - **Native `ab_dgemm`, `ab_dgemm_scaled` and `ab_zgemm`**: the same 1e±25
   data, rows spread over 2⁻¹⁰⁰…2⁻⁶⁰, columns over 2⁶⁰…2¹⁰⁰, an exactness
-  case (A and B × 2⁹⁰), and an A made only of values below 2⁻¹⁰⁴², which
-  must get a scale, not be stored as zeros.
+  case (A and B × 2⁹⁰), an A made only of values below 2⁻¹⁰⁴², which
+  must get a scale, not be stored as zeros, and an A whose values below
+  2⁻¹⁰⁴² lie within 2⁷⁸ of its largest (`range-tiny-span`), which must be
+  centred on them.
 
 `test_zgemm_imbalance` gives `zgemm_` (`AB_MODE=gpu`, alpha = 1, beta = 0,
 every TRANS kind) data whose real and imaginary parts are 10⁻⁶ apart:

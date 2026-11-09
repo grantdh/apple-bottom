@@ -199,6 +199,12 @@ typedef enum {
                         // GPU reads as zero (Accelerate)
     RANGE_ALL_SUBNORMAL, // native: A x 2^-1050 (all of it), B x 2^1000: A must get a scale, not be
                         // stored as zeros
+    RANGE_TINY_SPAN,    // native, ULP Fiction's counterexample spread out: A_0k x 2^-1056 for
+                        // k > 0 (below 2^-1042), A_00 = 0, rows i > 0 x 2^-997; B's row 0 x 2^1023,
+                        // the others x 2^945; C0's row 0 x 2^-111 (C's), the rest 0 (a larger C0
+                        // would give C its scale, below which C's row 0 falls). A's span, those
+                        // values included, is within 2^78: A must be centred on it, or C's row 0
+                        // keeps FP32's precision
 } RangeData;
 
 static const char *const RANGE_TAG[] = {
@@ -214,6 +220,7 @@ static const char *const RANGE_TAG[] = {
     [RANGE_C_SUBNORMAL] = "c-subnormal", [RANGE_C_SCALED_OUT] = "c-scaled-out",
     [RANGE_A_SUBNORMAL] = "a-subnormal", [RANGE_B_SUBNORMAL] = "b-subnormal",
     [RANGE_ENTRY_SUBNORMAL] = "entry-subnormal", [RANGE_ALL_SUBNORMAL] = "all-subnormal",
+    [RANGE_TINY_SPAN] = "tiny-span",
 };
 
 typedef struct {
@@ -668,6 +675,9 @@ static void gen_range(const Suite *s) {
         {OP_DGEMM, 'N', 'N', RANGE_ALL_SUBNORMAL, ROUTE_GPU},
         {OP_DGEMM_SCALED, 'N', 'N', RANGE_ALL_SUBNORMAL, ROUTE_GPU},
         {OP_ZGEMM, 'N', 'N', RANGE_ALL_SUBNORMAL, ROUTE_GPU},
+        {OP_DGEMM, 'N', 'N', RANGE_TINY_SPAN, ROUTE_GPU},
+        {OP_DGEMM_SCALED, 'N', 'N', RANGE_TINY_SPAN, ROUTE_GPU},
+        {OP_ZGEMM, 'N', 'N', RANGE_TINY_SPAN, ROUTE_GPU},
     };
     for (size_t i = 0; i < TEST_REGISTRY_SIZE(R); i++)
         add_range(s, R[i].op, R[i].ta, R[i].tb, R[i].data, R[i].route);
@@ -1627,6 +1637,7 @@ static double range_a(RangeData d, int i, int k, int M) {
     case RANGE_B_SUBNORMAL:   return 0x1p1000;
     case RANGE_ENTRY_SUBNORMAL: return k == 0 ? 1.0 : F_SUBNORMAL;
     case RANGE_ALL_SUBNORMAL: return F_SUBNORMAL;
+    case RANGE_TINY_SPAN:     return i > 0 ? 0x1p-997 : k > 0 ? 0x1p-1056 : 0.0;
     default:                  return 1.0;
     }
 }
@@ -1650,6 +1661,7 @@ static double range_b(RangeData d, int k, int j, int N) {
     case RANGE_B_SUBNORMAL:   return j == 0 ? F_SUBNORMAL : 1.0;
     case RANGE_ENTRY_SUBNORMAL: return k == 0 ? 0.0 : 0x1p1000;
     case RANGE_ALL_SUBNORMAL: return 0x1p1000;
+    case RANGE_TINY_SPAN:     return k == 0 ? 0x1p1023 : 0x1p945;
     default:                  return 1.0;
     }
 }
@@ -1670,6 +1682,7 @@ static double range_c(RangeData d, int i, int j, int M, int N) {
     case RANGE_C_SCALED_OUT:  return j != 0 ? 1.0 : i == 0 ? 0x1p-100 : 0x1p970;
     case RANGE_A_SUBNORMAL:   return i == 0 ? 0.0 : 0x1p1000;
     case RANGE_B_SUBNORMAL:   return j == 0 ? 0.0 : 0x1p1000;
+    case RANGE_TINY_SPAN:     return i == 0 ? 0x1p-111 : 0.0;
     default:                  return range_a(d, i, 0, M) * range_b(d, 0, j, N);
     }
 }

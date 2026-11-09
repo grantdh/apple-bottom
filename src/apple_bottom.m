@@ -1976,22 +1976,18 @@ static parts_range_t for_each_chunk_parts(size_t count, size_t work,
     return r;
 }
 
-// What convert_fp64_to_dd measures of the values it converts: nothing, the
-// range the exponent-range guard reads (MEASURE_GUARD: ab_stat_hiword_scaled,
-// which counts a nonzero |x| below 2^-1042 as AB_HIWORD_TINY), or the native
-// scale's (MEASURE_NATIVE, native_scale_exp): such an |x| there counts in the
-// largest magnitude only, so that a matrix made only of such values is not
-// read as zero, and one with larger values keeps the scale they give it.
-typedef enum { MEASURE_NONE, MEASURE_NATIVE, MEASURE_GUARD } Measure;
+// What convert_fp64_to_dd measures of the values it converts: nothing, or
+// the range of ab_stat_hiword_scaled, which counts a nonzero |x| below
+// 2^-1042 as AB_HIWORD_TINY. The two names say which reader takes that range:
+// the exponent-range guard, or the native scale (native_scale_exp, which
+// finds the exponents of such values where the range's smallest magnitude
+// says there may be some).
+typedef enum { MEASURE_NONE, MEASURE_GUARD, MEASURE_NATIVE = MEASURE_GUARD } Measure;
 
 // Adds v, the value x converts to, to the range (mx, mn) as M measures it.
 template <Measure M>
 static inline void measure_add(double v, double x, uint32_t& mx, uint32_t& mn) {
-    if (M == MEASURE_GUARD) AB_HIWORD_ADD(ab_stat_hiword_scaled(v, x), mx, mn);
-    if (M == MEASURE_NATIVE) {
-        AB_HIWORD_MAX(ab_stat_hiword_scaled(v, x), mx);
-        AB_HIWORD_MIN(ab_abs_hiword(v), mn);
-    }
+    if (M != MEASURE_NONE) AB_HIWORD_ADD(ab_stat_hiword_scaled(v, x), mx, mn);
 }
 
 // src[i * S] * 2^-e to dst[i] in DD, each value rounded once; also returns the
@@ -2086,22 +2082,17 @@ static inline int floor_to(int s, int q) { return s >= 0 ? s / q * q : -((q - 1 
 #define AB_STORE_MIN_EXP (-100)
 #define AB_STORE_MAX_EXP 120
 
-// The power-of-two scale e for a matrix whose entries have range r (as
-// MEASURE_NATIVE measures them: a range with a largest magnitude but no
-// smallest holds only values below 2^-1042, read as [2^-1074, 2^-1042]); it
-// stores value * 2^-e. The scales that bring every nonzero magnitude into
-// 2^±AB_NATIVE_WINDOW are [hi - W, lo + W] (none if the span exceeds 2W):
-//   - 0 if it is one of them (data inside the window, as before), or if an
-//     entry is NaN or Inf (which no scale helps);
+// The power-of-two scale e for a matrix whose nonzero magnitudes have
+// exponents (ilogb) from lo to hi; it stores value * 2^-e. The scales that
+// bring every nonzero magnitude into 2^±AB_NATIVE_WINDOW are [hi - W, lo + W]
+// (none if the span exceeds 2W):
+//   - 0 if it is one of them (data inside the window, as before);
 //   - else the multiple of 16 nearest the centre, so that real and imaginary
 //     parts of a similar range get the same scale and need no alignment
 //     before Gauss-3M's sums; else the centre itself;
 //   - a wider span stays at 0 if FP32 holds it (as before), else is centred
 //     when FP32 can hold it at all, else keeps its top at 2^AB_STORE_MAX_EXP.
-static int native_scale_exp(ab_range_t r) {
-    if (r.max == 0 || ab_range_nonfinite(r)) return 0;
-    int hi = ab_hiword_ilogb(r.max);
-    int lo = r.min != UINT32_MAX ? ab_hiword_ilogb(r.min) : ab_hiword_min_ilogb(r.max);
+static int native_scale_span(int lo, int hi) {
     int centre = floor_to(lo + hi, 2) / 2;
     if (hi - lo <= 2 * AB_NATIVE_WINDOW) {
         int elo = hi - AB_NATIVE_WINDOW, ehi = lo + AB_NATIVE_WINDOW;
@@ -2114,10 +2105,70 @@ static int native_scale_exp(ab_range_t r) {
     return hi - AB_STORE_MAX_EXP;
 }
 
-// Gives m, as an upload measures it, the scale of the range r of its values
+// A matrix's values, x[i * rs + j * cs] for i < rows and j < cols, in any
+// order (the scan below takes only their minima and maxima): cs = 1 where the
+// layout allows, so that it reads them in storage order.
+typedef struct {
+    const double* x;
+    size_t rows, cols, rs, cs;
+} native_values_t;
+
+// What MEASURE_NATIVE's range does not tell of a matrix's values: the
+// exponents of its nonzero values below 2^-1042 (lo > hi if none), whose high
+// word is 0 (|x| = low word * 2^-1074), and the smallest high word of its
+// other nonzero values (UINT32_MAX if none). One pass without branches, for
+// the rare matrix whose range says it may hold such values.
+typedef struct {
+    int lo, hi;
+    uint32_t other_min;
+} native_tiny_t;
+
+static native_tiny_t native_tiny_scan(native_values_t v) {
+    uint32_t zmin = 32, zmax = 0, other_min = UINT32_MAX;   // leading zeros of their low words
+    for (size_t i = 0; i < v.rows; i++)
+        for (size_t j = 0; j < v.cols; j++) {
+            uint32_t w[2];
+            memcpy(w, v.x + i * v.rs + j * v.cs, sizeof w);
+            const uint32_t h = w[1] & 0x7FFFFFFFu;
+            const bool tiny = !h && w[0];
+            const uint32_t z = w[0] ? (uint32_t)__builtin_clz(w[0]) : 32u;
+            zmin = MIN(zmin, tiny ? z : 32u);
+            zmax = MAX(zmax, tiny ? z : 0u);
+            AB_HIWORD_MIN(h, other_min);
+        }
+    native_tiny_t t = {INT_MAX, INT_MIN, other_min};
+    if (zmin < 32) {
+        t.lo = (31 - (int)zmax) - 1074;
+        t.hi = (31 - (int)zmin) - 1074;
+    }
+    return t;
+}
+
+// The scale native_scale_span gives a matrix with values v, from their range
+// r as MEASURE_NATIVE measures them; 0 if they are all zero, or if one is NaN
+// or Inf (which no scale helps). That range counts a value below 2^-1042 as
+// AB_HIWORD_TINY; where r's smallest magnitude is that word, native_tiny_scan
+// finds the exponents of such values. They count at their own exponents when
+// the whole span, theirs included, is within 2^(2 AB_NATIVE_WINDOW), so that
+// the matrix is centred on it. A wider span keeps the scale the other values
+// give it, those below 2^-1042 left out of its smallest magnitude.
+static int native_scale_exp(ab_range_t r, native_values_t v) {
+    if (r.max == 0 || ab_range_nonfinite(r)) return 0;
+    int hi = ab_hiword_ilogb(r.max), lo = ab_hiword_ilogb(r.min);
+    if (r.min == AB_HIWORD_TINY) {
+        const native_tiny_t t = native_tiny_scan(v);
+        if (t.lo <= t.hi) {
+            if (t.other_min == UINT32_MAX) hi = t.hi;   // only such values
+            lo = hi - t.lo <= 2 * AB_NATIVE_WINDOW ? t.lo : ab_hiword_ilogb(t.other_min);
+        }
+    }
+    return native_scale_span(lo, hi);
+}
+
+// Gives m, as an upload measures it, the scale of its values v of range r
 // (native_scale_exp) and their largest magnitude.
-static inline void set_scale_measured(ABMatrix m, ab_range_t r) {
-    m->exp2 = native_scale_exp(r);
+static inline void set_scale_measured(ABMatrix m, ab_range_t r, native_values_t v) {
+    m->exp2 = native_scale_exp(r, v);
     m->maxhw = r.max;
 }
 
@@ -2285,6 +2336,8 @@ void ab_matrix_dims(ABMatrix m, int* rows, int* cols) {
 
 size_t ab_matrix_count(ABMatrix m) { return m ? m->count : 0; }
 
+extern "C" int ab_internal_matrix_scale(ABMatrix m) { return m ? m->exp2 : 0; }
+
 // =============================================================================
 // Public API: Data Transfer
 // =============================================================================
@@ -2298,7 +2351,7 @@ ABStatus ab_matrix_upload(ABMatrix m, const double* data, bool parallel) {
     ab_range_t range =
         parallel ? convert_fp64_to_dd_parallel<MEASURE_NATIVE>(data, dst, m->count, 0)
                  : convert_fp64_to_dd<MEASURE_NATIVE>(data, dst, m->count, 0);
-    set_scale_measured(m, range);
+    set_scale_measured(m, range, {data, (size_t)m->rows, (size_t)m->cols, (size_t)m->cols, 1});
     if (m->exp2 != 0) {
         if (parallel)
             convert_fp64_to_dd_parallel<MEASURE_NONE>(data, dst, m->count, m->exp2);
@@ -2483,7 +2536,7 @@ static ab_range_t convert_cols_to_dd(const double* x, size_t ld, DDFloat* dst, s
 // again where it is not 0.
 template <size_t S>
 static void upload_rows_rescale(ABMatrix m, ab_range_t r, const double* x, size_t stride) {
-    set_scale_measured(m, r);
+    set_scale_measured(m, r, {x, (size_t)m->rows, (size_t)m->cols, stride, S});
     m->uploaded = true;
     if (m->exp2 == 0) return;
     const size_t cols = (size_t)m->cols;
@@ -2559,7 +2612,7 @@ extern "C" ABStatus ab_internal_upload_cols(ABMatrix m, const double* x, size_t 
     ab_range_t r = for_each_chunk(rows, cols, ^(size_t r0, size_t nr) {
         return convert_cols_to_dd<MEASURE_NATIVE>(x, ld, dst, cols, r0, nr, 0);
     });
-    set_scale_measured(m, r);
+    set_scale_measured(m, r, {x, cols, rows, ld, 1});
     if (m->exp2 != 0) {
         const int e = m->exp2;
         for_each_chunk(rows, cols, ^(size_t r0, size_t nr) {
@@ -2684,6 +2737,8 @@ extern "C" ABStatus ab_internal_zgemm_epilogue(ABMatrix tr, ABMatrix ti, double*
     double t0 = get_time_ms();
     const size_t rows = (size_t)tr->rows, cols = (size_t)tr->cols;
     const bool use_c = beta[0] != 0.0 || beta[1] != 0.0;
+    // C's parts (before the epilogue) and the result's (after)
+    const native_values_t vr = {x, rows, cols, 2 * ld, 2}, vi = {x + 1, rows, cols, 2 * ld, 2};
 
     // C's ranges, as its upload measures them
     parts_range_t rc = {AB_RANGE_EMPTY, AB_RANGE_EMPTY};
@@ -2703,7 +2758,7 @@ extern "C" ABStatus ab_internal_zgemm_epilogue(ABMatrix tr, ABMatrix ti, double*
     const zgemm_epilogue_t p = {
         (const DDFloat*)tr->buffer.contents, (const DDFloat*)ti->buffer.contents, x, ld, cols,
         alpha[0], alpha[1], beta[0], beta[1], part_scale(tr->exp2), part_scale(ti->exp2),
-        part_scale(native_scale_exp(rc.re)), part_scale(native_scale_exp(rc.im))};
+        part_scale(native_scale_exp(rc.re, vr)), part_scale(native_scale_exp(rc.im, vi))};
     const bool fast = part_scale_fast(p.str.e) && part_scale_fast(p.sti.e) &&
                       part_scale_fast(p.scr.e) && part_scale_fast(p.sci.e);
     parts_range_t (*epilogue)(const zgemm_epilogue_t&, size_t, size_t) =
@@ -2714,8 +2769,8 @@ extern "C" ABStatus ab_internal_zgemm_epilogue(ABMatrix tr, ABMatrix ti, double*
     });
 
     // The result's round trip, at the scales an upload gives its parts
-    const part_scale_t sr = part_scale(native_scale_exp(rn.re));
-    const part_scale_t si = part_scale(native_scale_exp(rn.im));
+    const part_scale_t sr = part_scale(native_scale_exp(rn.re, vr));
+    const part_scale_t si = part_scale(native_scale_exp(rn.im, vi));
     void (*round_trip)(double*, size_t, size_t, size_t, size_t, part_scale_t, part_scale_t) =
         part_scale_fast(sr.e) && part_scale_fast(si.e) ? round_trip_rows<true>
                                                        : round_trip_rows<false>;
