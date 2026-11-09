@@ -580,8 +580,8 @@ $(BUILD)/bench_device_residency: benchmarks/bench_device_residency.c lib | $(BUI
 # One GEMM split between Accelerate and the GPU against either engine alone. Run via
 # benchmarks/split/run.sh (benchmarks/split/README.md). IOKit and CoreFoundation: SMC wall
 # power and IOReport GPU clock, read without root. -I$(SRC): the library's cut and its split
-# seam (split_slice.h).
-$(BUILD)/bench_split: benchmarks/bench_split.c tests/test_dot2.h $(SLICE_H) lib | $(BUILD)
+# seam (split_slice.h), and the default AB_MIN_GPU_DIM (dispatch.h).
+$(BUILD)/bench_split: benchmarks/bench_split.c tests/test_dot2.h $(SLICE_H) $(SRC)/dispatch.h lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -Itests $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) -framework IOKit -framework CoreFoundation $(EXE_RPATH)
 	@echo "Built: $@"
 

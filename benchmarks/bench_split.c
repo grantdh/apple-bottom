@@ -12,8 +12,10 @@
 //       C = fl(fl(beta C0 + P_cpu) + P_gpu), P_gpu computed into P with beta = 0, added after both.
 // np processes run every repeat in lockstep (barrier before each); np = 1 is one process.
 // Per case: warm-up, a sweep over the GPU share (3 rounds, configs interleaved), then a fixed block
-// at the sweep's best share (3 rounds of Accelerate / GPU / split, interleaved) whose medians are the
-// headline (so the choice of f does not bias them), bit checks, and Dot2 errors on sampled columns.
+// at the sweep's best share (SPLIT_ROUNDS rounds, default 3, of Accelerate / GPU / split, interleaved)
+// whose medians are the headline (so the choice of f does not bias them), bit checks, and Dot2 errors
+// on sampled columns. SPLIT_G=g, or SPLIT_F=f (cut as the library cuts it, ab_split_cut with the
+// AB_MIN_GPU_DIM floor), skips the sweep and runs the fixed block at that GPU part.
 // SPLIT_POWER_S=s adds runs of s seconds per engine for wall power (SPLIT_IDLE_S: idle before).
 // Power: the parent samples SMC keys (PDTR, the DC input = wall side on AC power, PSTR, PPBR and
 // the GPU rails) at 20 Hz and, for sustained runs, IOReport's GPU energy and clock residency, both
@@ -50,6 +52,7 @@
 #endif
 #include <Accelerate/Accelerate.h>
 #include "apple_bottom.h"
+#include "dispatch.h"    // src/: AB_DISPATCH_DEFAULT_MIN_DIM, the default AB_MIN_GPU_DIM
 #include "split_slice.h" // src/: the library's cut (ab_split_cut)
 #include "test_dot2.h"   // tests/: Dot2 reference, U2 = 2^-48
 
@@ -57,7 +60,7 @@ extern char **environ;
 typedef double _Complex zc;
 #define NPMAX 4
 #define MAXCFG 14
-#define MAXREC 512
+#define MAXREC 2048   // timed calls per process: the sweep, SPLIT_ROUNDS fixed rounds, 2 orders
 #define PG 16384
 
 // ---------------------------------------------------------------- utilities
@@ -144,6 +147,7 @@ typedef struct { int phase, round, cfg, rep; double v[NV]; } Rec;
 typedef struct {
     _Atomic int bcount, bgen;
     int np, ncfg, g[MAXCFG], best;
+    int fixed, rounds;   // fixed: SPLIT_G or SPLIT_F set, no sweep; rounds of the fixed block
     int nrec[NPMAX]; Rec rec[NPMAX][MAXREC];
     int reg_ok[NPMAX], notgpu[NPMAX], gpucalls[NPMAX];
     int split_reps[NPMAX], split_diff_reps[NPMAX], gpu_reps[NPMAX], gpu_diff_reps[NPMAX], acc_reps[NPMAX], acc_diff_reps[NPMAX];
@@ -255,7 +259,7 @@ static void set_cfg(Ctx *x, int cfg) {
 }
 static void record(int phase, int round, int cfg, int rep, const double *v) {
     int n = shm->nrec[myid];
-    if (n >= MAXREC) { fprintf(stderr, "too many records\n"); exit(1); }
+    if (n >= MAXREC) { fprintf(stderr, "too many records (MAXREC %d)\n", MAXREC); exit(1); }
     Rec *r = &shm->rec[myid][n]; r->phase = phase; r->round = round; r->cfg = cfg; r->rep = rep;
     memcpy(r->v, v, sizeof r->v); shm->nrec[myid] = n + 1;
 }
@@ -391,9 +395,9 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
         if (c->big) break;
     }
     shm->tsetup[id] = now() - T0;
-    // ---- sweep: every config, 3 rounds, interleaved
+    // ---- sweep: every config, 3 rounds, interleaved (none at a fixed share)
     int ord[MAXCFG];
-    for (int r = 0; r < 3; r++) {
+    for (int r = 0; r < (shm->fixed ? 0 : 3); r++) {
         order_of(r, shm->ncfg, ord);
         for (int i = 0; i < shm->ncfg; i++) {
             int k = ord[i]; set_cfg(x, k);
@@ -411,10 +415,10 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
     }
     barrier();
     int bk = shm->best;
-    // ---- fixed block at the best share: Accelerate, GPU and split interleaved, 3 rounds
+    // ---- fixed block at the best share: Accelerate, GPU and split interleaved, shm->rounds rounds
     int fcfg[3] = {CF_ACC, CF_GPU, bk}, freps[3] = {c->fx_acc, c->fx_gpu, c->fx_split};
     int sreps = 0, sdiff = 0, greps = 0, gdiff = 0, areps = 0, adiff = 0; long smax = 0;
-    for (int r = 0; r < 3; r++) {
+    for (int r = 0; r < shm->rounds; r++) {
         order_of(r, 3, ord);
         for (int i = 0; i < 3; i++) {
             int k = fcfg[ord[i]], nrep = freps[ord[i]]; set_cfg(x, k);
@@ -669,26 +673,28 @@ static void report(const Case *c, int np, int data, bool smc, double idle_w) {
     printf("case %s: %cGEMM '%c','N' M=%d N=%d K=%d lda=%d ldb=%d ldc=%d beta=%d, split axis %c (align %d), %.2f GF per call x %d procs, data %s\n",
            c->name, c->prec == 'z' ? 'Z' : 'D', c->ta, c->M, c->N, c->K, c->lda, c->ldb, c->ldc, c->beta, c->axis, c->align, flops(c) / 1e9, np, data ? "QE-like (rows decay 9 decades)" : "uniform [-1,1)");
     printf("registration ok (of 4 arrays), per proc:"); for (int p = 0; p < np; p++) printf(" %d", shm->reg_ok[p]); printf("\n");
-    printf("-- sweep: lockstep medians over 3 interleaved rounds x %d reps (ms); L = slowest proc, A = mean over procs\n", c->sweep_reps);
+    if (shm->fixed) printf("-- sweep: none, the GPU part is fixed (SPLIT_G or SPLIT_F)\n");
+    else printf("-- sweep: lockstep medians over 3 interleaved rounds x %d reps (ms); L = slowest proc, A = mean over procs\n", c->sweep_reps);
     double sacc = stat(PH_SWEEP, CF_ACC, -1, V_TOTAL, true, NULL), sgpu = stat(PH_SWEEP, CF_GPU, -1, V_TOTAL, true, NULL);
-    printf("   %-6s %6s | %9s %9s | %7s %7s | %8s %8s %7s %6s\n", "config", "f", "L ms", "A ms", "/ACC", "/GPU", "cpu ms", "gpu ms", "join", "wake");
-    for (int k = 0; k < shm->ncfg; k++) {
+    if (!shm->fixed) printf("   %-6s %6s | %9s %9s | %7s %7s | %8s %8s %7s %6s\n", "config", "f", "L ms", "A ms", "/ACC", "/GPU", "cpu ms", "gpu ms", "join", "wake");
+    for (int k = 0; k < (shm->fixed ? 0 : shm->ncfg); k++) {
         double L = stat(PH_SWEEP, k, -1, V_TOTAL, true, NULL), A = stat(PH_SWEEP, k, -1, V_TOTAL, false, NULL);
         double f = (double)cfg_g(c, k) / axis_len(c);
         printf("   %-6s %6.3f | %9.2f %9.2f | %7.3f %7.3f | %8.2f %8.2f %7.2f %6.2f%s\n", cfg_name(k, b1), f, L * 1e3, A * 1e3, L / sacc, L / sgpu,
                stat(PH_SWEEP, k, -1, V_CPU, false, NULL) * 1e3, stat(PH_SWEEP, k, -1, V_GPU, false, NULL) * 1e3,
                stat(PH_SWEEP, k, -1, V_JOIN, false, NULL) * 1e3, stat(PH_SWEEP, k, -1, V_WAKE, false, NULL) * 1e3, k == shm->best ? "  <- best" : "");
     }
-    if (shm->best == CF_SPLIT0 || shm->best == shm->ncfg - 1) printf("   NOTE: best share is at the edge of the swept range\n");
+    if (!shm->fixed && (shm->best == CF_SPLIT0 || shm->best == shm->ncfg - 1)) printf("   NOTE: best share is at the edge of the swept range\n");
     int bk = shm->best, na, ng, ns;
     double fb = (double)shm->g[bk] / axis_len(c);
     double La = stat(PH_FIXED, CF_ACC, -1, V_TOTAL, true, &na), Lg = stat(PH_FIXED, CF_GPU, -1, V_TOTAL, true, &ng), Ls = stat(PH_FIXED, bk, -1, V_TOTAL, true, &ns);
     double Aa = stat(PH_FIXED, CF_ACC, -1, V_TOTAL, false, NULL), Ag = stat(PH_FIXED, CF_GPU, -1, V_TOTAL, false, NULL), As = stat(PH_FIXED, bk, -1, V_TOTAL, false, NULL);
-    printf("-- fixed block at g=%d (f=%.3f), 3 interleaved rounds; medians of lockstep times (ms) [per-round medians]\n", shm->g[bk], fb);
+    printf("-- fixed block at g=%d (f=%.3f, %s), %d interleaved rounds; medians of lockstep times (ms) [per-round medians]\n", shm->g[bk], fb,
+           shm->fixed ? "fixed" : "the sweep's best", shm->rounds);
     int cf[3] = {CF_ACC, CF_GPU, bk}; int cnt[3] = {na, ng, ns}; double Ls3[3] = {La, Lg, Ls}, As3[3] = {Aa, Ag, As};
     for (int i = 0; i < 3; i++) {
         printf("   %-6s n=%2d  L %9.2f  A %9.2f  %7.1f GF/s  [", cfg_name(cf[i], b1), cnt[i], Ls3[i] * 1e3, As3[i] * 1e3, F / Ls3[i] / 1e9);
-        for (int r = 0; r < 3; r++) printf("%s%.2f", r ? " " : "", stat(PH_FIXED, cf[i], r, V_TOTAL, true, NULL) * 1e3);
+        for (int r = 0; r < shm->rounds; r++) printf("%s%.2f", r ? " " : "", stat(PH_FIXED, cf[i], r, V_TOTAL, true, NULL) * 1e3);
         printf("]\n");
     }
     printf("   split parts (mean over procs, medians): cpu slice %.2f ms, gpu slice %.2f ms, join wait %.2f ms, gpu wake %.3f ms, K-add %.3f ms\n",
@@ -746,11 +752,12 @@ static void report(const Case *c, int np, int data, bool smc, double idle_w) {
     bool bits = sd == 0 && od == 0 && hs;
     printf("SUMMARY case=%s np=%d data=%d acc_ms=%.3f gpu_ms=%.3f split_ms=%.3f g=%d f=%.3f sp_acc=%.3f sp_gpu=%.3f sp_best=%.3f acc_gfs=%.1f gpu_gfs=%.1f split_gfs=%.1f "
            "bits_repeat=%s split_reps=%d gpu_rep_diff=%d acc_rep_diff=%d err_u2=%.3f err_gpu_u2=%.3f err_acc_u2=%.4f notgpu=%d pdtr_acc=%.1f pdtr_gpu=%.1f pdtr_split=%.1f idle=%.1f n=%d/%d/%d "
-           "reg=%d sus_w=%.1f/%.1f/%.1f sus_j=%.3f/%.3f/%.3f h_split=%016llx h_gpu=%016llx h_acc=%016llx\n",
+           "reg=%d sus_w=%.1f/%.1f/%.1f sus_j=%.3f/%.3f/%.3f h_split=%016llx h_gpu=%016llx h_acc=%016llx share=%s rounds=%d\n",
            c->name, np, data, La * 1e3, Lg * 1e3, Ls * 1e3, shm->g[bk], fb, La / Ls, Lg / Ls, best1 / Ls, F / La / 1e9, F / Lg / 1e9, F / Ls / 1e9,
            bits ? "yes" : "NO", sr, gd, ad, emax / U2, shm->err_gpu / U2, shm->err_acc / U2, notgpu, pw[0], pw[1], pw[2], idle_w, na, ng, ns,
            shm->reg_ok[0], sw[0], sw[1], sw[2], sj[0], sj[1], sj[2],
-           (unsigned long long)shm->hash_split[0], (unsigned long long)shm->hash_gpu[0], (unsigned long long)shm->hash_acc[0]);
+           (unsigned long long)shm->hash_split[0], (unsigned long long)shm->hash_gpu[0], (unsigned long long)shm->hash_acc[0],
+           shm->fixed ? "fixed" : "sweep", shm->rounds);
 }
 
 // ---------------------------------------------------------------- sustained runs (one process)
@@ -904,6 +911,18 @@ int main(int argc, char **argv) {
     if (argc < 5 || strcmp(argv[1], "run")) { fprintf(stderr, "usage: bench_split run <case> <np> <outdir> [data] | bench_split sustain <case> <outdir> <g> [secs] [idle] [steady_after] | bench_split list\n"); return 2; }
     const Case *c = find_case(argv[2]); int np = atoi(argv[3]), data = argc > 5 ? atoi(argv[5]) : 0;
     if (!c || np < 1 || np > NPMAX) { fprintf(stderr, "bad case or np\n"); return 2; }
+    // a fixed GPU part: SPLIT_G as given, or SPLIT_F cut by the library's rule with its AB_MIN_GPU_DIM floor
+    int fixed_g = 0, L = axis_len(c), rounds = (int)envd("SPLIT_ROUNDS", 3);
+    const char *eg = getenv("SPLIT_G"), *ef = getenv("SPLIT_F");
+    if (eg && ef) { fprintf(stderr, "SPLIT_G and SPLIT_F are both set: give one\n"); return 2; }
+    if (eg) fixed_g = atoi(eg);
+    if (ef) {
+        const char *md = getenv("AB_MIN_GPU_DIM");
+        int min_dim = md && *md && atoi(md) >= 0 ? atoi(md) : AB_DISPATCH_DEFAULT_MIN_DIM;   // as dispatch.c's env_dim
+        fixed_g = ab_split_cut(c->axis, L, atof(ef), min_dim);
+    }
+    if ((eg || ef) && (fixed_g <= 0 || fixed_g >= L)) { fprintf(stderr, "SPLIT_G or SPLIT_F gives GPU part %d of %d: not a split\n", fixed_g, L); return 2; }
+    if (rounds < 1) { fprintf(stderr, "SPLIT_ROUNDS must be at least 1\n"); return 2; }
     char pw[256], ld[256], path[1024];
     machine_state(pw, sizeof pw, ld, sizeof ld);
     printf("%s | VECLIB_MAXIMUM_THREADS=%s AB_MODE=%s AB_MIN_GPU_DIM=%s AB_STAGING_MB=%s AB_TRACE=%s | %d procs\nstart: %s| load %s\n", ab_build_info(),
@@ -913,7 +932,14 @@ int main(int argc, char **argv) {
     int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644); if (fd < 0 || ftruncate(fd, sizeof(Shm))) { perror("shm"); return 1; }
     shm = mmap(NULL, sizeof(Shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0); memset(shm, 0, sizeof(Shm));
     shm->np = np; shm->ncfg = CF_SPLIT0;
-    for (int i = 0; i < c->nf; i++) { int g = gpu_part(c, c->f[i]); if (shm->ncfg == CF_SPLIT0 || g != shm->g[shm->ncfg - 1]) shm->g[shm->ncfg++] = g; }
+    if (fixed_g > 0) { shm->fixed = 1; shm->g[shm->ncfg++] = fixed_g; }
+    else for (int i = 0; i < c->nf; i++) { int g = gpu_part(c, c->f[i]); if (shm->ncfg == CF_SPLIT0 || g != shm->g[shm->ncfg - 1]) shm->g[shm->ncfg++] = g; }
+    shm->rounds = rounds;
+    int need = (shm->fixed ? 0 : 3 * shm->ncfg * c->sweep_reps) + rounds * (c->fx_acc + c->fx_gpu + c->fx_split) + 2;
+    if (need > MAXREC) {   // records per process: the sweep, the fixed block, the two completion orders
+        fprintf(stderr, "SPLIT_ROUNDS=%d needs %d records per process, more than MAXREC %d\n", rounds, need, MAXREC);
+        unlink(path); return 2;
+    }
     bool smc = smc_open(); pthread_t st;
     g_ior = envd("SPLIT_POWER_S", 0) > 0 && ior_init();   // GPU clock for sustained runs
     if (smc) pthread_create(&st, NULL, sampler, NULL);

@@ -32,6 +32,11 @@ inside the library is on the [roadmap](../../docs/ROADMAP.md#next).
   4. bit checks: ≥ 12 split repeats compared with `memcmp`, both forced completion orders, hashes
      across processes, each part against the engine that computed it;
   5. errors against a compensated Dot2 reference (`tests/test_dot2.h`) on 16 sampled columns.
+- **Fixed share:** `SPLIT_G=<g>` skips the sweep and runs the fixed block at GPU part g. `SPLIT_F=<f>`
+  does the same at the GPU part the library would cut at share f (`ab_split_cut` in `src/split_slice.h`,
+  with the `AB_MIN_GPU_DIM` floor, default 32); a share that does not cut the axis is refused.
+- **Rounds:** `SPLIT_ROUNDS=<n>` (default 3) sets the fixed block's rounds. The program refuses a count
+  whose records would not fit (`MAXREC`, 2048 timed calls per process).
 - **Data:** `data 0` is uniform in [−1, 1). `data 1` is QE-like: the rows of the plane-wave arrays decay
   over 9 decades. That is synthetic data chosen to exercise the exponent-range guard, not data from QE.
 - **Power:**
