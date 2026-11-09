@@ -433,14 +433,20 @@ All notable changes to this project will be documented in this file.
   about 2⁻⁹⁶⁴), a matrix made only of such values included. The upload's vectorized
   measure now counts such a value as the guard's statistics do, in the
   smallest magnitude too, and a scalar pass finds the exponents only for a
-  matrix that holds one. `ab_dev_dgemm` and `ab_dev_zgemm` convert through the
-  same measure and get the same scales, the device ZGEMM's epilogue included;
-  the BLAS ABI's measure and bits are unchanged. New: `test_native_tiny_span`
-  in `tests/test_device_api.c` (10 checks: the counterexample through handles
-  and device buffers, real and complex; exponents 78 and 79 apart; a matrix
-  made only of such values; a stray one among ordinary values) and
-  `range-tiny-span` (`ab_dgemm`, `ab_dgemm_scaled`, `ab_zgemm`) in
-  `tests/test_blas_abi.c`. Each fails on a build without its part of the fix.
+  matrix that holds one. On ordinary data (values at 2⁰ and 2³⁰⁰, n = 512,
+  2048 and 4096, four interleaved rounds on the M2 Max) `ab_matrix_upload`
+  takes 0.93-0.96× 56216ee's median time on one thread and 0.97-1.01× with
+  `parallel` at n = 2048 and 4096 (the measure now computes one high word per
+  value, not two). `ab_dev_dgemm` and `ab_dev_zgemm` convert through the same
+  measure and get the same scales, the device ZGEMM's epilogue included. The
+  BLAS ABI's measure and bits are unchanged, and native results on data
+  without such values are bitwise those of 56216ee (432 outputs at 2⁰ and
+  2^±300). New: `test_native_tiny_span` in `tests/test_device_api.c` (10
+  checks: the counterexample through handles and device buffers, real and
+  complex; exponents 78 and 79 apart; a matrix made only of such values; a
+  stray one among ordinary values) and `range-tiny-span` (`ab_dgemm`,
+  `ab_dgemm_scaled`, `ab_zgemm`) in `tests/test_blas_abi.c`. Each fails on a
+  build without its part of the fix.
 - **A ZGEMM through the BLAS ABI that reads a NaN or Inf in C runs on
   Accelerate**, whether its epilogue would run on the GPU or on the host, as a
   DGEMM's has since 1.5.0. The epilogue's complex arithmetic,
