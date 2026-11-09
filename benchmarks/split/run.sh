@@ -50,12 +50,13 @@ go() {
         exit 1
     fi
 }
-# one <suite> <np> <veclib threads> <data> <case> [VAR=value ...]
+# one <suite> <np> <veclib threads> <data> <case> [VAR=value ...]: the VAR=value settings come after
+# env_common, so they override it (env keeps the last value of a name)
 one() {
     local sub=$1 np=$2 vl=$3 data=$4 c=$5; shift 5
     local pre=$c.np$np.d$data
     go "$out/$sub" "$pre" SUMMARY "$c np=$np veclib=$vl data=$data" \
-        env "$@" "${env_common[@]}" VECLIB_MAXIMUM_THREADS="$vl" AB_TRACE="$out/$sub/$pre.trace" "$bin" run "$c" "$np" "$out/$sub" "$data"
+        env "${env_common[@]}" "$@" VECLIB_MAXIMUM_THREADS="$vl" AB_TRACE="$out/$sub/$pre.trace" "$bin" run "$c" "$np" "$out/$sub" "$data"
 }
 # sus <case>: sustained runs at the GPU part g of sq1x8's fixed block for the same case
 sus() {
