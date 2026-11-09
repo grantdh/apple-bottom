@@ -166,7 +166,7 @@ typedef struct {
     int outcome, retries, in_place;    // ab_split_outcome_t, -1 if not a SEAM call
     ab_split_times_t tm;               // the seam's timeline (ns, mach_absolute_time); zero otherwise
 } Call;
-typedef struct { int phase, round, cfg, rep; Call k; } Rec;
+typedef struct { int phase, round, cfg, rep; float load1; Call k; } Rec;   // load1: the load average after the call
 typedef struct {
     _Atomic int bcount, bgen;
     int np, ncfg, g[MAXCFG], kind[MAXCFG], best;   // ncfg: ACC, GPU and the sweep's splits
@@ -310,6 +310,7 @@ static void record(int phase, int round, int cfg, int rep, const Call *o) {
     int n = shm->nrec[myid];
     if (n >= MAXREC) { fprintf(stderr, "too many records (MAXREC %d)\n", MAXREC); exit(1); }
     Rec *r = &shm->rec[myid][n]; r->phase = phase; r->round = round; r->cfg = cfg; r->rep = rep;
+    double la; r->load1 = getloadavg(&la, 1) == 1 ? (float)la : NAN;
     r->k = *o; shm->nrec[myid] = n + 1;
 }
 
@@ -932,6 +933,11 @@ static void report(const Case *c, int np, int data, bool smc, double idle_w) {
         }
     }
     for (int p = 0; p < np; p++) printf("   proc %d: setup %.1f s, total %.1f s\n", p, shm->tsetup[p], shm->ttotal[p]);
+    {   // load1 after each of process 0's calls (raw.tsv has every one)
+        static double la[MAXREC]; int n = 0; double lo = 1e300, hi = -1e300;
+        for (int i = 0; i < shm->nrec[0]; i++) if (shm->rec[0][i].phase == PH_FIXED) { double l = shm->rec[0][i].load1; la[n++] = l; lo = fmin(lo, l); hi = fmax(hi, l); }
+        printf("   load1 in the fixed block (after each call, proc 0): median %.2f [%.2f-%.2f]\n", median(la, n), n ? lo : NAN, n ? hi : NAN);
+    }
     bool bits = sd == 0 && od == 0 && hs;
     printf("SUMMARY case=%s np=%d data=%d acc_ms=%.3f gpu_ms=%.3f split_ms=%.3f g=%d f=%.3f sp_acc=%.3f sp_gpu=%.3f sp_best=%.3f acc_gfs=%.1f gpu_gfs=%.1f split_gfs=%.1f "
            "bits_repeat=%s split_reps=%d gpu_rep_diff=%d acc_rep_diff=%d err_u2=%.3f err_gpu_u2=%.3f err_acc_u2=%.4f notgpu=%d pdtr_acc=%.1f pdtr_gpu=%.1f pdtr_split=%.1f idle=%.1f n=%d/%d/%d "
@@ -1166,7 +1172,7 @@ int main(int argc, char **argv) {
             fprintf(f, "proc\tphase\tround\tcfg\tname\tg\trep\ttotal\tcpu\tgpu\tjoin\twake\tkadd\tt0\tt1\toutcome\tretries\tin_place"
                        "\tat_cut_ns\tat_create_ns\tat_cpu0_ns\tat_cpu1_ns\tat_gpu0_ns\tat_gpu1_ns\tat_join_ns\tat_end_ns"
                        "\tgpu_commit_ns\tgpu_start_ns\tgpu_end_ns\tgpu_done_ns\tgpu_encode_ns\tgpu_submit_ns\tgpu_wake_ns\tgpu_temps_ns"
-                       "\tgpu_groups\tgpu_groups_max\tgpu_dispatches\tgpu_cmdbufs\tgpu_kinds\tgpu_mtl_error\n");
+                       "\tgpu_groups\tgpu_groups_max\tgpu_dispatches\tgpu_cmdbufs\tgpu_kinds\tgpu_mtl_error\tload1\n");
             char nb[24];
             for (int p = 0; p < np; p++) for (int i = 0; i < shm->nrec[p]; i++) {
                 const Rec *r = &shm->rec[p][i]; const ab_split_times_t *m = &r->k.tm; const ab_prof_kernel_split_t *q = &m->gpu;
@@ -1175,10 +1181,10 @@ int main(int argc, char **argv) {
                 fprintf(f, "\t%s\t%d\t%d\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu", outcome_name(r->k.outcome), r->k.retries, r->k.in_place,
                         (unsigned long long)m->cut_ns, (unsigned long long)m->create_ns, (unsigned long long)m->cpu0_ns, (unsigned long long)m->cpu1_ns,
                         (unsigned long long)m->gpu0_ns, (unsigned long long)m->gpu1_ns, (unsigned long long)m->join_ns, (unsigned long long)m->end_ns);
-                fprintf(f, "\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%u\t%u\t%u\t%u\t%d\n",
+                fprintf(f, "\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%u\t%u\t%u\t%u\t%d\t%.2f\n",
                         (unsigned long long)q->commit_ns, (unsigned long long)q->gpu_start_ns, (unsigned long long)q->gpu_end_ns, (unsigned long long)q->done_ns,
                         (unsigned long long)q->encode_ns, (unsigned long long)q->submit_ns, (unsigned long long)q->wake_ns, (unsigned long long)q->temps_ns,
-                        (unsigned long long)q->groups, q->groups_max, q->dispatches, q->cmdbufs, q->kinds, q->mtl_error);
+                        (unsigned long long)q->groups, q->groups_max, q->dispatches, q->cmdbufs, q->kinds, q->mtl_error, r->load1);
             }
             fclose(f);
         }

@@ -92,14 +92,33 @@ make build/bench_split
 benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 ```
 
-- **Suites:** `run.sh` with no suite runs all of them, about 35 minutes. Its header lists them.
+- **Suites:** `run.sh` with no suite runs all of them but `smoke` and the G3 suites, about 50 minutes.
+  Its header lists them.
 - **Environment:** every case runs with `AB_MODE=gpu AB_MIN_GPU_DIM=0 AB_STAGING_MB=8192 AB_REPORT=1`
   and an `AB_TRACE` file per process.
-- **Machine:** run on an otherwise idle Mac on AC power. Each case checks `pmset` first, and on battery
-  the script stops with exit status 75. A case that did not both start and end on AC power is moved
-  aside, and running the script again resumes where it stopped.
-- **Memory:** the 8192² cases need about 15 GB per process (16 GB with the arms, which keep one more
-  copy of C).
+- **G3 suites** (`g3-1x8-s8192`, `g3-1x8-s2048`, `g3-4x2-s8192`, `g3-4x2-s2048`, or `g3` for all four;
+  not in the default run): the six squares and the seven QE-shaped cases of the 2026-10-28 results with
+  copied operands (`SPLIT_NOREG=1`), at 1×8 and at 4×2, with `AB_STAGING_MB` 8192 and 2048, so that the
+  library's seam and the user split meet the staged path's copies and a small pool. `ZGEMM 8192²` is not
+  run at 4×2 (see Memory).
+- **Machine:** run on an otherwise idle Mac on AC power, from an adapter of at least 90 W
+  (`SPLIT_MIN_W`). The script checks `pmset -g batt` and `pmset -g adapter` at the start and before each
+  case, and stops with exit status 75 if either fails. A case that did not both start and end on AC power
+  is moved aside, and running the script again resumes where it stopped. `SPLIT_DRY=1` makes the checks
+  and prints each case's command without running it. `power.log` has the power source, the adapter's
+  watts and the load averages before and after every case, and `raw.tsv` the load average after every
+  call (`load1`).
+- **Settings per suite:** a suite's own variables (`SPLIT_NOREG=1`, `AB_STAGING_MB=2048`, ...) come after
+  the common ones on the `env` line, so they override them.
+- **Memory:** the 8192² cases needed about 15 GB in the 2026-10-28 runs; the arms keep one more copy of
+  C (1 GiB at `ZGEMM 8192²`). An estimate from the code, per process:
+  - Each process holds A, B, C, C₀, the partial P and four reference copies of C (the user split's, the
+    GPU's, Accelerate's and the seam's): nine arrays of N² elements, 9 GiB at `ZGEMM 8192²` and 4.5 GiB
+    at `DGEMM 8192²`. With copied operands the GPU's buffers add their double-float copies of A, B and C
+    (3 GiB for ZGEMM, 1.5 GiB for DGEMM) and, for ZGEMM, the Gauss-3M temporaries (4 N² double-float
+    values, 2 GiB), whatever `AB_STAGING_MB` keeps between calls.
+  - At 4×2 that is about 4 × 14 = 56 GiB for `ZGEMM 8192²`, more than a 64 GB Mac can give without
+    swapping, so the G3 suites leave it out at 4×2. `DGEMM 8192²` needs about 4 × 6 = 24 GiB and is run.
 
 ## Output, per case
 

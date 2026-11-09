@@ -13,31 +13,49 @@
 #   power4x2       UN1000, RK500 with 6 s runs per engine for wall power
 #   sustain        80 s back-to-back runs of DGEMM and ZGEMM 8192^2 at 1x8, at the best share of
 #                  sq1x8's case (measured first if sq1x8 has not run)
-# Default: every suite but smoke, in that order (about 35 min).
+#   g3-1x8-s8192, g3-1x8-s2048, g3-4x2-s8192, g3-4x2-s2048 (or g3 for all four)
+#                  G3 (library seam against user code): the squares and the QE-shaped cases with copied
+#                  operands (SPLIT_NOREG=1) at 1x8 and 4x2, AB_STAGING_MB 8192 or 2048; no Z8192 at 4x2
+# Default: every suite but smoke and the G3 suites, in that order (about 50 min).
 #
-# Run on an otherwise idle Mac on AC power. Every case checks `pmset` first, and on battery the script
-# stops with exit status 75. A case already complete in <outdir> is skipped, and one that did not both
-# start and end on AC power is moved aside, so running the script again resumes.
+# Run on an otherwise idle Mac on AC power from an adapter of at least SPLIT_MIN_W watts (default 90).
+# The script checks `pmset` at the start and before every case, and stops with exit status 75 if either
+# fails. A case already complete in <outdir> is skipped, and one that did not both start and end on AC
+# power is moved aside, so running the script again resumes. SPLIT_DRY=1 makes the same checks and
+# prints each case's command instead of running it.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 bin=${BENCH_SPLIT:-$here/../../build/bench_split}
 [ -x "$bin" ] || { echo "no $bin: run 'make build/bench_split' first" >&2; exit 2; }
-[ $# -ge 1 ] || { sed -n 2,18p "$0" >&2; exit 2; }
+[ $# -ge 1 ] || { awk 'NR > 1 && /^set -u/ { exit } NR > 1' "$0" >&2; exit 2; }
 out=$1; shift
-suites=${*:-sq1x8 qe4x2 qe1x8 qe8x1 qelike4x2 qelike4x2-low noreg4x2 power4x2 sustain}
+suites=
+for s in ${*:-sq1x8 qe4x2 qe1x8 qe8x1 qelike4x2 qelike4x2-low noreg4x2 power4x2 sustain}; do
+    [ "$s" = g3 ] && suites="$suites g3-1x8-s8192 g3-1x8-s2048 g3-4x2-s8192 g3-4x2-s2048" || suites="$suites $s"
+done
 env_common=(AB_MODE=gpu AB_MIN_GPU_DIM=0 AB_STAGING_MB=8192 AB_REPORT=1)
+min_w=${SPLIT_MIN_W:-90}
+dry=${SPLIT_DRY:-}
 
 onac() { pmset -g batt | head -1 | grep -q "'AC Power'"; }
-note() { echo "$(date '+%F %T') $2: $(pmset -g batt | head -1) | load $(sysctl -n vm.loadavg)" >> "$1/power.log"; }
+adapter_w() { pmset -g adapter | sed -nE 's/^ *Wattage = ([0-9]+)W.*/\1/p' | head -1; }
+adapter_ok() { local w; w=$(adapter_w); [ -n "$w" ] && [ "$w" -ge "$min_w" ]; }
+power_ok() {   # power_ok <what>: on AC power from an adapter of at least min_w watts, else say so on stderr
+    onac || { echo "not on AC power, stopping $1: exit 75" >&2; return 1; }
+    adapter_ok || { echo "adapter $(adapter_w) W, under $min_w W, stopping $1: exit 75" >&2; return 1; }
+}
+note() { echo "$(date '+%F %T') $2: $(pmset -g batt | head -1) | adapter $(adapter_w) W | load $(sysctl -n vm.loadavg)" >> "$1/power.log"; }
+power_ok "before the first case" || exit 75
 # go <dir> <prefix> <marker> <label> <command ...>: run one case into <dir>/<prefix>.out, unless that
 # already holds a <marker> line; afterwards it must hold one and have started and ended on AC power,
 # else the case's files are moved aside and the script stops
 go() {
     local d=$1 pre=$2 mark=$3 label=$4 rc; shift 4
     grep -q "^$mark" "$d/$pre.out" 2>/dev/null && return 0
+    if [ -n "$dry" ]; then power_ok "before $label" || exit 75; echo "$label: $*"; return 0; fi
     mkdir -p "$d"
     note "$d" "before $label"
-    onac || { note "$d" "not on AC power, stopping before $label"; exit 75; }
+    power_ok "before $label" || { note "$d" "power check failed, stopping before $label"; exit 75; }
     "$@" > "$d/$pre.out" 2>&1
     rc=$?
     note "$d" "after $label rc=$rc"
@@ -62,17 +80,19 @@ one() {
 sus() {
     local c=$1 g
     one sq1x8 1 8 0 "$c"
-    g=$(sed -nE 's/^SUMMARY .* g=([0-9]+) .*/\1/p' "$out/sq1x8/$c.np1.d0.out")
+    g=$(sed -nE 's/^SUMMARY .* g=([0-9]+) .*/\1/p' "$out/sq1x8/$c.np1.d0.out" 2>/dev/null)
     go "$out/sustain" "$c.sustain" SUSTAIN "sustain $c g=$g" \
         env "${env_common[@]}" VECLIB_MAXIMUM_THREADS=8 AB_TRACE="$out/sustain/$c.sustain.trace" "$bin" sustain "$c" "$out/sustain" "$g" 80 30 20
 }
 
 QE="UN1000 UN512 UM160 UM320 UM1000 RK500 RK160"
 QE8="A8_UN512 A8_RK512 A8_RK1000 B8_UM1152 B8_RK1152"
+SQ="D2048 D4096 D8192 Z2048 Z4096 Z8192"
+SQ4X2="D2048 D4096 D8192 Z2048 Z4096"   # Z8192 at 4x2 does not fit in 64 GB (README, Memory)
 for s in $suites; do
     case $s in
     smoke)         one smoke 1 8 0 D2048; one smoke 1 8 0 Z2048; one smoke 4 2 0 UM160; one smoke 4 2 0 RK160 ;;
-    sq1x8)         for c in D2048 D4096 D8192 Z2048 Z4096 Z8192; do one sq1x8 1 8 0 "$c"; done ;;
+    sq1x8)         for c in $SQ; do one sq1x8 1 8 0 "$c"; done ;;
     qe4x2)         for c in $QE; do one qe4x2 4 2 0 "$c"; done ;;
     qe1x8)         for c in $QE; do one qe1x8 1 8 0 "$c"; done ;;
     qe8x1)         for c in $QE8; do one qe8x1 8 1 0 "$c"; done ;;
@@ -81,6 +101,9 @@ for s in $suites; do
     noreg4x2)      for c in UN1000 UM160 RK500; do one noreg4x2 4 2 0 "$c" SPLIT_NOREG=1; done ;;
     power4x2)      for c in UN1000 RK500; do one power4x2 4 2 0 "$c" SPLIT_POWER_S=6 SPLIT_IDLE_S=6; done ;;
     sustain)       sus D8192; sus Z8192 ;;
+    g3-1x8-s8192|g3-1x8-s2048|g3-4x2-s8192|g3-4x2-s2048)
+        case $s in g3-1x8-*) np=1 vl=8 cs="$SQ $QE" ;; *) np=4 vl=2 cs="$SQ4X2 $QE" ;; esac
+        for c in $cs; do one "$s" "$np" "$vl" 0 "$c" SPLIT_NOREG=1 AB_STAGING_MB="${s##*-s}"; done ;;
     *)             echo "unknown suite: $s" >&2; exit 2 ;;
     esac
 done
