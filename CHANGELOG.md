@@ -77,7 +77,7 @@ All notable changes to this project will be documented in this file.
     own products, so a part far below the other sends the call to Accelerate
     instead of losing its bits. Rule and limits:
     [Exponent range](docs/vv/LIMITATIONS.md#exponent-range).
-  - `tests/test_blas2.c` (19 tests, 983 cases; in `make test` and
+  - `tests/test_blas2.c` (19 tests, 995 cases; in `make test` and
     `make ci-local`, including a check of the `AB_MODE=auto` rule against
     its measurements and of the kernels' FP64-to-double-float conversion,
     bit for bit, on 4.2 million inputs) and `benchmarks/bench_gemv.c`

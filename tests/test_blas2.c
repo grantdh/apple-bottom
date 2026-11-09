@@ -606,13 +606,14 @@ static void test_nonfinite_propagation(void) {
 // The kinds from RG_IMAG_TINY on change one part of complex data, and do not run for DGEMV.
 typedef enum { RG_HUGE_ELEM, RG_ALL_TINY, RG_NEAR_FLT_MAX, RG_SCALED_UP, RG_X_HUGE, RG_X_TINY,
                RG_X_WIDE, RG_ZEROS, RG_SUBNORMALS, RG_TINY_ROWS, RG_FLT_EDGE, RG_FLT_OVERFLOW,
-               RG_LOSSY_ONE, RG_IMAG_TINY, RG_REAL_TINY, RG_IMAG_SMALL, RG_IMAG_ZERO, RG_IMAG_ONE,
-               RG_COUNT } RangeKind;
+               RG_LOSSY_ONE, RG_SMALL_ONE, RG_LARGE_ONE, RG_IMAG_TINY, RG_REAL_TINY, RG_IMAG_SMALL,
+               RG_IMAG_ZERO, RG_IMAG_ONE, RG_COUNT } RangeKind;
 // Where each must run (RG_TINY_ROWS: the guard may keep it on the GPU or not).
 static const Expect RG_WANT[] = {
     EXPECT_CPU, EXPECT_CPU, EXPECT_CPU, EXPECT_GPU, EXPECT_GPU, EXPECT_GPU,
     EXPECT_GPU, EXPECT_GPU, EXPECT_GPU, EXPECT_EITHER, EXPECT_GPU, EXPECT_CPU,
-    EXPECT_CPU, EXPECT_CPU, EXPECT_CPU, EXPECT_GPU, EXPECT_GPU, EXPECT_CPU,
+    EXPECT_CPU, EXPECT_CPU, EXPECT_CPU, EXPECT_CPU, EXPECT_CPU, EXPECT_GPU,
+    EXPECT_GPU, EXPECT_CPU,
 };
 _Static_assert(sizeof RG_WANT / sizeof *RG_WANT == RG_COUNT, "one route per kind");
 
@@ -692,6 +693,12 @@ static void test_range_guard(void) {
                 break;
             case RG_LOSSY_ONE:   // 2^30 x 2^-85: in range, but lossy with no larger product (lmax)
                 isolate(&c, &d, 0x1p30, 0, 0x1p-85);
+                break;
+            case RG_SMALL_ONE:   // 2^-70 x 2^-70: neither factor lossy, but below range (pmax)
+                isolate(&c, &d, 0x1p-70, 0, 0x1p-70);
+                break;
+            case RG_LARGE_ONE:   // 2^124 x 0.75: finite in FP32, but above range (pmax)
+                isolate(&c, &d, 0x1p124, 0, 0.75);
                 break;
             case RG_IMAG_ONE:    // 1 + 2^-100 i times a real x_p: only the imaginary part is out of range
                 isolate(&c, &d, 1, 0x1p-100, 0.75);
