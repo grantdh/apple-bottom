@@ -17,6 +17,12 @@
 // on sampled columns. SPLIT_G=g, or SPLIT_F=f (cut as the library cuts it, ab_split_cut with the
 // AB_MIN_GPU_DIM floor), skips the sweep and runs the fixed block at that GPU part.
 // SPLIT_POWER_S=s adds runs of s seconds per engine for wall power (SPLIT_IDLE_S: idle before).
+// The fixed block also runs four arms at the split's GPU part g (SPLIT_ARMS=0 leaves them out):
+//   SEAM   the library's own split of the same call through its seam (ab_internal_[dz]gemm_split,
+//          staged path, free completion order), with its outcome and timeline per call;
+//   S<g>b  a second, identical user-code split, so the user split can be timed against itself;
+//   HEAD   the CPU slice alone, on the calling thread;
+//   TAIL   the GPU slice alone, on the GPU thread, the caller waiting.
 // Power: the parent samples SMC keys (PDTR, the DC input = wall side on AC power, PSTR, PPBR and
 // the GPU rails) at 20 Hz and, for sustained runs, IOReport's GPU energy and clock residency, both
 // without root through undocumented interfaces; without them the power columns read nan.
@@ -59,7 +65,7 @@
 extern char **environ;
 typedef double _Complex zc;
 #define NPMAX 4
-#define MAXCFG 14
+#define MAXCFG 16
 #define MAXREC 2048   // timed calls per process: the sweep, SPLIT_ROUNDS fixed rounds, 2 orders
 #define PG 16384
 
@@ -142,16 +148,27 @@ static double flops(const Case *c) { return (c->prec == 'z' ? 8.0 : 2.0) * c->M 
 // ---------------------------------------------------------------- shared memory
 enum { V_TOTAL, V_CPU, V_GPU, V_JOIN, V_WAKE, V_KADD, V_T0, V_T1, NV };
 enum { PH_SWEEP, PH_FIXED, PH_ORDER };
-enum { CF_ACC, CF_GPU, CF_SPLIT0 };
-typedef struct { int phase, round, cfg, rep; double v[NV]; } Rec;
+enum { CF_ACC, CF_GPU, CF_SPLIT0 };   // config indices; the sweep's splits from CF_SPLIT0, the arms after them
+enum { KD_ACC, KD_GPU, KD_SPLIT, KD_SPLIT2, KD_SEAM, KD_HEAD, KD_TAIL };
+#define NARM 4                         // KD_SEAM, KD_SPLIT2, KD_HEAD, KD_TAIL
+// one timed call: its times (s, V_*) and, for a SEAM call, the library's record of it
+typedef struct {
+    double v[NV];
+    int outcome, retries, in_place;    // ab_split_outcome_t, -1 if not a SEAM call
+    ab_split_times_t tm;               // the seam's timeline (ns, mach_absolute_time); zero otherwise
+} Call;
+typedef struct { int phase, round, cfg, rep; Call k; } Rec;
 typedef struct {
     _Atomic int bcount, bgen;
-    int np, ncfg, g[MAXCFG], best;
+    int np, ncfg, g[MAXCFG], kind[MAXCFG], best;   // ncfg: ACC, GPU and the sweep's splits
     int fixed, rounds;   // fixed: SPLIT_G or SPLIT_F set, no sweep; rounds of the fixed block
+    int narm, k_seam, k_split2, k_head, k_tail;    // the arms (0 or NARM), at indices ncfg..ncfg+narm-1
     int nrec[NPMAX]; Rec rec[NPMAX][MAXREC];
     int reg_ok[NPMAX], notgpu[NPMAX], gpucalls[NPMAX];
     int split_reps[NPMAX], split_diff_reps[NPMAX], gpu_reps[NPMAX], gpu_diff_reps[NPMAX], acc_reps[NPMAX], acc_diff_reps[NPMAX];
     long split_diff_max[NPMAX], order_diff[NPMAX][2];
+    int seam_reps[NPMAX], seam_diff_reps[NPMAX], split2_reps[NPMAX], split2_diff_reps[NPMAX];
+    long seam_vs_split[NPMAX], head_vs_split[NPMAX], tail_vs_split[NPMAX];   // elements differing; -1 not compared
     uint64_t hash_split[NPMAX], hash_gpu[NPMAX], hash_acc[NPMAX];
     long cpu_vs_acc, gpu_vs_gpu, part_n_cpu, part_n_gpu, split_vs_acc, split_vs_gpu, all_n;
     double err_split_cpu, err_split_gpu, err_gpu, err_acc; int err_cols;
@@ -233,35 +250,58 @@ static void kadd(Ctx *x) {  // C = fl(C_cpu + P_gpu)
     const Case *c = x->c; zc *C = x->C; const zc *P = x->P;
     for (int j = 0; j < c->N; j++) for (int i = 0; i < c->M; i++) C[(size_t)j * c->ldc + i] += P[(size_t)j * c->M + i];
 }
-// one timed call of config cfg; C is reset from C0 first (untimed)
-static void one_call(Ctx *x, int cfg, double *v) {
+// the library's split of the whole call at x->g through its seam: staged path, free order
+static int seam_call(Ctx *x) {
+    const Case *c = x->c; const ab_split_forced_t f = {c->axis, x->g, 0, 0};
+    if (c->prec == 'd') return ab_internal_dgemm_split(&f, 'N', 'N', c->M, c->N, c->K, 1.0, x->A, c->lda, x->B, c->ldb, c->beta, x->C, c->ldc);
+    return ab_internal_zgemm_split(&f, c->ta, 'N', c->M, c->N, c->K, 1, x->A, c->lda, x->B, c->ldb, c->beta, x->C, c->ldc);
+}
+static double ns_s(uint64_t ns) { return (double)ns * 1e-9; }
+// one timed call of config k; C is reset from C0 first (untimed). V_CPU, V_GPU: the slices (or the
+// whole call); V_JOIN: the caller's wait for the GPU slice after its own; V_WAKE: the GPU slice's start
+// after the call's; V_KADD: the K axis's sum (the seam: everything after the join)
+static void one_call(Ctx *x, int k, Call *o) {
     if (!g_noreset) memcpy(x->C, x->C0, x->nC * x->es);
+    double *v = o->v; int kd = shm->kind[k];
+    memset(o, 0, sizeof *o); o->outcome = -1;
     double t0 = now(), tc0 = t0, tc1, tj, tk;
-    memset(v, 0, sizeof(double) * NV);
-    if (cfg == CF_ACC) { acc_full(x); tc1 = tj = tk = now(); v[V_CPU] = tc1 - t0; }
-    else if (cfg == CF_GPU) { gpu_full(x); tc1 = tj = tk = now(); v[V_GPU] = tc1 - t0; }
-    else {
+    if (kd == KD_ACC) { acc_full(x); tc1 = tj = tk = now(); v[V_CPU] = tc1 - t0; }
+    else if (kd == KD_GPU) { gpu_full(x); tc1 = tj = tk = now(); v[V_GPU] = tc1 - t0; }
+    else if (kd == KD_HEAD) { cpu_slice(x); tc1 = tj = tk = now(); v[V_CPU] = tc1 - t0; }
+    else if (kd == KD_SEAM) {
+        o->outcome = seam_call(x); tk = now();
+        ab_split_record_t r;
+        if (ab_internal_last_split(&r)) {
+            const ab_split_times_t *m = &r.times; o->tm = *m; o->retries = r.retries; o->in_place = r.in_place;
+            if (m->cpu1_ns) v[V_CPU] = ns_s(m->cpu1_ns - m->cpu0_ns);
+            if (m->gpu1_ns) { v[V_GPU] = ns_s(m->gpu1_ns - m->gpu0_ns); v[V_WAKE] = ns_s(m->gpu0_ns) - t0; }
+            if (m->join_ns) { v[V_JOIN] = ns_s(m->join_ns - m->cpu1_ns); v[V_KADD] = ns_s(m->end_ns - m->join_ns); }
+        }
+    } else {   // a user-code split (KD_SPLIT, KD_SPLIT2), or its GPU slice alone (KD_TAIL)
         dispatch_semaphore_signal(sem_go);
         if (g_delay == 2) dispatch_semaphore_wait(sem_done, DISPATCH_TIME_FOREVER);
-        tc0 = now(); cpu_slice(x); tc1 = now();
+        tc0 = now();
+        if (kd != KD_TAIL) cpu_slice(x);
+        tc1 = now();
         if (g_delay == 1) dispatch_semaphore_signal(sem_cpu_done);
         if (g_delay != 2) dispatch_semaphore_wait(sem_done, DISPATCH_TIME_FOREVER);
         tj = now();
-        if (x->c->axis == 'K') kadd(x);
+        if (x->c->axis == 'K' && kd != KD_TAIL) kadd(x);
         tk = now();
-        v[V_CPU] = tc1 - tc0; v[V_GPU] = g_tg1 - g_tg0; v[V_JOIN] = tj - tc1; v[V_WAKE] = g_tg0 - t0; v[V_KADD] = tk - tj;
+        if (kd != KD_TAIL) v[V_CPU] = tc1 - tc0;
+        v[V_GPU] = g_tg1 - g_tg0; v[V_JOIN] = tj - tc1; v[V_WAKE] = g_tg0 - t0; v[V_KADD] = tk - tj;
     }
     v[V_TOTAL] = tk - t0; v[V_T0] = t0; v[V_T1] = tk;
 }
-static int cfg_g(const Case *c, int cfg) { return cfg >= CF_SPLIT0 ? shm->g[cfg] : cfg == CF_GPU ? axis_len(c) : 0; }
-static void set_cfg(Ctx *x, int cfg) {
-    if (cfg >= CF_SPLIT0) { x->g = shm->g[cfg]; x->cut = axis_len(x->c) - x->g; }
+static int cfg_g(const Case *c, int k) { return shm->kind[k] == KD_ACC ? 0 : shm->kind[k] == KD_GPU ? axis_len(c) : shm->g[k]; }
+static void set_cfg(Ctx *x, int k) {
+    if (shm->kind[k] != KD_ACC && shm->kind[k] != KD_GPU) { x->g = shm->g[k]; x->cut = axis_len(x->c) - x->g; }
 }
-static void record(int phase, int round, int cfg, int rep, const double *v) {
+static void record(int phase, int round, int cfg, int rep, const Call *o) {
     int n = shm->nrec[myid];
     if (n >= MAXREC) { fprintf(stderr, "too many records (MAXREC %d)\n", MAXREC); exit(1); }
     Rec *r = &shm->rec[myid][n]; r->phase = phase; r->round = round; r->cfg = cfg; r->rep = rep;
-    memcpy(r->v, v, sizeof r->v); shm->nrec[myid] = n + 1;
+    r->k = *o; shm->nrec[myid] = n + 1;
 }
 
 // ---------------------------------------------------------------- data
@@ -344,8 +384,8 @@ static void ref_errors(ErrJob *ej) {
 
 // ---------------------------------------------------------------- child
 // lockstep (the slowest process) or mean-over-process value of record i
-static double lockv(int i, int fld) { double m = 0; for (int p = 0; p < shm->np; p++) if (shm->rec[p][i].v[fld] > m) m = shm->rec[p][i].v[fld]; return m; }
-static double meanv(int i, int fld) { double m = 0; for (int p = 0; p < shm->np; p++) m += shm->rec[p][i].v[fld] / shm->np; return m; }
+static double lockv(int i, int fld) { double m = 0; for (int p = 0; p < shm->np; p++) if (shm->rec[p][i].k.v[fld] > m) m = shm->rec[p][i].k.v[fld]; return m; }
+static double meanv(int i, int fld) { double m = 0; for (int p = 0; p < shm->np; p++) m += shm->rec[p][i].k.v[fld] / shm->np; return m; }
 // median over the records of (phase, cfg[, round]) of the lockstep (max over procs) or mean-over-procs value
 static double stat(int phase, int cfg, int round, int fld, bool lock, int *count) {
     double L[MAXREC]; int n = 0;
@@ -372,7 +412,7 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
     x->nA = (size_t)c->lda * acols; x->nB = (size_t)c->ldb * c->N; x->nC = (size_t)c->ldc * c->N;
     size_t es = x->es, nP = (size_t)c->M * c->N;
     x->A = palloc(x->nA * es); x->B = palloc(x->nB * es); x->C = palloc(x->nC * es); x->C0 = palloc(x->nC * es); x->P = palloc(nP * es);
-    void *Cs0 = palloc(x->nC * es), *Cg0 = palloc(x->nC * es), *Ca0 = palloc(x->nC * es);
+    void *Cs0 = palloc(x->nC * es), *Cg0 = palloc(x->nC * es), *Ca0 = palloc(x->nC * es), *Cm0 = shm->narm ? palloc(x->nC * es) : NULL;
     fill(x, data);
     memcpy(x->C, x->C0, x->nC * es); memset(x->P, 0, nP * es);
     if (ab_init() != AB_OK) { fprintf(stderr, "ab_init failed\n"); return 1; }
@@ -386,12 +426,12 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
     shm->reg_ok[id] = ok;
     sem_go = dispatch_semaphore_create(0); sem_done = dispatch_semaphore_create(0); sem_cpu_done = dispatch_semaphore_create(0);
     pthread_t th; pthread_create(&th, NULL, gpu_thread, NULL);
-    double v[NV];
+    Call v;
     // warm-up (untimed): Accelerate's threads, the library's pipelines and staging pool
-    barrier(); one_call(x, CF_ACC, v);
-    barrier(); one_call(x, CF_GPU, v);
+    barrier(); one_call(x, CF_ACC, &v);
+    barrier(); one_call(x, CF_GPU, &v);
     for (int k = shm->ncfg - 1; k >= CF_SPLIT0; k--) {
-        set_cfg(x, k); barrier(); one_call(x, k, v);
+        set_cfg(x, k); barrier(); one_call(x, k, &v);
         if (c->big) break;
     }
     shm->tsetup[id] = now() - T0;
@@ -401,7 +441,7 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
         order_of(r, shm->ncfg, ord);
         for (int i = 0; i < shm->ncfg; i++) {
             int k = ord[i]; set_cfg(x, k);
-            for (int rep = 0; rep < c->sweep_reps; rep++) { barrier(); one_call(x, k, v); record(PH_SWEEP, r, k, rep, v); }
+            for (int rep = 0; rep < c->sweep_reps; rep++) { barrier(); one_call(x, k, &v); record(PH_SWEEP, r, k, rep, &v); }
         }
     }
     barrier();
@@ -412,20 +452,44 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
             if (md < best) { best = md; bk = k; }
         }
         shm->best = bk;
+        for (int a = 0; a < shm->narm; a++) shm->g[shm->ncfg + a] = shm->g[bk];   // the arms cut where the split does
     }
     barrier();
     int bk = shm->best;
-    // ---- fixed block at the best share: Accelerate, GPU and split interleaved, shm->rounds rounds
-    int fcfg[3] = {CF_ACC, CF_GPU, bk}, freps[3] = {c->fx_acc, c->fx_gpu, c->fx_split};
+    // warm-up of the arms (untimed): the seam's thread and pool slots, the slices alone
+    for (int k = shm->ncfg; k < shm->ncfg + shm->narm; k++) { set_cfg(x, k); barrier(); one_call(x, k, &v); }
+    // ---- fixed block at the best share, shm->rounds rounds. Base order: Accelerate, GPU, the seam,
+    // the user split, its twin, the CPU slice alone, the GPU slice alone; rotated and reversed by round
+    // (order_of), so the seam and the twin sit one config from the user split in every round, and in
+    // round 0 the user split runs before its twin and the slices, whose checks use its first result.
+    int fcfg[3 + NARM] = {CF_ACC, CF_GPU, bk}, freps[3 + NARM] = {c->fx_acc, c->fx_gpu, c->fx_split}, nf = 3;
+    if (shm->narm) {
+        int base[3 + NARM] = {CF_ACC, CF_GPU, shm->k_seam, bk, shm->k_split2, shm->k_head, shm->k_tail};
+        for (int i = 0; i < 3 + NARM; i++) { fcfg[i] = base[i]; freps[i] = i == 0 ? c->fx_acc : i == 1 ? c->fx_gpu : c->fx_split; }
+        nf = 3 + NARM;
+    }
     int sreps = 0, sdiff = 0, greps = 0, gdiff = 0, areps = 0, adiff = 0; long smax = 0;
+    int mreps = 0, mdiff = 0, s2reps = 0, s2diff = 0, hdone = 0, tdone = 0;
+    shm->seam_vs_split[id] = shm->head_vs_split[id] = shm->tail_vs_split[id] = -1;
+    const int M = c->M, N = c->N, cut = axis_len(c) - shm->g[bk];
     for (int r = 0; r < shm->rounds; r++) {
-        order_of(r, 3, ord);
-        for (int i = 0; i < 3; i++) {
-            int k = fcfg[ord[i]], nrep = freps[ord[i]]; set_cfg(x, k);
+        order_of(r, nf, ord);
+        for (int i = 0; i < nf; i++) {
+            int k = fcfg[ord[i]], nrep = freps[ord[i]], kd = shm->kind[k]; set_cfg(x, k);
             for (int rep = 0; rep < nrep; rep++) {
-                barrier(); one_call(x, k, v); record(PH_FIXED, r, k, rep, v);
-                void *ref = k == CF_ACC ? Ca0 : k == CF_GPU ? Cg0 : Cs0;
-                int *nr = k == CF_ACC ? &areps : k == CF_GPU ? &greps : &sreps, *nd = k == CF_ACC ? &adiff : k == CF_GPU ? &gdiff : &sdiff;
+                barrier(); one_call(x, k, &v); record(PH_FIXED, r, k, rep, &v);
+                if (kd == KD_SPLIT2) { s2diff += memcmp(Cs0, x->C, x->nC * es) != 0; s2reps++; continue; }   // against the user split's first
+                if (kd == KD_HEAD || kd == KD_TAIL) {   // the part of C the slice wrote, against the user split's (N and M axes)
+                    int *done = kd == KD_HEAD ? &hdone : &tdone;
+                    if (*done || c->axis == 'K') continue;
+                    bool head = kd == KD_HEAD, n_ax = c->axis == 'N';
+                    long d = cmp_block(x, Cs0, x->C, n_ax ? 0 : head ? 0 : cut, n_ax ? M : head ? cut : M, n_ax ? (head ? 0 : cut) : 0, n_ax ? (head ? cut : N) : N);
+                    if (head) shm->head_vs_split[id] = d; else shm->tail_vs_split[id] = d;
+                    *done = 1; continue;
+                }
+                void *ref = kd == KD_ACC ? Ca0 : kd == KD_GPU ? Cg0 : kd == KD_SEAM ? Cm0 : Cs0;
+                int *nr = kd == KD_ACC ? &areps : kd == KD_GPU ? &greps : kd == KD_SEAM ? &mreps : &sreps;
+                int *nd = kd == KD_ACC ? &adiff : kd == KD_GPU ? &gdiff : kd == KD_SEAM ? &mdiff : &sdiff;
                 if (*nr == 0) memcpy(ref, x->C, x->nC * es);
                 else if (memcmp(ref, x->C, x->nC * es)) {
                     (*nd)++;
@@ -438,17 +502,18 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
     // ---- completion order: GPU slice starts after the CPU slice, then the reverse
     set_cfg(x, bk);
     for (int o = 1; o <= 2; o++) {
-        g_delay = o; barrier(); one_call(x, bk, v); record(PH_ORDER, 0, bk, o, v);
+        g_delay = o; barrier(); one_call(x, bk, &v); record(PH_ORDER, 0, bk, o, &v);
         shm->order_diff[id][o - 1] = memcmp(Cs0, x->C, x->nC * es) ? cmp_block(x, Cs0, x->C, 0, c->M, 0, c->N) : 0;
     }
     g_delay = 0;
     // ---- sustained power (SPLIT_POWER_S = seconds per run): each config back to back, 3 interleaved
     // rounds, C not reset, so SMC's ~1 s lag can be trimmed; no bit checks here
     double pws = envd("SPLIT_POWER_S", 0);
+    const int pcfg[3] = {CF_ACC, CF_GPU, bk};
     if (pws > 0) {
         barrier();
         if (id == 0) for (int i = 0; i < 3; i++) {
-            int n = (int)ceil(pws / stat(PH_FIXED, fcfg[i], -1, V_TOTAL, true, NULL));
+            int n = (int)ceil(pws / stat(PH_FIXED, pcfg[i], -1, V_TOTAL, true, NULL));
             shm->pw_n[i] = n < 2 ? 2 : n;
         }
         barrier();
@@ -456,9 +521,9 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
         for (int r = 0; r < 3; r++) {
             order_of(r, 3, ord);
             for (int i = 0; i < 3; i++) {
-                int ci = ord[i], k = fcfg[ci]; set_cfg(x, k);
+                int ci = ord[i], k = pcfg[ci]; set_cfg(x, k);
                 barrier(); double t0 = now();
-                for (int n = 0; n < shm->pw_n[ci]; n++) { barrier(); one_call(x, k, v); }
+                for (int n = 0; n < shm->pw_n[ci]; n++) { barrier(); one_call(x, k, &v); }
                 barrier();
                 if (id == 0) { shm->pw_t0[r][ci] = t0; shm->pw_t1[r][ci] = now(); }
             }
@@ -469,10 +534,11 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
     shm->split_reps[id] = sreps; shm->split_diff_reps[id] = sdiff; shm->split_diff_max[id] = smax;
     shm->gpu_reps[id] = greps; shm->gpu_diff_reps[id] = gdiff; shm->acc_reps[id] = areps; shm->acc_diff_reps[id] = adiff;
     shm->hash_split[id] = h64(Cs0, x->nC * es); shm->hash_gpu[id] = h64(Cg0, x->nC * es); shm->hash_acc[id] = h64(Ca0, x->nC * es);
+    shm->seam_reps[id] = mreps; shm->seam_diff_reps[id] = mdiff; shm->split2_reps[id] = s2reps; shm->split2_diff_reps[id] = s2diff;
+    if (mreps) shm->seam_vs_split[id] = cmp_block(x, Cm0, Cs0, 0, M, 0, N);
     shm->ttotal[id] = now() - T0;
     barrier();
     if (id == 0) {  // which parts of the split equal which single-engine result; errors vs Dot2
-        int M = c->M, N = c->N, cut = x->cut;
         if (c->axis == 'N') {
             shm->cpu_vs_acc = cmp_block(x, Cs0, Ca0, 0, M, 0, cut); shm->part_n_cpu = (long)M * cut;
             shm->gpu_vs_gpu = cmp_block(x, Cs0, Cg0, 0, M, cut, N); shm->part_n_gpu = (long)M * (N - cut);
@@ -657,18 +723,80 @@ static void machine_state(char *pw, size_t npw, char *ld, size_t nld) {
 }
 
 // ---------------------------------------------------------------- parent: report
-static const char *cfg_name(int k, char *buf) { if (k == CF_ACC) return "ACC"; if (k == CF_GPU) return "GPU"; snprintf(buf, 24, "S%d", shm->g[k]); return buf; }
+// config names, as raw.tsv's name column has them: ACC, GPU, S<g> (the user split), S<g>b (its twin),
+// SEAM, HEAD, TAIL
+static const char *cfg_name(int k, char *buf) {
+    switch (shm->kind[k]) {
+    case KD_ACC: return "ACC";
+    case KD_GPU: return "GPU";
+    case KD_SEAM: return "SEAM";
+    case KD_HEAD: return "HEAD";
+    case KD_TAIL: return "TAIL";
+    default: snprintf(buf, 24, "S%d%s", shm->g[k], shm->kind[k] == KD_SPLIT2 ? "b" : ""); return buf;
+    }
+}
+static const char *OUTCOME[] = {"KEPT", "KEPT_4M", "CPU", "RANGE", "GPU_FAILED", "DECLINED", "NOT_CUT", "INVALID"};
+#define NOUT (int)(sizeof OUTCOME / sizeof OUTCOME[0])
+static const char *outcome_name(int o) { return o >= 0 && o < NOUT ? OUTCOME[o] : "-"; }
+// median over (round, rep) of the fixed block's lockstep time of config a over config b's
+static double paired_median(int a, int b, int *count) {
+    static double r[MAXREC]; int n = 0;
+    for (int i = 0; i < shm->nrec[0]; i++) {
+        const Rec *x = &shm->rec[0][i];
+        if (x->phase != PH_FIXED || x->cfg != a) continue;
+        for (int j = 0; j < shm->nrec[0]; j++) {
+            const Rec *y = &shm->rec[0][j];
+            if (y->phase == PH_FIXED && y->cfg == b && y->round == x->round && y->rep == x->rep) { r[n++] = lockv(i, V_TOTAL) / lockv(j, V_TOTAL); break; }
+        }
+    }
+    if (count) *count = n;
+    return median(r, n);
+}
+// median over every process's SEAM calls in the fixed block of a span of the seam's timeline (ms)
+// or of a count; spans whose ends did not happen (a 0 stamp) are left out
+enum { SM_INIT, SM_START, SM_CPU, SM_GPU, SM_WAIT, SM_AFTER, SM_PRE, SM_EXEC, SM_POST, SM_SUBMIT, SM_WAKE, SM_ENCODE,
+       SM_CMDBUFS, SM_DISPATCHES, SM_GROUPS, SM_INPLACE };
+static double seam_med(int what) {
+    static double v[NPMAX * MAXREC]; int n = 0;
+    for (int p = 0; p < shm->np; p++) for (int i = 0; i < shm->nrec[p]; i++) {
+        const Rec *r = &shm->rec[p][i];
+        if (r->phase != PH_FIXED || r->cfg != shm->k_seam) continue;
+        const ab_split_times_t *m = &r->k.tm; const ab_prof_kernel_split_t *k = &m->gpu;
+        uint64_t a = 0, b = 0; double cnt = NAN;
+        switch (what) {
+        case SM_INIT: a = m->cut_ns; b = m->create_ns; break;          // cut to the GPU thread's creation
+        case SM_START: a = m->create_ns; b = m->gpu0_ns; break;        // creation to the GPU part's start
+        case SM_CPU: a = m->cpu0_ns; b = m->cpu1_ns; break;
+        case SM_GPU: a = m->gpu0_ns; b = m->gpu1_ns; break;
+        case SM_WAIT: a = m->cpu1_ns; b = m->join_ns; break;           // the caller's wait for the GPU part
+        case SM_AFTER: a = m->join_ns; b = m->end_ns; break;           // the K axis's sum, or a redo
+        case SM_PRE: a = m->gpu0_ns; b = k->commit_ns; break;          // the GPU part's host work before its first commit
+        case SM_EXEC: a = k->gpu_start_ns; b = k->gpu_end_ns; break;   // GPUStartTime to GPUEndTime
+        case SM_POST: a = k->done_ns; b = m->gpu1_ns; break;           // after the last command buffer returned
+        case SM_SUBMIT: cnt = k->submit_ns * 1e-6; break;
+        case SM_WAKE: cnt = k->wake_ns * 1e-6; break;
+        case SM_ENCODE: cnt = k->encode_ns * 1e-6; break;
+        case SM_CMDBUFS: cnt = k->cmdbufs; break;
+        case SM_DISPATCHES: cnt = k->dispatches; break;
+        case SM_GROUPS: cnt = (double)k->groups; break;
+        case SM_INPLACE: cnt = r->k.in_place; break;
+        }
+        if (what < SM_SUBMIT) { if (!a || !b) continue; cnt = ((double)b - (double)a) * 1e-6; }
+        v[n++] = cnt;
+    }
+    return median(v, n);
+}
 static int windows(int phase, int cfg, double *t0, double *t1) {
     int n = 0;
     for (int i = 0; i < shm->nrec[0]; i++) {
         const Rec *r = &shm->rec[0][i]; if (r->phase != phase || r->cfg != cfg) continue;
-        double a = 1e300, b = 0; for (int p = 0; p < shm->np; p++) { a = fmin(a, shm->rec[p][i].v[V_T0]); b = fmax(b, shm->rec[p][i].v[V_T1]); }
+        double a = 1e300, b = 0; for (int p = 0; p < shm->np; p++) { a = fmin(a, shm->rec[p][i].k.v[V_T0]); b = fmax(b, shm->rec[p][i].k.v[V_T1]); }
         t0[n] = a; t1[n] = b; n++;
     }
     return n;
 }
 static void report(const Case *c, int np, int data, bool smc, double idle_w) {
-    char b1[24];
+    char b1[24], b2[24];
     double F = flops(c) * np;
     printf("case %s: %cGEMM '%c','N' M=%d N=%d K=%d lda=%d ldb=%d ldc=%d beta=%d, split axis %c (align %d), %.2f GF per call x %d procs, data %s\n",
            c->name, c->prec == 'z' ? 'Z' : 'D', c->ta, c->M, c->N, c->K, c->lda, c->ldb, c->ldc, c->beta, c->axis, c->align, flops(c) / 1e9, np, data ? "QE-like (rows decay 9 decades)" : "uniform [-1,1)");
@@ -688,13 +816,17 @@ static void report(const Case *c, int np, int data, bool smc, double idle_w) {
     int bk = shm->best, na, ng, ns;
     double fb = (double)shm->g[bk] / axis_len(c);
     double La = stat(PH_FIXED, CF_ACC, -1, V_TOTAL, true, &na), Lg = stat(PH_FIXED, CF_GPU, -1, V_TOTAL, true, &ng), Ls = stat(PH_FIXED, bk, -1, V_TOTAL, true, &ns);
-    double Aa = stat(PH_FIXED, CF_ACC, -1, V_TOTAL, false, NULL), Ag = stat(PH_FIXED, CF_GPU, -1, V_TOTAL, false, NULL), As = stat(PH_FIXED, bk, -1, V_TOTAL, false, NULL);
     printf("-- fixed block at g=%d (f=%.3f, %s), %d interleaved rounds; medians of lockstep times (ms) [per-round medians]\n", shm->g[bk], fb,
            shm->fixed ? "fixed" : "the sweep's best", shm->rounds);
-    int cf[3] = {CF_ACC, CF_GPU, bk}; int cnt[3] = {na, ng, ns}; double Ls3[3] = {La, Lg, Ls}, As3[3] = {Aa, Ag, As};
-    for (int i = 0; i < 3; i++) {
-        printf("   %-6s n=%2d  L %9.2f  A %9.2f  %7.1f GF/s  [", cfg_name(cf[i], b1), cnt[i], Ls3[i] * 1e3, As3[i] * 1e3, F / Ls3[i] / 1e9);
-        for (int r = 0; r < shm->rounds; r++) printf("%s%.2f", r ? " " : "", stat(PH_FIXED, cf[i], r, V_TOTAL, true, NULL) * 1e3);
+    int cf[3] = {CF_ACC, CF_GPU, bk};
+    int all[3 + NARM] = {CF_ACC, CF_GPU, bk}, nall = 3;
+    if (shm->narm) { int arms[NARM] = {shm->k_seam, shm->k_split2, shm->k_head, shm->k_tail}; for (int a = 0; a < NARM; a++) all[nall++] = arms[a]; }
+    double gb = (double)shm->g[bk] / axis_len(c);
+    for (int i = 0; i < nall; i++) {   // GF/s of the part the config computes: HEAD the head's, TAIL the tail's
+        int k = all[i], n; double L = stat(PH_FIXED, k, -1, V_TOTAL, true, &n), A = stat(PH_FIXED, k, -1, V_TOTAL, false, NULL);
+        double part = shm->kind[k] == KD_HEAD ? 1 - gb : shm->kind[k] == KD_TAIL ? gb : 1;
+        printf("   %-6s n=%2d  L %9.2f  A %9.2f  %7.1f GF/s  [", cfg_name(k, b1), n, L * 1e3, A * 1e3, F * part / L / 1e9);
+        for (int r = 0; r < shm->rounds; r++) printf("%s%.2f", r ? " " : "", stat(PH_FIXED, k, r, V_TOTAL, true, NULL) * 1e3);
         printf("]\n");
     }
     printf("   split parts (mean over procs, medians): cpu slice %.2f ms, gpu slice %.2f ms, join wait %.2f ms, gpu wake %.3f ms, K-add %.3f ms\n",
@@ -702,6 +834,33 @@ static void report(const Case *c, int np, int data, bool smc, double idle_w) {
            stat(PH_FIXED, bk, -1, V_WAKE, false, NULL) * 1e3, stat(PH_FIXED, bk, -1, V_KADD, false, NULL) * 1e3);
     double best1 = fmin(La, Lg);
     printf("   speedup of the split: vs Accelerate %.3fx, vs GPU %.3fx, vs the faster engine (%s) %.3fx\n", La / Ls, Lg / Ls, La <= Lg ? "ACC" : "GPU", best1 / Ls);
+    // the arms
+    double Lm = NAN, Ls2 = NAN, Lh = NAN, Lt = NAN, rseam = NAN, rnull = NAN; int nseam = 0, nnull = 0, outs[NOUT] = {0}, nout = 0;
+    if (shm->narm) {
+        Lm = stat(PH_FIXED, shm->k_seam, -1, V_TOTAL, true, NULL); Ls2 = stat(PH_FIXED, shm->k_split2, -1, V_TOTAL, true, NULL);
+        Lh = stat(PH_FIXED, shm->k_head, -1, V_TOTAL, true, NULL); Lt = stat(PH_FIXED, shm->k_tail, -1, V_TOTAL, true, NULL);
+        rseam = paired_median(shm->k_seam, bk, &nseam); rnull = paired_median(shm->k_split2, bk, &nnull);
+        for (int p = 0; p < np; p++) for (int i = 0; i < shm->nrec[p]; i++) {
+            const Rec *r = &shm->rec[p][i];
+            if (r->phase == PH_FIXED && r->cfg == shm->k_seam && r->k.outcome >= 0 && r->k.outcome < NOUT) { outs[r->k.outcome]++; nout++; }
+        }
+        printf("-- library seam and alone arms at g=%d (lockstep medians; ratios: median over (round, rep) pairs)\n", shm->g[bk]);
+        printf("   SEAM / %s %.3f (%d pairs), %s / %s %.3f (%d pairs, the user split against itself)\n", cfg_name(bk, b1), rseam, nseam,
+               cfg_name(shm->k_split2, b2), cfg_name(bk, b1), rnull, nnull);
+        printf("   seam outcomes (%d calls):", nout);
+        for (int o = 0; o < NOUT; o++) if (outs[o]) printf(" %s %d", OUTCOME[o], outs[o]);
+        printf("; operands in place (median) %.0f\n", seam_med(SM_INPLACE));
+        printf("   seam timeline (medians over all procs' calls, ms): cut to thread %.3f, thread to GPU part %.3f | cpu part %.2f, gpu part %.2f, "
+               "wait for the GPU %.2f, after the join %.3f | GPU part: host before first commit %.2f, submit %.3f, GPU exec %.2f, wake %.3f, "
+               "after last done %.2f, encode %.3f | %.0f command buffers, %.0f dispatches, %.0f threadgroups\n",
+               seam_med(SM_INIT), seam_med(SM_START), seam_med(SM_CPU), seam_med(SM_GPU), seam_med(SM_WAIT), seam_med(SM_AFTER), seam_med(SM_PRE),
+               seam_med(SM_SUBMIT), seam_med(SM_EXEC), seam_med(SM_WAKE), seam_med(SM_POST), seam_med(SM_ENCODE),
+               seam_med(SM_CMDBUFS), seam_med(SM_DISPATCHES), seam_med(SM_GROUPS));
+        double hc = stat(PH_FIXED, shm->k_head, -1, V_CPU, false, NULL), tg = stat(PH_FIXED, shm->k_tail, -1, V_GPU, false, NULL);
+        double sc = stat(PH_FIXED, bk, -1, V_CPU, false, NULL), sg = stat(PH_FIXED, bk, -1, V_GPU, false, NULL);
+        printf("   alone: HEAD %.2f ms (cpu slice %.2f), TAIL %.2f ms (gpu slice %.2f); (HEAD + TAIL) / split %.3f; in the split the cpu slice takes "
+               "%.3fx its time alone, the gpu slice %.3fx\n", Lh * 1e3, hc * 1e3, Lt * 1e3, tg * 1e3, (Lh + Lt) / Ls, sc / hc, sg / tg);
+    }
     // bits
     int sr = 0, sd = 0, gr = 0, gd = 0, ar = 0, ad = 0; long smax = 0, od = 0; bool hs = true, hg = true, ha = true;
     for (int p = 0; p < np; p++) {
@@ -715,6 +874,19 @@ static void report(const Case *c, int np, int data, bool smc, double idle_w) {
     printf("   single engines: GPU repeats differing %d/%d, Accelerate repeats differing %d/%d\n", gd, gr, ad, ar);
     if (c->axis != 'K') printf("   split CPU part vs Accelerate alone: %ld/%ld elements differ; GPU part vs GPU alone: %ld/%ld differ\n", shm->cpu_vs_acc, shm->part_n_cpu, shm->gpu_vs_gpu, shm->part_n_gpu);
     printf("   whole split C vs Accelerate alone %ld/%ld, vs GPU alone %ld/%ld elements differ\n", shm->split_vs_acc, shm->all_n, shm->split_vs_gpu, shm->all_n);
+    int mr = 0, md = 0, s2r = 0, s2d = 0; long mvs = -1, hvs = -1, tvs = -1, part_h = 0, part_t = 0;
+    if (shm->narm) {   // the arms' bits: summed over processes; element counts from the process that differs most
+        for (int p = 0; p < np; p++) {
+            mr += shm->seam_reps[p]; md += shm->seam_diff_reps[p]; s2r += shm->split2_reps[p]; s2d += shm->split2_diff_reps[p];
+            mvs = shm->seam_vs_split[p] > mvs ? shm->seam_vs_split[p] : mvs;
+            hvs = shm->head_vs_split[p] > hvs ? shm->head_vs_split[p] : hvs; tvs = shm->tail_vs_split[p] > tvs ? shm->tail_vs_split[p] : tvs;
+        }
+        int L = axis_len(c), g = shm->g[bk];
+        part_h = c->axis == 'N' ? (long)c->M * (L - g) : (long)(L - g) * c->N; part_t = c->axis == 'N' ? (long)c->M * g : (long)g * c->N;
+        printf("   seam: repeats differing from its first %d/%d; its C vs the user split's %ld/%ld elements differ | %s repeats differing from %s's first %d/%d\n",
+               md, mr, mvs, shm->all_n, cfg_name(shm->k_split2, b2), cfg_name(bk, b1), s2d, s2r);
+        if (c->axis != 'K') printf("   alone: HEAD's part vs the split's %ld/%ld elements differ, TAIL's %ld/%ld (first call per proc)\n", hvs, part_h, tvs, part_t);
+    }
     int notgpu = 0, gcalls = 0; for (int p = 0; p < np; p++) { notgpu += shm->notgpu[p]; gcalls += shm->gpucalls[p]; }
     printf("   GPU-routed calls whose C was not computed on the GPU (ab_get_last_dispatch_path): %d of %d\n", notgpu, gcalls);
     double emax = c->axis == 'K' ? shm->err_split_cpu : fmax(shm->err_split_cpu, shm->err_split_gpu);
@@ -752,12 +924,20 @@ static void report(const Case *c, int np, int data, bool smc, double idle_w) {
     bool bits = sd == 0 && od == 0 && hs;
     printf("SUMMARY case=%s np=%d data=%d acc_ms=%.3f gpu_ms=%.3f split_ms=%.3f g=%d f=%.3f sp_acc=%.3f sp_gpu=%.3f sp_best=%.3f acc_gfs=%.1f gpu_gfs=%.1f split_gfs=%.1f "
            "bits_repeat=%s split_reps=%d gpu_rep_diff=%d acc_rep_diff=%d err_u2=%.3f err_gpu_u2=%.3f err_acc_u2=%.4f notgpu=%d pdtr_acc=%.1f pdtr_gpu=%.1f pdtr_split=%.1f idle=%.1f n=%d/%d/%d "
-           "reg=%d sus_w=%.1f/%.1f/%.1f sus_j=%.3f/%.3f/%.3f h_split=%016llx h_gpu=%016llx h_acc=%016llx share=%s rounds=%d\n",
+           "reg=%d sus_w=%.1f/%.1f/%.1f sus_j=%.3f/%.3f/%.3f h_split=%016llx h_gpu=%016llx h_acc=%016llx share=%s rounds=%d arms=%d",
            c->name, np, data, La * 1e3, Lg * 1e3, Ls * 1e3, shm->g[bk], fb, La / Ls, Lg / Ls, best1 / Ls, F / La / 1e9, F / Lg / 1e9, F / Ls / 1e9,
            bits ? "yes" : "NO", sr, gd, ad, emax / U2, shm->err_gpu / U2, shm->err_acc / U2, notgpu, pw[0], pw[1], pw[2], idle_w, na, ng, ns,
            shm->reg_ok[0], sw[0], sw[1], sw[2], sj[0], sj[1], sj[2],
            (unsigned long long)shm->hash_split[0], (unsigned long long)shm->hash_gpu[0], (unsigned long long)shm->hash_acc[0],
-           shm->fixed ? "fixed" : "sweep", shm->rounds);
+           shm->fixed ? "fixed" : "sweep", shm->rounds, shm->narm);
+    if (shm->narm) {
+        printf(" seam_ms=%.3f split2_ms=%.3f head_ms=%.3f tail_ms=%.3f seam_ratio=%.4f null_ratio=%.4f pairs=%d seam_out=", Lm * 1e3, Ls2 * 1e3, Lh * 1e3, Lt * 1e3, rseam, rnull, nseam);
+        bool first = true;
+        for (int o = 0; o < NOUT; o++) if (outs[o]) { printf("%s%s:%d", first ? "" : ",", OUTCOME[o], outs[o]); first = false; }
+        if (first) printf("-");
+        printf(" seam_rep_diff=%d/%d seam_vs_split=%ld split2_rep_diff=%d/%d head_vs_split=%ld tail_vs_split=%ld", md, mr, mvs, s2d, s2r, hvs, tvs);
+    }
+    printf("\n");
 }
 
 // ---------------------------------------------------------------- sustained runs (one process)
@@ -791,6 +971,7 @@ static int sustain(const Case *c, const char *outdir, int g, double secs, double
     shm = mmap(NULL, sizeof(Shm), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
     if (shm == MAP_FAILED) { perror("mmap"); return 1; }
     memset(shm, 0, sizeof(Shm)); shm->g[CF_SPLIT0] = shm->g[CF_SPLIT0 + 1] = g;
+    shm->kind[CF_ACC] = KD_ACC; shm->kind[CF_GPU] = KD_GPU; shm->kind[CF_SPLIT0] = shm->kind[CF_SPLIT0 + 1] = KD_SPLIT;
     Ctx *x = &X; x->c = c; x->es = c->prec == 'z' ? 16 : 8;
     int acols = c->ta == 'C' ? c->M : c->K;
     x->nA = (size_t)c->lda * acols; x->nB = (size_t)c->ldb * c->N; x->nC = (size_t)c->ldc * c->N;
@@ -808,9 +989,9 @@ static int sustain(const Case *c, const char *outdir, int g, double secs, double
     sem_go = dispatch_semaphore_create(0); sem_done = dispatch_semaphore_create(0); sem_cpu_done = dispatch_semaphore_create(0);
     pthread_t th, st; pthread_create(&th, NULL, gpu_thread, NULL);
     if (smc || g_ior) pthread_create(&st, NULL, sampler, NULL);
-    double v[NV];
+    Call call; const double *v = call.v;
     g_noreset = c->beta == 0;   // beta = 0: every call overwrites all of C, so the calls run back to back
-    one_call(x, CF_ACC, v); one_call(x, CF_GPU, v); set_cfg(x, CF_SPLIT0); one_call(x, CF_SPLIT0, v);   // warm-up
+    one_call(x, CF_ACC, &call); one_call(x, CF_GPU, &call); set_cfg(x, CF_SPLIT0); one_call(x, CF_SPLIT0, &call);   // warm-up
     const int bcfg[4] = {CF_SPLIT0, CF_GPU, CF_ACC, CF_SPLIT0 + 1};
     const char *bname[4] = {"split", "GPU alone", "Accelerate alone", "split rebalanced"};
     double bt0[4], bt1[4], it0[4], it1[4]; int bn[4] = {0}, bchk[4] = {0}, bdiff[4] = {0};
@@ -827,7 +1008,7 @@ static int sustain(const Case *c, const char *outdir, int g, double secs, double
         it0[b] = now(); usleep((useconds_t)(idle_s * 1e6)); it1[b] = now();
         bt0[b] = now(); int i = 0;
         while (now() - bt0[b] < secs && nsrec < MAXSR) {
-            one_call(x, k, v);
+            one_call(x, k, &call);
             SRec *r = &srec[nsrec++];
             *r = (SRec){b, k, cfg_g(c, k), i, v[V_T0], v[V_T1], v[V_TOTAL], v[V_CPU], v[V_GPU], v[V_JOIN]};
             if (i == 0) memcpy(Cref, x->C, x->nC * es);
@@ -931,11 +1112,17 @@ int main(int argc, char **argv) {
     snprintf(path, sizeof path, "%s/shm.%s.%d.%d", argv[4], c->name, np, getpid());
     int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644); if (fd < 0 || ftruncate(fd, sizeof(Shm))) { perror("shm"); return 1; }
     shm = mmap(NULL, sizeof(Shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0); memset(shm, 0, sizeof(Shm));
-    shm->np = np; shm->ncfg = CF_SPLIT0;
+    shm->np = np; shm->ncfg = CF_SPLIT0; shm->kind[CF_ACC] = KD_ACC; shm->kind[CF_GPU] = KD_GPU;
     if (fixed_g > 0) { shm->fixed = 1; shm->g[shm->ncfg++] = fixed_g; }
     else for (int i = 0; i < c->nf; i++) { int g = gpu_part(c, c->f[i]); if (shm->ncfg == CF_SPLIT0 || g != shm->g[shm->ncfg - 1]) shm->g[shm->ncfg++] = g; }
+    for (int k = CF_SPLIT0; k < shm->ncfg; k++) shm->kind[k] = KD_SPLIT;
     shm->rounds = rounds;
-    int need = (shm->fixed ? 0 : 3 * shm->ncfg * c->sweep_reps) + rounds * (c->fx_acc + c->fx_gpu + c->fx_split) + 2;
+    shm->narm = envd("SPLIT_ARMS", 1) != 0 ? NARM : 0;   // the arms take their g from the split's best after the sweep
+    if (shm->narm) {
+        shm->k_seam = shm->ncfg; shm->k_split2 = shm->ncfg + 1; shm->k_head = shm->ncfg + 2; shm->k_tail = shm->ncfg + 3;
+        shm->kind[shm->k_seam] = KD_SEAM; shm->kind[shm->k_split2] = KD_SPLIT2; shm->kind[shm->k_head] = KD_HEAD; shm->kind[shm->k_tail] = KD_TAIL;
+    }
+    int need = (shm->fixed ? 0 : 3 * shm->ncfg * c->sweep_reps) + rounds * (c->fx_acc + c->fx_gpu + c->fx_split * (1 + shm->narm)) + 2;
     if (need > MAXREC) {   // records per process: the sweep, the fixed block, the two completion orders
         fprintf(stderr, "SPLIT_ROUNDS=%d needs %d records per process, more than MAXREC %d\n", rounds, need, MAXREC);
         unlink(path); return 2;
@@ -963,12 +1150,24 @@ int main(int argc, char **argv) {
         char rp[1100]; snprintf(rp, sizeof rp, "%s/%s.np%d.d%d.raw.tsv", argv[4], c->name, np, data);
         FILE *f = fopen(rp, "w");
         if (f) {
-            fprintf(f, "proc\tphase\tround\tcfg\tg\trep\ttotal\tcpu\tgpu\tjoin\twake\tkadd\tt0\tt1\n");
+            // the SEAM calls' outcome and timeline (ns on the clock of t0 and t1); 0 (or - for the outcome)
+            // on other configs' rows and for a step that did not happen
+            fprintf(f, "proc\tphase\tround\tcfg\tname\tg\trep\ttotal\tcpu\tgpu\tjoin\twake\tkadd\tt0\tt1\toutcome\tretries\tin_place"
+                       "\tat_cut_ns\tat_create_ns\tat_cpu0_ns\tat_cpu1_ns\tat_gpu0_ns\tat_gpu1_ns\tat_join_ns\tat_end_ns"
+                       "\tgpu_commit_ns\tgpu_start_ns\tgpu_end_ns\tgpu_done_ns\tgpu_encode_ns\tgpu_submit_ns\tgpu_wake_ns\tgpu_temps_ns"
+                       "\tgpu_groups\tgpu_groups_max\tgpu_dispatches\tgpu_cmdbufs\tgpu_kinds\tgpu_mtl_error\n");
+            char nb[24];
             for (int p = 0; p < np; p++) for (int i = 0; i < shm->nrec[p]; i++) {
-                const Rec *r = &shm->rec[p][i];
-                fprintf(f, "%d\t%d\t%d\t%d\t%d\t%d", p, r->phase, r->round, r->cfg, cfg_g(c, r->cfg), r->rep);
-                for (int k = 0; k < NV; k++) fprintf(f, "\t%.6f", r->v[k]);
-                fprintf(f, "\n");
+                const Rec *r = &shm->rec[p][i]; const ab_split_times_t *m = &r->k.tm; const ab_prof_kernel_split_t *q = &m->gpu;
+                fprintf(f, "%d\t%d\t%d\t%d\t%s\t%d\t%d", p, r->phase, r->round, r->cfg, cfg_name(r->cfg, nb), cfg_g(c, r->cfg), r->rep);
+                for (int k = 0; k < NV; k++) fprintf(f, "\t%.6f", r->k.v[k]);
+                fprintf(f, "\t%s\t%d\t%d\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu", outcome_name(r->k.outcome), r->k.retries, r->k.in_place,
+                        (unsigned long long)m->cut_ns, (unsigned long long)m->create_ns, (unsigned long long)m->cpu0_ns, (unsigned long long)m->cpu1_ns,
+                        (unsigned long long)m->gpu0_ns, (unsigned long long)m->gpu1_ns, (unsigned long long)m->join_ns, (unsigned long long)m->end_ns);
+                fprintf(f, "\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%u\t%u\t%u\t%u\t%d\n",
+                        (unsigned long long)q->commit_ns, (unsigned long long)q->gpu_start_ns, (unsigned long long)q->gpu_end_ns, (unsigned long long)q->done_ns,
+                        (unsigned long long)q->encode_ns, (unsigned long long)q->submit_ns, (unsigned long long)q->wake_ns, (unsigned long long)q->temps_ns,
+                        (unsigned long long)q->groups, q->groups_max, q->dispatches, q->cmdbufs, q->kinds, q->mtl_error);
             }
             fclose(f);
         }

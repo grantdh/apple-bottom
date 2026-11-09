@@ -4,8 +4,8 @@
 GPU path, and times the split against each engine alone. Results from an M2 Max are in
 [`benchmarks/results/2026-10-28-415cb5d-hybrid-split`](../results/2026-10-28-415cb5d-hybrid-split/README.md).
 
-The split is made here, in user code: `dgemm_` and `zgemm_` make each call on one engine. A split
-inside the library is on the [roadmap](../../docs/ROADMAP.md#next).
+The split is made here, in user code. The fixed block also times the library's own split of the
+same call through its seam (`SEAM`, below), which `AB_SPLIT` uses inside `dgemm_` and `zgemm_`.
 
 ## What it does
 
@@ -28,10 +28,26 @@ inside the library is on the [roadmap](../../docs/ROADMAP.md#next).
   1. a warm-up;
   2. a sweep over the GPU share f, 3 rounds with every configuration interleaved;
   3. a fixed block at the sweep's best f: 3 interleaved rounds of Accelerate alone, the GPU alone and
-     the split. Its medians are the reported numbers, so choosing f does not bias them;
+     the split, and the four arms below. Its medians are the reported numbers, so choosing f does not
+     bias them;
   4. bit checks: ≥ 12 split repeats compared with `memcmp`, both forced completion orders, hashes
      across processes, each part against the engine that computed it;
   5. errors against a compensated Dot2 reference (`tests/test_dot2.h`) on 16 sampled columns.
+- **Arms** (the fixed block, at the split's GPU part g, each with as many repeats per round as the
+  split; `SPLIT_ARMS=0` leaves them out):
+  - `SEAM`: the library's split of the same call through its seam (`ab_internal_dgemm_split` /
+    `ab_internal_zgemm_split` in `src/split_slice.h`): staged path, free completion order, a thread
+    per call, and on K a partial product allocated per call. Each call's outcome and timeline
+    (`ab_internal_last_split`) go to `raw.tsv`.
+  - `S<g>b`: a second user-code split, identical to `S<g>`, so the user split can be timed against
+    itself (G3's null run).
+  - `HEAD`: the CPU slice alone, on the calling thread.
+  - `TAIL`: the GPU slice alone, on the GPU thread, with the caller waiting and doing nothing else.
+
+  Each round runs, rotated and reversed as before, Accelerate, the GPU, `SEAM`, `S<g>`, `S<g>b`,
+  `HEAD`, `TAIL`, so `SEAM` and `S<g>b` sit next to `S<g>` in every round. Bits: `SEAM`'s repeats
+  against its first and its C against the user split's; `S<g>b`'s against the user split's first;
+  on N and M the part of C that `HEAD` and `TAIL` write against the user split's (first call).
 - **Fixed share:** `SPLIT_G=<g>` skips the sweep and runs the fixed block at GPU part g. `SPLIT_F=<f>`
   does the same at the GPU part the library would cut at share f (`ab_split_cut` in `src/split_slice.h`,
   with the `AB_MIN_GPU_DIM` floor, default 32); a share that does not cut the axis is refused.
@@ -76,14 +92,15 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 - **Machine:** run on an otherwise idle Mac on AC power. Each case checks `pmset` first, and on battery
   the script stops with exit status 75. A case that did not both start and end on AC power is moved
   aside, and running the script again resumes where it stopped.
-- **Memory:** the 8192² cases need about 15 GB.
+- **Memory:** the 8192² cases need about 15 GB per process (16 GB with the arms, which keep one more
+  copy of C).
 
 ## Output, per case
 
 | file | content |
 |---|---|
 | `<case>.np<N>.d<data>.out` | the report: sweep table, fixed block, bits, errors, power, then a `SUMMARY` line |
-| `.raw.tsv` | every timed call: process, phase (0 sweep, 1 fixed block, 2 completion order), round, configuration, GPU part g, repeat, times in s |
+| `.raw.tsv` | every timed call: process, phase (0 sweep, 1 fixed block, 2 completion order), round, configuration (`cfg` index and `name`: `ACC`, `GPU`, `S<g>`, `S<g>b`, `SEAM`, `HEAD`, `TAIL`), GPU part g, repeat, times in s (`total`, the slices `cpu` and `gpu`, the caller's wait `join`, the GPU slice's start after the call's `wake`, the K axis's sum `kadd`, and the call's `t0`, `t1` on `mach_absolute_time`); for `SEAM` calls also the outcome (`KEPT`, `KEPT_4M`, `RANGE`, `GPU_FAILED`, ...; `-` on other rows), retries, operands in place, and the timeline in ns on the same clock (`at_*`: cut, thread created, CPU part start and end, GPU part start and end, join, end; `gpu_*`: first commit, `GPUStartTime`, `GPUEndTime`, last completion, encode, submit, wake and temporaries times, threadgroups, largest grid, dispatches, command buffers, kernel kinds, Metal error), 0 where a step did not happen |
 | `.power.tsv` | the SMC samples |
 | `.ior.tsv` | IOReport samples (power runs only) |
 | `.trace.<pid>` | `AB_TRACE`, one line per GPU-routed call |
@@ -101,6 +118,10 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 - **Error metric:** max |C − R| / (|op(A)||op(B)| + |βC₀|) over the sampled columns, with complex
   moduli, in u² = 2⁻⁴⁸. The "bound 8 u^2" in the report is the library tests' long-K bound, which they
   apply to each part's own scale (`tests/test_dot2.h`); it is quoted here as a reference.
+- **Arms in `SUMMARY`:** `seam_ms`, `split2_ms`, `head_ms`, `tail_ms` (lockstep medians), `seam_ratio`
+  and `null_ratio` (medians over the (round, repeat) pairs of `SEAM` ÷ `S<g>` and `S<g>b` ÷ `S<g>`),
+  `pairs`, `seam_out` (outcome counts), `seam_rep_diff`, `seam_vs_split` (elements of C that differ
+  from the user split's), `split2_rep_diff`, `head_vs_split` and `tail_vs_split` (-1: not compared).
 - **Hashes:** `h_split`, `h_gpu` and `h_acc` in `SUMMARY` are this program's own, over the 64-bit words
   of C. Equal hashes across runs or machines mean equal bits. They cannot be compared with `AB_TRACE_HASH`.
 
@@ -108,6 +129,6 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 
 | script | what it prints |
 |---|---|
-| `table.py <outdir>` | the results tables: medians [min–max] of the lockstep times, speedups, bits, errors, power state, sustained runs |
+| `table.py <outdir>` | the results tables: medians [min–max] of the lockstep times, speedups, bits, errors, power state; with the arms, the seam and twin against the user split (paired medians), the slices alone and the seam's outcomes; sustained runs |
 | `classify_trace.py <dir>` | every traced GPU call as staged path, host path or fallback, by shape, with median stage times |
 | `power.py <dir>/<case>.np<N>.d<data> ...` | wall power by run of consecutive calls, trimming SMC's ~1 s lag |

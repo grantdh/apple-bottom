@@ -7,7 +7,10 @@ For each case: the fixed block's lockstep times (the slowest process per repeat)
 over every repeat, for Accelerate alone, the GPU alone and the split at the sweep's best share; the
 split's speedups (ratios of medians); its throughput as a fraction of the two engines' summed; bit
 repeats; the largest error in u^2 = 2^-48; and whether the case started and ended on AC power.
-Then the sustained runs' throughput, wall power and GPU clock.
+Cases run with the arms (raw.tsv's name column has SEAM) get a second table: the library's seam and
+the user split's twin against the user split (medians of the ratios paired by round and repeat), the
+slices alone, and the seam's outcomes and bits. Then the sustained runs' throughput, wall power and
+GPU clock.
 """
 import glob, os, re, statistics, sys
 from collections import defaultdict
@@ -34,19 +37,39 @@ def on_ac(txt):
     return all(re.search(rf"^{w}: Now drawing from 'AC Power'", txt, re.M) for w in ("start", "end"))
 
 
-def fixed_block(raw):
-    """lockstep times (ms) per config of the fixed block (phase 1): {cfg: [one per repeat]}"""
+def role(name):
+    """a config's role from raw.tsv's name: ACC, GPU, SPLIT (S<g>), SPLIT2 (S<g>b), SEAM, HEAD, TAIL"""
+    return "SPLIT" if re.fullmatch(r"S\d+", name) else "SPLIT2" if re.fullmatch(r"S\d+b", name) else name
+
+
+def fixed_pairs(raw):
+    """lockstep times (ms) of the fixed block (phase 1): {role: {(round, rep): ms}}. Files written
+    before raw.tsv had a name column: cfg 0 is ACC, 1 GPU and the highest index the split."""
     rows = [l.rstrip("\n").split("\t") for l in open(raw)]
-    worst = defaultdict(float)
-    for r in rows[1:]:
-        d = dict(zip(rows[0], r))
-        if d["phase"] == "1":
-            k = (d["cfg"], d["round"], d["rep"])
-            worst[k] = max(worst[k], float(d["total"]) * 1e3)
-    out = defaultdict(list)
-    for (cfg, _, _), v in worst.items():
-        out[cfg].append(v)
+    h = rows[0]
+    recs = [dict(zip(h, r)) for r in rows[1:]]
+    recs = [d for d in recs if d["phase"] == "1"]
+    if "name" in h:
+        key = lambda d: role(d["name"])
+    else:
+        top = max(int(d["cfg"]) for d in recs)
+        key = lambda d: {"0": "ACC", "1": "GPU"}.get(d["cfg"], "SPLIT" if int(d["cfg"]) == top else d["cfg"])
+    out = defaultdict(dict)
+    for d in recs:
+        k = (d["round"], d["rep"])
+        out[key(d)][k] = max(out[key(d)].get(k, 0.0), float(d["total"]) * 1e3)
     return out
+
+
+def fixed_block(raw):
+    """lockstep times (ms) per role of the fixed block: {role: [one per repeat]}"""
+    return {k: list(v.values()) for k, v in fixed_pairs(raw).items()}
+
+
+def paired(fp, a, b):
+    """median over (round, rep) of a's lockstep time over b's"""
+    r = [fp[a][k] / fp[b][k] for k in fp[a] if k in fp[b]]
+    return (statistics.median(r), len(r)) if r else (float("nan"), 0)
 
 
 def mr(v):
@@ -54,6 +77,7 @@ def mr(v):
 
 
 root = sys.argv[1]
+arms = []
 subs = sys.argv[2:] or sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)) and d != "sustain")
 print("| suite | shape class | layout | data | Accelerate alone ms | GPU alone ms | split ms (f) | vs Accelerate | vs GPU "
       "| split ÷ summed GF/s | bits repeat | max err (u²) | power |")
@@ -65,13 +89,29 @@ for s in subs:
         if not v:
             continue
         threads = re.search(r"VECLIB_MAXIMUM_THREADS=(\d+)", txt).group(1)
-        fb = fixed_block(f[:-4] + ".raw.tsv")
-        split_cfg = max(fb, key=int)                     # the best split's config index (>= 2)
-        la, lg, ls = (statistics.median(fb[k]) for k in ("0", "1", split_cfg))
+        fp = fixed_pairs(f[:-4] + ".raw.tsv")
+        fb = {k: list(x.values()) for k, x in fp.items()}
+        la, lg, ls = (statistics.median(fb[k]) for k in ("ACC", "GPU", "SPLIT"))
         data = ("QE-like" if v["data"] == "1" else "uniform") + (", copied" if v.get("reg", "4") == "0" else "")
-        print(f"| {s} | {CLASS.get(v['case'], v['case'])} | {v['np']}×{threads} | {data} | {mr(fb['0'])} | {mr(fb['1'])} | "
-              f"{mr(fb[split_cfg])} ({float(v['f']):.2f}) | {la / ls:.2f}× | {lg / ls:.2f}× | {la * lg / (ls * (la + lg)):.2f} | "
+        print(f"| {s} | {CLASS.get(v['case'], v['case'])} | {v['np']}×{threads} | {data} | {mr(fb['ACC'])} | {mr(fb['GPU'])} | "
+              f"{mr(fb['SPLIT'])} ({float(v['f']):.2f}) | {la / ls:.2f}× | {lg / ls:.2f}× | {la * lg / (ls * (la + lg)):.2f} | "
               f"{v['bits_repeat']} ({v['split_reps']}) | {float(v['err_u2']):.2f} | {'AC' if on_ac(txt) else 'NOT AC'} |")
+        if "SEAM" in fp:
+            staging = re.search(r"AB_STAGING_MB=(\S+)", txt).group(1)
+            arms.append((s, v, threads, data, staging, fp))
+
+if arms:
+    print()
+    print("| suite | shape class | layout | data | staging MB | split ms | SEAM ms | SEAM ÷ split (pairs) | twin ÷ split (pairs) "
+          "| HEAD ms | TAIL ms | (HEAD + TAIL) ÷ split | seam outcomes | seam bits: repeats, vs split |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    for s, v, threads, data, staging, fp in arms:
+        md = lambda r: statistics.median(fp[r].values())
+        rs, ns = paired(fp, "SEAM", "SPLIT")
+        rn, nn = paired(fp, "SPLIT2", "SPLIT")
+        print(f"| {s} | {CLASS.get(v['case'], v['case'])} | {v['np']}×{threads} | {data} | {staging} | {md('SPLIT'):.2f} | "
+              f"{md('SEAM'):.2f} | {rs:.3f} ({ns}) | {rn:.3f} ({nn}) | {md('HEAD'):.2f} | {md('TAIL'):.2f} | "
+              f"{(md('HEAD') + md('TAIL')) / md('SPLIT'):.2f} | {v.get('seam_out', '?')} | {v.get('seam_rep_diff', '?')}, {v.get('seam_vs_split', '?')} |")
 
 sus = sorted(glob.glob(os.path.join(root, "sustain", "*.sustain.out")))
 if sus:
