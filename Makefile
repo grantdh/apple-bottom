@@ -584,6 +584,12 @@ $(BUILD)/bench_split: benchmarks/bench_split.c tests/test_dot2.h lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -Itests $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) -framework IOKit -framework CoreFoundation $(EXE_RPATH)
 	@echo "Built: $@"
 
+# Power, energy and clock-state residency through a block, streamed as TSV on the
+# trace clock (benchmarks/powerlog.c); SMC and IOReport, read without root.
+$(BUILD)/powerlog: benchmarks/powerlog.c | $(BUILD)
+	$(CC) $(CFLAGS) $< -o $@ -framework IOKit -framework CoreFoundation
+	@echo "Built: $@"
+
 # Strassen-Winograd speed and accuracy (docs/STRASSEN.md has the runs).
 $(BUILD)/bench_strassen: benchmarks/bench_strassen.c tests/test_blas_check.h tests/test_dot2.h $(SRC)/strassen.h $(PROF_H) lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -Itests $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
@@ -832,6 +838,8 @@ build-check: $(BUILD)/fft_metal_src.h | $(BUILD)/check
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -Itests -c benchmarks/probe_guard_gaps.c -o $(BUILD)/check/probe_guard_gaps.o
 	@echo "Compiling bench_split.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -Itests -c benchmarks/bench_split.c -o $(BUILD)/check/bench_split.o
+	@echo "Compiling powerlog.c..."
+	@$(CC) $(CFLAGS) -c benchmarks/powerlog.c -o $(BUILD)/check/powerlog.o
 	@echo "Compiling test_chaos.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -c tests/test_chaos.c -o $(BUILD)/check/test_chaos.o
 	@echo "Compiling test_convergence.c..."
