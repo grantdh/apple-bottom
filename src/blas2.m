@@ -958,9 +958,9 @@ static ab_b2_result_t run_gpu(const ab_b2_call_t *c, id<MTLCommandQueue> queue, 
     // Every sum must pass the guard before y is touched (an AccZHost is two).
     const int L = ceil_log2((uint64_t)nx * w);
     const AccDHost *sums = (const AccDHost *)bout.contents;
-    int ok = 1;
-    for (uint32_t i = 0; i < nout * (uint32_t)w; i++) ok &= sum_ok(sums[i], L);
-    if (!ok) return AB_B2_RANGE;
+    uint32_t failed = 0;   // a count: clang vectorizes it, and not an AND of the verdicts
+    for (uint32_t i = 0; i < nout * (uint32_t)w; i++) failed += 1 - sum_ok(sums[i], L);
+    if (failed) return AB_B2_RANGE;
     ab_prof_stage_mark(stage_ns, mark, AB_PROF_STAGE_DOWNLOAD);
 
     // y := alpha t + beta y, t = 2^sx (hi + lo); y is not read for beta == 0.
