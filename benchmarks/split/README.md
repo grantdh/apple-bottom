@@ -40,6 +40,12 @@ inside the library is on the [roadmap](../../docs/ROADMAP.md#next).
   - Sustained runs also read IOReport's GPU energy and clock residency.
   - Both are read without root through interfaces Apple does not document. Where they are unavailable,
     the power figures read `nan`.
+  - `powerlog` (`benchmarks/powerlog.c`, `make build/powerlog`) streams the same SMC keys through any
+    command, with IOReport's GPU and CPU clock-state residency by state name, its energy channels and
+    each agent's DRAM bytes (the memory controller's counters: the CPU clusters, the GPU, DRAM), as TSV
+    on the `AB_TRACE` clock, without root; `powerlog --list` shows which channels a machine reports.
+    `bench_split` still runs its own sampler, so do not run it under `powerlog` until it can be turned
+    off.
 - **Sustained mode** (`bench_split sustain <case> <outdir> <g>`): 80 s runs, back to back, after 30 s
   of idle each:
   1. the split at GPU part g;

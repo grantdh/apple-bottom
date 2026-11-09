@@ -38,6 +38,8 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#include "../split_times.h"   // ab_split_times_t
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -151,6 +153,7 @@ typedef struct {
     uint64_t gpu_stage_ns[AB_PROF_STAGE_COUNT], gpu_wall_ns;
     uint64_t wait_cpu_ns, wait_gpu_ns;
     double gf_cpu, gf_gpu;
+    ab_split_times_t times;             // when each step happened (AB_TRACE's split lines)
 } ab_prof_split_t;
 
 // Dimension bins (by max(M,N)):
@@ -248,20 +251,8 @@ int  ab_prof_active(void);
 // Per-call trace (AB_TRACE)
 // =============================================================================
 
-// The host time of a GPU call's kernel step besides GPU execution, which the
-// stages leave in "other", and when the GPU ran; ns on the mach_absolute_time
-// clock (CLOCK_UPTIME_RAW). apple_bottom.m adds up the command buffers each
-// thread completes; the BLAS-ABI layer takes the record once per call, with
-// their GPU time.
-typedef struct {
-    uint64_t temps_ns;      // taking the call's GPU temporaries from the pool and back
-                            // (ZGEMM on the host path; the staged path's are in alloc)
-    uint64_t encode_ns;     // building the command buffer and its encoders
-    uint64_t submit_ns;     // from commit until the GPU started (GPUStartTime)
-    uint64_t wake_ns;       // from GPUEndTime until waitUntilCompleted returned
-    uint64_t gpu_start_ns;  // GPUStartTime of the first command buffer; 0 if none reported
-    uint64_t gpu_end_ns;    // GPUEndTime of the last
-} ab_prof_kernel_split_t;
+// ab_prof_kernel_split_t, the host time of a GPU call's kernel step and its
+// command buffers, is in split_times.h.
 
 // GPU execution time of the command buffers this thread completed since the
 // last take, in seconds; 0 if Metal reported none. split, unless NULL, gets

@@ -158,6 +158,36 @@ static int seam(const Call *c, char axis, int g, int order, int M, int N, int K,
 
 static bool kept(int outcome) { return outcome == AB_SPLIT_KEPT || outcome == AB_SPLIT_KEPT_4M; }
 
+// The timeline of a split kept by the staged path (split_times.h): every
+// step recorded, in the order the executor takes them in `order` (0 free, 1
+// the CPU's part first, 2 the GPU's). The GPU's GPUStartTime and GPUEndTime
+// are compared with host times within 2 us, for the two clocks' rounding.
+// NULL if it holds, else what fails.
+static const char *times_fault(const ab_split_times_t *t, int order) {
+    const uint64_t tol = 2000;
+    const ab_prof_kernel_split_t *k = &t->gpu;
+    const struct { const char *what; bool ok; } C[] = {
+        {"a step not recorded", t->cut_ns && t->create_ns && t->cpu0_ns && t->cpu1_ns && t->gpu0_ns && t->gpu1_ns &&
+                                    t->join_ns && t->end_ns && k->commit_ns && k->gpu_start_ns && k->gpu_end_ns &&
+                                    k->done_ns},
+        {"cut, create, GPU part start out of order", t->cut_ns <= t->create_ns && t->create_ns <= t->gpu0_ns},
+        {"GPU part: start, commit, GPU start, GPU end, completion, end out of order",
+         t->gpu0_ns <= k->commit_ns && k->commit_ns <= k->gpu_start_ns + tol && k->gpu_start_ns <= k->gpu_end_ns &&
+             k->gpu_end_ns <= k->done_ns + tol && k->done_ns <= t->gpu1_ns},
+        {"CPU part, join, end out of order", t->create_ns <= t->cpu0_ns && t->cpu0_ns <= t->cpu1_ns &&
+                                                 t->cpu1_ns <= t->end_ns && t->gpu1_ns <= t->join_ns &&
+                                                 t->join_ns <= t->end_ns},
+        {"the parts not in the order asked for", order == 1 ? t->cpu1_ns <= t->gpu0_ns
+                                                 : order == 2 ? t->join_ns <= t->cpu0_ns : true},
+        {"no command buffer or GEMM dispatch counted, or a Metal error",
+         k->cmdbufs >= 1 && k->dispatches >= 1 && k->groups >= k->dispatches && k->groups_max >= 1 &&
+             k->groups_max <= k->groups && k->kinds && !k->mtl_error},
+    };
+    for (size_t i = 0; i < sizeof C / sizeof *C; i++)
+        if (!C[i].ok) return C[i].what;
+    return NULL;
+}
+
 static const char *call_text(const Call *c, char axis, int g) {
     static char s[160];
     snprintf(s, sizeof s, "%cgemm %c %c %dx%dx%d pad %d alpha %g%+gi beta %g%+gi axis %c g=%d", c->r,
@@ -216,6 +246,8 @@ static void compose_case(const Call *c, char axis, int g) {
             ab_split_record_t rec;
             check(kept(got) && ab_internal_last_split(&rec) && rec.outcome == got && rec.axis == axis &&
                   rec.g == g, "%s order %d: outcome %d", call_text(c, axis, g), order, got);
+            const char *fault = kept(got) ? times_fault(&rec.times, order) : NULL;
+            check(!fault, "%s order %d: timeline: %s", call_text(c, axis, g), order, fault);
             check(!memcmp(C, ref, o.nC * sizeof *C), "%s order %d: C is not the composition of its parts",
                   call_text(c, axis, g), order);
             check(!strcmp(ab_get_last_dispatch_path(), "split"), "%s: last path %s", call_text(c, axis, g),
@@ -825,9 +857,9 @@ static void child_calls(void) {
         Layout la = {o.rA, o.cA, o.ldA}, lb = {o.rB, o.cB, o.ldB}, lc = {c->M, c->N, o.ldC};
         double err = blas_error(c->r == 'z', c->ta, c->tb, c->M, c->N, c->K, CMPLX(c->alpha[0], c->alpha[1]),
                                 CMPLX(c->beta[0], c->beta[1]), o.A, la, o.B, lb, o.C0, lc, C);
-        printf("call %d %016llx %016llx %d %d %d %d %d %d %s %.3e\n", i, (unsigned long long)h[0],
+        printf("call %d %016llx %016llx %d %d %d %d %d %d %d %s %.3e\n", i, (unsigned long long)h[0],
                (unsigned long long)h[1], rec.outcome, rec.declined, rec.staged, rec.retries, rec.retry_kept,
-               rec.scales, ab_get_last_dispatch_path(), err);
+               rec.scales, (int)rec.times.gpu.mtl_error, ab_get_last_dispatch_path(), err);
         free(C);
         free_operands(&o);
     }
@@ -1000,6 +1032,7 @@ static char *run_child(const char *scenario, const char *const *extra, int *stat
 typedef struct {
     uint64_t h[2];
     int outcome, declined, staged, retries, retry_kept, scales;
+    int mtl_error;              // the GPU part's first failed command buffer (split_times.h)
     char path[16];
     double err;
 } CallLine;
@@ -1012,8 +1045,8 @@ static bool parse_calls(const char *out, CallLine lines[N_TCALLS], uint64_t *gpu
         unsigned long long h0, h1, gg;
         CallLine l;
         char src[256];
-        if (sscanf(p, "call %d %llx %llx %d %d %d %d %d %d %15s %lf", &i, &h0, &h1, &l.outcome, &l.declined,
-                   &l.staged, &l.retries, &l.retry_kept, &l.scales, l.path, &l.err) == 11 &&
+        if (sscanf(p, "call %d %llx %llx %d %d %d %d %d %d %d %15s %lf", &i, &h0, &h1, &l.outcome, &l.declined,
+                   &l.staged, &l.retries, &l.retry_kept, &l.scales, &l.mtl_error, l.path, &l.err) == 12 &&
             i >= 0 && i < N_TCALLS) {
             l.h[0] = h0;
             l.h[1] = h1;
@@ -1121,6 +1154,9 @@ static void check_calls(const Scenario *s, const char *out, int status) {
               l[i].path, l[i].h[0] == want ? "has" : "does not have");
         bool gpu = outcome == AB_SPLIT_KEPT || outcome == AB_SPLIT_KEPT_4M;
         check(!strcmp(l[i].path, gpu ? "split" : "cpu"), "scenario %s call %d: path %s", s->name, i, l[i].path);
+        // Only the test hooks fail command buffers here: a retried part's code is theirs (-2).
+        check(l[i].retries ? l[i].mtl_error == -2 : !gpu || l[i].mtl_error == 0,
+              "scenario %s call %d: retries %d, Metal error code %d", s->name, i, l[i].retries, l[i].mtl_error);
         check(l[i].err <= TOL, "scenario %s call %d: error %.2e against cblas", s->name, i, l[i].err);
     }
     if (!strcmp(s->name, "cpu")) check(gpu_gemms == 0, "AB_SPLIT=1 AB_MODE=cpu ran %llu GPU GEMMs",
@@ -1411,6 +1447,25 @@ static void test_split_reports(void) {
             }
             check(st == t && gs == field(line, "gpu_wall_ns") && field(line, "row") >= 0,
                   "trace stages %lld vs %lld, GPU %lld vs %lld: %.200s", st, t, gs, field(line, "gpu_wall_ns"), line);
+            // the timeline: its last field present (the line is whole), and on a
+            // kept split every step in order, within the call's t0_ns .. t1_ns
+            check(strstr(line, " gpu_mtl_error=") && strchr(line, '\n'), "trace line cut short: %.200s", line);
+            if (strstr(line, " path=split")) {
+                ab_split_times_t tm = {
+                    .cut_ns = field(line, "at_cut_ns"), .create_ns = field(line, "at_create_ns"),
+                    .cpu0_ns = field(line, "at_cpu0_ns"), .cpu1_ns = field(line, "at_cpu1_ns"),
+                    .gpu0_ns = field(line, "at_gpu0_ns"), .gpu1_ns = field(line, "at_gpu1_ns"),
+                    .join_ns = field(line, "at_join_ns"), .end_ns = field(line, "at_end_ns"),
+                    .gpu = {.commit_ns = field(line, "at_commit_ns"), .gpu_start_ns = field(line, "gpu_start_ns"),
+                            .gpu_end_ns = field(line, "gpu_end_ns"), .done_ns = field(line, "at_done_ns"),
+                            .groups = field(line, "gpu_groups"), .groups_max = field(line, "gpu_groups_max"),
+                            .dispatches = field(line, "gpu_dispatches"), .cmdbufs = field(line, "gpu_cmdbufs"),
+                            .kinds = field(line, "gpu_kinds"), .mtl_error = field(line, "gpu_mtl_error")}};
+                const char *fault = times_fault(&tm, 0);
+                check(!fault && field(line, "t0_ns") <= (long long)tm.cut_ns &&
+                          (long long)tm.end_ns <= field(line, "t1_ns"),
+                      "trace timeline: %s, or outside t0_ns .. t1_ns: %.300s", fault ? fault : "steps", line);
+            }
         } else if (strstr(line, " row=5 axis=N g=0")) {
             row_lines++;
         }
