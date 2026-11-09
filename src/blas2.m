@@ -168,10 +168,12 @@ inline bool nonzero(uint2 w) { return ((w.y << 1) | w.x) != 0u; }
 // factors are nonzero and below G_LOW otherwise, and max(l_a + e_x, e_a +
 // l_x) equals it if a factor is lossy and is below G_LOW if neither is.
 // pmax and lmax are therefore plain maxima (note), and the host reads a
-// value below G_LOW as no such product (sum_ok).
-constant int G_NONE = -(1 << 30);   // nothing noted
-constant int G_LOW = -(1 << 19);
-constant int XE_ZERO = -(1 << 20);
+// value below G_LOW as no such product (sum_ok). Every code lies in
+// [-12288, 2047] and every sum of an A code and an x code in [-24576, 2048],
+// so a guard holds them as 16-bit values.
+constant short G_NONE = -32768;   // nothing noted
+constant int G_LOW = -8192;
+constant int XE_ZERO = -12288;
 constant int EA_LOSSY = 1023 - 78;
 constant int XE_LOSSY = -78 - 1023;
 
@@ -191,14 +193,11 @@ inline Code2 xcodes(device const int *xe, uint j) {
     return {xcode(v.x), xcode(v.y)};
 }
 
-struct Guard { int pmax; int lmax; };
+typedef short2 Guard;   // x = pmax, y = lmax
 
 inline void note(thread Guard &g, Code a, Code x) {
-    g.pmax = max(g.pmax, a.e + x.e);
-    g.lmax = max(g.lmax, max(a.l + x.e, a.e + x.l));
+    g = max(g, Guard(short(a.e + x.e), short(max(a.l + x.e, a.e + x.l))));
 }
-
-inline Guard guard_join(Guard a, Guard b) { return {max(a.pmax, b.pmax), max(a.lmax, b.lmax)}; }
 
 // Accumulators: a real sum with its guard, and a complex one as two of
 // them, one per part.
@@ -206,14 +205,14 @@ struct AccD { DD s; Guard g; };
 struct AccZ { AccD re; AccD im; };
 
 template <typename Acc> Acc acc_zero();
-template <> inline AccD acc_zero<AccD>() { return {{0.0f, 0.0f}, {G_NONE, G_NONE}}; }
+template <> inline AccD acc_zero<AccD>() { return {{0.0f, 0.0f}, Guard(G_NONE)}; }
 template <> inline AccZ acc_zero<AccZ>() { return {acc_zero<AccD>(), acc_zero<AccD>()}; }
 
-inline AccD join(AccD a, AccD b) { return {dd_add(a.s, b.s), guard_join(a.g, b.g)}; }
+inline AccD join(AccD a, AccD b) { return {dd_add(a.s, b.s), max(a.g, b.g)}; }
 inline AccZ join(AccZ a, AccZ b) { return {join(a.re, b.re), join(a.im, b.im)}; }
 
 inline DD shuffle_down(DD a, ushort o) { return {simd_shuffle_down(a.hi, o), simd_shuffle_down(a.lo, o)}; }
-inline Guard shuffle_down(Guard g, ushort o) { return {simd_shuffle_down(g.pmax, o), simd_shuffle_down(g.lmax, o)}; }
+inline Guard shuffle_down(Guard g, ushort o) { return as_type<Guard>(simd_shuffle_down(as_type<int>(g), o)); }   // one shuffle
 inline AccD shuffle_down(AccD a, ushort o) { return {shuffle_down(a.s, o), shuffle_down(a.g, o)}; }
 inline AccZ shuffle_down(AccZ a, ushort o) { return {shuffle_down(a.re, o), shuffle_down(a.im, o)}; }
 
@@ -355,17 +354,17 @@ template <bool TAIL> inline ulong band_base(uint b, uint n, uint B) {
 // row) nor the reads (lanes across rows) conflict.
 struct HemvTg {
     float rh[4][33], rl[4][33], ih[4][33], il[4][33];
-    int pmr[4][33], lmr[4][33], pmi[4][33], lmi[4][33];
+    Guard gr[4][33], gi[4][33];
 };
+static_assert(sizeof(AccD) == 12 && sizeof(HemvTg) == 3168, "= the host's AccDHost, HemvTgHost");
 
 inline void tg_put(threadgroup HemvTg &t, int c, ushort l, AccZ a) {
     t.rh[c][l] = a.re.s.hi; t.rl[c][l] = a.re.s.lo; t.ih[c][l] = a.im.s.hi; t.il[c][l] = a.im.s.lo;
-    t.pmr[c][l] = a.re.g.pmax; t.lmr[c][l] = a.re.g.lmax; t.pmi[c][l] = a.im.g.pmax; t.lmi[c][l] = a.im.g.lmax;
+    t.gr[c][l] = a.re.g; t.gi[c][l] = a.im.g;
 }
 
 inline AccZ tg_get(threadgroup const HemvTg &t, int c, int l) {
-    return {{{t.rh[c][l], t.rl[c][l]}, {t.pmr[c][l], t.lmr[c][l]}},
-            {{t.ih[c][l], t.il[c][l]}, {t.pmi[c][l], t.lmi[c][l]}}};
+    return {{{t.rh[c][l], t.rl[c][l]}, t.gr[c][l]}, {{t.ih[c][l], t.il[c][l]}, t.gi[c][l]}};
 }
 
 // Columns [j, j + 4) of the panel at row r0, adding into the lane's row
@@ -669,7 +668,7 @@ static id<MTLBuffer> scratch_buffer(id<MTLBuffer> __strong &slot, id<MTLDevice> 
 // =============================================================================
 
 typedef struct { float hi, lo; } DDf;
-typedef struct { DDf s; int32_t pmax, lmax; } AccDHost;               // = MSL AccD
+typedef struct { DDf s; int16_t pmax, lmax; } AccDHost;               // = MSL AccD
 typedef struct { AccDHost re, im; } AccZHost;                         // = MSL AccZ
 
 typedef struct {
@@ -684,11 +683,12 @@ typedef struct {
 
 typedef struct {
     float rh[4][33], rl[4][33], ih[4][33], il[4][33];
-    int32_t pmr[4][33], lmr[4][33], pmi[4][33], lmi[4][33];
+    int16_t gr[4][33][2], gi[4][33][2];
 } HemvTgHost;                                                         // = MSL HemvTg
+_Static_assert(sizeof(AccDHost) == 12 && sizeof(HemvTgHost) == 3168, "= MSL AccD, HemvTg (the kernels assert the same sizes)");
 
-static const int32_t kGuardLow = -(1 << 19);   // = MSL G_LOW
-static const int32_t kXeZero = -(1 << 20);
+static const int32_t kGuardLow = -8192;    // = MSL G_LOW
+static const int32_t kXeZero = -12288;     // = MSL XE_ZERO
 
 // Threads a call aims to keep in flight, and the fewest columns (rows) a
 // chunk of a rows (cols) kernel gets.
