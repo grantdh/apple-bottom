@@ -94,9 +94,10 @@ static inline uint32_t ab_abs_hiword(double x) {
 #define AB_HIWORD_NONFINITE 0x7FF00000u     // high words from here up: Inf or NaN
 
 // A nonzero |x| below 2^-1042 has high word 0, as a zero has. The
-// exponent-range guard's statistics count it as AB_HIWORD_TINY, the smallest
-// nonzero high word (that of [2^-1042, 2^-1041)), so that a line or a C with
-// such values is not read as zero, or as without them.
+// exponent-range guard's statistics (and the native API's measure) count it
+// as AB_HIWORD_TINY, the smallest nonzero high word (that of [2^-1042,
+// 2^-1041)), so that a line or a C with such values is not read as zero, or
+// as without them.
 #define AB_HIWORD_TINY 1u
 
 // The high word the guard's statistics take for v, which is x or x times a
@@ -407,6 +408,9 @@ ABStatus ab_internal_download_rows(ABMatrix re, ABMatrix im, double* x, size_t l
 // downloaded, each round trip at the scale an upload gives the part.
 ABStatus ab_internal_zgemm_epilogue(ABMatrix tr, ABMatrix ti, double* x, size_t ld,
                                     const double alpha[2], const double beta[2]);
+
+// m's power-of-two scale: element = DD value * 2^scale (tests).
+int ab_internal_matrix_scale(ABMatrix m);
 
 #ifdef __cplusplus
 }

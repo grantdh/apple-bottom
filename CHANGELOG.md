@@ -408,12 +408,49 @@ All notable changes to this project will be documented in this file.
   `ab_matrix_upload` measured such a matrix as zero and stored it as zeros:
   `ab_dgemm` and `ab_zgemm` with every entry of A at 2⁻ᵏ against B at 2¹⁰⁰⁰
   returned 0 for k ≥ 1043 (confirmed on the GPU, through A and through B).
-  It now counts such values in a matrix's largest magnitude only, so a
-  matrix made only of them is scaled as if they spanned [2⁻¹⁰⁷⁴, 2⁻¹⁰⁴²] (the
-  probes are exact for every k up to 1074), and a matrix that also holds
-  larger values keeps its scale. New cases `range-all-subnormal`
-  (`ab_dgemm`, `ab_dgemm_scaled`, `ab_zgemm`) in `tests/test_blas_abi.c`,
-  which fail on the previous build.
+  It now counts such values (at their own exponents: next entry), so such a
+  matrix gets a scale, and the probes are exact for every k up to 1074. New
+  cases `range-all-subnormal` (`ab_dgemm`, `ab_dgemm_scaled`, `ab_zgemm`) in
+  `tests/test_blas_abi.c`, which fail on 1.5.1.
+- **The native API centres a matrix whose values below 2⁻¹⁰⁴² lie within 2⁷⁸
+  of its largest.** `ab_matrix_upload` left a nonzero value below 2⁻¹⁰⁴²
+  (FP64 high word 0) out of a matrix's smallest magnitude when the matrix
+  also held a larger value, so its scale could store that
+  value below 2⁻³⁹ and its products below the 2⁻⁷⁸ floor, where they keep
+  FP32's 24 bits. ULP Fiction's guard audit found A = [[0, t], [2⁻⁹⁹⁷, 0]],
+  t = 177571·2⁻¹⁰⁷⁴ (span 2^59.6), and B = [[2¹⁰²³, 0],
+  [2⁹⁴⁵·1.7382651127463331, 0]] (span 2^77.2): `ab_dgemm` returned C₀₀ =
+  0x1.2d6e5ep-111, 2.035×10⁵ times the bound (3K+19)u²|A||B| + 2⁻⁵³|C| +
+  2⁻¹⁰⁷⁴ (u = 2⁻²⁴), with `AB_OK`, on 56216ee and on 1.5.1 (the BLAS ABI was
+  right on these operands). Such values now count at their own exponents,
+  read from their low words, when the whole span, theirs included, is within
+  2⁷⁸ (binary exponents at most 78 apart), so the matrix is centred as
+  [LIMITATIONS](docs/vv/LIMITATIONS.md) says: C₀₀ is now
+  0x1.2d6e5e5b83328p-111, 0.00116 times the bound. A wider span keeps the
+  scale it had, so a matrix of ordinary values with one stray value below
+  2⁻¹⁰⁴² keeps its scale and its bits. Bits change only for matrices that hold
+  such a value and whose whole span is within 2⁷⁸ (all their values below
+  about 2⁻⁹⁶⁴), a matrix made only of such values included. The upload's vectorized
+  measure now counts such a value as the guard's statistics do, in the
+  smallest magnitude too, and a scalar pass reads the exponents only of a
+  matrix whose smallest nonzero magnitude is below 2⁻¹⁰⁴¹ (high word 0 or 1).
+  On ordinary data (values at 2⁰ and 2³⁰⁰, n = 512, 2048 and 4096, four
+  interleaved rounds on the M2 Max) `ab_matrix_upload` takes 0.92-0.96×
+  56216ee's median time on one thread and 0.97-1.01× with `parallel` at
+  n = 2048 and 4096 (the measure now computes one high word per value, not
+  two). `ab_dev_dgemm` and `ab_dev_zgemm` convert through the same measure and
+  get the same scales. The device ZGEMM's epilogue scales C's parts and the
+  result's by the same rule, though no output there depends on it and no
+  test can tell the two scales apart (the comment in
+  `ab_internal_zgemm_epilogue` says why). The BLAS ABI's measure and bits are
+  unchanged, and native results on data without such values are bitwise
+  those of 56216ee (432 outputs at 2⁰ and 2^±300). New: `test_native_tiny_span` in
+  `tests/test_device_api.c` (10 checks: the counterexample through handles
+  and device buffers, real and complex; exponents 78 and 79 apart; a matrix
+  made only of such values; a stray one among ordinary values; the epilogue's
+  alpha and beta on the counterexample's operands) and `range-tiny-span`
+  (`ab_dgemm`, `ab_dgemm_scaled`, `ab_zgemm`) in `tests/test_blas_abi.c`. All
+  but the epilogue check fail on a build without their part of the fix.
 - **A ZGEMM through the BLAS ABI that reads a NaN or Inf in C runs on
   Accelerate**, whether its epilogue would run on the GPU or on the host, as a
   DGEMM's has since 1.5.0. The epilogue's complex arithmetic,
