@@ -50,6 +50,7 @@
 #endif
 #include <Accelerate/Accelerate.h>
 #include "apple_bottom.h"
+#include "split_slice.h" // src/: the library's cut (ab_split_cut)
 #include "test_dot2.h"   // tests/: Dot2 reference, U2 = 2^-48
 
 extern char **environ;
@@ -130,10 +131,9 @@ static const Case CASES[] = {
 #define NCASES (int)(sizeof CASES / sizeof CASES[0])
 static const Case *find_case(const char *n) { for (int i = 0; i < NCASES; i++) if (!strcmp(CASES[i].name, n)) return &CASES[i]; return NULL; }
 static int axis_len(const Case *c) { return c->axis == 'N' ? c->N : c->axis == 'M' ? c->M : c->K; }
-static int gpu_part(const Case *c, double f) {
-    int L = axis_len(c), a = c->align, g = (int)lround(f * L / a) * a;
-    return g < a ? a : g > L - a ? L - a : g;
-}
+// the GPU part at share f: the library's cut with no AB_MIN_GPU_DIM floor, round(f L / a) a clamped
+// to [a, L - a]; a is the axis's unit (ab_split_align), which every case's `align` states
+static int gpu_part(const Case *c, double f) { return ab_split_cut(c->axis, axis_len(c), f, 0); }
 static double flops(const Case *c) { return (c->prec == 'z' ? 8.0 : 2.0) * c->M * c->N * c->K; }
 
 // ---------------------------------------------------------------- shared memory
