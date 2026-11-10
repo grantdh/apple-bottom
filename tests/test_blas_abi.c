@@ -643,6 +643,25 @@ static AbiCase *add_range(const Suite *s, Op op, char ta, char tb, RangeData dat
     return c;
 }
 
+// A DGEMM whose alpha or beta is NaN or Inf must give Accelerate's NaN and Inf,
+// with no GPU GEMM: the staged path declines it (dgemm_stage_begin) and the
+// host path refuses it before its guard, whose int arithmetic would otherwise
+// take ilogb(NaN) = INT_MIN or ilogb(Inf) = INT_MAX. These cases pin that
+// result, not which of the two checks gives it.
+static void add_dgemm_nonfinite_scalars(const Suite *s) {
+    static const struct { char ta; double alpha, beta; const char *tag; } D[] = {
+        {'N', NAN, 0.0, "aNaN"}, {'T', INFINITY, 0.0, "aInf"},
+        {'N', 1.0, NAN, "a1bNaN"}, {'T', 1.0, -INFINITY, "a1b-Inf"},
+    };
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(D); i++) {
+        AbiCase *c = add_range(s, OP_DGEMM_SYM, D[i].ta, 'N', RANGE_EPI_SCALAR, ROUTE_CPU);
+        c->alpha = D[i].alpha;
+        c->beta = D[i].beta;
+        size_t len = strlen(c->name);
+        snprintf(c->name + len, sizeof c->name - len, "/%s", D[i].tag);
+    }
+}
+
 static void gen_range(const Suite *s) {
     static const struct { Op op; char ta, tb; RangeData data; Route route; } R[] = {
         {OP_DGEMM_SYM, 'N', 'N', RANGE_TINY, ROUTE_GPU},
@@ -750,6 +769,7 @@ static void gen_range(const Suite *s) {
         size_t len = strlen(c->name);
         snprintf(c->name + len, sizeof c->name - len, "/%s", E[i].tag);
     }
+    add_dgemm_nonfinite_scalars(s);
 }
 
 // Gauss-3M's imaginary part under Re/Im imbalance (audit K-P1-2): zgemm_

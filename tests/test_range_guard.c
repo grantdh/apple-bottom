@@ -17,8 +17,9 @@
 // window, values below 2^-1042 (lines made of them too), zero lines and
 // parts, and calls the guard refuses. Each suite also requires both outcomes
 // to occur in stage 2 often enough that the comparison means something, and
-// the crafted cases their known outcome. A last test holds a ZGEMM's
-// epilogue bounds (step 5) to their edges and to the claim behind them.
+// the crafted cases their known outcome. A test holds a ZGEMM's epilogue
+// bounds (step 5) to their edges and to the claim behind them, and the last
+// pins stage 1's floors to literal exponents.
 // =============================================================================
 
 #include "ab_internal.h"
@@ -1023,6 +1024,84 @@ static void test_zgemm_epilogue_bounds(void) {
     finish();
 }
 
+// =============================================================================
+// Stage 1's floors, pinned to literal exponents
+// =============================================================================
+// The suites above take the floors from the library's macros and its own
+// stage 1, so they would not see a floor moved or stage 1's product term
+// dropped. Here one-line statistics with literal powers of two, at scale 0,
+// must give the decisions the paper's bound needs: entries from 2^-78 and
+// products from 2^-78 certified, one binade lower to stage 2 (each floor on
+// its own: the other one held with room to spare), alpha's scalar below 1
+// raising the product floor and one above 1 leaving it, and the overflow
+// test's headroom below 2^122 (at K = 1, 4 binades for real data, 6 for
+// complex). The assert pins the macros, which stage 2 and its oracle both read.
+_Static_assert(AB_ENTRY_MIN_EXP == -78 && AB_PRODUCT_MIN_EXP == -78 && AB_SUM_MAX_EXP == 122,
+               "the guard's floors are 2^-78 and its ceiling 2^122 (docs/vv/LIMITATIONS.md)");
+
+// Stage 1 on op(A) = one row with largest |x| amax and smallest nonzero amin,
+// op(B) one column likewise (bmax, bmin), K = 1, no line scaled.
+static ab_guard_t lit_stage1(double amax, double amin, double bmax, double bmin, int alpha_exp,
+                             bool z) {
+    uint32_t a_max = ab_abs_hiword(amax), a_min = ab_abs_hiword(amin);
+    uint32_t b_max = ab_abs_hiword(bmax), b_min = ab_abs_hiword(bmin);
+    int ea = 0, eb = 0;
+    ab_line_stats_t sa = {1, &a_max, &a_min, &ea, z ? &a_max : NULL, z ? &a_max : NULL};
+    ab_line_stats_t sb = {1, &b_max, &b_min, &eb, z ? &b_max : NULL, z ? &b_max : NULL};
+    return ab_range_guard_stage1(1, &sa, &sb, alpha_exp, z);
+}
+
+static ab_guard_t lit_c_stage1(double cmax, double cmin, double beta) {
+    ab_range_t r = {ab_abs_hiword(cmax), ab_abs_hiword(cmin)};
+    return ab_range_guard_c_stage1(r, beta);
+}
+
+static void test_guard_literal_floors(void) {
+    begin();
+    const ab_guard_t ok = AB_GUARD_CERTIFIED, s2 = AB_GUARD_STAGE2, rej = AB_GUARD_REJECT;
+    for (int z = 0; z < 2; z++) {
+        const char* kind = z ? "complex" : "real";
+        // Entry floor (products from 2^-77 up, above their floor).
+        expect(lit_stage1(1.0, 0x1p-78, 2.0, 2.0, 0, z) == ok, "%s: A entry 2^-78 not certified", kind);
+        expect(lit_stage1(1.0, 0x1p-79, 2.0, 2.0, 0, z) == s2, "%s: A entry 2^-79 certified", kind);
+        expect(lit_stage1(2.0, 2.0, 1.0, 0x1p-78, 0, z) == ok, "%s: B entry 2^-78 not certified", kind);
+        expect(lit_stage1(2.0, 2.0, 1.0, 0x1p-79, 0, z) == s2, "%s: B entry 2^-79 certified", kind);
+        // Product floor (entries from 2^-40 up, above theirs).
+        expect(lit_stage1(0x1p-39, 0x1p-39, 0x1p-39, 0x1p-39, 0, z) == ok,
+               "%s: product 2^-39 x 2^-39 not certified", kind);
+        expect(lit_stage1(0x1p-39, 0x1p-39, 0x1p-40, 0x1p-40, 0, z) == s2,
+               "%s: product 2^-39 x 2^-40 certified", kind);
+        // alpha's scalar in [2^-2, 2^-1) raises the product floor to 2^-76;
+        // one in [8, 16) leaves it at 2^-78.
+        expect(lit_stage1(0x1p-38, 0x1p-38, 0x1p-38, 0x1p-38, -2, z) == ok,
+               "%s: alpha_exp -2, product 2^-76 not certified", kind);
+        expect(lit_stage1(0x1p-38, 0x1p-38, 0x1p-39, 0x1p-39, -2, z) == s2,
+               "%s: alpha_exp -2, product 2^-77 certified", kind);
+        expect(lit_stage1(0x1p-39, 0x1p-39, 0x1p-39, 0x1p-39, 3, z) == ok,
+               "%s: alpha_exp 3, product 2^-78 not certified", kind);
+        expect(lit_stage1(0x1p-39, 0x1p-39, 0x1p-40, 0x1p-40, 3, z) == s2,
+               "%s: alpha_exp 3, product 2^-79 certified", kind);
+    }
+    // The ceiling, K = 1: a real product's sums need 4 binades of headroom
+    // below 2^122, a complex one's 6.
+    expect(lit_stage1(0x1p59, 0x1p59, 0x1p59, 0x1p59, 0, false) == ok, "real: 2^59 x 2^59 refused");
+    expect(lit_stage1(0x1p59, 0x1p59, 0x1p60, 0x1p60, 0, false) == rej, "real: 2^59 x 2^60 not refused");
+    expect(lit_stage1(0x1p58, 0x1p58, 0x1p58, 0x1p58, 0, true) == ok, "complex: 2^58 x 2^58 refused");
+    expect(lit_stage1(0x1p59, 0x1p59, 0x1p59, 0x1p59, 0, true) == rej, "complex: 2^59 x 2^59 not refused");
+    // NaN or Inf in a line's statistics: Accelerate.
+    expect(lit_stage1(INFINITY, 1.0, 1.0, 1.0, 0, false) == rej, "an Inf line not refused");
+    expect(lit_stage1(1.0, 1.0, NAN, 1.0, 0, false) == rej, "a NaN line not refused");
+    // C: C' from 2^-78 and beta' C' from 2^-78.
+    expect(lit_c_stage1(1.0, 0x1p-78, 2.0) == ok, "C' 2^-78, beta 2 not certified");
+    expect(lit_c_stage1(1.0, 0x1p-79, 2.0) == s2, "C' 2^-79, beta 2 certified");
+    expect(lit_c_stage1(1.0, 0x1p-39, 0x1p-39) == ok, "C' 2^-39, beta 2^-39 not certified");
+    expect(lit_c_stage1(1.0, 0x1p-40, 0x1p-39) == s2, "C' 2^-40, beta 2^-39 certified");
+    expect(lit_c_stage1(1.0, 0x1p-76, 0.25) == ok, "C' 2^-76, beta 2^-2 not certified");
+    expect(lit_c_stage1(1.0, 0x1p-77, 0.25) == s2, "C' 2^-77, beta 2^-2 certified");
+    expect(lit_c_stage1(INFINITY, 1.0, 1.0) == rej, "an Inf in C not refused");
+    finish();
+}
+
 static const TestCase TESTS[] = {
     {"test_guard_random_real", test_guard_random_real},
     {"test_guard_random_complex", test_guard_random_complex},
@@ -1032,6 +1111,7 @@ static const TestCase TESTS[] = {
     {"test_guard_c_random", test_guard_c_random},
     {"test_guard_flush_to_zero", test_guard_flush_to_zero},
     {"test_zgemm_epilogue_bounds", test_zgemm_epilogue_bounds},
+    {"test_guard_literal_floors", test_guard_literal_floors},
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
 

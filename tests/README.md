@@ -45,8 +45,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 251, every test but
-the chaos ones, and `make ci-local` all 269 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 252, every test but
+the chaos ones, and `make ci-local` all 270 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -95,10 +95,10 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     against element lists written out by hand in BLAS order
   - `tests/test_dispatch.c` — 23 tests of the BLAS-ABI routing and the
     `AB_SPLIT` plan, no GPU, see below
-  - `tests/test_range_guard.c` — 8 tests of the exponent-range guards'
-    stage 2 against the plain loops it replaced, and of a ZGEMM
-    epilogue's bounds, no GPU, see below
-  - `tests/test_blas_abi.c` — 33 suites (1114 cases), see below
+  - `tests/test_range_guard.c` — 9 tests of the exponent-range guards'
+    stage 2 against the plain loops it replaced, of a ZGEMM epilogue's
+    bounds, and of stage 1's floors at literal exponents, no GPU, see below
+  - `tests/test_blas_abi.c` — 33 suites (1118 cases), see below
   - `tests/test_trace.c` — 8 tests of `AB_TRACE`, `AB_TEST_FAIL_STAGE`
     and the solvers' `AB_PROFILE` fallback lines, see below
   - `tests/test_blas2.c` — 19 tests (995 cases) of DGEMV, ZGEMV and
@@ -603,6 +603,25 @@ itself is held to that edge by `test_blas_abi`'s `epi-c-at` and
 the edges, that every call both bounds pass keeps the epilogue's worst case
 (the largest parts they allow, every term of one sign) finite, below
 2¹⁰²³(1 + 2⁻⁵⁰).
+
+The oracle above reads the library's floor macros and calls its stage 1, so
+it cannot see a floor moved or stage 1's product term dropped.
+`test_guard_literal_floors` calls `ab_range_guard_stage1` and
+`ab_range_guard_c_stage1` on one-line statistics with literal exponents:
+entries and products of 2⁻⁷⁸ certified and of 2⁻⁷⁹ sent to stage 2, each
+floor on its own, alpha's scalar below 1 raising the product floor and above
+1 leaving it, the overflow test's headroom at K = 1, and NaN or Inf
+refused; a `_Static_assert` pins `AB_ENTRY_MIN_EXP`, `AB_PRODUCT_MIN_EXP`
+and `AB_SUM_MAX_EXP`, which stage 2 and its oracle read. On mutants built
+from `git archive` into fresh trees (2026-11-10), it fails with either
+floor at 2⁻⁷⁹ or 2⁻⁷⁷, stage 1's product term dropped, or C's β′C′ term
+dropped, and either macro at −79 stops the build; the earlier tests missed
+the entry floor at 2⁻⁷⁹, the dropped product term and both macros.
+`test_blas_abi`'s exponent-range suite has DGEMMs with NaN or Inf alpha or
+beta, which must give Accelerate's results with no GPU GEMM; they fail
+when the host path's check of the scalars is removed, but not when only the
+staged path's is, since the staged run then flags the non-finite result and
+declines to the same refusal.
 
 ## Fortran binding probe
 
