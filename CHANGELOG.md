@@ -427,6 +427,48 @@ All notable changes to this project will be documented in this file.
   anyway, and one with beta = 0 does not read C. `test_blas_abi` adds four
   cases, on the GPU epilogue's route and on the host epilogue's, and
   `test_staging`'s NaN and Inf cases now expect Accelerate.
+- **A ZGEMM through the BLAS ABI whose FP64 epilogue could overflow runs on
+  Accelerate.** The host epilogue (alpha ≠ 1, or beta not 0 or 1, on the staged
+  path; every ZGEMM on the host path, `AB_HOST_PACK=1`) scaled each part of
+  the GPU's product back by its row's and column's factors before applying
+  alpha, and kept the result unchecked, so a product beyond FP64's range
+  became Inf there, and the complex arithmetic NaN, even where alpha brought C
+  back into range. A 32 × 32 × 32 `ab_zgemm_blas` with every entry of A at
+  2⁶⁰⁰ and of B at 2⁵⁰⁰, alpha 2⁻²⁰⁰ and beta 0 (C = 2⁹⁰⁵) returned NaN + NaN i
+  in all 1,024 entries with path `gpu`, staged and on the host path, at 56216ee
+  and in 1.5.1; Accelerate returns Inf + NaN i (its own product overflows).
+  With alpha 1 and beta 0 the same data came back as Inf + 0i, and an alpha
+  or beta of Inf on ordinary data as NaN + NaN i where Accelerate gives
+  Inf + NaN i, all with path `gpu`.
+  A ZGEMM now keeps its GPU product only where bounds the guard already has
+  (the largest parts of op(A), op(B) and C, K, alpha and beta) keep every value
+  the epilogue forms finite
+  ([Exponent range](docs/vv/LIMITATIONS.md#exponent-range)). Any other call
+  runs on Accelerate, returns its bits and counts as a `range` fallback, as
+  do NaN and Inf alpha or beta: each call above now returns Accelerate's bits
+  with path `cpu`, and the GEMM counters do not move. The host path decides
+  before the GPU runs; the staged path decides C before its run and the
+  product from the run's own statistics, before C is written. Its GPU
+  epilogue (alpha = 1, beta 0 or 1), which flags an overflow, now also stops on
+  a C of 2¹⁰²² or more beside beta = 1; the host path then refuses such a call,
+  as it would on its own. AB_SPLIT's GPU parts follow the same rule (a `range`
+  outcome, made again on Accelerate). The bound refuses only calls whose data,
+  with those largest parts, could make a part of P reach 2¹⁰¹⁹, of alpha·P
+  2¹⁰¹⁸ or of beta·C 2¹⁰²¹, so it also refuses some finite results (alpha =
+  beta = 1 with C at 2¹⁰²³ and a small product now runs on Accelerate); lines
+  in the guard's window [2⁻²⁰, 2²⁰) give E ≤ 73 in its 2^E bound on P, far from
+  it. Calls it passes keep their bits: 100 ordinary ZGEMMs over every scalar
+  class (`zbits.c`) hash the same as on 56216ee, staged and on the host path,
+  and `test_qe_golden`'s 32 cases are unchanged. DGEMM is unaffected: it
+  applies alpha and beta in DD before its one scale-back, so the reproduction
+  as a DGEMM returns the finite 2⁹⁰⁵ on the GPU (Accelerate: Inf), and a DGEMM
+  whose result itself overflows returns ±Inf. `ab_dev_zgemm`, which has no
+  Accelerate fallback, is unchanged: on the reproduction's data it returns
+  NaN + NaN i with `AB_OK`. `test_blas_abi` adds 14 cases on both sides of
+  each bound, `test_staging` two kinds of data (7 cases) that every child
+  sends to Accelerate, `test_split` four refused tails, and `test_range_guard`
+  a test of the bounds at their edges; each fails on a build without its part
+  of the fix.
 - **`make test-asan` no longer hangs where AddressSanitizer's runtime does not
   start.** On macOS 27.0.1, with Apple clang 17.0.0 or Homebrew clang 19.1.7, it
   hangs in its own initialization, before `main()`. `test-asan` now runs an empty
