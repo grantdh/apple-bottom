@@ -45,22 +45,27 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 247, every test but
-the chaos ones, and `make ci-local` all 265 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 251, every test but
+the chaos ones, and `make ci-local` all 269 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
 (its `TEST_QE_GOLDEN` line says `PASS`, or `SKIP` on another device).
 
 - **Registry-based (ghost-guarded):**
-  - `tests/test_correctness.c` — 81 tests; `test_prefetch_same_bits`
+  - `tests/test_correctness.c` — 85 tests; `test_prefetch_same_bits`
     runs every register-prefetch kernel (`AB_PREFETCH=1`) against the
     plain ones (`AB_PREFETCH=0`) and requires bitwise-equal results;
     `test_mpir_ill_conditioned` (κ = 10¹⁰) and `test_mpir_fp32_singular`
     (A singular only once rounded to FP32) give `ab_dgesv_mpir` systems
     that FP32 refinement cannot solve, which it must solve in FP64 and
     return `AB_OK` (an A singular in FP64 too: `AB_ERROR_KERNEL_FAILED`,
-    B unchanged)
+    B unchanged); the four `test_*zgemm*_shape_mismatch` tests give
+    `ab_zgemm`, `ab_zgemm_ex` (with transposes), `ab_zgemm_strassen`,
+    `ab_zgemm_async`, `ab_batch_zgemm` and `ab_zgemm_batched` a wrong
+    imaginary part, a wrong C or a mismatched op() shape: each must return
+    `AB_ERROR_DIMENSION_MISMATCH` (async: in a completed future) and leave
+    C as it was
   - `tests/test_chaos.c` — 18 tests
   - `tests/test_device_api.c` — 21 tests (219 `CHECK`s); the GEMM
     tests compare `ab_dev_dgemm` / `ab_dev_zgemm` with column-major

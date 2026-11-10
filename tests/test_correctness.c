@@ -1873,6 +1873,125 @@ static void test_batch_committed_reuse(void) {
 }
 
 // =============================================================================
+// Native ZGEMM shapes: every entry checks all six handles before it encodes
+// anything; a mismatched one was read or written past its end with AB_OK.
+// =============================================================================
+
+// op(A) 8x6 times op(B) 6x5 into C 8x5. ZS_AI_BAD..ZS_CI_BAD are wrong
+// imaginary parts; ZS_AT..ZS_BIT are A and B stored for op = transpose.
+enum { ZS_AR, ZS_AI, ZS_BR, ZS_BI, ZS_CR, ZS_CI, ZS_AI_BAD, ZS_BI_BAD, ZS_CI_BAD,
+       ZS_AT, ZS_AIT, ZS_BT, ZS_BIT, ZS_N };
+static const int ZS_DIMS[ZS_N][2] = {{8, 6}, {8, 6}, {6, 5}, {6, 5}, {8, 5}, {8, 5}, {4, 6},
+                                     {6, 4}, {8, 4}, {6, 8}, {6, 8}, {5, 6}, {5, 6}};
+
+#define ZS_MM AB_ERROR_DIMENSION_MISMATCH
+
+// ab_init() and the ZS_N matrices, matrix i holding i + e/64 at element e so
+// zs_intact sees any write to it; false if one could not be made.
+static bool zs_begin(ABMatrix m[ZS_N]) {
+    ab_init();
+    double d[64];
+    bool ok = true;
+    for (int i = 0; i < ZS_N; i++) {
+        for (int e = 0; e < 64; e++) d[e] = i + e / 64.0;
+        m[i] = ab_matrix_create(ZS_DIMS[i][0], ZS_DIMS[i][1]);
+        ok = ok && m[i] && ab_matrix_upload(m[i], d, false) == AB_OK;
+    }
+    return ok;
+}
+
+static bool zs_intact(ABMatrix m[ZS_N], int i) {
+    double d[64];
+    if (ab_matrix_download(m[i], d, false) != AB_OK) return false;
+    for (int e = 0; e < ZS_DIMS[i][0] * ZS_DIMS[i][1]; e++)
+        if (d[e] != i + e / 64.0) return false;
+    return true;
+}
+
+static bool zs_c_intact(ABMatrix m[ZS_N]) {
+    return zs_intact(m, ZS_CR) && zs_intact(m, ZS_CI) && zs_intact(m, ZS_CI_BAD);
+}
+
+static void zs_end(ABMatrix m[ZS_N], bool ok, const char* why) {
+    for (int i = 0; i < ZS_N; i++) ab_matrix_destroy(m[i]);
+    ab_shutdown();
+    if (ok) PASS(); else FAIL(why);
+}
+
+static void test_zgemm_shape_mismatch(void) {
+    TEST("ZGEMM shapes: ab_zgemm, _ex, _strassen");
+    ABMatrix m[ZS_N];
+    bool ok = zs_begin(m);
+    // An imaginary part of another shape, Cr of another shape, and, with
+    // transposes, an imaginary part stored in op()'s shape instead of its real part's.
+    ok = ok && ab_zgemm(m[ZS_AR], m[ZS_AI_BAD], m[ZS_BR], m[ZS_BI], m[ZS_CR], m[ZS_CI]) == ZS_MM &&
+         ab_zgemm(m[ZS_AR], m[ZS_AI], m[ZS_BR], m[ZS_BI_BAD], m[ZS_CR], m[ZS_CI]) == ZS_MM &&
+         ab_zgemm(m[ZS_AR], m[ZS_AI], m[ZS_BR], m[ZS_BI], m[ZS_CR], m[ZS_CI_BAD]) == ZS_MM &&
+         ab_zgemm(m[ZS_AR], m[ZS_AI], m[ZS_BR], m[ZS_BI], m[ZS_CI_BAD], m[ZS_CI]) == ZS_MM &&
+         ab_zgemm_ex(AB_TRANS, AB_CONJ_TRANS, m[ZS_AT], m[ZS_AI], m[ZS_BT], m[ZS_BIT], m[ZS_CR],
+                     m[ZS_CI]) == ZS_MM &&
+         ab_zgemm_ex(AB_TRANS, AB_CONJ_TRANS, m[ZS_AT], m[ZS_AIT], m[ZS_BT], m[ZS_BI], m[ZS_CR],
+                     m[ZS_CI]) == ZS_MM &&
+         ab_zgemm_strassen(m[ZS_AR], m[ZS_AI], m[ZS_BR], m[ZS_BI_BAD], m[ZS_CR], m[ZS_CI]) == ZS_MM;
+    ok = ok && zs_c_intact(m);
+    // The same transposes with matching parts are accepted.
+    ok = ok && ab_zgemm_ex(AB_TRANS, AB_CONJ_TRANS, m[ZS_AT], m[ZS_AIT], m[ZS_BT], m[ZS_BIT],
+                           m[ZS_CR], m[ZS_CI]) == AB_OK;
+    zs_end(m, ok, "a mismatched shape was not refused, or C was written");
+}
+
+// Whether f is a completed future holding DIMENSION_MISMATCH; destroys it.
+static bool zs_refused(ABFuture f) {
+    bool ok = f && ab_future_is_ready(f) && ab_future_status(f) == ZS_MM &&
+              ab_future_wait(f) == ZS_MM;
+    ab_future_destroy(f);
+    return ok;
+}
+
+static void test_zgemm_async_shape_mismatch(void) {
+    TEST("ZGEMM shapes: ab_zgemm_async");
+    ABMatrix m[ZS_N];
+    bool ok = zs_begin(m);
+    ok = ok && zs_refused(ab_zgemm_async(m[ZS_AR], m[ZS_AI], m[ZS_BR], m[ZS_BI_BAD], m[ZS_CR],
+                                         m[ZS_CI])) &&
+         zs_refused(ab_zgemm_async(m[ZS_AR], m[ZS_AI], m[ZS_BR], m[ZS_BI], m[ZS_CR],
+                                   m[ZS_CI_BAD]));
+    ok = ok && zs_c_intact(m);
+    zs_end(m, ok, "expected a completed future holding DIMENSION_MISMATCH");
+}
+
+static void test_batch_zgemm_shape_mismatch(void) {
+    TEST("ZGEMM shapes: ab_batch_zgemm");
+    ABMatrix m[ZS_N];
+    bool ok = zs_begin(m);
+    ABBatch batch = ab_batch_create();
+    ok = ok && batch &&
+         ab_batch_zgemm(batch, m[ZS_AR], m[ZS_AI_BAD], m[ZS_BR], m[ZS_BI], m[ZS_CR], m[ZS_CI]) ==
+             ZS_MM &&
+         ab_batch_zgemm(batch, m[ZS_AR], m[ZS_AI], m[ZS_BR], m[ZS_BI], m[ZS_CR], m[ZS_CI_BAD]) ==
+             ZS_MM &&
+         ab_batch_commit(batch) == AB_OK && ab_batch_wait(batch) == AB_OK;
+    ab_batch_destroy(batch);
+    ok = ok && zs_c_intact(m);
+    zs_end(m, ok, "a mismatched shape was not refused, or C was written");
+}
+
+static void test_zgemm_batched_shape_mismatch(void) {
+    TEST("ZGEMM shapes: ab_zgemm_batched");
+    ABMatrix m[ZS_N];
+    bool ok = zs_begin(m);
+    // Entry 0 is valid and writes C if it runs; entry 1 has a short Ai.
+    ABMatrix Ars[] = {m[ZS_AR], m[ZS_AR]}, Ais[] = {m[ZS_AI], m[ZS_AI_BAD]};
+    ABMatrix Brs[] = {m[ZS_BR], m[ZS_BR]}, Bis[] = {m[ZS_BI], m[ZS_BI]};
+    ABMatrix Crs[] = {m[ZS_CR], m[ZS_CR]}, Cis[] = {m[ZS_CI], m[ZS_CI]};
+    ABMatrix Bis_bad[] = {m[ZS_BI_BAD]};
+    ok = ok && ab_zgemm_batched(2, Ars, Ais, Brs, Bis, Crs, Cis) == ZS_MM &&
+         ab_zgemm_batched(1, Ars, Ais, Brs, Bis_bad, Crs, Cis) == ZS_MM;
+    ok = ok && zs_c_intact(m);
+    zs_end(m, ok, "a mismatched entry was not refused before any ran");
+}
+
+// =============================================================================
 // Fused ZGEMM Regression Test
 // =============================================================================
 
@@ -2946,6 +3065,10 @@ static const TestCase TESTS[] = {
     {"test_batch_null_safety",                test_batch_null_safety},
     {"test_batch_zgemm",                      test_batch_zgemm},
     {"test_batch_committed_reuse",            test_batch_committed_reuse},
+    {"test_zgemm_shape_mismatch",             test_zgemm_shape_mismatch},
+    {"test_zgemm_async_shape_mismatch",       test_zgemm_async_shape_mismatch},
+    {"test_batch_zgemm_shape_mismatch",       test_batch_zgemm_shape_mismatch},
+    {"test_zgemm_batched_shape_mismatch",     test_zgemm_batched_shape_mismatch},
     {"test_fused_zgemm_precision",            test_fused_zgemm_precision},
     {"test_async_zgemm_true",                 test_async_zgemm_true},
     {"test_bug1_async_dimension_packing",     test_bug1_async_dimension_packing},

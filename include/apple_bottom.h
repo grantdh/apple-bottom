@@ -181,7 +181,12 @@ ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C);
 ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C);
 ABStatus ab_zgemm(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci);
 
-// Extended ZGEMM with transpose support (for QE compatibility)
+// Extended ZGEMM with transpose support (for QE compatibility).
+// Every ZGEMM entry (ab_zgemm, ab_zgemm_ex, ab_zgemm_strassen, ab_zgemm_async,
+// ab_batch_zgemm, ab_zgemm_batched) needs each imaginary part in its real
+// part's shape, op(A) M x K, op(B) K x N and C M x N. Otherwise it returns
+// AB_ERROR_DIMENSION_MISMATCH before any GPU work: ab_zgemm_async as a
+// completed future holding it, ab_zgemm_batched before any entry runs.
 ABStatus ab_zgemm_ex(
     ABTranspose transA, ABTranspose transB,
     ABMatrix Ar, ABMatrix Ai,
