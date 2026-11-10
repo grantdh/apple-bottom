@@ -56,7 +56,9 @@ void ab_internal_set_last_path(bool gpu) { _ab_last_path = gpu ? "gpu" : "cpu"; 
 // sum of C_ij alike, so wherever no intermediate leaves FP32's normal range
 // either way, the bits are those of the unscaled computation; data whose
 // lines all lie inside the window runs exactly as before.
-#define AB_RANGE_WHY "values beyond double-float's exponent range, or NaN/Inf"
+#define AB_RANGE_WHY \
+    "values beyond double-float's exponent range, a ZGEMM epilogue that could overflow FP64, " \
+    "or NaN/Inf"
 
 bool ab_line_stats_init(ab_line_stats_t* s, int n, bool complex_parts) {
     s->n = n;
@@ -844,6 +846,22 @@ bool ab_range_guard_c(const ab_line_stats_t* sa, const ab_line_stats_t* sb, ab_r
     return ok;
 }
 
+bool ab_zgemm_product_fits(int K, uint32_t a_max, uint32_t b_max, double alpha_re,
+                           double alpha_im) {
+    const double al = fabs(alpha_re) + fabs(alpha_im);
+    if (!isfinite(al) || a_max >= AB_HIWORD_NONFINITE || b_max >= AB_HIWORD_NONFINITE) return false;
+    if (a_max == 0 || b_max == 0) return true;          // P is zero
+    const int e = ab_hiword_ilogb(a_max) + ab_hiword_ilogb(b_max) + ilogb((double)K) + 5;
+    return e <= AB_EPI_MAX_EXP + 1 && ldexp(al, e) <= ab_pow2(AB_EPI_MAX_EXP);
+}
+
+bool ab_zgemm_c_fits(double beta_re, double beta_im, uint32_t c_max) {
+    const double bl = fabs(beta_re) + fabs(beta_im);
+    if (bl == 0.0) return true;                         // C is not read
+    if (!isfinite(bl) || c_max >= AB_HIWORD_NONFINITE) return false;
+    return c_max == 0 || ldexp(bl, ab_hiword_ilogb(c_max) + 1) <= ab_pow2(AB_EPI_MAX_EXP);
+}
+
 // The gate of dgemm_blas and zgemm_blas (dispatch.h): Accelerate where the
 // routing says so, and for the BLAS quick return for alpha == 0 (A and B must
 // not be read) and invalid arguments.
@@ -1042,7 +1060,9 @@ static ab_prof_fallback_t fallback_reason(ABStatus st) {
 // Bit for bit (ab_internal.h): with the line scales re (rows of op(A)) and
 // ce (columns of op(B)), both NULL if none, each part of the product, as the
 // download made it FP64, times 2^(re[row] + ce[col]) in one rounding
-// (ab_scale2), then alpha and beta in FP64, in the order below.
+// (ab_scale2), then alpha and beta in FP64, in the order below. Every value
+// it forms stays finite: a call whose P, alpha P or beta C could overflow
+// went to Accelerate before it (ab_zgemm_product_fits, ab_zgemm_c_fits).
 static void zgemm_epilogue(int M, int N, double complex alpha, double complex beta,
                            const double *Cr_data, const double *Ci_data,
                            double complex *C, int ldC, const int *re, const int *ce) {
@@ -1084,19 +1104,19 @@ static void zgemm_epilogue(int M, int N, double complex alpha, double complex be
     }
 }
 
-// Whether a ZGEMM with this beta reads a NaN or Inf in C's M x N block. Such a
-// call runs on Accelerate, as a DGEMM's does (ab_range_guard_c_stage1): the
-// epilogue's C[dst] = re + I * im, which the GPU's follows bit for bit, turns
-// (Inf, y) into (NaN, NaN).
-static bool zgemm_reads_nonfinite_c(double complex beta, const double complex *C, int ldC, int M,
-                                    int N) {
+// Whether a ZGEMM with this beta reads, in C's M x N block, a NaN or Inf or a
+// value that beta could take beyond FP64's range (ab_zgemm_c_fits). Such a
+// call runs on Accelerate, as a DGEMM reading NaN or Inf does
+// (ab_range_guard_c_stage1): the epilogue's C[dst] = re + I * im, which the
+// GPU's follows bit for bit, turns (Inf, y) into (NaN, NaN).
+static bool zgemm_c_refused(double complex beta, const double complex *C, int ldC, int M, int N) {
     if (beta == 0.0) return false;
     uint32_t mx = 0;
     for (size_t j = 0; j < (size_t)N; j++) {
         const double *x = (const double *)(C + j * ldC);
         for (size_t i = 0; i < 2 * (size_t)M; i++) AB_HIWORD_MAX(ab_abs_hiword(x[i]), mx);
     }
-    return mx >= AB_HIWORD_NONFINITE;
+    return !ab_zgemm_c_fits(creal(beta), cimag(beta), mx);
 }
 
 // =============================================================================
@@ -1213,9 +1233,10 @@ static void copy_matrix(void *dst, int dst_ld, const void *src, int src_ld, size
 // lines' scales the host path would give them, which the GPU applied, the
 // product certified, and a DGEMM's C when it is read, stage 2 reading the
 // caller's operands as the host path does (the staged run wrote none of them
-// it reads). A call it does not certify runs on Accelerate, as the host
-// path's guard, from the same statistics, would send it. (A DGEMM's alpha
-// and beta were checked before the run: dgemm_staged.) Returns
+// it reads), and a ZGEMM's product bound (ab_zgemm_product_fits). A call it
+// does not certify runs on Accelerate, as the host path's guard, from the
+// same statistics, would send it. (A DGEMM's alpha and beta were checked
+// before the run: dgemm_staged; a ZGEMM's C, zgemm_stage_begin.) Returns
 // AB_PROF_STAGED_KEPT if it does, else why not. Also returns whether a
 // ZGEMM's parts call for 4M (ab_lines_method) and the lines' scales, *re for
 // op(A)'s rows and *ce for op(B)'s columns (NULL if none).
@@ -1240,6 +1261,8 @@ static ab_prof_staged_t staged_refusal(ab_stage_t *s, const ab_stage_gemm_t *g, 
         ab_test_fail_stage() == AB_PROF_FAIL_SCALES)
         return AB_PROF_STAGED_GPU_FAILED;
     if (!ab_range_guard(g->K, &sa, &sb, z ? 0 : ilogb(g->alpha[0]), &va, &vb) ||
+        (z && !ab_zgemm_product_fits(g->K, ab_lines_max(&sa), ab_lines_max(&sb), g->alpha[0],
+                                     g->alpha[1])) ||
         (!z && g->c_in && !ab_range_guard_c(&sa, &sb, c, g->alpha[0], g->beta[0], C->ptr, C->ld,
                                             0, &va, &vb)))
         return AB_PROF_STAGED_RANGE;
@@ -1342,9 +1365,10 @@ static char op_char(enum CBLAS_TRANSPOSE t) {
 }
 
 // A ZGEMM as the staged path runs it, into *g: AB_PROF_STAGED_NONE to run
-// it, or AB_PROF_STAGED_RANGE for one whose host epilogue would read a NaN or
-// Inf in C (the GPU epilogue flags those itself, and that call comes back to
-// the host path's check).
+// it, or AB_PROF_STAGED_RANGE for one whose host epilogue would read in C a
+// NaN or Inf or a value beta could take out of range (zgemm_c_refused). The
+// GPU epilogue (beta = 1) flags such a C itself (ab_epi_z), and that call
+// comes back to the host path's check.
 static ab_prof_staged_t zgemm_stage_begin(ab_stage_gemm_t *g, enum CBLAS_TRANSPOSE ta,
                                           enum CBLAS_TRANSPOSE tb, int M, int N, int K,
                                           double complex alpha, const double complex *A, int ldA,
@@ -1359,8 +1383,8 @@ static ab_prof_staged_t zgemm_stage_begin(ab_stage_gemm_t *g, enum CBLAS_TRANSPO
         .c_in = gpu_epi && beta1, .split = !gpu_epi,
         .alpha = {creal(alpha), cimag(alpha)}, .beta = {creal(beta), cimag(beta)},
     };
-    return !gpu_epi && zgemm_reads_nonfinite_c(beta, C, ldC, M, N) ? AB_PROF_STAGED_RANGE
-                                                                   : AB_PROF_STAGED_NONE;
+    return !gpu_epi && zgemm_c_refused(beta, C, ldC, M, N) ? AB_PROF_STAGED_RANGE
+                                                           : AB_PROF_STAGED_NONE;
 }
 
 // A DGEMM as the staged path runs it, into *g: AB_PROF_STAGED_NONE to run it,
@@ -1456,22 +1480,30 @@ static ab_prof_staged_t part_stage_begin(ab_stage_gemm_t *g, const gemm_part_t *
                              q->ldB, creal(q->beta), q->C, q->ldC);
 }
 
-// Whether a staged call reads a NaN or Inf: in op(A), op(B), or C when its
-// epilogue (GPU or host) reads C. A run ends NONFINITE either on such data,
-// which the host path's guard sends to Accelerate as out of range, or on a
-// value the GPU made; only the first is a data condition.
-static bool stage_reads_nonfinite(const ab_stage_gemm_t *g) {
-    const size_t w = g->routine == 'z' ? 2 : 1;
+// Whether a staged call reads data the host path refuses: a NaN or Inf in
+// op(A), op(B), or C when its epilogue (GPU or host) reads C, or, for a
+// ZGEMM, a product or C its epilogue could take out of range
+// (ab_zgemm_product_fits, ab_zgemm_c_fits; the GPU epilogue flags the
+// overflow, and a C beside beta = 1). A run ends NONFINITE either on such
+// data, which the host path sends to Accelerate as out of range, or on a value
+// the GPU made; only the first is a data condition.
+static bool stage_reads_refused(const ab_stage_gemm_t *g) {
+    const bool z = g->routine == 'z';
+    const size_t w = z ? 2 : 1;
     const bool c_read = g->c_in || (g->split && (g->beta[0] != 0.0 || g->beta[1] != 0.0));
-    uint32_t mx = 0;
+    uint32_t mx[3] = {0, 0, 0};
     for (int i = 0; i < 2 + c_read; i++) {
         const ab_stage_matrix_t *x = &g->x[i];
         for (size_t j = 0; j < (size_t)x->cols; j++) {
             const double *col = (const double *)x->ptr + w * j * (size_t)x->ld;
-            for (size_t k = 0; k < w * (size_t)x->rows; k++) AB_HIWORD_MAX(ab_abs_hiword(col[k]), mx);
+            for (size_t k = 0; k < w * (size_t)x->rows; k++) AB_HIWORD_MAX(ab_abs_hiword(col[k]), mx[i]);
         }
     }
-    return mx >= AB_HIWORD_NONFINITE;
+    if (z)      // NaN and Inf in op(A), op(B) or C fail these too
+        return !ab_zgemm_product_fits(g->K, mx[0], mx[1], g->alpha[0], g->alpha[1]) ||
+               !ab_zgemm_c_fits(g->beta[0], g->beta[1], mx[2]);
+    return mx[0] >= AB_HIWORD_NONFINITE || mx[1] >= AB_HIWORD_NONFINITE ||
+           mx[2] >= AB_HIWORD_NONFINITE;
 }
 
 // The tail and what became of it, on the caller's stack.
@@ -1617,7 +1649,8 @@ static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis
         if (why == AB_PROF_STAGED_SCALAR) return split_declined(rec, AB_PROF_SPLIT_DECLINE_SCALAR);
         j.g.classical = true;
         j.g.c_staged = axis == 'M';
-        // A ZGEMM tail reading NaN or Inf in C goes to Accelerate without a run.
+        // A ZGEMM tail whose host epilogue would read in C a NaN, an Inf or a
+        // value beta could take out of range goes to Accelerate without a run.
         if (why == AB_PROF_STAGED_RANGE) {
             j.why = why;
             run_tail = false;
@@ -1671,10 +1704,11 @@ static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis
     }
     if (run_tail) pthread_setcancelstate(cancel_state, NULL);
     if (j.head_done) dispatch_release(j.head_done);
-    // A tail the GPU epilogue stopped on a NaN or Inf it read is a data
+    // A tail the GPU epilogue stopped on its data (NaN or Inf read, or for a
+    // ZGEMM a product or C its epilogue could take out of range) is a data
     // condition, as the host path's guard reports it without AB_SPLIT: range.
     // The scan's time is the join's (join_ns), not the redo's.
-    if (j.why == AB_PROF_STAGED_NONFINITE && stage_reads_nonfinite(&j.g)) j.why = AB_PROF_STAGED_RANGE;
+    if (j.why == AB_PROF_STAGED_NONFINITE && stage_reads_refused(&j.g)) j.why = AB_PROF_STAGED_RANGE;
     SPLIT_AT(p, join_ns, tm->end_ns);   // the end unless a redo or the K axis's sum follows
     if (run_tail) {
         tm->gpu0_ns = ab_prof_ticks_to_ns(j.t0);
@@ -1928,8 +1962,8 @@ static void zgemm_blas(
 
     const ab_op_view_t va = {(const double*)A, ldA, M, K, ta != CblasNoTrans, true};
     const ab_op_view_t vb = {(const double*)B, ldB, K, N, tb != CblasNoTrans, true};
-    if (!ab_range_guard(K, &sa, &sb, 0, &va, &vb) ||
-        zgemm_reads_nonfinite_c(beta, C, ldC, M, N)) {
+    if (!ab_range_guard(K, &sa, &sb, 0, &va, &vb) || zgemm_c_refused(beta, C, ldC, M, N) ||
+        !ab_zgemm_product_fits(K, ab_lines_max(&sa), ab_lines_max(&sb), creal(alpha), cimag(alpha))) {
         fallback = AB_PROF_FB_RANGE;
         goto cleanup;
     }

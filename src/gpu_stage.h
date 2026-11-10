@@ -34,10 +34,12 @@
 // same. A ZGEMM whose parts call for 4M runs as Gauss-3M first; then a second
 // command buffer forms 4M's imaginary part, as the host path's 4M does (its
 // real part is 3M's), and the epilogue again. A call the guard does not
-// certify runs on Accelerate (the host path's guard would say the same);
-// any other, and one whose GPU epilogue meets Inf or NaN, is made on the
-// host path instead, with its own bits; so the GPU writes C in place only
-// when it does not read it.
+// certify, or a ZGEMM whose epilogue could overflow (ab_zgemm_product_fits),
+// runs on Accelerate (the host path's guard would say the same); any other,
+// and one whose GPU epilogue meets Inf or NaN (or a C of 2^1022 or more
+// beside beta = 1), is made on the host path instead, whose guard decides it
+// again, with its own bits; so the GPU writes C in place only when it does
+// not read it.
 //
 // The pool keeps at most AB_STAGING_MB MB between calls
 // (ab_staging_cap_bytes()). Slots are per call, so threads calling at once
@@ -102,7 +104,8 @@ int ab_internal_stage_in_place(const ab_stage_t *s);
 typedef enum {
     AB_STAGE_RAN,           // the result as ab_internal_stage_host() or ab_internal_stage_split()
                             // gives it, to use if the guard lets it stand
-    AB_STAGE_NONFINITE,     // the epilogue met Inf or NaN
+    AB_STAGE_NONFINITE,     // the epilogue met Inf or NaN, or (ZGEMM, beta = 1) a C of 2^1022
+                            // or more (ab_zgemm_c_fits)
     AB_STAGE_FAILED,        // the command buffer failed
 } ab_stage_result_t;
 

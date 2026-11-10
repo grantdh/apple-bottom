@@ -351,6 +351,13 @@ static void parts_reference(const Call *c, char axis, int g, const Operands *o, 
 
 static uint64_t hash_doubles(const double *x, size_t n) { return fnv1a(x, n * sizeof *x, FNV_OFFSET); }
 
+// Whether x and y hold the same n values, NaN payloads aside.
+static bool same_values(const double *x, const double *y, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        if (!(x[i] == y[i] || (isnan(x[i]) && isnan(y[i])))) return false;
+    return true;
+}
+
 // n doubles in whole pages of their own, for ab_register_host_memory; *bytes
 // is the size to register.
 static double *page_alloc(size_t n, size_t *bytes) {
@@ -518,34 +525,62 @@ static void test_split_exponent_range(void) {
                               what == PLANT_SCALE ? "scaled line" : "NaN/Inf", tail_side ? "tail" : "head", got);
                     }
                     // NaN payloads aside, the bits: compare as values where both are NaN.
-                    bool same = true;
-                    for (size_t i = 0; i < o.nC; i++)
-                        same = same && (C[i] == ref[i] || (isnan(C[i]) && isnan(ref[i])) ||
-                                        !memcmp(&C[i], &ref[i], sizeof C[i]));
-                    check(same, "%s, plant %d %s: C is not the expected composition", text, what,
-                          tail_side ? "tail" : "head");
+                    check(same_values(C, ref, o.nC), "%s, plant %d %s: C is not the expected composition", text,
+                          what, tail_side ? "tail" : "head");
                     free(C); free(ref);
                     free_operands(&o);
                 }
-    // A ZGEMM tail that reads NaN in C goes to Accelerate as out of range:
-    // with alpha 2 (the host epilogue) unrun, with alpha 1, beta 1 after the
-    // GPU epilogue meets it, as without AB_SPLIT.
-    for (int gpu_epi = 0; gpu_epi < 2; gpu_epi++) {
-        Call c = {'z', 'N', 'N', 300, 260, 200, 0, {gpu_epi ? 1 : 2, 0}, {gpu_epi ? 1 : 0.5, 0}};
-        Operands o = operands(&c);
-        o.C0[(size_t)2 * o.ldC * 250 + 4] = NAN;              // column 250: in the tail
-        double *C = malloc(o.nC * sizeof *C), *ref = malloc(o.nC * sizeof *ref);
-        memcpy(C, o.C0, o.nC * sizeof *C);
-        memcpy(ref, o.C0, o.nC * sizeof *ref);
-        int got = seam(&c, 'N', 64, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
-        parts_reference(&c, 'N', 64, &o, ref);
-        ab_split_record_t rec;
-        check(got == AB_SPLIT_RANGE && ab_internal_last_split(&rec) && rec.staged == 8 /* RANGE */,
-              "ZGEMM alpha %g beta %g with NaN in the tail's C: outcome %d", c.alpha[0], c.beta[0], got);
-        check(!memcmp(C, ref, o.nC * sizeof *C), "ZGEMM with NaN in the tail's C: C is not the cblas parts");
-        free(C); free(ref);
-        free_operands(&o);
-    }
+    // A ZGEMM tail goes to Accelerate as out of range, as without AB_SPLIT,
+    // where its epilogue would read NaN in C, or could overflow FP64
+    // (ab_zgemm_product_fits, ab_zgemm_c_fits): its product (op(A) x 2^600,
+    // the tail's 64 columns of op(B) x 2^500), its C (the tail's columns x
+    // 2^1023). With the host epilogue (alpha 2, or 2^-200) a C is refused
+    // unrun and a product after the run; with the GPU's (alpha 1, beta 0 or 1)
+    // once that epilogue meets them. The head stays finite on Accelerate. The
+    // mirror, the head's columns so scaled and the tail's not, keeps the tail
+    // (the head's own overflow is Accelerate's).
+    enum { NAN_C, BIG_P, BIG_C };
+    static const char *const BAD[] = {"NaN in C", "product out of range", "C out of range"};
+    static const struct { int bad; double alpha, beta; } TAIL[] = {
+        {NAN_C, 2.0, 0.5}, {NAN_C, 1.0, 1.0}, {BIG_P, 0x1p-200, 0.0}, {BIG_P, 1.0, 0.0},
+        {BIG_C, 2.0, 1.0}, {BIG_C, 1.0, 1.0},
+    };
+    for (size_t t = 0; t < TEST_REGISTRY_SIZE(TAIL); t++)
+        for (int head = 0; head < 1 + (TAIL[t].bad != NAN_C); head++) {
+            Call c = {'z', 'N', 'N', 300, 260, 200, 0, {TAIL[t].alpha, 0}, {TAIL[t].beta, 0}};
+            Operands o = operands(&c);
+            const int bad = TAIL[t].bad, g = 64, cut = c.N - g;   // the tail: columns cut .. N - 1
+            if (bad == NAN_C) o.C0[(size_t)2 * o.ldC * 250 + 4] = NAN;   // column 250: in the tail
+            for (int j = head ? 0 : cut; bad != NAN_C && j < (head ? cut : c.N); j++) {
+                if (bad == BIG_P)
+                    for (size_t i = 0; i < (size_t)2 * c.K; i++) o.B[(size_t)2 * o.ldB * j + i] *= 0x1p500;
+                else
+                    for (size_t i = 0; i < (size_t)2 * c.M; i++) o.C0[(size_t)2 * o.ldC * j + i] *= 0x1p1023;
+            }
+            for (int k = 0; bad == BIG_P && k < c.K; k++)
+                for (size_t i = 0; i < (size_t)2 * c.M; i++) o.A[(size_t)2 * o.ldA * k + i] *= 0x1p600;
+            double *C = malloc(o.nC * sizeof *C), *ref = malloc(o.nC * sizeof *ref);
+            memcpy(C, o.C0, o.nC * sizeof *C);
+            memcpy(ref, o.C0, o.nC * sizeof *ref);
+            int got = seam(&c, 'N', g, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
+            ab_split_record_t rec;
+            bool same;
+            if (head) {
+                compose_reference(&c, 'N', g, &o, ref);
+                check(kept(got), "ZGEMM alpha %g beta %g, %s in the head: outcome %d", c.alpha[0], c.beta[0],
+                      BAD[bad], got);
+                same = same_values(C, ref, o.nC);
+            } else {
+                parts_reference(&c, 'N', g, &o, ref);
+                check(got == AB_SPLIT_RANGE && ab_internal_last_split(&rec) && rec.staged == 8 /* RANGE */,
+                      "ZGEMM alpha %g beta %g, %s in the tail: outcome %d", c.alpha[0], c.beta[0], BAD[bad], got);
+                same = !memcmp(C, ref, o.nC * sizeof *C);
+            }
+            check(same, "ZGEMM alpha %g beta %g, %s in the %s: C is not the expected parts", c.alpha[0],
+                  c.beta[0], BAD[bad], head ? "head" : "tail");
+            free(C); free(ref);
+            free_operands(&o);
+        }
     // The scan that makes a NaN read from the data range, on transposed and
     // conjugated layouts and a DGEMM that reads C: NaN in the tail's op(A)
     // rows (M axis) or op(B) columns (N axis) is range, and C the cblas parts.

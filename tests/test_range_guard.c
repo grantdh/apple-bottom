@@ -17,13 +17,15 @@
 // window, values below 2^-1042 (lines made of them too), zero lines and
 // parts, and calls the guard refuses. Each suite also requires both outcomes
 // to occur in stage 2 often enough that the comparison means something, and
-// the crafted cases their known outcome.
+// the crafted cases their known outcome. A last test holds a ZGEMM's
+// epilogue bounds (step 5) to their edges and to the claim behind them.
 // =============================================================================
 
 #include "ab_internal.h"
 #include "test_blas_check.h"
 #include "test_registry.h"
 
+#include <float.h>
 #include <limits.h>
 #include <math.h>
 #include <stdarg.h>
@@ -31,6 +33,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -921,6 +924,105 @@ static void test_guard_flush_to_zero(void) {
     finish();
 }
 
+// Step 5, a ZGEMM's FP64 epilogue (ab_zgemm_product_fits, ab_zgemm_c_fits):
+// each bound on both sides of its edge; a copy of the predicate of the GPU
+// epilogue's flag on C beside beta = 1 (ab_f64_top in the Metal source: |c| >=
+// 2^1022, Inf and NaN included) against c_fits (test_blas_abi's epi-c-at and
+// epi-c-below hold the flag itself to that edge); and the bound's claim, that
+// wherever both pass, the epilogue's FP64 operations on the largest parts they
+// allow, with the worst signs, stay below 2^1023 (1 + 2^-50).
+
+// The P bound with a and b the largest parts of op(A) and op(B).
+static bool epi_product(int K, double a, double b, double ar, double ai) {
+    return ab_zgemm_product_fits(K, ab_abs_hiword(a), ab_abs_hiword(b), ar, ai);
+}
+
+// The epilogue's real part (as zgemm_epilogue forms it) on p = |P|'s parts
+// and c = |C|'s, signed so that every term adds: also its imaginary part's
+// worst case, with the signs moved.
+static double epi_worst(double ar, double ai, double br, double bi, double p, double c) {
+    double pr = copysign(p, ar), pi = copysign(p, -ai), cr = copysign(c, br), ci = copysign(c, -bi);
+    double r = ar * pr - ai * pi;
+    r += br * cr - bi * ci;
+    pr = copysign(p, ai);
+    pi = copysign(p, ar);
+    cr = copysign(c, bi);
+    ci = copysign(c, br);
+    double i = ar * pi + ai * pr;
+    i += br * ci + bi * cr;
+    return fmax(fabs(r), fabs(i));
+}
+
+static void test_zgemm_epilogue_bounds(void) {
+    begin();
+    const double two = 2.0, top = 0x1p1023 * (1 + 0x1p-50);
+    // The product: E = ilogb a + ilogb b + ilogb K + 5.
+    const double a505 = 0.75 * 0x1p506, a506 = 0.75 * 0x1p507, a507 = 0.75 * 0x1p508;
+    expect(epi_product(72, a505, a505, two, 0), "E = 1021, alpha 2 refused");
+    expect(!epi_product(72, a505, a505, nextafter(two, 3), 0), "E = 1021, alpha 2 + ulp passed");
+    expect(epi_product(72, a505, a505, 1, -1), "E = 1021, alpha 1 - i refused");
+    expect(!epi_product(72, a505, a505, 1, -(1 + 0x1p-51)), "E = 1021, alpha 1 - (1 + 2^-51)i passed");
+    expect(epi_product(127, a505, a505, two, 0), "K = 127 (E = 1021), alpha 2 refused");
+    expect(!epi_product(128, a505, a505, two, 0), "K = 128 (E = 1022), alpha 2 passed");
+    expect(epi_product(72, a506, a506, 0.5, 0), "E = 1023, alpha 0.5 refused");
+    expect(!epi_product(72, a506, a506, 0.5 + 0x1p-53, 0), "E = 1023, alpha 0.5 + ulp passed");
+    expect(epi_product(72, a506, a506, 0x1p-1074, 0), "E = 1023, alpha 2^-1074 refused");
+    expect(!epi_product(72, a507, a506, 0x1p-1000, 0), "E = 1024 passed (P itself overflows)");
+    expect(epi_product(1 << 30, 1.0, 1.0, 0x1p900, 0), "lines at 1, K = 2^30, alpha 2^900 refused");
+    expect(epi_product(72, 0.0, a507, 0x1p1000, 0), "op(A) zero, alpha 2^1000 refused");
+    expect(!epi_product(72, 0.0, a507, INFINITY, 0), "op(A) zero, alpha Inf passed");
+    expect(!epi_product(72, 1.0, 1.0, 1.0, NAN), "alpha 1 + NaN i passed");
+    expect(!epi_product(72, 1.0, NAN, 1.0, 0), "a NaN line passed");
+    expect(!epi_product(72, INFINITY, 1.0, 1.0, 0), "an Inf line passed");
+    // beta C: (|Re beta| + |Im beta|) 2^(ilogb c + 1) <= 2^1022.
+    const double below = nextafter(0x1p1022, 0);
+    expect(ab_zgemm_c_fits(0.0, -0.0, ab_abs_hiword(NAN)), "beta 0 with NaN in C refused");
+    expect(ab_zgemm_c_fits(1.0, 0.0, ab_abs_hiword(below)), "beta 1, |c| below 2^1022 refused");
+    expect(!ab_zgemm_c_fits(1.0, 0.0, ab_abs_hiword(0x1p1022)), "beta 1, |c| = 2^1022 passed");
+    expect(!ab_zgemm_c_fits(nextafter(1, 2), 0.0, ab_abs_hiword(0x1p1021)),
+           "beta 1 + ulp, |c| = 2^1021 passed");
+    expect(ab_zgemm_c_fits(0.5, -0.5, ab_abs_hiword(0x1p1021)), "beta 0.5 - 0.5i, |c| = 2^1021 refused");
+    expect(ab_zgemm_c_fits(5.0, 0.0, 0), "beta 5, C zero refused");
+    expect(!ab_zgemm_c_fits(INFINITY, 0.0, 0), "beta Inf, C zero passed");
+    expect(!ab_zgemm_c_fits(NAN, 0.0, ab_abs_hiword(1.0)), "beta NaN passed");
+    expect(!ab_zgemm_c_fits(1e-300, 0.0, ab_abs_hiword(INFINITY)), "an Inf in C passed");
+    const double cs[] = {0x1p1021, below, 0x1p1022, -0x1p1022, nextafter(0x1p1022, 0x1p1023), 0x1p1023,
+                         DBL_MAX, INFINITY, -INFINITY, NAN, 1.0, 0x1p-1060, 0.0};
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(cs); i++) {
+        uint64_t u;
+        memcpy(&u, &cs[i], sizeof u);
+        bool flagged = (u & ~(1ULL << 63)) >= 0x7FD0000000000000ULL;
+        expect(ab_zgemm_c_fits(1.0, 0.0, ab_abs_hiword(cs[i])) == !flagged,
+               "c = %a: c_fits and the GPU flag disagree", cs[i]);
+    }
+    // The claim, on random calls near the edges: wherever both pass, the
+    // worst case stays below 2^1023 (1 + 2^-50).
+    rng_state = 0x5EED0008;
+    int passed = 0, refused = 0;
+    for (int t = 0; t < 200000; t++) {
+        const int K = rnd_int(1, 1 << 20);
+        const int ea = rnd_int(400, 620), eb = 1013 - ilogb((double)K) - ea + rnd_int(0, 11);
+        const double a = fabs(rnd_val(ea)), b = fabs(rnd_val(eb));
+        const double ar = rnd_val(rnd_int(-8, 0)), ai = rnd_bool(0.67) ? rnd_val(rnd_int(-8, 0)) : 0.0;
+        const double br = rnd_val(rnd_int(-4, 3)), bi = rnd_bool(0.67) ? rnd_val(rnd_int(-4, 1)) : 0.0;
+        const double c = fabs(rnd_val(rnd_int(1016, 1023)));
+        if (!epi_product(K, a, b, ar, ai) || !ab_zgemm_c_fits(br, bi, ab_abs_hiword(c))) {
+            refused++;
+            continue;
+        }
+        passed++;
+        const int E = ilogb(a) + ilogb(b) + ilogb((double)K) + 5;
+        const double w = epi_worst(ar, ai, br, bi, nextafter(ldexp(1.0, E), 0),
+                                   nextafter(ldexp(1.0, ilogb(c) + 1), 0));
+        if (!expect(isfinite(w) && w <= top, "K %d, |a| %a, |b| %a, alpha %a%+ai, beta %a%+ai, |c| %a: "
+                    "worst %a", K, a, b, ar, ai, br, bi, c, w))
+            break;
+    }
+    printf("(%d near the edges pass, %d refused) ", passed, refused);
+    expect(passed > 1000 && refused > 1000, "only %d passed and %d refused near the edges", passed, refused);
+    finish();
+}
+
 static const TestCase TESTS[] = {
     {"test_guard_random_real", test_guard_random_real},
     {"test_guard_random_complex", test_guard_random_complex},
@@ -929,6 +1031,7 @@ static const TestCase TESTS[] = {
     {"test_guard_tiny_values", test_guard_tiny_values},
     {"test_guard_c_random", test_guard_c_random},
     {"test_guard_flush_to_zero", test_guard_flush_to_zero},
+    {"test_zgemm_epilogue_bounds", test_zgemm_epilogue_bounds},
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
 

@@ -45,8 +45,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 245, every test but
-the chaos ones, and `make ci-local` all 263 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 246, every test but
+the chaos ones, and `make ci-local` all 264 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -85,9 +85,10 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     with one such value) must keep its earlier scale and bits
   - `tests/test_dispatch.c` — 23 tests of the BLAS-ABI routing and the
     `AB_SPLIT` plan, no GPU, see below
-  - `tests/test_range_guard.c` — 7 tests of the exponent-range guards'
-    stage 2 against the plain loops it replaced, no GPU, see below
-  - `tests/test_blas_abi.c` — 33 suites (1098 cases), see below
+  - `tests/test_range_guard.c` — 8 tests of the exponent-range guards'
+    stage 2 against the plain loops it replaced, and of a ZGEMM
+    epilogue's bounds, no GPU, see below
+  - `tests/test_blas_abi.c` — 33 suites (1114 cases), see below
   - `tests/test_trace.c` — 8 tests of `AB_TRACE`, `AB_TEST_FAIL_STAGE`
     and the solvers' `AB_PROFILE` fallback lines, see below
   - `tests/test_blas2.c` — 19 tests (995 cases) of DGEMV, ZGEMV and
@@ -124,8 +125,9 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     against Dot2 within (3K + 13) u² |A||B|, with cuts at 1 and L − 1, NaN
     padding, beta = 0 over NaN in C, signed zeros, cancellation and QE's
     K = 143666 on the K axis; NaN, Inf and scaled lines in the head only or
-    the tail only (a refused tail is the cblas parts, with nothing added on
-    K); repeats after other shapes, on registered and misaligned memory,
+    the tail only, ZGEMM tails whose product or C the epilogue's bounds
+    refuse, and the same data in the head only, whose tail stands (a refused
+    tail is the cblas parts, with nothing added on K); repeats after other shapes, on registered and misaligned memory,
     under background load and from 8 threads at once; registered memory in
     place except C on the M axis; a caller with flush to zero declined. In
     child processes through `dgemm_` / `zgemm_`, with a split table covering
@@ -154,7 +156,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
   - `tests/test_precision.c` — 17 tests (the last compares
     `AB_PRECISION=fast` with the default mode); needs decomposition strategy
   - `tests/test_qe_golden.c` — 32 golden-bits cases, see below
-  - `tests/test_staging.c` — 134 cases of the staged path against the
+  - `tests/test_staging.c` — 141 cases of the staged path against the
     host path, bit for bit, see below (its `TEST_STAGING` line is not
     part of the total either)
   - `tests/verification/test_convergence.c` — monolithic numerical
@@ -352,8 +354,9 @@ as `ab_internal_last_staged()` reports it: the staged result stands
 exactly where the exponent-range guard certifies the call, its lines
 scaled or not and a ZGEMM by Gauss-3M or 4M (the test asks the guard's own
 functions, `src/ab_internal.h`), a DGEMM's alpha and beta lie in their
-window, and no Inf or NaN reaches an epilogue; every other call is
-made on the host path. It must run on the GPU and hash the
+window, no Inf or NaN reaches an epilogue, and a ZGEMM's epilogue stays in
+FP64's range (`ab_zgemm_product_fits`, `ab_zgemm_c_fits`); every other call
+is made on the host path. It must run on the GPU and hash the
 whole C array (padding included) the same in all four children, unless the
 guard sends it to Accelerate (NaN or Inf in A or B, or in C with beta ≠ 0,
 or a range the scaling cannot keep), which it must then do in every child. The
@@ -581,7 +584,15 @@ the window, values below 2⁻¹⁰⁴² (lines made only of them too), zero line
 and parts, and calls the guard refuses, plus QE-sized shapes and passes
 with the CPU flushing subnormals to zero (FPCR.FZ). Each suite also needs
 both outcomes in stage 2 often enough, and each crafted case its known
-outcome.
+outcome. `test_zgemm_epilogue_bounds` holds a ZGEMM epilogue's bounds
+(`ab_zgemm_product_fits`, `ab_zgemm_c_fits`) to both sides of each edge,
+checks that a copy of the predicate of the GPU epilogue's flag on C beside
+beta = 1 (2¹⁰²² and up) refuses exactly where the C bound does (the flag
+itself is held to that edge by `test_blas_abi`'s `epi-c-at` and
+`epi-c-below` cases), and, on 200,000 random calls near
+the edges, that every call both bounds pass keeps the epilogue's worst case
+(the largest parts they allow, every term of one sign) finite, below
+2¹⁰²³(1 + 2⁻⁵⁰).
 
 ## Fortran binding probe
 

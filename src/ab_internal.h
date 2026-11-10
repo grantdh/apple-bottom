@@ -215,7 +215,10 @@ static inline ab_range_t ab_range_merge(ab_range_t a, ab_range_t b) {
 //      where row i's and column j's supports miss each other, beta' C'_ij is
 //      all of C_ij. Without such a product the call goes to Accelerate. A ZGEMM
 //      with beta != 0 and NaN or Inf in C goes to Accelerate too
-//      (zgemm_reads_nonfinite_c).
+//      (zgemm_c_refused).
+//   5. A ZGEMM's FP64 epilogue must stay in FP64's range (ab_zgemm_product_fits,
+//      ab_zgemm_c_fits, below): a call whose alpha P or beta C could reach
+//      2^AB_EPI_MAX_EXP goes to Accelerate.
 // The unscale, bit for bit (dgemm_blas, zgemm_blas): each GPU result C'_ij
 // becomes FP64 as (double)hi + (double)lo, then is multiplied by
 // 2^(ra[i] + cb[j] + ea) (ea = 0 for ZGEMM) with ab_scale2, one rounding. A
@@ -298,6 +301,43 @@ ab_guard_t ab_range_guard_c_stage1(ab_range_t r, double beta);
 bool ab_range_guard_c(const ab_line_stats_t* sa, const ab_line_stats_t* sb, ab_range_t r,
                       double alpha, double beta, const double* C, int ldC, int shift,
                       const ab_op_view_t* a, const ab_op_view_t* b);
+
+// Step 5. A ZGEMM's epilogue (zgemm_blas's, and the GPU's ab_epi_z, which
+// follows it) forms C = alpha P + beta C in FP64 after scaling each part of
+// the product P back by 2^(ra[i] + cb[j]), so a P, alpha P or beta C beyond
+// FP64's range turns into Inf or NaN there even where C itself is finite. The
+// call goes to Accelerate where, from bounds the guard already has, that
+// could happen:
+//   - P: with a and b the largest |Re x| or |Im x| of op(A) and op(B) (the
+//     largest of their lines' max, unscaled), each part of P_ij is a sum of 2K
+//     products below 2^(ilogb a + 1) 2^(ilogb b + 1), so below 2^E, E =
+//     ilogb a + ilogb b + ilogb K + 5, with a factor 2 for DD's rounding. The
+//     call needs E <= AB_EPI_MAX_EXP + 1 and (|Re alpha| + |Im alpha|) 2^E <=
+//     2^AB_EPI_MAX_EXP.
+//   - beta C, read where beta != 0: with c the largest |Re C| or |Im C|,
+//     (|Re beta| + |Im beta|) 2^(ilogb c + 1) <= 2^AB_EPI_MAX_EXP.
+// Each part of alpha P and of beta C is then at most 2^AB_EPI_MAX_EXP
+// (1 + 2^-52) (the sum |Re| + |Im| is rounded), and every value the
+// epilogue forms below 2^1023 (1 + 2^-50), clear of FP64's overflow. A NaN or
+// Inf line or C fails, and so does a scalar whose |Re| + |Im| is not finite.
+#define AB_EPI_MAX_EXP 1022
+
+// The P part: true if the call may keep its GPU product. a_max and b_max are
+// the high words of a and b (ab_abs_hiword; ab_lines_max of the statistics).
+bool ab_zgemm_product_fits(int K, uint32_t a_max, uint32_t b_max, double alpha_re,
+                           double alpha_im);
+
+// The beta C part: c_max is the high word of the largest |Re C| or |Im C| of
+// C's block (ab_abs_hiword), read only where beta != 0.
+bool ab_zgemm_c_fits(double beta_re, double beta_im, uint32_t c_max);
+
+// The high word of the largest |x| over s's lines as scanned (unscaled; a
+// complex x's larger part).
+static inline uint32_t ab_lines_max(const ab_line_stats_t* s) {
+    uint32_t mx = 0;
+    for (int i = 0; i < s->n; i++) AB_HIWORD_MAX(s->max[i], mx);
+    return mx;
+}
 
 // =============================================================================
 // Complex products: Gauss-3M or 4M
