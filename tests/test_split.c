@@ -495,13 +495,32 @@ static void test_split_exponent_range(void) {
                     free(C); free(ref);
                     free_operands(&o);
                 }
-    // A ZGEMM tail that reads NaN in C goes to Accelerate as out of range:
-    // with alpha 2 (the host epilogue) unrun, with alpha 1, beta 1 after the
-    // GPU epilogue meets it, as without AB_SPLIT.
-    for (int gpu_epi = 0; gpu_epi < 2; gpu_epi++) {
-        Call c = {'z', 'N', 'N', 300, 260, 200, 0, {gpu_epi ? 1 : 2, 0}, {gpu_epi ? 1 : 0.5, 0}};
+    // A ZGEMM tail goes to Accelerate as out of range, as without AB_SPLIT,
+    // where its epilogue would read NaN in C, or could overflow FP64
+    // (ab_zgemm_product_fits, ab_zgemm_c_fits): its product (op(A) x 2^600,
+    // the tail's columns of op(B) x 2^500), its C (the tail's columns x
+    // 2^1023). With the host epilogue (alpha 2, or 2^-200) a C is refused
+    // unrun and a product after the run; with the GPU's (alpha 1, beta 0 or 1)
+    // once that epilogue meets them. The head stays finite on Accelerate.
+    enum { NAN_C, BIG_P, BIG_C };
+    static const char *const BAD[] = {"NaN in C", "product out of range", "C out of range"};
+    static const struct { int bad; double alpha, beta; } TAIL[] = {
+        {NAN_C, 2.0, 0.5}, {NAN_C, 1.0, 1.0}, {BIG_P, 0x1p-200, 0.0}, {BIG_P, 1.0, 0.0},
+        {BIG_C, 2.0, 1.0}, {BIG_C, 1.0, 1.0},
+    };
+    for (size_t t = 0; t < TEST_REGISTRY_SIZE(TAIL); t++) {
+        Call c = {'z', 'N', 'N', 300, 260, 200, 0, {TAIL[t].alpha, 0}, {TAIL[t].beta, 0}};
         Operands o = operands(&c);
-        o.C0[(size_t)2 * o.ldC * 250 + 4] = NAN;              // column 250: in the tail
+        const int bad = TAIL[t].bad;
+        if (bad == NAN_C) o.C0[(size_t)2 * o.ldC * 250 + 4] = NAN;       // column 250: in the tail
+        for (int j = 64; bad != NAN_C && j < c.N; j++) {                 // the tail's columns
+            if (bad == BIG_P)
+                for (size_t i = 0; i < (size_t)2 * c.K; i++) o.B[(size_t)2 * o.ldB * j + i] *= 0x1p500;
+            else
+                for (size_t i = 0; i < (size_t)2 * c.M; i++) o.C0[(size_t)2 * o.ldC * j + i] *= 0x1p1023;
+        }
+        for (int k = 0; bad == BIG_P && k < c.K; k++)
+            for (size_t i = 0; i < (size_t)2 * c.M; i++) o.A[(size_t)2 * o.ldA * k + i] *= 0x1p600;
         double *C = malloc(o.nC * sizeof *C), *ref = malloc(o.nC * sizeof *ref);
         memcpy(C, o.C0, o.nC * sizeof *C);
         memcpy(ref, o.C0, o.nC * sizeof *ref);
@@ -509,8 +528,9 @@ static void test_split_exponent_range(void) {
         parts_reference(&c, 'N', 64, &o, ref);
         ab_split_record_t rec;
         check(got == AB_SPLIT_RANGE && ab_internal_last_split(&rec) && rec.staged == 8 /* RANGE */,
-              "ZGEMM alpha %g beta %g with NaN in the tail's C: outcome %d", c.alpha[0], c.beta[0], got);
-        check(!memcmp(C, ref, o.nC * sizeof *C), "ZGEMM with NaN in the tail's C: C is not the cblas parts");
+              "ZGEMM alpha %g beta %g, %s in the tail: outcome %d", c.alpha[0], c.beta[0], BAD[bad], got);
+        check(!memcmp(C, ref, o.nC * sizeof *C), "ZGEMM alpha %g beta %g, %s in the tail: C is not the "
+              "cblas parts", c.alpha[0], c.beta[0], BAD[bad]);
         free(C); free(ref);
         free_operands(&o);
     }

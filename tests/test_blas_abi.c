@@ -199,6 +199,21 @@ typedef enum {
                         // GPU reads as zero (Accelerate)
     RANGE_ALL_SUBNORMAL, // native: A x 2^-1050 (all of it), B x 2^1000: A must get a scale, not be
                         // stored as zeros
+    // A ZGEMM's FP64 epilogue, alpha P + beta C after P's scale-back, must stay
+    // in FP64's range (ab_zgemm_product_fits, ab_zgemm_c_fits). With K = 72,
+    // P's parts are bounded by 2^E, E = ilogb max|op(A)| + ilogb max|op(B)| +
+    // 11; the call needs E <= 1023, (|Re alpha| + |Im alpha|) 2^E <= 2^1022 and
+    // (|Re beta| + |Im beta|) 2^(ilogb max|C0| + 1) <= 2^1022.
+    RANGE_EPI_OVERFLOW, // op(A) x 2^600, op(B) x 2^500: P overflows FP64 before alpha 2^-200 would
+                        // bring C back to about 2^905 (Accelerate, whose own P overflows too)
+    RANGE_EPI_TOP,      // op(A), op(B) x 2^507: E = 1023, the largest P may have; alpha with
+                        // |Re| + |Im| = 0.5 is at the edge (the GPU), 0.5 + 2^-53 past it
+    RANGE_EPI_OVER,     // op(A) x 2^508, op(B) x 2^507: E = 1024 (Accelerate, though C is finite)
+    RANGE_EPI_C,        // C0 x 2^1022 (below 2^1022): beta = 1 is at the edge (the GPU), 1 + 2^-52
+                        // past it (Accelerate)
+    RANGE_EPI_C_TOP,    // C0 x 2^1023: past the edge with alpha = beta = 1, which the GPU epilogue
+                        // flags (Accelerate)
+    RANGE_EPI_SCALAR,   // no factors: for a NaN or Inf alpha or beta (Accelerate)
 } RangeData;
 
 static const char *const RANGE_TAG[] = {
@@ -214,6 +229,9 @@ static const char *const RANGE_TAG[] = {
     [RANGE_C_SUBNORMAL] = "c-subnormal", [RANGE_C_SCALED_OUT] = "c-scaled-out",
     [RANGE_A_SUBNORMAL] = "a-subnormal", [RANGE_B_SUBNORMAL] = "b-subnormal",
     [RANGE_ENTRY_SUBNORMAL] = "entry-subnormal", [RANGE_ALL_SUBNORMAL] = "all-subnormal",
+    [RANGE_EPI_OVERFLOW] = "epi-overflow", [RANGE_EPI_TOP] = "epi-top",
+    [RANGE_EPI_OVER] = "epi-over", [RANGE_EPI_C] = "epi-c", [RANGE_EPI_C_TOP] = "epi-c-top",
+    [RANGE_EPI_SCALAR] = "epi-scalar",
 };
 
 typedef struct {
@@ -584,7 +602,8 @@ static void gen_memory(const Suite *s) {
 //   - Through dgemm_ / zgemm_ (AB_MODE=gpu, no ab_init()), each call must
 //     run on the GPU where power-of-two scaling of op(A)'s rows and op(B)'s
 //     columns puts every product back in range (ROUTE_GPU), and on Accelerate
-//     where no such scaling can (ROUTE_CPU: NaN or Inf, or RANGE_MISALIGNED).
+//     where no such scaling can (ROUTE_CPU: NaN or Inf, RANGE_MISALIGNED, or a
+//     ZGEMM whose FP64 epilogue could overflow, RANGE_EPI_*).
 //   - The native ABMatrix cases call ab_init() and run on the GPU; a matrix
 //     keeps one power-of-two scale there.
 // Every case must give C within TOL of cblas, with Inf and NaN where cblas
@@ -678,6 +697,41 @@ static void gen_range(const Suite *s) {
         AbiCase *c = add_range(s, OP_ZGEMM_SYM, 'N', 'N', d, ROUTE_CPU);
         c->alpha = c->beta = 1.0;
         add_range(s, OP_ZGEMM_SYM, 'C', 'N', d, ROUTE_CPU);
+    }
+    // A ZGEMM's FP64 epilogue must stay in range: on both sides of each bound,
+    // through the host epilogue (other alpha or beta: the product bound decided
+    // after the staged run, the C bound before it) and the GPU's (alpha = 1,
+    // beta = 0 or 1: it flags an overflow, and a C of 2^1022 or more).
+    const double complex sc = SCALARS[SC_GEN].alpha;
+    const struct {
+        char ta, tb;
+        RangeData data;
+        double complex alpha, beta;
+        Route route;
+        const char *tag;
+    } E[] = {
+        {'N', 'N', RANGE_EPI_OVERFLOW, 0x1p-200, 0.0, ROUTE_CPU, "a2^-200"},
+        {'C', 'N', RANGE_EPI_OVERFLOW, 0x1p-200, 0.0, ROUTE_CPU, "a2^-200"},
+        {'N', 'T', RANGE_EPI_OVERFLOW, 1.0, 0.0, ROUTE_CPU, "a1b0"},
+        {'N', 'N', RANGE_EPI_TOP, 0.5, 0.0, ROUTE_GPU, "a0.5"},
+        {'N', 'N', RANGE_EPI_TOP, 0.5 + 0x1p-53, 0.0, ROUTE_CPU, "a0.5+2^-53"},
+        {'C', 'N', RANGE_EPI_TOP, CMPLX(0.25, -0.25), 0.0, ROUTE_GPU, "a0.25-0.25i"},
+        {'C', 'N', RANGE_EPI_TOP, CMPLX(0.25, -(0.25 + 0x1p-53)), 0.0, ROUTE_CPU,
+         "a0.25-(0.25+2^-53)i"},
+        {'N', 'N', RANGE_EPI_OVER, 0x1p-10, 0.0, ROUTE_CPU, "a2^-10"},
+        {'N', 'N', RANGE_EPI_C, sc, 1.0, ROUTE_GPU, "b1"},
+        {'N', 'N', RANGE_EPI_C, sc, 1.0 + 0x1p-52, ROUTE_CPU, "b1+2^-52"},
+        {'T', 'N', RANGE_EPI_C, 1.0, 1.0, ROUTE_GPU, "a1b1"},
+        {'T', 'N', RANGE_EPI_C_TOP, 1.0, 1.0, ROUTE_CPU, "a1b1"},
+        {'N', 'N', RANGE_EPI_SCALAR, INFINITY, 0.0, ROUTE_CPU, "aInf"},
+        {'N', 'N', RANGE_EPI_SCALAR, sc, NAN, ROUTE_CPU, "bNaN"},
+    };
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(E); i++) {
+        AbiCase *c = add_range(s, OP_ZGEMM_SYM, E[i].ta, E[i].tb, E[i].data, E[i].route);
+        c->alpha = E[i].alpha;
+        c->beta = E[i].beta;
+        size_t len = strlen(c->name);
+        snprintf(c->name + len, sizeof c->name - len, "/%s", E[i].tag);
     }
 }
 
@@ -1627,6 +1681,9 @@ static double range_a(RangeData d, int i, int k, int M) {
     case RANGE_B_SUBNORMAL:   return 0x1p1000;
     case RANGE_ENTRY_SUBNORMAL: return k == 0 ? 1.0 : F_SUBNORMAL;
     case RANGE_ALL_SUBNORMAL: return F_SUBNORMAL;
+    case RANGE_EPI_OVERFLOW:  return 0x1p600;
+    case RANGE_EPI_TOP:       return 0x1p507;
+    case RANGE_EPI_OVER:      return 0x1p508;
     default:                  return 1.0;
     }
 }
@@ -1650,6 +1707,9 @@ static double range_b(RangeData d, int k, int j, int N) {
     case RANGE_B_SUBNORMAL:   return j == 0 ? F_SUBNORMAL : 1.0;
     case RANGE_ENTRY_SUBNORMAL: return k == 0 ? 0.0 : 0x1p1000;
     case RANGE_ALL_SUBNORMAL: return 0x1p1000;
+    case RANGE_EPI_OVERFLOW:  return 0x1p500;
+    case RANGE_EPI_TOP:
+    case RANGE_EPI_OVER:      return 0x1p507;
     default:                  return 1.0;
     }
 }
@@ -1670,6 +1730,11 @@ static double range_c(RangeData d, int i, int j, int M, int N) {
     case RANGE_C_SCALED_OUT:  return j != 0 ? 1.0 : i == 0 ? 0x1p-100 : 0x1p970;
     case RANGE_A_SUBNORMAL:   return i == 0 ? 0.0 : 0x1p1000;
     case RANGE_B_SUBNORMAL:   return j == 0 ? 0.0 : 0x1p1000;
+    case RANGE_EPI_OVERFLOW:
+    case RANGE_EPI_TOP:
+    case RANGE_EPI_OVER:      return 1.0;
+    case RANGE_EPI_C:         return 0x1p1022;
+    case RANGE_EPI_C_TOP:     return 0x1p1023;
     default:                  return range_a(d, i, 0, M) * range_b(d, 0, j, N);
     }
 }

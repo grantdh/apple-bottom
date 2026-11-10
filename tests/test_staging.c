@@ -92,6 +92,9 @@ typedef enum {
                     // a row, one entry, imaginary parts) and columns of op(B) (all of one)
     D_SUBNORMAL_C,  // row 0 of op(A) zero; columns of op(B) x 2^1000, C there x 2^970, but
                     // in row 0 x 2^-100 (op(A) = A) or 2^-200: C' below 2^-1042, or 0
+    D_EPI_P,        // A x 2^600, B x 2^500 (ZGEMM): the product overflows FP64 when the
+                    // epilogue scales it back, whatever alpha does after
+    D_EPI_C,        // C on entry x 2^1023 (ZGEMM, C read): beta C could overflow FP64
     D_COUNT
 } DataKind;
 
@@ -100,7 +103,7 @@ static const char *const DATA_TAG[D_COUNT] = {
     [D_SIGNED_ZERO] = "signedzero", [D_TINY_C] = "tinyC", [D_CANCEL] = "cancel",
     [D_NAN_A] = "nanA", [D_NAN_C] = "nanC", [D_HUGE] = "huge", [D_HUGE_C] = "hugeC",
     [D_STAGE2] = "stage2", [D_IMBAL] = "imbal", [D_SUBNORMAL] = "subnormal",
-    [D_SUBNORMAL_C] = "subnormalC",
+    [D_SUBNORMAL_C] = "subnormalC", [D_EPI_P] = "epiP", [D_EPI_C] = "epiC",
 };
 
 // What each kind of data is for: the staged result must stand in at least
@@ -191,6 +194,17 @@ static void make_cases(void) {
     add('d', 'N', 'T', 96, 80, 72, 3, S_A1B0, D_SUBNORMAL_C);
     add('d', 'N', 'N', 96, 80, 72, 3, S_A1B1, D_SUBNORMAL_C);
     add('d', 'T', 'N', 96, 80, 72, 3, S_A1B1, D_SUBNORMAL_C);
+    // A ZGEMM whose FP64 epilogue could overflow goes to Accelerate in every
+    // child: by its product, decided after the staged run (the GPU epilogue's
+    // overflow too) and before the host path's; by its C, decided before
+    // either runs, or flagged by the GPU epilogue beside alpha = beta = 1.
+    add('z', 'N', 'N', 96, 80, 72, 3, S_A1B0, D_EPI_P);
+    add('z', 'C', 'N', 96, 80, 72, 3, S_A1B1, D_EPI_P);
+    add('z', 'N', 'T', 96, 80, 72, 3, S_AXB0, D_EPI_P);
+    add('z', 'T', 'C', 75, 53, 47, 3, S_AXBX, D_EPI_P);
+    add('z', 'N', 'N', 96, 80, 72, 3, S_A1B1, D_EPI_C);
+    add('z', 'C', 'N', 75, 53, 47, 3, S_A1BX, D_EPI_C);
+    add('z', 'N', 'C', 75, 53, 47, 3, S_AXBX, D_EPI_C);
     // Complex parts imbalanced enough for 4M
     add('z', 'T', 'N', 96, 80, 72, 3, S_A1B0, D_IMBAL);
     add('z', 'N', 'C', 96, 80, 72, 3, S_A1B1, D_IMBAL);
@@ -250,7 +264,7 @@ static double random_bits(int lo, int hi) {
 }
 
 typedef enum { V_UNIFORM, V_MIXED, V_WIDE, V_BITS_A, V_BITS_C, V_ONE, V_SIGNED_ZERO, V_TINY,
-               V_NAN_INF, V_HUGE, V_HUGE_C } ValueKind;
+               V_NAN_INF, V_HUGE, V_HUGE_C, V_EPI_A, V_EPI_B, V_EPI_C } ValueKind;
 
 static double value(ValueKind v, size_t idx) {
     static const double NAN_INF[] = {NAN, INFINITY, -INFINITY};
@@ -271,6 +285,9 @@ static double value(ValueKind v, size_t idx) {
     case V_NAN_INF:     return NAN_INF[idx % 3];
     case V_HUGE:        return ldexp(1.0 + uniform() / 4, 100);
     case V_HUGE_C:      return ldexp(uniform(), 140);
+    case V_EPI_A:       return ldexp(uniform(), 600);
+    case V_EPI_B:       return ldexp(uniform(), 500);
+    case V_EPI_C:       return ldexp(uniform(), 1023);
     default:            return uniform();
     }
 }
@@ -325,6 +342,8 @@ static void make_problem(Problem *P, const Case *c, const char *name, int shift)
     case D_NAN_C:       vc = V_NAN_INF; break;
     case D_HUGE:        va = vb = V_HUGE; break;
     case D_HUGE_C:      vc = V_HUGE_C; break;
+    case D_EPI_P:       va = V_EPI_A; vb = V_EPI_B; break;
+    case D_EPI_C:       vc = V_EPI_C; break;
     default: break;
     }
     fill(P->A, P->la, w, va);
@@ -432,9 +451,11 @@ static void call_gemm(Problem *P) {
 // a DGEMM only with alpha and beta in their window. There the
 // exponent-range guard (ab_internal.h) certifies the product of the lines
 // as scaled (and a DGEMM's C, when read, as uploaded: scaled by its row's
-// and column's scales). Then no Inf or NaN may reach an epilogue: a ZGEMM's C
-// with beta != 0 must be finite. The host path makes every other call: on the
-// GPU with such scalars, or on Accelerate.
+// and column's scales). Then no Inf or NaN may reach an epilogue, nor come out
+// of a ZGEMM's: its product and its C with beta != 0 must meet the epilogue's
+// bounds (ab_zgemm_product_fits, ab_zgemm_c_fits; such a C is finite). The
+// host path makes every other call: on the GPU with such scalars, or on
+// Accelerate.
 static bool expected_staged(const Problem *P) {
     const Case *c = P->c;
     bool z = c->routine == 'z';
@@ -451,7 +472,9 @@ static bool expected_staged(const Problem *P) {
         ab_line_stats_scan(&vb, false, &sb);
         ab_line_scales(&sa);
         ab_line_scales(&sb);
-        ok = ab_range_guard(c->K, &sa, &sb, z ? 0 : ilogb(creal(al)), &va, &vb);
+        ok = ab_range_guard(c->K, &sa, &sb, z ? 0 : ilogb(creal(al)), &va, &vb) &&
+             (!z || ab_zgemm_product_fits(c->K, ab_lines_max(&sa), ab_lines_max(&sb), creal(al),
+                                          cimag(al)));
     }
     ab_range_t r = AB_RANGE_EMPTY;
     for (int j = 0; j < c->N; j++)
@@ -462,7 +485,7 @@ static bool expected_staged(const Problem *P) {
                 AB_HIWORD_ADD(ab_stat_hiword_scaled(cs, v), r.max, r.min);
             }
     if (ok && be != 0.0)
-        ok = z ? !ab_range_nonfinite(r)
+        ok = z ? ab_zgemm_c_fits(creal(be), cimag(be), r.max)
                : ab_range_guard_c(&sa, &sb, r, creal(al), creal(be), P->C0, P->lc.ld, 0,
                                   &va, &vb);
     ab_line_stats_free(&sa);
