@@ -56,7 +56,9 @@ void ab_internal_set_last_path(bool gpu) { _ab_last_path = gpu ? "gpu" : "cpu"; 
 // sum of C_ij alike, so wherever no intermediate leaves FP32's normal range
 // either way, the bits are those of the unscaled computation; data whose
 // lines all lie inside the window runs exactly as before.
-#define AB_RANGE_WHY "values beyond double-float's exponent range, or NaN/Inf"
+#define AB_RANGE_WHY \
+    "values beyond double-float's exponent range, a ZGEMM epilogue that could overflow FP64, " \
+    "or NaN/Inf"
 
 bool ab_line_stats_init(ab_line_stats_t* s, int n, bool complex_parts) {
     s->n = n;
@@ -1636,7 +1638,8 @@ static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis
         if (why == AB_PROF_STAGED_SCALAR) return split_declined(rec, AB_PROF_SPLIT_DECLINE_SCALAR);
         j.g.classical = true;
         j.g.c_staged = axis == 'M';
-        // A ZGEMM tail reading NaN or Inf in C goes to Accelerate without a run.
+        // A ZGEMM tail whose host epilogue would read in C a NaN, an Inf or a
+        // value beta could take out of range goes to Accelerate without a run.
         if (why == AB_PROF_STAGED_RANGE) {
             j.why = why;
             run_tail = false;

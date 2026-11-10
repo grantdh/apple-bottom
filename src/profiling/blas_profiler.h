@@ -91,7 +91,8 @@ typedef enum {
     AB_PROF_STAGED_SCALAR,      // a DGEMM alpha or beta outside 2^±AB_SCALAR_WINDOW, or not finite
     AB_PROF_STAGED_ALLOC,       // no GPU buffers for it
     AB_PROF_STAGED_GPU_FAILED,  // its command buffer failed, or its line scales were not the host's
-    AB_PROF_STAGED_NONFINITE,   // Inf or NaN in the GPU epilogue
+    AB_PROF_STAGED_NONFINITE,   // Inf or NaN in the GPU epilogue, or a ZGEMM C there of 2^1022 or
+                                // more beside beta = 1 (the host path then refuses it: range)
     AB_PROF_STAGED_RANGE,       // the exponent-range guard does not certify it
     AB_PROF_STAGED_COUNT
 } ab_prof_staged_t;

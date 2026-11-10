@@ -93,8 +93,12 @@ in-range data unchanged:
   - A DGEMM alpha or beta outside 2^±20 joins C's scale.
   - A call the scaled data still cannot keep in range runs on Accelerate.
     So does a call with NaN or Inf in A or B, or in C with beta ≠ 0,
-    which then gets IEEE results. `AB_REPORT` counts such calls
-    as `range` fallbacks.
+    which then gets IEEE results, and a ZGEMM whose FP64 epilogue could
+    overflow (its product, alpha times it, or beta times C beyond FP64's
+    range, judged from their largest entries; see
+    [Exponent range](vv/LIMITATIONS.md#exponent-range)) or whose alpha or
+    beta is NaN or Inf or has |Re| + |Im| beyond FP64's range. `AB_REPORT`
+    counts such calls as `range` fallbacks.
 - **Native `ABMatrix` API.**
   - `ab_matrix_upload` gives each matrix one power-of-two scale, and
     `ab_matrix_download` removes it; the GPU operations carry it through.
@@ -715,8 +719,10 @@ AB_REPORT[<pid>] <routine> staged kept=… kept_4m=… host_pack=… fpcr=… sc
   allocation, upload or kernel failed before C was written), `other` (BLAS-2:
   A could not be mapped for the GPU), `range` (NaN or Inf, or values that
   power-of-two scaling cannot keep in double-float's exponent range, see
-  [Values far from 1](#values-far-from-1); BLAS-2, which scales only x: data
-  outside [its guard's limits](vv/LIMITATIONS.md#exponent-range)). They count
+  [Values far from 1](#values-far-from-1); a ZGEMM whose FP64 epilogue could
+  overflow, or whose alpha or beta is NaN or Inf or has |Re| + |Im| beyond
+  FP64's range; BLAS-2, which scales only x: data outside
+  [its guard's limits](vv/LIMITATIONS.md#exponent-range)). They count
   as CPU calls, and their `cpu_ms` includes the failed GPU attempt.
 - **The staged line** counts the GPU-routed calls that reached the staged
   path: `kept` its result, `kept_4m` (a ZGEMM whose real and imaginary
@@ -729,7 +735,10 @@ AB_REPORT[<pid>] <routine> staged kept=… kept_4m=… host_pack=… fpcr=… sc
   2^±20, or not finite), `alloc` (no GPU buffers), `gpu_failed` (its
   command buffer failed, or the GPU's power-of-two scales of the lines
   differ from the host path's: a defect, never expected), `nonfinite` (Inf
-  or NaN in the GPU epilogue) and `range` (the guard does not certify the
+  or NaN in the GPU epilogue, or a ZGEMM's C of 2¹⁰²² or more beside alpha =
+  beta = 1, which the host path then sends to Accelerate as a `range`
+  fallback; `AB_SPLIT` counts such a tail as range) and `range` (the guard,
+  with a ZGEMM's epilogue bounds, does not certify the
   call, which goes straight to Accelerate as a `range` fallback). Each call
   counts once, whether it then ran on the host path or on Accelerate.
 - **Each process reports once**, tagged with its pid, so MPI ranks sharing

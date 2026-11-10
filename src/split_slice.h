@@ -104,7 +104,8 @@ typedef enum {
     AB_SPLIT_KEPT_4M,       // ... a ZGEMM part by 4M
     AB_SPLIT_CPU,           // cblas made both parts (engine 1, or g = 0)
     AB_SPLIT_RANGE,         // the GPU's part was made again on Accelerate: the range guard
-                            // did not certify it, or its C held NaN or Inf
+                            // did not certify it (a ZGEMM's epilogue bounds included: its
+                            // product, or its C, could overflow FP64), or its C held NaN or Inf
     AB_SPLIT_GPU_FAILED,    // ... its run failed: no buffers, a command buffer failed twice,
                             // line scales unlike the host's, Inf or NaN in its epilogue, or
                             // the worker's floating-point control

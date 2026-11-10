@@ -318,7 +318,7 @@ bool ab_range_guard_c(const ab_line_stats_t* sa, const ab_line_stats_t* sb, ab_r
 // Each part of alpha P and of beta C is then at most 2^AB_EPI_MAX_EXP
 // (1 + 2^-52) (the sum |Re| + |Im| is rounded), and every value the
 // epilogue forms below 2^1023 (1 + 2^-50), clear of FP64's overflow. A NaN or
-// Inf scalar, line or C fails.
+// Inf line or C fails, and so does a scalar whose |Re| + |Im| is not finite.
 #define AB_EPI_MAX_EXP 1022
 
 // The P part: true if the call may keep its GPU product. a_max and b_max are

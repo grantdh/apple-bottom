@@ -4980,7 +4980,8 @@ typedef enum {
     STAGE_B, STAGE_BI, STAGE_B4,    // op(B) in DD, likewise
     STAGE_T1, STAGE_T2,             // ZGEMM Ar*Br, Ai*Bi
     STAGE_C, STAGE_CI,              // the GEMM's DD result: DGEMM C; ZGEMM Cr, Ci
-    STAGE_FLAG,                     // set by the epilogue on Inf or NaN
+    STAGE_FLAG,                     // set by the epilogue on Inf or NaN, or a ZGEMM C of 2^1022
+                                    // or more beside beta = 1
     STAGE_STATS,                    // the guard's statistics (stage_stats_lines)
     STAGE_ROLES
 } StageRole;
