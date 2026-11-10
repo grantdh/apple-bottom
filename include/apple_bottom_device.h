@@ -242,8 +242,18 @@ ABStatus ab_dev_zhemv(ABUplo uplo, int n, const double alpha[2],
                       const double* x, int incx,
                       const double beta[2], double* y, int incy);
 
-// Element-wise utilities of the kind GPU-resident Fortran codes need
-// (conjugate, scale, axpy on device buffers).
+// Element-wise utilities of the kind GPU-resident Fortran codes need, run on
+// the CPU in FP64 on the buffer's shared memory:
+//   ab_dev_conjg_c: x := conj(x)
+//   ab_dev_scale_z: x := alpha * x
+//   ab_dev_axpy_z:  y := alpha * x + y
+// The buffers hold interleaved complex doubles. Offsets, n and increments
+// count complex elements. A vector starts `offset` elements into its buffer;
+// ab_dev_axpy_z's increments may be negative, which step backwards from the
+// far end as in BLAS, or zero (every step reads or updates the same element,
+// as in reference ZAXPY). Returns AB_OK (also for n == 0), or
+// AB_ERROR_INVALID_ARG with every buffer unchanged for a NULL buffer or alpha
+// or a vector reaching past the end of its buffer.
 ABStatus ab_dev_conjg_c(ab_dev_buffer_t buf, size_t offset, size_t n);
 ABStatus ab_dev_scale_z(ab_dev_buffer_t buf, size_t offset, size_t n,
                         const double alpha[2]);

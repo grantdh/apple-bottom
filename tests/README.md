@@ -45,8 +45,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 246, every test but
-the chaos ones, and `make ci-local` all 264 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 247, every test but
+the chaos ones, and `make ci-local` all 265 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -62,7 +62,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     return `AB_OK` (an A singular in FP64 too: `AB_ERROR_KERNEL_FAILED`,
     B unchanged)
   - `tests/test_chaos.c` — 18 tests
-  - `tests/test_device_api.c` — 20 tests (209 `CHECK`s); the GEMM
+  - `tests/test_device_api.c` — 21 tests (219 `CHECK`s); the GEMM
     tests compare `ab_dev_dgemm` / `ab_dev_zgemm` with column-major
     cblas over all trans pairs, non-square and tall-skinny shapes,
     `ld > rows`, buffer offsets and a C of 2²⁰ elements, and check that
@@ -82,7 +82,12 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     and variants, through handles and device buffers, real and complex):
     within 2⁷⁸ it must be centred and C within ULP Fiction's bound for
     `ab_dgemm`, and a wider span (exponents 79 apart, or ordinary values
-    with one such value) must keep its earlier scale and bits
+    with one such value) must keep its earlier scale and bits;
+    `test_elementwise_bounds` holds `ab_dev_conjg_c`, `ab_dev_scale_z` and
+    `ab_dev_axpy_z` to their buffers (one element past the end, with either
+    sign of increment, is `AB_ERROR_INVALID_ARG` with the buffers and their
+    sentinels bitwise unchanged) and checks negative and zero increments
+    against element lists written out by hand in BLAS order
   - `tests/test_dispatch.c` — 23 tests of the BLAS-ABI routing and the
     `AB_SPLIT` plan, no GPU, see below
   - `tests/test_range_guard.c` — 8 tests of the exponent-range guards'

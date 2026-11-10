@@ -12,11 +12,13 @@
 // and the BLAS entry points: ab_dev_dgemm / ab_dev_zgemm against column-major
 // cblas, ab_dev_zgemm on imbalanced real and imaginary parts against Dot2,
 // both on the staging pool's reused buffers and on registered, non-page-
-// aligned memory, plus the element-wise ops.
+// aligned memory, plus the element-wise ops (results, bounds, BLAS increments).
 //
 // Pass criteria: all assertions hold. Exits non-zero on first failure.
 // =============================================================================
 
+#include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1121,6 +1123,98 @@ static void test_elementwise(void) {
     ab_dev_free(dx); ab_dev_free(dy);
 }
 
+#define EW_N 8   // complex elements in each element-wise test buffer
+
+// y0 + alpha x[jx[i]] at y[jy[i]] for i < n, in order: the hand reference.
+// The data are small integers, so every value is exact.
+static void axpy_hand(double* y, const double* x, const double alpha[2], int n,
+                      const size_t* jx, const size_t* jy) {
+    for (int i = 0; i < n; i++) {
+        const double xr = x[2 * jx[i]], xi = x[2 * jx[i] + 1];
+        y[2 * jy[i]] += alpha[0] * xr - alpha[1] * xi;
+        y[2 * jy[i] + 1] += alpha[0] * xi + alpha[1] * xr;
+    }
+}
+
+// The element-wise ops on registered memory between sentinels: a vector one
+// element past its buffer, or any way out of it, returns INVALID_ARG with the
+// buffers and the sentinels bitwise unchanged; negative and zero increments
+// follow BLAS (reference ZAXPY), checked against hand-written indices.
+static void test_elementwise_bounds(void) {
+    printf("[BLAS-3] element-wise ops: bounds, BLAS increments\n");
+    const size_t bytes = 2 * EW_N * sizeof(double);
+    double x0[2 * EW_N], y0[2 * EW_N];
+    for (int k = 0; k < EW_N; k++) {
+        x0[2 * k] = k + 1;   x0[2 * k + 1] = -(k + 1) * 4;
+        y0[2 * k] = 100 * k; y0[2 * k + 1] = 1000 + k;
+    }
+    void *rx, *ry;
+    double* x = reg_block(x0, bytes, 16, &rx);
+    double* y = reg_block(y0, bytes, 16, &ry);
+    ab_dev_buffer_t dx = ab_dev_register(x, bytes), dy = ab_dev_register(y, bytes);
+    CHECK(dx && dy, "registered two 8-element complex buffers");
+    if (!dx || !dy) { ab_dev_free(dx); ab_dev_free(dy); free(rx); free(ry); return; }
+    const double a[2] = {2.0, 1.0};
+    const ABStatus bad = AB_ERROR_INVALID_ARG;
+
+    CHECK(ab_dev_conjg_c(dx, 0, EW_N + 1) == bad && ab_dev_conjg_c(dx, 1, EW_N) == bad &&
+          ab_dev_conjg_c(dx, EW_N, 1) == bad && ab_dev_conjg_c(dx, SIZE_MAX, 2) == bad &&
+          ab_dev_conjg_c(dx, 2, SIZE_MAX) == bad,
+          "conjg_c: n or offset one past the end (or wrapping) is INVALID_ARG");
+    CHECK(ab_dev_scale_z(dx, 0, EW_N + 1, a) == bad && ab_dev_scale_z(dx, 1, EW_N, a) == bad &&
+          ab_dev_scale_z(dx, EW_N, 1, a) == bad && ab_dev_scale_z(dx, SIZE_MAX, 2, a) == bad,
+          "scale_z: n or offset one past the end (or wrapping) is INVALID_ARG");
+    CHECK(ab_dev_axpy_z(EW_N + 1, a, dx, 0, 1, dy, 0, 1) == bad &&
+          ab_dev_axpy_z(5, a, dx, 0, 2, dy, 0, 1) == bad &&
+          ab_dev_axpy_z(5, a, dx, 0, -2, dy, 0, 1) == bad &&
+          ab_dev_axpy_z(4, a, dx, 2, 2, dy, 0, 1) == bad &&
+          ab_dev_axpy_z(4, a, dx, 0, 1, dy, 5, 1) == bad &&
+          ab_dev_axpy_z(3, a, dx, 0, 1, dy, 0, -4) == bad &&
+          ab_dev_axpy_z(2, a, dx, 0, INT_MIN, dy, 0, 1) == bad &&
+          ab_dev_axpy_z(2, a, dx, 0, 1, dy, 0, INT_MAX) == bad &&
+          ab_dev_axpy_z(1, a, dx, EW_N, 0, dy, 0, 1) == bad,
+          "axpy_z: x or y one past the end (either sign of increment) is INVALID_ARG");
+    CHECK(!memcmp(x, x0, bytes) && !memcmp(y, y0, bytes) && reg_sentinels_intact(x, bytes) &&
+          reg_sentinels_intact(y, bytes),
+          "after the refused calls both buffers and their sentinels are bitwise unchanged");
+
+    // At the edges: the last element of x, and 4 steps of 2 (x[0], x[2], x[4], x[6]).
+    double xe[2 * EW_N], ye[2 * EW_N];
+    memcpy(xe, x0, bytes); memcpy(ye, y0, bytes);
+    xe[2 * (EW_N - 1) + 1] = -xe[2 * (EW_N - 1) + 1];
+    static const size_t jx_edge[4] = {0, 2, 4, 6}, jy_edge[4] = {4, 5, 6, 7};
+    axpy_hand(ye, x0, a, 4, jx_edge, jy_edge);
+    CHECK(ab_dev_conjg_c(dx, EW_N - 1, 1) == AB_OK &&
+          ab_dev_axpy_z(4, a, dx, 0, 2, dy, EW_N - 4, 1) == AB_OK && !memcmp(x, xe, bytes) &&
+          !memcmp(y, ye, bytes),
+          "conjg_c and axpy_z ending on the last element run, and touch only their elements");
+    memcpy(x, x0, bytes);
+
+    // Three steps each, against hand-written element lists.
+    static const struct {
+        size_t x_off; int incx; size_t y_off; int incy;
+        size_t jx[3], jy[3];
+        const char* msg;
+    } INC[] = {
+        {1, -2, 0, 3, {5, 3, 1}, {0, 3, 6}, "axpy_z incx = -2: starts at the far end of x, as BLAS does"},
+        {0, 1, 1, -3, {0, 1, 2}, {7, 4, 1}, "axpy_z incy = -3: starts at the far end of y, as BLAS does"},
+        {3, 1, 2, 0, {3, 4, 5}, {2, 2, 2}, "axpy_z incy = 0: every step updates the same element"},
+    };
+    for (size_t t = 0; t < sizeof INC / sizeof INC[0]; t++) {
+        memcpy(y, y0, bytes);
+        memcpy(ye, y0, bytes);
+        axpy_hand(ye, x0, a, 3, INC[t].jx, INC[t].jy);
+        CHECK(ab_dev_axpy_z(3, a, dx, INC[t].x_off, INC[t].incx, dy, INC[t].y_off, INC[t].incy) ==
+                  AB_OK && !memcmp(y, ye, bytes),
+              INC[t].msg);
+    }
+    CHECK(!memcmp(x, x0, bytes) && reg_sentinels_intact(x, bytes) && reg_sentinels_intact(y, bytes),
+          "axpy_z leaves x and every sentinel unchanged");
+
+    ab_dev_free(dx); ab_dev_free(dy);
+    free(rx); free(ry);
+}
+
 static const TestCase TESTS[] = {
     {"test_lifecycle",                test_lifecycle},
     {"test_roundtrip",                test_roundtrip},
@@ -1142,6 +1236,7 @@ static const TestCase TESTS[] = {
     {"test_gemm_registered",          test_gemm_registered},
     {"test_native_tiny_span",         test_native_tiny_span},
     {"test_elementwise",              test_elementwise},
+    {"test_elementwise_bounds",       test_elementwise_bounds},
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
 
