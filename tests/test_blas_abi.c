@@ -213,6 +213,10 @@ typedef enum {
                         // past it (Accelerate)
     RANGE_EPI_C_TOP,    // C0 x 2^1023: past the edge with alpha = beta = 1, which the GPU epilogue
                         // flags (Accelerate)
+    RANGE_EPI_C_AT,     // C0 x 2^1021, but Re C0_00 = 2^1022 exactly: the GPU epilogue's flag
+                        // beside alpha = beta = 1 (ab_f64_top) stops it (Accelerate)
+    RANGE_EPI_C_BELOW,  // the same with Re C0_00 = 2^1022 (1 - 2^-53), the largest double below
+                        // (the GPU)
     RANGE_EPI_SCALAR,   // no factors: for a NaN or Inf alpha or beta (Accelerate)
 } RangeData;
 
@@ -231,7 +235,8 @@ static const char *const RANGE_TAG[] = {
     [RANGE_ENTRY_SUBNORMAL] = "entry-subnormal", [RANGE_ALL_SUBNORMAL] = "all-subnormal",
     [RANGE_EPI_OVERFLOW] = "epi-overflow", [RANGE_EPI_TOP] = "epi-top",
     [RANGE_EPI_OVER] = "epi-over", [RANGE_EPI_C] = "epi-c", [RANGE_EPI_C_TOP] = "epi-c-top",
-    [RANGE_EPI_SCALAR] = "epi-scalar",
+    [RANGE_EPI_SCALAR] = "epi-scalar", [RANGE_EPI_C_AT] = "epi-c-at",
+    [RANGE_EPI_C_BELOW] = "epi-c-below",
 };
 
 typedef struct {
@@ -723,6 +728,8 @@ static void gen_range(const Suite *s) {
         {'N', 'N', RANGE_EPI_C, sc, 1.0 + 0x1p-52, ROUTE_CPU, "b1+2^-52"},
         {'T', 'N', RANGE_EPI_C, 1.0, 1.0, ROUTE_GPU, "a1b1"},
         {'T', 'N', RANGE_EPI_C_TOP, 1.0, 1.0, ROUTE_CPU, "a1b1"},
+        {'N', 'N', RANGE_EPI_C_AT, 1.0, 1.0, ROUTE_CPU, "a1b1"},
+        {'N', 'N', RANGE_EPI_C_BELOW, 1.0, 1.0, ROUTE_GPU, "a1b1"},
         {'N', 'N', RANGE_EPI_SCALAR, INFINITY, 0.0, ROUTE_CPU, "aInf"},
         {'N', 'N', RANGE_EPI_SCALAR, sc, NAN, ROUTE_CPU, "bNaN"},
     };
@@ -1735,6 +1742,8 @@ static double range_c(RangeData d, int i, int j, int M, int N) {
     case RANGE_EPI_OVER:      return 1.0;
     case RANGE_EPI_C:         return 0x1p1022;
     case RANGE_EPI_C_TOP:     return 0x1p1023;
+    case RANGE_EPI_C_AT:
+    case RANGE_EPI_C_BELOW:   return 0x1p1021;
     default:                  return range_a(d, i, 0, M) * range_b(d, 0, j, N);
     }
 }
@@ -1767,6 +1776,8 @@ static void range_apply(Call *k, RangeData d, bool base) {
     if (!base && d == RANGE_INF) A[op_index(c->ta, k->la, 0, 0) * w] = INFINITY;
     if (!base && d == RANGE_C_INF) C0[0] = INFINITY;
     if (!base && d == RANGE_C_NAN) C0[0] = NAN;
+    if (!base && d == RANGE_EPI_C_AT) C0[0] = 0x1p1022;
+    if (!base && d == RANGE_EPI_C_BELOW) C0[0] = nextafter(0x1p1022, 0.0);
 }
 
 // True if x is finite where r is, and else non-finite as r is: the same

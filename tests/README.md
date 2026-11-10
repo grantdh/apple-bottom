@@ -83,7 +83,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
   - `tests/test_range_guard.c` — 8 tests of the exponent-range guards'
     stage 2 against the plain loops it replaced, and of a ZGEMM
     epilogue's bounds, no GPU, see below
-  - `tests/test_blas_abi.c` — 33 suites (1109 cases), see below
+  - `tests/test_blas_abi.c` — 33 suites (1111 cases), see below
   - `tests/test_trace.c` — 8 tests of `AB_TRACE`, `AB_TEST_FAIL_STAGE`
     and the solvers' `AB_PROFILE` fallback lines, see below
   - `tests/test_blas2.c` — 19 tests (995 cases) of DGEMV, ZGEMV and
@@ -118,8 +118,9 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     against Dot2 within (3K + 13) u² |A||B|, with cuts at 1 and L − 1, NaN
     padding, beta = 0 over NaN in C, signed zeros, cancellation and QE's
     K = 143666 on the K axis; NaN, Inf and scaled lines in the head only or
-    the tail only, and ZGEMM tails whose product or C the epilogue's bounds
-    refuse (a refused tail is the cblas parts, with nothing added on K); repeats after other shapes, on registered and misaligned memory,
+    the tail only, ZGEMM tails whose product or C the epilogue's bounds
+    refuse, and the same data in the head only, whose tail stands (a refused
+    tail is the cblas parts, with nothing added on K); repeats after other shapes, on registered and misaligned memory,
     under background load and from 8 threads at once; registered memory in
     place except C on the M axis; a caller with flush to zero declined. In
     child processes through `dgemm_` / `zgemm_`, with a split table covering
@@ -574,8 +575,10 @@ with the CPU flushing subnormals to zero (FPCR.FZ). Each suite also needs
 both outcomes in stage 2 often enough, and each crafted case its known
 outcome. `test_zgemm_epilogue_bounds` holds a ZGEMM epilogue's bounds
 (`ab_zgemm_product_fits`, `ab_zgemm_c_fits`) to both sides of each edge,
-checks that the GPU epilogue's flag on C beside beta = 1 (2¹⁰²² and up)
-refuses exactly where the C bound does, and, on 200,000 random calls near
+checks that a copy of the predicate of the GPU epilogue's flag on C beside
+beta = 1 (2¹⁰²² and up) refuses exactly where the C bound does (the flag
+itself is held to that edge by `test_blas_abi`'s `epi-c-at` and
+`epi-c-below` cases), and, on 200,000 random calls near
 the edges, that every call both bounds pass keeps the epilogue's worst case
 (the largest parts they allow, every term of one sign) finite, below
 2¹⁰²³(1 + 2⁻⁵⁰).

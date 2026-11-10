@@ -67,9 +67,16 @@ DEFECTS = [
                                "    if (staged_kept(why)) ab_internal_stage_release(s);\n"
                                "    prof_stage(p, AB_PROF_STAGE_ALLOC);\n    return why;")],
      [SPLIT("test_split_exponent_range")]),
-    ("NaN made by the GPU taken for data", [(BW, "if (j.why == AB_PROF_STAGED_NONFINITE && stage_reads_nonfinite(&j.g))",
+    ("NaN made by the GPU taken for data", [(BW, "if (j.why == AB_PROF_STAGED_NONFINITE && stage_reads_refused(&j.g))",
                                              "if (j.why == AB_PROF_STAGED_NONFINITE)")],
      [SPLIT("test_split_scenarios")]),
+    ("ZGEMM tail's overflowing product taken for a GPU failure",
+     [(BW, "        return !ab_zgemm_product_fits(g->K, mx[0], mx[1], g->alpha[0], g->alpha[1]) ||\n",
+       "        return mx[0] >= AB_HIWORD_NONFINITE || mx[1] >= AB_HIWORD_NONFINITE ||\n")],
+     [SPLIT("test_split_exponent_range")]),
+    ("ZGEMM tail's C out of range taken for a GPU failure",
+     [(BW, "               !ab_zgemm_c_fits(g->beta[0], g->beta[1], mx[2]);", "               mx[2] >= AB_HIWORD_NONFINITE;")],
+     [SPLIT("test_split_exponent_range")]),
     ("P leak", [(BW, "    free(P);\n    rec->staged", "    rec->staged")],
      [SPLIT("test_split_interactions")]),
     # routing

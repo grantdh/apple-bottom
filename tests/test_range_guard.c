@@ -925,11 +925,12 @@ static void test_guard_flush_to_zero(void) {
 }
 
 // Step 5, a ZGEMM's FP64 epilogue (ab_zgemm_product_fits, ab_zgemm_c_fits):
-// each bound on both sides of its edge; the GPU epilogue's flag on C beside
-// beta = 1 (ab_f64_top: |c| >= 2^1022, Inf and NaN included) where c_fits
-// says no; and the bound's claim, that wherever both pass, the epilogue's
-// FP64 operations on the largest parts they allow, with the worst signs, stay
-// below 2^1023 (1 + 2^-50).
+// each bound on both sides of its edge; a copy of the predicate of the GPU
+// epilogue's flag on C beside beta = 1 (ab_f64_top in the Metal source: |c| >=
+// 2^1022, Inf and NaN included) against c_fits (test_blas_abi's epi-c-at and
+// epi-c-below hold the flag itself to that edge); and the bound's claim, that
+// wherever both pass, the epilogue's FP64 operations on the largest parts they
+// allow, with the worst signs, stay below 2^1023 (1 + 2^-50).
 
 // The P bound with a and b the largest parts of op(A) and op(B).
 static bool epi_product(int K, double a, double b, double ar, double ai) {
@@ -985,7 +986,6 @@ static void test_zgemm_epilogue_bounds(void) {
     expect(!ab_zgemm_c_fits(INFINITY, 0.0, 0), "beta Inf, C zero passed");
     expect(!ab_zgemm_c_fits(NAN, 0.0, ab_abs_hiword(1.0)), "beta NaN passed");
     expect(!ab_zgemm_c_fits(1e-300, 0.0, ab_abs_hiword(INFINITY)), "an Inf in C passed");
-    // The GPU epilogue's flag beside beta = 1 refuses exactly where c_fits does.
     const double cs[] = {0x1p1021, below, 0x1p1022, -0x1p1022, nextafter(0x1p1022, 0x1p1023), 0x1p1023,
                          DBL_MAX, INFINITY, -INFINITY, NAN, 1.0, 0x1p-1060, 0.0};
     for (size_t i = 0; i < TEST_REGISTRY_SIZE(cs); i++) {
