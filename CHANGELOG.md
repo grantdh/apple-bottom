@@ -459,7 +459,13 @@ All notable changes to this project will be documented in this file.
   in the guard's window [2⁻²⁰, 2²⁰) give E ≤ 73 in its 2^E bound on P, far from
   it. Calls it passes keep their bits: 100 ordinary ZGEMMs over every scalar
   class (`zbits.c`) hash the same as on 56216ee, staged and on the host path,
-  and `test_qe_golden`'s 32 cases are unchanged. DGEMM is unaffected: it
+  and `test_qe_golden`'s 32 cases are unchanged. The bounds cost nothing
+  measurable: on M2 Max (140 W adapter, load1 under 5), `ab_zgemm_blas`'s
+  median time on the fix over 56216ee's, balanced for which library ran first,
+  is 0.9998 to 1.0013 at 9139 × 500 × 512 with general alpha (39.3 ms) and
+  with general alpha and beta (44.9 ms), at 2048³ with general alpha
+  (112.5 ms), and at 'C','N' 512 × 512 × 9139 with alpha 1 (30 ms), with C
+  bitwise the same in every call. DGEMM is unaffected: it
   applies alpha and beta in DD before its one scale-back, so the reproduction
   as a DGEMM returns the finite 2⁹⁰⁵ on the GPU (Accelerate: Inf), and a DGEMM
   whose result itself overflows returns ±Inf. `ab_dev_zgemm`, which has no
