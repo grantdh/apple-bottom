@@ -591,6 +591,12 @@ $(BUILD)/probe_guard_gaps: benchmarks/probe_guard_gaps.c tests/test_blas2_ref.h 
 	$(CC) $(CFLAGS) -I$(INCLUDE) -Itests $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
 	@echo "Built: $@"
 
+# A ZGEMM's FP64 epilogue at the edge of FP64's range: overflow probes, bit
+# hashes and timing (see its header).
+$(BUILD)/probe_zgemm_epilogue: benchmarks/probe_zgemm_epilogue.c tests/test_blas_check.h lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -Itests $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH)
+	@echo "Built: $@"
+
 # BLAS-2 (GEMV, HEMV) in GB/s: resident and staged GPU, Accelerate, plain C
 # (see the header of benchmarks/bench_gemv.c; run it under machlock bench).
 $(BUILD)/bench_gemv: benchmarks/bench_gemv.c tests/test_blas2_ref.h tests/test_dot2.h $(SRC)/blas_trans.h lib | $(BUILD)
@@ -827,6 +833,8 @@ build-check: $(BUILD)/fft_metal_src.h | $(BUILD)/check
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -Itests -c benchmarks/bench_strassen.c -o $(BUILD)/check/bench_strassen.o
 	@echo "Compiling probe_guard_gaps.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -Itests -c benchmarks/probe_guard_gaps.c -o $(BUILD)/check/probe_guard_gaps.o
+	@echo "Compiling probe_zgemm_epilogue.c..."
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -Itests -c benchmarks/probe_zgemm_epilogue.c -o $(BUILD)/check/probe_zgemm_epilogue.o
 	@echo "Compiling bench_split.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -Itests -c benchmarks/bench_split.c -o $(BUILD)/check/bench_split.o
 	@echo "Compiling test_chaos.c..."
