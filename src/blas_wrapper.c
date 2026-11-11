@@ -599,7 +599,11 @@ ab_guard_t ab_range_guard_stage1(int K, const ab_line_stats_t* sa, const ab_line
 
 // The scales of C_ij's parts through one k, from the scaled parts of
 // op(A)_ik (ar, ai) and op(B)_kj (br, bi): |Ar||Br| + |Ai||Bi| (*re; for
-// real data the product's magnitude) and |Ar||Bi| + |Ai||Br| (*im).
+// real data the product's magnitude) and |Ar||Bi| + |Ai||Br| (*im). With
+// -ffp-contract=on clang may fuse one product of each sum. The per-pair
+// comparisons have no slack, so for complex data a decision at an exact
+// one-ulp tie can depend on that fusion (docs/vv/LIMITATIONS.md, "Host FP64
+// code is contracted"). For real data ai = bi = 0, and both forms agree.
 static inline void k_part_scales(double ar, double ai, double br, double bi, double* re,
                                  double* im) {
     *re = ar * br + ai * bi;
