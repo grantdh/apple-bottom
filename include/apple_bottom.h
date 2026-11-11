@@ -64,9 +64,16 @@
 //     power-of-two scale (0 for nonzero entries within 2^±39; otherwise
 //     entries spanning at most 2^78 are centred on 1), which the GPU
 //     operations carry and ab_matrix_download removes; a matrix spanning
-//     more keeps FP32's range relative to its scale. The BLAS ABI scales
-//     rows of op(A) and columns of op(B) instead, and runs on Accelerate
-//     what its guard refuses (docs/vv/LIMITATIONS.md, Exponent range).
+//     more keeps FP32's range relative to its scale. Results are not
+//     re-centred: a result's scale comes from its operands' scales, never
+//     from its values, so a chain of products whose magnitudes shrink or
+//     grow drifts away from it: lost precision below about 2^-80, 0 below
+//     2^-126, Inf past 2^128, with AB_OK. ab_matrix_download +
+//     ab_matrix_upload re-centres a result (one FP64 rounding);
+//     ab_matrix_copy does not. The native API has no guard and no
+//     fallback. The BLAS ABI instead scales each row of op(A) and column of
+//     op(B), and runs on Accelerate what its guard refuses
+//     (docs/vv/LIMITATIONS.md, Exponent range).
 // =============================================================================
 #ifndef APPLE_BOTTOM_H
 #define APPLE_BOTTOM_H
@@ -178,6 +185,10 @@ void ab_future_destroy(ABFuture f);
 
 // BLAS operations
 ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C);
+// If |alpha| lies in [2^-39, 2^40), beta is 0 or in that range, and C's scale
+// is A's plus B's (as for data in the window), alpha multiplies C's stored
+// values instead of changing its scale, so a small alpha on small data can
+// take them out of FP32's range (Exponent range, above).
 ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C);
 ABStatus ab_zgemm(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci);
 
@@ -276,6 +287,9 @@ ABStatus ab_zherk(ABMatrix Ar, ABMatrix Ai, ABMatrix Cr, ABMatrix Ci);
 // Element-wise operations
 ABStatus ab_matrix_add(ABMatrix A, ABMatrix B, ABMatrix C);
 ABStatus ab_matrix_sub(ABMatrix A, ABMatrix B, ABMatrix C);
+// A := alpha A. With |alpha| in [2^-39, 2^40), alpha multiplies the stored
+// values (A's scale does not take its exponent), so repeated scaling of small
+// data loses precision, as in ab_dgemm_scaled.
 ABStatus ab_matrix_scale(double alpha, ABMatrix A);
 
 // Batched GEMM API — amortizes Metal command buffer overhead across many GEMMs.
@@ -300,6 +314,7 @@ typedef struct ABBatch_s* ABBatch;
 ABBatch ab_batch_create(void);
 void ab_batch_destroy(ABBatch batch);
 ABStatus ab_batch_dgemm(ABBatch batch, ABMatrix A, ABMatrix B, ABMatrix C);
+// alpha as in ab_dgemm_scaled.
 ABStatus ab_batch_dgemm_scaled(ABBatch batch, double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C);
 ABStatus ab_batch_zgemm(ABBatch batch, ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci);
 ABStatus ab_batch_barrier(ABBatch batch);
