@@ -179,13 +179,13 @@ All notable changes to this project will be documented in this file.
   overflow headroom; a `_Static_assert` pins `AB_ENTRY_MIN_EXP`,
   `AB_PRODUCT_MIN_EXP` and `AB_SUM_MAX_EXP`. `test_blas_abi` adds four DGEMMs
   with NaN or Inf alpha or beta, which must give Accelerate's results with no
-  GPU GEMM. On mutants built from fresh trees:
-  - either floor at 2⁻⁷⁹ or 2⁻⁷⁷, or a dropped product term, fails the new
-    test (the earlier tests missed the entry floor and the dropped term);
-  - `AB_ENTRY_MIN_EXP` or `AB_PRODUCT_MIN_EXP` at −79 stops the build;
-  - removing the host path's check of the scalars fails two DGEMM cases;
-  - removing only the staged path's check changes no result: the staged run
-    flags the non-finite result and sends the call to Accelerate anyway.
+  GPU GEMM. On mutants built from fresh trees (2026-11-10; the list is in
+  [tests/README.md](tests/README.md#range-guard-stage-2)), each moved floor,
+  dropped term or short headroom fails the new test, a moved macro stops the
+  build, and removing the host path's check of the scalars fails two of the
+  DGEMM cases. Removing only the staged path's check changes no result: the
+  staged run flags the non-finite result and sends the call to Accelerate
+  anyway.
 
 ### Changed
 - **Stage 2 of the exponent-range guard takes a fraction of the host time,
@@ -288,8 +288,9 @@ All notable changes to this project will be documented in this file.
   `zblat2` stop there, as those of `dblat3` and `zblat3` already did.
 - **The Makefile states `-ffp-contract=on` for the host code.** It is clang's
   default; the Makefile now names it in `CFLAGS`, `OBJCFLAGS` and
-  `FFT_OBJCFLAGS`, so a change of toolchain default cannot change the host
-  FP64 code's contraction. With Apple clang 17.0.0 every object file,
+  `FFT_OBJCFLAGS`, so a change of toolchain default cannot change the
+  contraction mode (which products are fused is still the compiler's
+  choice). With Apple clang 17.0.0 every object file,
   `libapplebottom.dylib` and `libapplebottom.a` are byte-identical with and
   without the flag (checked 2026-11-10). What contraction does to the host
   epilogues' bits is in
@@ -589,7 +590,10 @@ All notable changes to this project will be documented in this file.
   M × N. Otherwise it returns `AB_ERROR_DIMENSION_MISMATCH`: `ab_zgemm_async`
   as a completed future, `ab_zgemm_batched` before any entry runs. Valid
   shapes take the same path as before. `test_correctness` adds one test per
-  entry point, each failing on c8be67d.
+  entry point, each failing on c8be67d. Each test also makes one call per
+  op() rule (K, M and N) with every imaginary part in its real part's shape;
+  with any one rule deleted from the check, all four fail (mutants built from
+  fresh trees, 2026-11-10).
 
 ### Corrected claims
 - **"No silent errors outside FP32's exponent range" and "every product keeps
@@ -641,15 +645,23 @@ All notable changes to this project will be documented in this file.
   [the list](docs/vv/LIMITATIONS.md#command-buffers-stopped-by-macos).
 - **Limits documented, not fixed** (hostile audit 2026-11-10). Each is in
   [Exponent range](docs/vv/LIMITATIONS.md#exponent-range) unless noted; the
-  failing inputs are predicted from the code, not run:
+  failing inputs are predicted from the code, not run. A device-GEMM guard
+  (L2), re-centring native results (L3, L4) and folding alpha into the ZGEMM
+  and BLAS-2 scale-back (L9) are [planned](docs/ROADMAP.md#planned):
   - the device GEMMs have no range guard and no Accelerate fallback (L2);
+  - `ab_dgemm_scaled` (with its batch and Strassen forms) and `ab_dev_dgemm`
+    give C the larger of the scales of alpha·op(A)op(B) and beta·C, and
+    `ab_matrix_add` and `ab_matrix_sub` align their operands the same way,
+    so in an element where the larger term is 0 the smaller can lose
+    precision or become 0 (L2);
   - native results are not re-centred, so chains of products drift out of
     the window and lose accuracy with `AB_OK` (L3), and an alpha with |alpha|
     in [2⁻³⁹, 2⁴⁰) multiplies the stored values (L4);
   - no API limits K, and the closed-form bounds are stated for K ≤ 2²⁰ (L6,
     [Framing](docs/vv/LIMITATIONS.md#framing));
   - the BLAS-ABI ZGEMM epilogue can underflow before alpha, BLAS-2 rounds its
-    sum to FP64 before alpha, and the FFT has FP32's exponent range (L9).
+    sum to FP64 before alpha (so a sum beyond FP64's range gives Inf or NaN
+    even with |alpha| < 1), and the FFT has FP32's exponent range (L9).
 
 ## [1.5.1] - 2026-11-01
 
