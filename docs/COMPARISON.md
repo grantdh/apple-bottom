@@ -48,8 +48,9 @@ Where it helps:
 
 Where it does not:
 
-- Bit-for-bit IEEE FP64 results, or native-API matrices whose entries span
-  more than about 10²³.
+- Bit-for-bit IEEE FP64 results.
+- Native-API or device-GEMM data outside the windows the BLAS ABI guards:
+  they have no fallback ([Exponent range](vv/LIMITATIONS.md#exponent-range)).
 - GEMMs issued one call at a time from host memory through the BLAS ABI.
   On an M2 Max, 1.4.0's host path, which packed and converted on the CPU,
   was no more than 1.02× faster than Accelerate for any measured shape
