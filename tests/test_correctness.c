@@ -1878,11 +1878,32 @@ static void test_batch_committed_reuse(void) {
 // =============================================================================
 
 // op(A) 8x6 times op(B) 6x5 into C 8x5. ZS_AI_BAD..ZS_CI_BAD are wrong
-// imaginary parts; ZS_AT..ZS_BIT are A and B stored for op = transpose.
+// imaginary parts; ZS_AT..ZS_BIT are A and B stored for op = transpose;
+// ZS_BK, ZS_BKI a B with 5 rows; ZS_CR_N with ZS_CI_BAD a C with 4 columns.
 enum { ZS_AR, ZS_AI, ZS_BR, ZS_BI, ZS_CR, ZS_CI, ZS_AI_BAD, ZS_BI_BAD, ZS_CI_BAD,
-       ZS_AT, ZS_AIT, ZS_BT, ZS_BIT, ZS_N };
+       ZS_AT, ZS_AIT, ZS_BT, ZS_BIT, ZS_BK, ZS_BKI, ZS_CR_N, ZS_N };
 static const int ZS_DIMS[ZS_N][2] = {{8, 6}, {8, 6}, {6, 5}, {6, 5}, {8, 5}, {8, 5}, {4, 6},
-                                     {6, 4}, {8, 4}, {6, 8}, {6, 8}, {5, 6}, {5, 6}};
+                                     {6, 4}, {8, 4}, {6, 8}, {6, 8}, {5, 6}, {5, 6},
+                                     {5, 5}, {5, 5}, {8, 4}};
+
+// One refused call per op() rule, every imaginary part in its real part's
+// shape (Ar, Ai, Br, Bi, Cr, Ci): N (C 8x4), M (op(A) 5x6), K (op(B) 5x5).
+static const int ZS_OP_RULES[][6] = {
+    {ZS_AR, ZS_AI, ZS_BR, ZS_BI, ZS_CR_N, ZS_CI_BAD},
+    {ZS_BT, ZS_BIT, ZS_BR, ZS_BI, ZS_CR, ZS_CI},
+    {ZS_AR, ZS_AI, ZS_BK, ZS_BKI, ZS_CR, ZS_CI},
+};
+// The same rules with op(A) = A^T and op(B) = B^H, for ab_zgemm_ex.
+static const int ZS_OP_RULES_T[][6] = {
+    {ZS_AT, ZS_AIT, ZS_BT, ZS_BIT, ZS_CR_N, ZS_CI_BAD},
+    {ZS_BR, ZS_BI, ZS_BT, ZS_BIT, ZS_CR, ZS_CI},
+    {ZS_AT, ZS_AIT, ZS_BK, ZS_BKI, ZS_CR, ZS_CI},
+};
+#define ZS_N_RULES ((int)(sizeof ZS_OP_RULES / sizeof ZS_OP_RULES[0]))
+// Rule r's six handles from table t, as the ZGEMM entries take them.
+#define ZS_RULE_ARGS_IN(t, m, r)                                                              \
+    (m)[t[r][0]], (m)[t[r][1]], (m)[t[r][2]], (m)[t[r][3]], (m)[t[r][4]], (m)[t[r][5]]
+#define ZS_RULE_ARGS(m, r) ZS_RULE_ARGS_IN(ZS_OP_RULES, m, r)
 
 #define ZS_MM AB_ERROR_DIMENSION_MISMATCH
 
@@ -1909,7 +1930,8 @@ static bool zs_intact(ABMatrix m[ZS_N], int i) {
 }
 
 static bool zs_c_intact(ABMatrix m[ZS_N]) {
-    return zs_intact(m, ZS_CR) && zs_intact(m, ZS_CI) && zs_intact(m, ZS_CI_BAD);
+    return zs_intact(m, ZS_CR) && zs_intact(m, ZS_CI) && zs_intact(m, ZS_CI_BAD) &&
+           zs_intact(m, ZS_CR_N);
 }
 
 static void zs_end(ABMatrix m[ZS_N], bool ok, const char* why) {
@@ -1933,6 +1955,10 @@ static void test_zgemm_shape_mismatch(void) {
          ab_zgemm_ex(AB_TRANS, AB_CONJ_TRANS, m[ZS_AT], m[ZS_AIT], m[ZS_BT], m[ZS_BI], m[ZS_CR],
                      m[ZS_CI]) == ZS_MM &&
          ab_zgemm_strassen(m[ZS_AR], m[ZS_AI], m[ZS_BR], m[ZS_BI_BAD], m[ZS_CR], m[ZS_CI]) == ZS_MM;
+    for (int r = 0; r < ZS_N_RULES; r++) {
+        ok = ok && ab_zgemm(ZS_RULE_ARGS(m, r)) == ZS_MM &&
+             ab_zgemm_ex(AB_TRANS, AB_CONJ_TRANS, ZS_RULE_ARGS_IN(ZS_OP_RULES_T, m, r)) == ZS_MM;
+    }
     ok = ok && zs_c_intact(m);
     // The same transposes with matching parts are accepted.
     ok = ok && ab_zgemm_ex(AB_TRANS, AB_CONJ_TRANS, m[ZS_AT], m[ZS_AIT], m[ZS_BT], m[ZS_BIT],
@@ -1956,6 +1982,7 @@ static void test_zgemm_async_shape_mismatch(void) {
                                          m[ZS_CI])) &&
          zs_refused(ab_zgemm_async(m[ZS_AR], m[ZS_AI], m[ZS_BR], m[ZS_BI], m[ZS_CR],
                                    m[ZS_CI_BAD]));
+    for (int r = 0; r < ZS_N_RULES; r++) ok = ok && zs_refused(ab_zgemm_async(ZS_RULE_ARGS(m, r)));
     ok = ok && zs_c_intact(m);
     zs_end(m, ok, "expected a completed future holding DIMENSION_MISMATCH");
 }
@@ -1969,8 +1996,10 @@ static void test_batch_zgemm_shape_mismatch(void) {
          ab_batch_zgemm(batch, m[ZS_AR], m[ZS_AI_BAD], m[ZS_BR], m[ZS_BI], m[ZS_CR], m[ZS_CI]) ==
              ZS_MM &&
          ab_batch_zgemm(batch, m[ZS_AR], m[ZS_AI], m[ZS_BR], m[ZS_BI], m[ZS_CR], m[ZS_CI_BAD]) ==
-             ZS_MM &&
-         ab_batch_commit(batch) == AB_OK && ab_batch_wait(batch) == AB_OK;
+             ZS_MM;
+    for (int r = 0; r < ZS_N_RULES; r++)
+        ok = ok && ab_batch_zgemm(batch, ZS_RULE_ARGS(m, r)) == ZS_MM;
+    ok = ok && ab_batch_commit(batch) == AB_OK && ab_batch_wait(batch) == AB_OK;
     ab_batch_destroy(batch);
     ok = ok && zs_c_intact(m);
     zs_end(m, ok, "a mismatched shape was not refused, or C was written");
@@ -1980,13 +2009,24 @@ static void test_zgemm_batched_shape_mismatch(void) {
     TEST("ZGEMM shapes: ab_zgemm_batched");
     ABMatrix m[ZS_N];
     bool ok = zs_begin(m);
-    // Entry 0 is valid and writes C if it runs; entry 1 has a short Ai.
+    // Entry 0 is valid and writes C if it runs. Entry 1 first has a short Ai,
+    // then holds each op() rule's refused call in turn.
     ABMatrix Ars[] = {m[ZS_AR], m[ZS_AR]}, Ais[] = {m[ZS_AI], m[ZS_AI_BAD]};
     ABMatrix Brs[] = {m[ZS_BR], m[ZS_BR]}, Bis[] = {m[ZS_BI], m[ZS_BI]};
     ABMatrix Crs[] = {m[ZS_CR], m[ZS_CR]}, Cis[] = {m[ZS_CI], m[ZS_CI]};
     ABMatrix Bis_bad[] = {m[ZS_BI_BAD]};
     ok = ok && ab_zgemm_batched(2, Ars, Ais, Brs, Bis, Crs, Cis) == ZS_MM &&
          ab_zgemm_batched(1, Ars, Ais, Brs, Bis_bad, Crs, Cis) == ZS_MM;
+    for (int r = 0; r < ZS_N_RULES; r++) {
+        const int* x = ZS_OP_RULES[r];
+        Ars[1] = m[x[0]];
+        Ais[1] = m[x[1]];
+        Brs[1] = m[x[2]];
+        Bis[1] = m[x[3]];
+        Crs[1] = m[x[4]];
+        Cis[1] = m[x[5]];
+        ok = ok && ab_zgemm_batched(2, Ars, Ais, Brs, Bis, Crs, Cis) == ZS_MM;
+    }
     ok = ok && zs_c_intact(m);
     zs_end(m, ok, "a mismatched entry was not refused before any ran");
 }

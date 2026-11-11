@@ -62,10 +62,16 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     return `AB_OK` (an A singular in FP64 too: `AB_ERROR_KERNEL_FAILED`,
     B unchanged); the four `test_*zgemm*_shape_mismatch` tests give
     `ab_zgemm`, `ab_zgemm_ex` (with transposes), `ab_zgemm_strassen`,
-    `ab_zgemm_async`, `ab_batch_zgemm` and `ab_zgemm_batched` a wrong
-    imaginary part, a wrong C or a mismatched op() shape: each must return
+    `ab_zgemm_async`, `ab_batch_zgemm` and `ab_zgemm_batched` an imaginary
+    part or C whose shape differs from its real part's; `ab_zgemm` (and
+    `ab_zgemm_ex` with op(A) = Aᵀ, op(B) = Bᴴ), `ab_zgemm_async`,
+    `ab_batch_zgemm` and `ab_zgemm_batched` also get one call per op() rule
+    (K, M and N) that breaks only that rule, with every imaginary part in its
+    real part's shape: each must return
     `AB_ERROR_DIMENSION_MISMATCH` (async: in a completed future) and leave
-    C as it was
+    C as it was. Built from `git archive` with any one op() rule deleted
+    from the library's check (2026-11-10), all four fail; the earlier tests
+    missed every such deletion
   - `tests/test_chaos.c` — 18 tests
   - `tests/test_device_api.c` — 21 tests (219 `CHECK`s); the GEMM
     tests compare `ab_dev_dgemm` / `ab_dev_zgemm` with column-major
