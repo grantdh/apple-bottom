@@ -1032,10 +1032,11 @@ static void test_zgemm_epilogue_bounds(void) {
 // dropped. Here one-line statistics with literal powers of two, at scale 0,
 // must give the decisions the paper's bound needs: entries from 2^-78 and
 // products from 2^-78 certified, one binade lower to stage 2 (each floor on
-// its own: the other one held with room to spare), alpha's scalar below 1
-// raising the product floor and one above 1 leaving it, and the overflow
-// test's headroom below 2^122 (at K = 1, 4 binades for real data, 6 for
-// complex). The assert pins the macros, which stage 2 and its oracle both read.
+// its own, with the other met), alpha's scalar below 1 raising the product
+// floor and one above 1 leaving it, and the overflow test at its edge and one
+// binade past it (at K = 1, amax + bmax + 4 may reach 122 for real data,
+// amax + bmax + 6 for complex). The assert pins the macros, which stage 2 and
+// its oracle both read.
 _Static_assert(AB_ENTRY_MIN_EXP == -78 && AB_PRODUCT_MIN_EXP == -78 && AB_SUM_MAX_EXP == 122,
                "the guard's floors are 2^-78 and its ceiling 2^122 (docs/vv/LIMITATIONS.md)");
 
@@ -1061,7 +1062,7 @@ static void test_guard_literal_floors(void) {
     const ab_guard_t ok = AB_GUARD_CERTIFIED, s2 = AB_GUARD_STAGE2, rej = AB_GUARD_REJECT;
     for (int z = 0; z < 2; z++) {
         const char* kind = z ? "complex" : "real";
-        // Entry floor (products from 2^-77 up, above their floor).
+        // Entry floor (products 2^-77 or 2^-78, at or above their floor).
         expect(lit_stage1(1.0, 0x1p-78, 2.0, 2.0, 0, z) == ok, "%s: A entry 2^-78 not certified", kind);
         expect(lit_stage1(1.0, 0x1p-79, 2.0, 2.0, 0, z) == s2, "%s: A entry 2^-79 certified", kind);
         expect(lit_stage1(2.0, 2.0, 1.0, 0x1p-78, 0, z) == ok, "%s: B entry 2^-78 not certified", kind);
@@ -1082,12 +1083,12 @@ static void test_guard_literal_floors(void) {
         expect(lit_stage1(0x1p-39, 0x1p-39, 0x1p-40, 0x1p-40, 3, z) == s2,
                "%s: alpha_exp 3, product 2^-79 certified", kind);
     }
-    // The ceiling, K = 1: a real product's sums need 4 binades of headroom
-    // below 2^122, a complex one's 6.
+    // The ceiling, K = 1, alpha_exp 0: amax + bmax plus a headroom of 4 (real)
+    // or 6 (complex) may reach 122; one binade more is refused.
     expect(lit_stage1(0x1p59, 0x1p59, 0x1p59, 0x1p59, 0, false) == ok, "real: 2^59 x 2^59 refused");
     expect(lit_stage1(0x1p59, 0x1p59, 0x1p60, 0x1p60, 0, false) == rej, "real: 2^59 x 2^60 not refused");
     expect(lit_stage1(0x1p58, 0x1p58, 0x1p58, 0x1p58, 0, true) == ok, "complex: 2^58 x 2^58 refused");
-    expect(lit_stage1(0x1p59, 0x1p59, 0x1p59, 0x1p59, 0, true) == rej, "complex: 2^59 x 2^59 not refused");
+    expect(lit_stage1(0x1p58, 0x1p58, 0x1p59, 0x1p59, 0, true) == rej, "complex: 2^58 x 2^59 not refused");
     // NaN or Inf in a line's statistics: Accelerate.
     expect(lit_stage1(INFINITY, 1.0, 1.0, 1.0, 0, false) == rej, "an Inf line not refused");
     expect(lit_stage1(1.0, 1.0, NAN, 1.0, 0, false) == rej, "a NaN line not refused");

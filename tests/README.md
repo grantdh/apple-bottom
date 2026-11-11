@@ -620,14 +620,16 @@ floor on its own, alpha's scalar below 1 raising the product floor and above
 refused; a `_Static_assert` pins `AB_ENTRY_MIN_EXP`, `AB_PRODUCT_MIN_EXP`
 and `AB_SUM_MAX_EXP`, which stage 2 and its oracle read. On mutants built
 from `git archive` into fresh trees (2026-11-10), it fails with either
-floor at 2⁻⁷⁹ or 2⁻⁷⁷, stage 1's product term dropped, or C's β′C′ term
-dropped, and either macro at −79 stops the build; the earlier tests missed
-the entry floor at 2⁻⁷⁹, the dropped product term and both macros.
-`test_blas_abi`'s exponent-range suite has DGEMMs with NaN or Inf alpha or
-beta, which must give Accelerate's results with no GPU GEMM; they fail
-when the host path's check of the scalars is removed, but not when only the
-staged path's is, since the staged run then flags the non-finite result and
-declines to the same refusal.
+floor at 2⁻⁷⁹ or 2⁻⁷⁷, stage 1's product term dropped, C's β′C′ term
+dropped, or the complex headroom at 5 binades instead of 6, and either macro
+at −79 stops the build; the earlier tests missed the entry floor at 2⁻⁷⁹,
+the dropped product term, the short headroom and both macros.
+`test_blas_abi`'s exponent-range suite has four DGEMMs with NaN or Inf alpha
+or beta, which must give Accelerate's results with no GPU GEMM. With the
+host path's check of the scalars removed, two of them (alpha Inf, beta NaN)
+fail; with only the staged path's check removed none does, since the staged
+run then flags the non-finite result and sends the call to Accelerate
+anyway.
 
 ## Fortran binding probe
 
