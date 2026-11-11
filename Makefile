@@ -14,8 +14,19 @@ CC = clang
 CXX = clang++
 OBJC = clang
 
-CFLAGS = -Wall -Wextra -O3 -std=c11 -DACCELERATE_NEW_LAPACK
-OBJCFLAGS = -std=c++11 -Wall -Wextra -O3 -fobjc-arc -DACCELERATE_NEW_LAPACK
+# Host FP64 contraction: clang's default, pinned so that the bits do not
+# depend on the toolchain. It lets clang fuse a multiply and an add within one
+# statement into an FMA, which sets the bits (not the error bounds) of the
+# complex-scalar FP64 epilogues: zgemm_, BLAS-2, ab_dev_zgemm, ab_dev_scale_z
+# and ab_dev_axpy_z; tests/test_qe_golden.c pins zgemm_'s. The Metal shaders,
+# compiled at run time with MTLMathModeSafe, are not affected. Code that needs
+# every rounding turns it off: #pragma STDC FP_CONTRACT OFF (src/fft/fft_host.h,
+# which covers fft.m, and tests/test_precision.c) or -ffp-contract=off
+# (FFT_EMU_FLAGS, test-dd-bound). docs/vv/LIMITATIONS.md, "Host FP64 code is
+# contracted".
+FP_CONTRACT = -ffp-contract=on
+CFLAGS = -Wall -Wextra -O3 $(FP_CONTRACT) -std=c11 -DACCELERATE_NEW_LAPACK
+OBJCFLAGS = -std=c++11 -Wall -Wextra -O3 $(FP_CONTRACT) -fobjc-arc -DACCELERATE_NEW_LAPACK
 LDFLAGS = -lc++ -framework Metal -framework Foundation -framework Accelerate -framework IOKit
 
 # DD multiplication algorithm selector (v1.3 A/C investigation).
@@ -129,7 +140,7 @@ $(BUILD)/blas2_abi.o: $(SRC)/blas2_abi.c $(SRC)/blas2.h $(SRC)/blas_trans.h $(SR
 # Double-float FFT (apple_bottom_fft.h). Its Metal source is embedded as one
 # NUL-terminated byte array; fft.m compiles it once per pass configuration,
 # behind a block of #defines.
-FFT_OBJCFLAGS = -std=gnu11 -Wall -Wextra -O3 -fobjc-arc
+FFT_OBJCFLAGS = -std=gnu11 -Wall -Wextra -O3 $(FP_CONTRACT) -fobjc-arc
 FFT_MSL = $(SRC)/fft/fft_types.h $(SRC)/fft/fft_device.h $(SRC)/fft/fft_kernel.metal
 
 $(BUILD)/fft_metal_src.h: $(FFT_MSL) | $(BUILD)
