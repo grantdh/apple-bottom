@@ -159,11 +159,10 @@ ABStatus ab_dev_stream_sync(ab_dev_stream_t stream);
 // non-finite results:
 //   - an operand whose nonzero entries span more than 2^78;
 //   - NaN or Inf (double-float rules: Inf - Inf is NaN);
-//   - ab_dev_dgemm: alpha op(A) op(B) and beta C on scales far apart (the
-//     result takes the larger scale, so where the larger term is 0 the
-//     smaller loses precision below about 2^-80 of that scale and becomes 0
-//     below 2^-126 of it), or, for operands and C in the window, an alpha
-//     with |alpha| in [2^-39, 2^40) that takes the result below about 2^-80;
+//   - ab_dev_dgemm: alpha op(A) op(B) and beta C on scales far apart, as for
+//     ab_dgemm_scaled (apple_bottom.h), or, for operands and C in the window,
+//     an alpha with |alpha| in [2^-39, 2^40) that takes the result below
+//     about 2^-80;
 //   - ab_dev_zgemm: P = op(A) op(B), alpha P or beta C beyond FP64's range
 //     (Inf or NaN parts); a part of P below 2^-1022 also loses bits before
 //     alpha multiplies it.
@@ -225,13 +224,13 @@ ABStatus ab_dev_zgemm_offset(ABTranspose transA, ABTranspose transB,
 // The GPU reads A as FP64 and accumulates in double-float: componentwise
 // error of order 1e-15 relative to |alpha| |op(A)| |x| + |beta| |y| (at
 // most 1e-14 in tests/test_blas2.c, dot products up to 65536 long), about
-// ten times an FP64 BLAS's, plus an absolute term of order |alpha| 2^-1074,
-// as in an FP64 BLAS that applies alpha after the sum. This holds while the
-// sum op(A) x stays in FP64's range: it is rounded to FP64 before alpha
-// multiplies it, so beyond that range finite data with |alpha| < 1 give Inf,
-// and below 2^-1022 with |alpha| > 1 it keeps only a subnormal's bits
-// (predicted from the code, not run). Each call checks, at no extra memory traffic,
-// that its data stay in double-float's range (docs/vv/LIMITATIONS.md, Exponent
+// ten times an FP64 BLAS's, plus an absolute term of order
+// (1 + |alpha|) 2^-1074, as in an FP64 BLAS. The sum op(A) x is rounded to
+// FP64 before alpha multiplies it, so where the sum itself overflows FP64,
+// finite data with |alpha| < 1 give Inf or NaN (predicted from the code, not
+// run).
+// Each call checks, at no extra memory traffic, that its data stay in
+// double-float's range (docs/vv/LIMITATIONS.md, Exponent
 // range), each part of a complex output against its own products. A call
 // that fails it, whose sum of products, x, alpha or beta is not finite, and
 // every call with m or n == 0 or alpha == 0, runs on Accelerate instead, on

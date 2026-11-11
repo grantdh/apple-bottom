@@ -81,7 +81,7 @@ use the BLAS ABI for column-major data.
 ### Values far from 1
 
 Double-float values are pairs of FP32 numbers, so on their own they have
-FP32's exponent range: products below about 2⁻⁷⁸ lose their low part,
+FP32's exponent range: products below about 2⁻⁸⁰ lose their low part,
 values below 2⁻¹²⁶ flush to zero on the GPU, and sums overflow at 2¹²⁸.
 The library bridges that with exact powers of two, which leave the bits of
 in-range data unchanged:
@@ -120,8 +120,14 @@ in-range data unchanged:
     also in that range) or of `ab_matrix_scale` with |alpha| in [2⁻³⁹, 2⁴⁰)
     multiplies the stored values, so small alpha on small data, or repeated
     scaling, loses precision the same way.
+  - `ab_dgemm_scaled` (and its batch and Strassen forms) gives C the larger
+    of the scales of alpha·op(A)op(B) and beta·C, so in an element where the
+    larger term is 0 and the scales are far apart, the smaller term loses
+    precision or becomes 0. `ab_matrix_add` and `ab_matrix_sub` align their
+    operands to the larger scale the same way.
 - **Device-buffer API** (`ab_dev_dgemm`, `ab_dev_zgemm`): converts through
-  `ABMatrix` handles, measured on every call, with no range guard and no
+  `ABMatrix` handles, measured on every call (`ab_dev_dgemm` gives C the
+  larger scale as `ab_dgemm_scaled` does), with no range guard and no
   fallback: some data the BLAS ABI would scale or refuse returns `AB_OK`
   with degraded or non-finite results
   ([the cases](vv/LIMITATIONS.md#exponent-range)). Use the BLAS ABI for
@@ -297,9 +303,14 @@ machine, and `AB_DISPATCH_TABLE=<file>` uses it without a rebuild
 **Precision issues**
 - Double-float gives ~10⁻¹⁵ precision, not 10⁻¹⁶
 - For ~10⁻¹⁶, use IEEE FP64 on the CPU (Accelerate)
-- Zeros, Inf or degraded results with `AB_OK` from the native or device API:
-  data outside the native window, or a chain of results that drifted from
-  its scale ([Values far from 1](#values-far-from-1))
+- Zeros, Inf or degraded results with `AB_OK` from the native or device API
+  ([Values far from 1](#values-far-from-1)):
+  - a matrix whose nonzero entries span more than about 2⁷⁸;
+  - a chain of results that drifted from its scale;
+  - an alpha with |alpha| in [2⁻³⁹, 2⁴⁰) on small data;
+  - alpha·op(A)op(B) and beta·C on scales far apart (`ab_dgemm_scaled`,
+    `ab_dev_dgemm`);
+  - an `ab_dev_zgemm` epilogue outside FP64's range.
 
 ---
 

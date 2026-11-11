@@ -70,9 +70,12 @@
 //     grow drifts away from it: lost precision below about 2^-80, 0 below
 //     2^-126, Inf past 2^128, with AB_OK. ab_matrix_download +
 //     ab_matrix_upload re-centres a result (one FP64 rounding);
-//     ab_matrix_copy does not. The native API has no guard and no
-//     fallback. The BLAS ABI instead scales each row of op(A) and column of
-//     op(B), and runs on Accelerate what its guard refuses
+//     ab_matrix_copy does not. A sum of terms on different scales (alpha
+//     op(A) op(B) + beta C in ab_dgemm_scaled, ab_matrix_add, ab_matrix_sub)
+//     takes the larger scale, so a term that is the whole of an element can
+//     be lost when its scale is far below the other's. The native API has no
+//     guard and no fallback. The BLAS ABI instead scales each row of op(A)
+//     and column of op(B), and runs on Accelerate what its guard refuses
 //     (docs/vv/LIMITATIONS.md, Exponent range).
 // =============================================================================
 #ifndef APPLE_BOTTOM_H
@@ -188,7 +191,11 @@ ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C);
 // If |alpha| lies in [2^-39, 2^40), beta is 0 or in that range, and C's scale
 // is A's plus B's (as for data in the window), alpha multiplies C's stored
 // values instead of changing its scale, so a small alpha on small data can
-// take them out of FP32's range (Exponent range, above).
+// take them out of FP32's range (Exponent range, above). Otherwise C takes
+// the larger of the scales of alpha op(A) op(B) and beta C, so in an element where the
+// larger term is 0 and the scales are far apart, the smaller term loses
+// precision (below about 2^-80 of that scale) or becomes 0 (below 2^-126 of it),
+// with AB_OK; the same holds for ab_batch_dgemm_scaled and ab_dgemm_strassen.
 ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C);
 ABStatus ab_zgemm(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci);
 
@@ -314,7 +321,7 @@ typedef struct ABBatch_s* ABBatch;
 ABBatch ab_batch_create(void);
 void ab_batch_destroy(ABBatch batch);
 ABStatus ab_batch_dgemm(ABBatch batch, ABMatrix A, ABMatrix B, ABMatrix C);
-// alpha as in ab_dgemm_scaled.
+// alpha, beta and C's scale as in ab_dgemm_scaled.
 ABStatus ab_batch_dgemm_scaled(ABBatch batch, double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C);
 ABStatus ab_batch_zgemm(ABBatch batch, ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci);
 ABStatus ab_batch_barrier(ABBatch batch);
@@ -366,7 +373,9 @@ const char* ab_status_string(ABStatus status);
 // DGEMM whose alpha or beta lies outside 2^±20 are redone on the host path,
 // as is every call when AB_HOST_PACK=1 or the CPU's floating-point control
 // is not the default (rounding, flush to zero, default NaN), on which the
-// host conversion's bits depend.
+// host conversion's bits depend. ab_zgemm_blas's FP64 epilogue bound is from
+// above only: a part of the product scaled back below 2^-1022 loses bits
+// before alpha multiplies it (docs/vv/LIMITATIONS.md, Exponent range).
 void ab_dgemm_blas(char transA, char transB, int M, int N, int K,
                    double alpha, const double* A, int ldA,
                    const double* B, int ldB,
@@ -384,7 +393,8 @@ void ab_zgemm_blas(char transA, char transB, int M, int N, int K,
 // zgemv_ and zhemv_ Fortran symbols. A GPU call reads A in place through a
 // mapping made for that call, so a one-shot product pays to map A each time;
 // for a matrix used in many products, keep it in a device buffer and call
-// ab_dev_dgemv / ab_dev_zgemv / ab_dev_zhemv (apple_bottom_device.h).
+// ab_dev_dgemv / ab_dev_zgemv / ab_dev_zhemv (apple_bottom_device.h), whose
+// accuracy and range these share.
 void ab_dgemv_blas(char trans, int M, int N, double alpha, const double* A, int ldA,
                    const double* x, int incx, double beta, double* y, int incy);
 void ab_zgemv_blas(char trans, int M, int N, double _Complex alpha,
