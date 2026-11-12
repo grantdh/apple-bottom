@@ -50,10 +50,24 @@ same call through its seam (`SEAM`, below), which `AB_SPLIT` uses inside `dgemm_
   - `HEAD`: the CPU slice alone, on the calling thread.
   - `TAIL`: the GPU slice alone, on the GPU thread, with the caller waiting and doing nothing else.
 
-  Each round runs, rotated and reversed as before, Accelerate, the GPU, `SEAM`, `S<g>`, `S<g>b`,
-  `HEAD`, `TAIL`, so `SEAM` and `S<g>b` sit next to `S<g>` in every round. Bits: `SEAM`'s repeats
-  against its first and its C against the user split's; `S<g>b`'s against the user split's first;
-  on N and M the part of C that `HEAD` and `TAIL` write against the user split's (first call).
+  With the arms, each round of the fixed block runs:
+  1. an idle gap (`SPLIT_GAP_S`, default 1 s);
+  2. the CPU-only configs, Accelerate and `HEAD` (their order alternating by round), so neither
+     follows a config that used the GPU;
+  3. the GPU alone and `TAIL` (alternating likewise);
+  4. one untimed call of `S<g>`, then the trio `SEAM`, `S<g>`, `S<g>b` repeat by repeat, in round
+     r mod 6's order of a Williams design: over every 6 rounds each of the three runs first equally
+     often and comes right before and right after each of the others equally often, none follows
+     Accelerate, the GPU, `HEAD` or `TAIL`, and the calls paired by (round, repeat) sit within one
+     repeat of the trio. Use a multiple of 6 rounds; the report says when the count is not one.
+
+  Before the block the split runs untimed for `SPLIT_WARM_S` seconds (default 2 with the arms, 0
+  without), so the block does not start cool. `raw.tsv`'s `prev` column names each call's
+  predecessor in its process (`idle` after the gap). Without the arms the order is as before:
+  Accelerate, the GPU and the split, rotated and reversed by round. Bits: `SEAM`'s repeats against its
+  first and its C against the user split's; `S<g>b`'s against the user split's first; on N and M the
+  part of C that `HEAD` and `TAIL` write against the user split's (their first call after the user
+  split's first, so from round 1).
 - **Fixed share:** `SPLIT_G=<g>` skips the sweep and runs the fixed block at GPU part g. `SPLIT_F=<f>`
   does the same at the GPU part the library would cut at share f (`ab_split_cut` in `src/split_slice.h`,
   with the `AB_MIN_GPU_DIM` floor, default 32); a share that does not cut the axis is refused.

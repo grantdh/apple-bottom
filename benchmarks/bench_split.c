@@ -104,6 +104,7 @@ static double median(const double *v, int n) {
     double m = n % 2 ? t[n / 2] : 0.5 * (t[n / 2 - 1] + t[n / 2]); free(t); return m;
 }
 static double envd(const char *name, double d) { const char *v = getenv(name); return v ? atof(v) : d; }
+static void sleep_s(double s) { usleep((useconds_t)(s * 1e6)); }
 static bool noreg(void) { return envd("SPLIT_NOREG", 0) != 0; }   // SPLIT_NOREG=1: the operands are not registered
 static void sh_line(const char *cmd, char *out, size_t n) {
     FILE *f = popen(cmd, "r"); out[0] = 0;
@@ -167,6 +168,8 @@ enum { KD_ACC, KD_GPU, KD_SPLIT, KD_SPLIT2, KD_SEAM, KD_HEAD, KD_TAIL };
 // one timed call: its times (s, V_*) and, for a SEAM call, the library's record of it
 typedef struct {
     double v[NV];
+    int prev;                          // the config of this process's call before it: PREV_IDLE after the
+                                       // idle gap, PREV_NONE if none; untimed calls count
     int outcome, retries, in_place;    // ab_split_outcome_t, -1 if not a SEAM call
     ab_split_times_t tm;               // the seam's timeline (ns, mach_absolute_time); zero otherwise
 } Call;
@@ -175,6 +178,7 @@ typedef struct {
     _Atomic int bcount, bgen;
     int np, ncfg, g[MAXCFG], kind[MAXCFG], best;   // ncfg: ACC, GPU and the sweep's splits
     int fixed, rounds;   // fixed: SPLIT_G or SPLIT_F set, no sweep; rounds of the fixed block
+    int nwarm;           // untimed split calls before the fixed block
     int narm, k_seam, k_split2, k_head, k_tail;    // the arms (0 or NARM), at indices ncfg..ncfg+narm-1
     int nrec[NPMAX]; Rec rec[NPMAX][MAXREC];
     int reg_ok[NPMAX], notgpu[NPMAX], gpucalls[NPMAX];
@@ -206,6 +210,8 @@ typedef struct {
 static Ctx X;
 static dispatch_semaphore_t sem_go, sem_done, sem_cpu_done;
 static int g_delay;                     // 0 none, 1 GPU slice starts after the CPU slice, 2 the reverse
+enum { PREV_NONE = -2, PREV_IDLE = -1 };
+static int g_prev = PREV_NONE;          // the config of this process's last call (Call.prev)
 static bool g_noreset;                  // power phase: C is not reset between calls
 static double g_tg0, g_tg1;
 
@@ -276,7 +282,7 @@ static double ns_s(uint64_t ns) { return (double)ns * 1e-9; }
 static void one_call(Ctx *x, int k, Call *o) {
     if (!g_noreset) memcpy(x->C, x->C0, x->nC * x->es);
     double *v = o->v; int kd = shm->kind[k];
-    memset(o, 0, sizeof *o); o->outcome = -1;
+    memset(o, 0, sizeof *o); o->outcome = -1; o->prev = g_prev; g_prev = k;
     double t0 = now(), tc0 = t0, tc1, tj, tk;
     if (kd == KD_ACC) { acc_full(x); tc1 = tj = tk = now(); v[V_CPU] = tc1 - t0; }
     else if (kd == KD_GPU) { gpu_full(x); tc1 = tj = tk = now(); v[V_GPU] = tc1 - t0; }
@@ -437,6 +443,38 @@ static void order_of(int r, int n, int *ord) {  // interleave: rotate by r, reve
     for (int i = 0; i < n; i++) ord[i] = (i + r) % n;
     if (r % 2) for (int i = 0; i < n / 2; i++) { int t = ord[i]; ord[i] = ord[n - 1 - i]; ord[n - 1 - i] = t; }
 }
+// One call of a fixed-block round: config k's repeat rep, or an untimed call of k (rep -1).
+typedef struct { int k, rep; } Step;
+#define MAXSTEP 512   // calls per round (main checks the cases' repeats against it)
+static int add_reps(Step *p, int n, int k, int reps) { for (int r = 0; r < reps; r++) p[n++] = (Step){k, r}; return n; }
+// The trio's orders, a Williams design for three (0 S<g>, 1 SEAM, 2 S<g>b): over NW6 rounds each arm
+// runs first, and right before and right after each other arm, equally often.
+#define NW6 6
+static const int W6[NW6][3] = {{1, 0, 2}, {2, 0, 1}, {0, 2, 1}, {1, 2, 0}, {2, 1, 0}, {0, 1, 2}};
+// Round r of the fixed block, the user split at config bk. Without the arms, as before: Accelerate,
+// GPU and the split with their repeats back to back, rotated and reversed by round (order_of). With
+// them (after the idle gap child() runs first): the CPU-only configs ACC and HEAD, then the GPU alone
+// and TAIL, each pair's order alternating by round; then one untimed call of the user split and the
+// trio SEAM, S<g>, S<g>b, repeat by repeat, in W6[r % NW6]'s order. So ACC and HEAD never follow a
+// GPU config, no arm of the trio follows ACC, GPU, HEAD or TAIL, and pairs by (round, rep) stay
+// within one repeat of the trio. Round 0 runs the user split before its twin, so its first result
+// (the bit checks' reference) comes first.
+static int fixed_plan(const Case *c, int r, int bk, Step *p) {
+    int n = 0;
+    if (!shm->narm) {
+        const int cf[3] = {CF_ACC, CF_GPU, bk}, reps[3] = {c->fx_acc, c->fx_gpu, c->fx_split}; int ord[3];
+        order_of(r, 3, ord);
+        for (int i = 0; i < 3; i++) n = add_reps(p, n, cf[ord[i]], reps[ord[i]]);
+        return n;
+    }
+    const int cf[2][2] = {{CF_ACC, shm->k_head}, {CF_GPU, shm->k_tail}}, rp[2][2] = {{c->fx_acc, c->fx_split}, {c->fx_gpu, c->fx_split}};
+    for (int e = 0; e < 2; e++) for (int i = 0; i < 2; i++) n = add_reps(p, n, cf[e][i ^ (r & 1)], rp[e][i ^ (r & 1)]);
+    p[n++] = (Step){bk, -1};
+    const int trio[3] = {bk, shm->k_seam, shm->k_split2};
+    for (int rep = 0; rep < c->fx_split; rep++)
+        for (int j = 0; j < 3; j++) p[n++] = (Step){trio[W6[r % NW6][j]], rep};
+    return n;
+}
 static int child(const Case *c, int id, const char *shmpath, int data) {   // np: shm->np
     double T0 = now();
     alarm(c->big ? 2400 : 600);
@@ -483,45 +521,49 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
     int bk = shm->best;
     // warm-up of the arms (untimed): the seam's thread and pool slots, the slices alone
     for (int k = shm->ncfg; k < shm->ncfg + shm->narm; k++) { set_cfg(x, k); barrier(); one_call(x, k, &v); }
-    // ---- fixed block at the best share, shm->rounds rounds. Base order: Accelerate, GPU, the seam,
-    // the user split, its twin, the CPU slice alone, the GPU slice alone; rotated and reversed by round
-    // (order_of), so the seam and the twin sit one config from the user split in every round, and in
-    // round 0 the user split runs before its twin and the slices, whose checks use its first result.
-    int fcfg[3 + NARM] = {CF_ACC, CF_GPU, bk}, freps[3 + NARM] = {c->fx_acc, c->fx_gpu, c->fx_split}, nf = 3;
-    if (shm->narm) {
-        int base[3 + NARM] = {CF_ACC, CF_GPU, shm->k_seam, bk, shm->k_split2, shm->k_head, shm->k_tail};
-        for (int i = 0; i < 3 + NARM; i++) { fcfg[i] = base[i]; freps[i] = i == 0 ? c->fx_acc : i == 1 ? c->fx_gpu : c->fx_split; }
-        nf = 3 + NARM;
+    // warm-up before the block (untimed): the split at g for SPLIT_WARM_S seconds (default 2 with the
+    // arms, 0 without), so the block does not start cool; process 0's call time sets the count for all
+    const double warm_s = envd("SPLIT_WARM_S", shm->narm ? 2 : 0);
+    if (warm_s > 0) {
+        set_cfg(x, bk); barrier(); one_call(x, bk, &v);
+        if (id == 0) { double n = ceil(warm_s / fmax(v.v[V_TOTAL], 1e-6)) - 1; shm->nwarm = n < 0 ? 0 : n > 10000 ? 10000 : (int)n; }
+        barrier();
+        for (int i = 0; i < shm->nwarm; i++) { barrier(); one_call(x, bk, &v); }
     }
+    // ---- fixed block at the best share, shm->rounds rounds (fixed_plan has the order)
     int sreps = 0, sdiff = 0, greps = 0, gdiff = 0, areps = 0, adiff = 0; long smax = 0;
     int mreps = 0, mdiff = 0, s2reps = 0, s2diff = 0, hdone = 0, tdone = 0;
     shm->seam_vs_split[id] = shm->head_vs_split[id] = shm->tail_vs_split[id] = -1;
     const int M = c->M, N = c->N, cut = axis_len(c) - shm->g[bk];
+    const double gap_s = envd("SPLIT_GAP_S", 1.0);
+    Step plan[MAXSTEP];
     for (int r = 0; r < shm->rounds; r++) {
-        order_of(r, nf, ord);
-        for (int i = 0; i < nf; i++) {
-            int k = fcfg[ord[i]], nrep = freps[ord[i]], kd = shm->kind[k]; set_cfg(x, k);
-            for (int rep = 0; rep < nrep; rep++) {
-                barrier(); one_call(x, k, &v); record(PH_FIXED, r, k, rep, &v);
-                if (kd == KD_SPLIT2) { s2diff += memcmp(Cs0, x->C, x->nC * es) != 0; s2reps++; continue; }   // against the user split's first
-                if (kd == KD_HEAD || kd == KD_TAIL) {   // the part of C the slice wrote, against the user split's (N and M axes)
-                    int *done = kd == KD_HEAD ? &hdone : &tdone;
-                    if (*done || c->axis == 'K') continue;
-                    bool head = kd == KD_HEAD, n_ax = c->axis == 'N';
-                    long d = cmp_block(x, Cs0, x->C, n_ax ? 0 : head ? 0 : cut, n_ax ? M : head ? cut : M, n_ax ? (head ? 0 : cut) : 0, n_ax ? (head ? cut : N) : N);
-                    if (head) shm->head_vs_split[id] = d; else shm->tail_vs_split[id] = d;
-                    *done = 1; continue;
-                }
-                void *ref = kd == KD_ACC ? Ca0 : kd == KD_GPU ? Cg0 : kd == KD_SEAM ? Cm0 : Cs0;
-                int *nr = kd == KD_ACC ? &areps : kd == KD_GPU ? &greps : kd == KD_SEAM ? &mreps : &sreps;
-                int *nd = kd == KD_ACC ? &adiff : kd == KD_GPU ? &gdiff : kd == KD_SEAM ? &mdiff : &sdiff;
-                if (*nr == 0) memcpy(ref, x->C, x->nC * es);
-                else if (memcmp(ref, x->C, x->nC * es)) {
-                    (*nd)++;
-                    if (k == bk) { long d = cmp_block(x, ref, x->C, 0, c->M, 0, c->N); if (d > smax) smax = d; }
-                }
-                (*nr)++;
+        if (shm->narm) { barrier(); sleep_s(gap_s); g_prev = PREV_IDLE; }   // the idle gap that starts a round
+        int nst = fixed_plan(c, r, bk, plan);
+        for (int st = 0; st < nst; st++) {
+            int k = plan[st].k, rep = plan[st].rep;
+            int kd = shm->kind[k]; set_cfg(x, k);
+            barrier(); one_call(x, k, &v);
+            if (rep < 0) continue;   // untimed
+            record(PH_FIXED, r, k, rep, &v);
+            if (kd == KD_SPLIT2) { if (sreps) { s2diff += memcmp(Cs0, x->C, x->nC * es) != 0; s2reps++; } continue; }   // against the user split's first
+            if (kd == KD_HEAD || kd == KD_TAIL) {   // the part of C the slice wrote, against the user split's first (N and M axes)
+                int *done = kd == KD_HEAD ? &hdone : &tdone;
+                if (*done || !sreps || c->axis == 'K') continue;
+                bool head = kd == KD_HEAD, n_ax = c->axis == 'N';
+                long d = cmp_block(x, Cs0, x->C, n_ax ? 0 : head ? 0 : cut, n_ax ? M : head ? cut : M, n_ax ? (head ? 0 : cut) : 0, n_ax ? (head ? cut : N) : N);
+                if (head) shm->head_vs_split[id] = d; else shm->tail_vs_split[id] = d;
+                *done = 1; continue;
             }
+            void *ref = kd == KD_ACC ? Ca0 : kd == KD_GPU ? Cg0 : kd == KD_SEAM ? Cm0 : Cs0;
+            int *nr = kd == KD_ACC ? &areps : kd == KD_GPU ? &greps : kd == KD_SEAM ? &mreps : &sreps;
+            int *nd = kd == KD_ACC ? &adiff : kd == KD_GPU ? &gdiff : kd == KD_SEAM ? &mdiff : &sdiff;
+            if (*nr == 0) memcpy(ref, x->C, x->nC * es);
+            else if (memcmp(ref, x->C, x->nC * es)) {
+                (*nd)++;
+                if (k == bk) { long d = cmp_block(x, ref, x->C, 0, c->M, 0, c->N); if (d > smax) smax = d; }
+            }
+            (*nr)++;
         }
     }
     // ---- completion order: GPU slice starts after the CPU slice, then the reverse
@@ -843,8 +885,9 @@ static void report(const Case *c, int np, int data, bool smc, double idle_w) {
     int bk = shm->best, na, ng, ns;
     double fb = (double)shm->g[bk] / axis_len(c);
     double La = stat(PH_FIXED, CF_ACC, -1, V_TOTAL, true, &na), Lg = stat(PH_FIXED, CF_GPU, -1, V_TOTAL, true, &ng), Ls = stat(PH_FIXED, bk, -1, V_TOTAL, true, &ns);
-    printf("-- fixed block at g=%d (f=%.3f, %s), %d interleaved rounds; medians of lockstep times (ms) [per-round medians]\n", shm->g[bk], fb,
-           shm->fixed ? "fixed" : "the sweep's best", shm->rounds);
+    printf("-- fixed block at g=%d (f=%.3f, %s), %d interleaved rounds%s; medians of lockstep times (ms) [per-round medians]\n", shm->g[bk], fb,
+           shm->fixed ? "fixed" : "the sweep's best", shm->rounds,
+           shm->narm && shm->rounds % NW6 ? " (the trio's order is balanced over multiples of 6 rounds; this is not one)" : "");
     int cf[3] = {CF_ACC, CF_GPU, bk};
     int all[3 + NARM] = {CF_ACC, CF_GPU, bk}, nall = 3;
     if (shm->narm) { int arms[NARM] = {shm->k_seam, shm->k_split2, shm->k_head, shm->k_tail}; for (int a = 0; a < NARM; a++) all[nall++] = arms[a]; }
@@ -1050,7 +1093,7 @@ static int sustain(const Case *c, const char *outdir, int g, double secs, double
             shm->g[bcfg[SB_BAL]] = gpu_part(c, rg / (rc + rg));
         }
         int k = bcfg[b]; set_cfg(x, k);
-        it0[b] = now(); usleep((useconds_t)(idle_s * 1e6)); it1[b] = now();
+        it0[b] = now(); sleep_s(idle_s); it1[b] = now();
         bt0[b] = now(); int i = 0;
         while (now() - bt0[b] < secs) {
             one_call(x, k, &call);
@@ -1196,6 +1239,7 @@ int main(int argc, char **argv) {
         shm->kind[shm->k_seam] = KD_SEAM; shm->kind[shm->k_split2] = KD_SPLIT2; shm->kind[shm->k_head] = KD_HEAD; shm->kind[shm->k_tail] = KD_TAIL;
     }
     int need = (shm->fixed ? 0 : 3 * shm->ncfg * c->sweep_reps) + rounds * (c->fx_acc + c->fx_gpu + c->fx_split * (1 + shm->narm)) + 2;
+    if (c->fx_acc + c->fx_gpu + c->fx_split * (1 + shm->narm) + 1 > MAXSTEP) { fprintf(stderr, "too many repeats per round (MAXSTEP %d)\n", MAXSTEP); unlink(path); return 2; }
     if (need > MAXREC) {   // records per process: the sweep, the fixed block, the two completion orders
         fprintf(stderr, "SPLIT_ROUNDS=%d needs %d records per process, more than MAXREC %d\n", rounds, need, MAXREC);
         unlink(path); return 2;
@@ -1204,7 +1248,7 @@ int main(int argc, char **argv) {
     g_ior = sampler_on() && envd("SPLIT_POWER_S", 0) > 0 && ior_init();   // GPU clock for sustained runs
     if (smc) pthread_create(&st, NULL, sampler, NULL);
     double idle_s = envd("SPLIT_IDLE_S", 1.0);   // mean over its second half
-    double ti0 = now(); usleep((useconds_t)(idle_s * 1e6)); double ti1 = now(), tih = ti0 + 0.5 * idle_s;
+    double ti0 = now(); sleep_s(idle_s); double ti1 = now(), tih = ti0 + 0.5 * idle_s;
     double idle_w = smc ? smc_mean(0, &tih, &ti1, 1, NULL) : NAN;
     double t0 = now();
     pid_t kids[NPMAX]; char ids[NPMAX][8], nps[8], ds[8];
@@ -1225,14 +1269,16 @@ int main(int argc, char **argv) {
         if (f) {
             // the SEAM calls' outcome and timeline (ns on the clock of t0 and t1); 0 (or - for the outcome)
             // on other configs' rows and for a step that did not happen
-            fprintf(f, "proc\tphase\tround\tcfg\tname\tg\trep\ttotal\tcpu\tgpu\tjoin\twake\tkadd\tt0\tt1\toutcome\tretries\tin_place"
+            fprintf(f, "proc\tphase\tround\tcfg\tname\tg\trep\tprev\ttotal\tcpu\tgpu\tjoin\twake\tkadd\tt0\tt1\toutcome\tretries\tin_place"
                        "\tat_cut_ns\tat_create_ns\tat_cpu0_ns\tat_cpu1_ns\tat_gpu0_ns\tat_gpu1_ns\tat_join_ns\tat_end_ns"
                        "\tgpu_commit_ns\tgpu_start_ns\tgpu_end_ns\tgpu_done_ns\tgpu_encode_ns\tgpu_submit_ns\tgpu_wake_ns\tgpu_temps_ns"
                        "\tgpu_groups\tgpu_groups_max\tgpu_dispatches\tgpu_cmdbufs\tgpu_kinds\tgpu_mtl_error\tload1\n");
             char nb[24];
             for (int p = 0; p < np; p++) for (int i = 0; i < shm->nrec[p]; i++) {
                 const Rec *r = &shm->rec[p][i]; const ab_split_times_t *m = &r->k.tm; const ab_prof_kernel_split_t *q = &m->gpu;
-                fprintf(f, "%d\t%d\t%d\t%d\t%s\t%d\t%d", p, r->phase, r->round, r->cfg, cfg_name(r->cfg, nb), cfg_g(c, r->cfg), r->rep);
+                int pv = r->k.prev; char pb[24];
+                fprintf(f, "%d\t%d\t%d\t%d\t%s\t%d\t%d\t%s", p, r->phase, r->round, r->cfg, cfg_name(r->cfg, nb), cfg_g(c, r->cfg), r->rep,
+                        pv == PREV_IDLE ? "idle" : pv == PREV_NONE ? "-" : cfg_name(pv, pb));
                 for (int k = 0; k < NV; k++) fprintf(f, "\t%.6f", r->k.v[k]);
                 fprintf(f, "\t%s\t%d\t%d\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu", outcome_name(r->k.outcome), r->k.retries, r->k.in_place,
                         (unsigned long long)m->cut_ns, (unsigned long long)m->create_ns, (unsigned long long)m->cpu0_ns, (unsigned long long)m->cpu1_ns,
