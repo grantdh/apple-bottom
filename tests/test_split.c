@@ -828,6 +828,7 @@ static const char TABLE[] =
     "dgemm N N N m=512: f=0.5\n"                       // 3
     "dgemm T N K k=4096: f=0.5\n"                      // 4
     "zgemm N T N m=200: f=0\n";                        // 5: attributed, never cut
+#define N_ROWS 6
 // The first 12 hex digits of `shasum -a 256` of TABLE: the reports name the file with them.
 #define TABLE_SHA256 "99da8cd29a2b"
 
@@ -1388,12 +1389,43 @@ static void test_split_fork(void) {
     finish();
 }
 
-// The integer after "key=" in line, or -1.
-static long long field(const char *line, const char *key) {
+// What follows " key=" in line, or NULL.
+static const char *after_key(const char *line, const char *key) {
     char k[64];
     snprintf(k, sizeof k, " %s=", key);
     const char *p = strstr(line, k);
-    return p ? atoll(p + strlen(k)) : -1;
+    return p ? p + strlen(k) : NULL;
+}
+
+// The integer after "key=" in line, or -1.
+static long long field(const char *line, const char *key) {
+    const char *p = after_key(line, key);
+    return p ? atoll(p) : -1;
+}
+
+// The number after "key=" in line, or NAN.
+static double fieldf(const char *line, const char *key) {
+    const char *p = after_key(line, key);
+    return p ? strtod(p, NULL) : NAN;
+}
+
+// The number after "key": in row i of the JSON dump's split_rows, or NAN.
+static double json_row_field(const char *js, int i, const char *key) {
+    char k[64];
+    snprintf(k, sizeof k, "{\"i\": %d,", i);
+    const char *row = js ? strstr(js, k) : NULL;
+    if (!row) return NAN;
+    snprintf(k, sizeof k, "\"%s\": ", key);
+    const char *p = strstr(row, k), *end = strchr(row, '}');
+    return p && end && p < end ? strtod(p + strlen(k), NULL) : NAN;
+}
+
+// The GFLOP of call t's head (gpu false) or tail (gpu true), cut as planned.
+static double part_gf(const TableCall *t, bool gpu) {
+    double d[3] = {t->c.M, t->c.N, t->c.K};
+    int a = t->axis == 'M' ? 0 : t->axis == 'N' ? 1 : 2;
+    d[a] = gpu ? t->g : d[a] - t->g;
+    return (t->c.r == 'z' ? 8.0 : 2.0) * d[0] * d[1] * d[2] / 1e9;
 }
 
 // T9: the reports with AB_SPLIT on.
@@ -1445,11 +1477,19 @@ static void test_split_reports(void) {
             if (i == 5) check(field(l, "calls") == 2 && field(l, "split") == 0, "the f = 0 row: %s", l);
             if (i == 0) check(field(l, "calls") == 4 && field(l, "split") == 4 && field(l, "kept_4m") == 2,
                               "row 0: %s", l);
+            // the row's first split call: its parts, within the row's sums, and none without one
+            static const char *const FIRST[][2] = {{"first_cpu_ms", "cpu_ms"}, {"first_gpu_ms", "gpu_ms"},
+                                                   {"first_gf_cpu", "gf_cpu"}, {"first_gf_gpu", "gf_gpu"}};
+            for (int k = 0; k < 4; k++) {
+                double first = fieldf(l, FIRST[k][0]), all = fieldf(l, FIRST[k][1]);
+                check(first <= all && (first > 0) == (field(l, "split") > 0), "row %lld: %s %g, %s %g: %s", i,
+                      FIRST[k][0], first, FIRST[k][1], all, l);
+            }
         }
     }
     check(routines == 2, "%d routine lines with split_calls (want zgemm, dgemm)", routines);
-    check(split_total == 14 && rows_seen == 6, "split calls by axis %lld (want 14), %d row lines (want 6)",
-          split_total, rows_seen);
+    check(split_total == 14 && rows_seen == N_ROWS, "split calls by axis %lld (want 14), %d row lines (want %d)",
+          split_total, rows_seen, N_ROWS);
     check(strstr(out, "AB_PROFILE zgemm M=1200 N=128 K=64  split row=0 axis=N g=64") != NULL,
           "no AB_PROFILE line for a split call");
     check(strstr(out, "AB_SPLIT: calls whose GPU part stood") != NULL, "no AB_SPLIT section in AB_PROFILE");
@@ -1461,18 +1501,24 @@ static void test_split_reports(void) {
     snprintf(want_js, sizeof want_js, "\"split_table\": \"%s\"", g_label);
     check(js && strstr(js, want_js) && strstr(js, "\"split_rows\"") && strstr(js, "\"split_calls\": "),
           "the JSON dump lacks the split fields");
-    free(js);
     // the trace: a split line's stages sum to t1 - t0, its GPU part's to gpu_wall_ns
     char cmd[PATH_MAX * 2];
     snprintf(cmd, sizeof cmd, "/bin/cat %s.*", trace);
     FILE *p = popen(cmd, "r");
     int split_lines = 0, row_lines = 0;
+    long long first_cpu[N_ROWS], first_gpu[N_ROWS];   // each row's first split call, as traced
+    for (int r = 0; r < N_ROWS; r++) first_cpu[r] = first_gpu[r] = -1;
     char line[4096];
     bool header = false;
     while (p && fgets(line, sizeof line, p)) {
         if (line[0] == '#') { header = header || strstr(line, want + 1); continue; }
         if (strstr(line, " path=split") || (strstr(line, " retries=") && strstr(line, " path=fallback:"))) {
             split_lines++;
+            long long row = field(line, "row");
+            if (row >= 0 && row < N_ROWS && first_cpu[row] < 0) {
+                first_cpu[row] = field(line, "cpu_part_ns");
+                first_gpu[row] = field(line, "gpu_wall_ns");
+            }
             long long t = field(line, "t1_ns") - field(line, "t0_ns");
             long long st = field(line, "init_ns") + field(line, "cpu_part_ns") + field(line, "join_ns") +
                            field(line, "redo_ns") + field(line, "sum_ns") + field(line, "other_ns");
@@ -1511,6 +1557,21 @@ static void test_split_reports(void) {
     if (p) pclose(p);
     check(header && split_lines == 14 && row_lines == 2, "trace: header %d, %d split lines (want 14), %d f = 0 "
           "lines (want 2)", header, split_lines, row_lines);
+    // The JSON's first split call per row is the trace's, and its GFLOP the plan's for the row's first call.
+    bool seen[N_ROWS] = {false};
+    for (int i = 0; i < N_TCALLS; i++) {
+        const TableCall *t = &TCALLS[i];
+        int r = t->row;
+        if (!cut_call(i) || seen[r]) continue;
+        seen[r] = true;
+        double cpu = json_row_field(js, r, "first_cpu_ns"), gpu = json_row_field(js, r, "first_gpu_ns"),
+               gf_cpu = json_row_field(js, r, "first_gf_cpu"), gf_gpu = json_row_field(js, r, "first_gf_gpu");
+        check(cpu == first_cpu[r] && gpu == first_gpu[r] && fabs(gf_cpu - part_gf(t, false)) <= 1e-6 &&
+                  fabs(gf_gpu - part_gf(t, true)) <= 1e-6,
+              "row %d's first split call: cpu %.0f gpu %.0f ns (trace %lld, %lld), GFLOP %g + %g (plan %g + %g)", r,
+              cpu, gpu, first_cpu[r], first_gpu[r], gf_cpu, gf_gpu, part_gf(t, false), part_gf(t, true));
+    }
+    free(js);
     snprintf(cmd, sizeof cmd, "/bin/rm -f %s.* %s", trace, json);
     if (system(cmd)) {}
     finish();

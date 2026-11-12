@@ -80,11 +80,16 @@ const char* const ab_prof_split_decline_names[AB_PROF_SPLIT_DECLINE_COUNT] = {
 };
 
 // AB_SPLIT: per row of the split table, the calls it covered (also those it
-// did not cut) and what became of them (AB_REPORT's split_row lines).
+// did not cut) and what became of them (AB_REPORT's split_row lines). first_ns
+// is the wall time of the first call the row covered; first_cpu_ns and the
+// other first_ fields are the parts of its first split call, whose GPU part
+// carries Metal's start-up when it is the process's first, so that a fit of
+// the shares can leave that call out.
 typedef struct {
     uint64_t calls, split, kept, kept_4m, range, gpu_failed;
     uint64_t wall_ns, first_ns, cpu_ns, gpu_ns, wait_cpu_ns, wait_gpu_ns, redo_ns, sum_ns;
-    double gf, gf_cpu, gf_gpu;
+    uint64_t first_cpu_ns, first_gpu_ns;
+    double gf, gf_cpu, gf_gpu, first_gf_cpu, first_gf_gpu;
 } split_row_stats_t;
 
 static split_row_stats_t g_split_rows[AB_SPLIT_MAX_ROWS];   // under g_lock
@@ -327,6 +332,12 @@ void ab_prof_record_split(const char* routine, uint64_t elapsed_ns, size_t m, si
         x->declined[s->declined]++;
     if (s->split) {
         bool k4 = s->staged == AB_PROF_STAGED_KEPT_4M, range = s->staged == AB_PROF_STAGED_RANGE;
+        if (!r->split) {
+            r->first_cpu_ns = s->cpu_part_ns;
+            r->first_gpu_ns = s->gpu_wall_ns;
+            r->first_gf_cpu = s->gf_cpu;
+            r->first_gf_gpu = s->gf_gpu;
+        }
         r->split++;
         r->kept += s->kept && !k4;
         r->kept_4m += s->kept && k4;
@@ -646,11 +657,13 @@ static void report_split_rows(report_line_t* l, FILE* out, const char* prefix) {
         const ab_split_row_t* row = &dc->split_rows[i];
         const split_row_stats_t* r = &g_split_rows[i];
         line_add(l, "%ssplit_row i=%d routine=%cgemm axis=%c f=%g calls=%llu split=%llu wall_ms=%.3f "
-                    "first_ms=%.3f cpu_ms=%.3f gpu_ms=%.3f wait_cpu_ms=%.3f wait_gpu_ms=%.3f "
+                    "first_ms=%.3f first_cpu_ms=%.3f first_gpu_ms=%.3f first_gf_cpu=%.3f first_gf_gpu=%.3f "
+                    "cpu_ms=%.3f gpu_ms=%.3f wait_cpu_ms=%.3f wait_gpu_ms=%.3f "
                     "redo_ms=%.3f sum_ms=%.3f gf=%.3f gf_cpu=%.3f gf_gpu=%.3f kept=%llu kept_4m=%llu "
                     "range=%llu gpu_failed=%llu\n",
                  prefix, i, row->routine, row->axis, row->share, LLU(r->calls), LLU(r->split),
-                 r->wall_ns / 1e6, r->first_ns / 1e6, r->cpu_ns / 1e6, r->gpu_ns / 1e6,
+                 r->wall_ns / 1e6, r->first_ns / 1e6, r->first_cpu_ns / 1e6, r->first_gpu_ns / 1e6,
+                 r->first_gf_cpu, r->first_gf_gpu, r->cpu_ns / 1e6, r->gpu_ns / 1e6,
                  r->wait_cpu_ns / 1e6, r->wait_gpu_ns / 1e6, r->redo_ns / 1e6, r->sum_ns / 1e6, r->gf,
                  r->gf_cpu, r->gf_gpu, LLU(r->kept), LLU(r->kept_4m), LLU(r->range), LLU(r->gpu_failed));
         line_emit(l, out);
@@ -1150,12 +1163,15 @@ void ab_prof_dump_json(const char* path) {
             const split_row_stats_t* r = &g_split_rows[i];
             fprintf(f, "%s\n    {\"i\": %d, \"routine\": \"%cgemm\", \"axis\": \"%c\", \"f\": %g, "
                        "\"calls\": %llu, \"split\": %llu, \"wall_ns\": %llu, \"first_ns\": %llu, "
+                       "\"first_cpu_ns\": %llu, \"first_gpu_ns\": %llu, "
+                       "\"first_gf_cpu\": %.6f, \"first_gf_gpu\": %.6f, "
                        "\"cpu_ns\": %llu, \"gpu_ns\": %llu, \"wait_cpu_ns\": %llu, \"wait_gpu_ns\": %llu, "
                        "\"redo_ns\": %llu, \"sum_ns\": %llu, \"gf\": %.6f, \"gf_cpu\": %.6f, "
                        "\"gf_gpu\": %.6f, \"kept\": %llu, \"kept_4m\": %llu, \"range\": %llu, "
                        "\"gpu_failed\": %llu}",
                     i ? "," : "", i, row->routine, row->axis, row->share, LLU(r->calls), LLU(r->split),
-                    LLU(r->wall_ns), LLU(r->first_ns), LLU(r->cpu_ns), LLU(r->gpu_ns), LLU(r->wait_cpu_ns),
+                    LLU(r->wall_ns), LLU(r->first_ns), LLU(r->first_cpu_ns), LLU(r->first_gpu_ns),
+                    r->first_gf_cpu, r->first_gf_gpu, LLU(r->cpu_ns), LLU(r->gpu_ns), LLU(r->wait_cpu_ns),
                     LLU(r->wait_gpu_ns), LLU(r->redo_ns), LLU(r->sum_ns), r->gf, r->gf_cpu, r->gf_gpu,
                     LLU(r->kept), LLU(r->kept_4m), LLU(r->range), LLU(r->gpu_failed));
         }

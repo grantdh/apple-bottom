@@ -143,7 +143,8 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     unset); `AB_STRASSEN`, `AB_STAGING_MB=0` and `AB_MIN_GPU_DIM=0` keeping
     the bits; `VECLIB_MAXIMUM_THREADS` 1, 2 and 8 repeating; `fork()` with
     `_exit` and `exit`; the reports (the table's path and digest in the
-    headers, counts that add up, a line per row,
+    headers, counts that add up, a line per row, each row's first split
+    call the trace's first for that row,
     trace stages that sum exactly, every split line's timeline whole and in
     order, the JSON fields; which stage a piece of
     work is charged to, such as the NaN scan's time to `join_ns`, is checked
