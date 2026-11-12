@@ -21,10 +21,12 @@
 # Default: every suite but smoke and the G3 suites, in that order (about 50 min).
 #
 # Run on an otherwise idle Mac on AC power from an adapter of at least SPLIT_MIN_W watts (default 90).
-# The script checks `pmset` at the start and before every case, and stops with exit status 75 if either
-# fails. A case already complete in <outdir> is skipped, and one that did not both start and end on AC
-# power is moved aside, so running the script again resumes. SPLIT_DRY=1 makes the same checks and
-# prints each case's command instead of running it.
+# Before every case the script also wants the battery at SPLIT_MIN_BATT percent or more (default 95)
+# and neither charging nor finishing its charge: it waits up to SPLIT_BATT_WAIT_S seconds (default
+# 900) for that. It stops with exit status 75 when a check fails (after the wait, for the battery). A
+# case already complete in <outdir> is skipped, and one whose report does not start and end on AC power
+# from an adapter of SPLIT_MIN_W watts or more is moved aside, so running the script again resumes.
+# SPLIT_DRY=1 makes the same checks (without waiting) and prints each case's command instead.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 bin=${BENCH_SPLIT:-$here/../../build/bench_split}
@@ -37,20 +39,43 @@ for s in ${*:-sq1x8 qe4x2 qe1x8 qe8x1 qelike4x2 qelike4x2-low noreg4x2 power4x2 
 done
 env_common=(AB_MODE=gpu AB_MIN_GPU_DIM=0 AB_STAGING_MB=8192 AB_REPORT=1)
 min_w=${SPLIT_MIN_W:-90}
+min_batt=${SPLIT_MIN_BATT:-95}
+batt_wait=${SPLIT_BATT_WAIT_S:-900}
 dry=${SPLIT_DRY:-}
 
 onac() { pmset -g batt | head -1 | grep -q "'AC Power'"; }
 adapter_w() { pmset -g adapter | sed -nE 's/^ *Wattage = ([0-9]+)W.*/\1/p' | head -1; }
 adapter_ok() { local w; w=$(adapter_w); [ -n "$w" ] && [ "$w" -ge "$min_w" ]; }
-power_ok() {   # power_ok <what>: on AC power from an adapter of at least min_w watts, else say so on stderr
+batt_line() { pmset -g batt | sed -n 2p; }
+batt_ok() {   # at least min_batt percent, not charging and not finishing its charge (as the AB_SPLIT pilot)
+    local b; b=$(batt_line)
+    ! echo "$b" | grep -qE '; (charging|finishing charge);' && [ "$(echo "$b" | grep -oE '[0-9]+%' | tr -d %)" -ge "$min_batt" ] 2>/dev/null
+}
+ac_ok() {   # ac_ok <what>: on AC power from an adapter of at least min_w watts, else say so on stderr
     onac || { echo "not on AC power, stopping $1: exit 75" >&2; return 1; }
     adapter_ok || { echo "adapter $(adapter_w) W, under $min_w W, stopping $1: exit 75" >&2; return 1; }
 }
-note() { echo "$(date '+%F %T') $2: $(pmset -g batt | head -1) | adapter $(adapter_w) W | load $(sysctl -n vm.loadavg)" >> "$1/power.log"; }
+power_ok() {   # power_ok <what>: ac_ok and the battery as batt_ok wants (waiting up to batt_wait s for it,
+               # except in a dry run), else say so on stderr
+    ac_ok "$1" || return 1
+    local t=0
+    while ! batt_ok; do
+        [ -z "$dry" ] && [ $t -lt "$batt_wait" ] || { echo "battery [$(batt_line)], stopping $1: exit 75" >&2; return 1; }
+        sleep 30; t=$((t + 30))
+    done
+}
+report_power_ok() {   # report_power_ok <file>: its start and end lines say AC power from an adapter of min_w W or more
+    local w
+    for w in start end; do
+        grep -q "^$w: Now drawing from 'AC Power'" "$1" || return 1
+        [ "$(sed -nE "s/^$w: .*\| adapter ([0-9]+) W.*/\1/p" "$1")" -ge "$min_w" ] 2>/dev/null || return 1
+    done
+}
+note() { echo "$(date '+%F %T') $2: $(pmset -g batt | tr '\n' ' ') | adapter $(adapter_w) W | load $(sysctl -n vm.loadavg)" >> "$1/power.log"; }
 power_ok "before the first case" || exit 75
 # go <dir> <prefix> <marker> <label> <command ...>: run one case into <dir>/<prefix>.out, unless that
-# already holds a <marker> line; afterwards it must hold one and have started and ended on AC power,
-# else the case's files are moved aside and the script stops
+# already holds a <marker> line; afterwards it must hold one and have started and ended on AC power from
+# an adapter of min_w W or more, else the case's files are moved aside and the script stops
 go() {
     local d=$1 pre=$2 mark=$3 label=$4 rc; shift 4
     grep -q "^$mark" "$d/$pre.out" 2>/dev/null && return 0
@@ -61,12 +86,11 @@ go() {
     "$@" > "$d/$pre.out" 2>&1
     rc=$?
     note "$d" "after $label rc=$rc"
-    if [ $rc -ne 0 ] || ! grep -q "^$mark" "$d/$pre.out" ||
-       ! grep -q "^start: Now drawing from 'AC Power'" "$d/$pre.out" || ! grep -q "^end: Now drawing from 'AC Power'" "$d/$pre.out"; then
+    if [ $rc -ne 0 ] || ! grep -q "^$mark" "$d/$pre.out" || ! report_power_ok "$d/$pre.out"; then
         local aside="$d/incomplete-$(date +%Y%m%d-%H%M%S)"
         mkdir -p "$aside" && mv "$d/$pre".* "$aside/" 2>/dev/null
         note "$d" "moved $pre.* to $aside"
-        onac || exit 75
+        ac_ok "after $label" || exit 75
         exit 1
     fi
 }

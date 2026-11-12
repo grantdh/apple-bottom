@@ -801,9 +801,15 @@ static void dump_ior(const char *path) {
     for (int i = 0; i < n; i++) fprintf(f, "%.3f\t%.2f\t%.1f\t%.4f\n", g_it[i], g_iv[i][0], g_iv[i][1], g_iv[i][2]);
     fclose(f);
 }
-// `pmset -g batt` on one line, and the load averages
+// `pmset -g batt` on one line with the adapter's watts (`| adapter 140 W`), and the load averages
 static void machine_state(char *pw, size_t npw, char *ld, size_t nld) {
-    sh_line("pmset -g batt | tr '\\n' ' '", pw, npw); sh_line("sysctl -n vm.loadavg", ld, nld);
+    sh_line("pmset -g batt | tr '\\n' ' '; pmset -g adapter | sed -nE 's/^ *Wattage = ([0-9]+)W.*/| adapter \\1 W /p'", pw, npw);
+    sh_line("sysctl -n vm.loadavg", ld, nld);
+}
+// on AC power from an adapter of at least SPLIT_MIN_W watts (default 90), by machine_state's line
+static bool power_ok(const char *pw) {
+    const char *a = strstr(pw, "| adapter "); double w;
+    return strstr(pw, "'AC Power'") && a && sscanf(a, "| adapter %lf", &w) == 1 && w >= envd("SPLIT_MIN_W", 90);
 }
 
 // ---------------------------------------------------------------- parent: report
@@ -1068,7 +1074,7 @@ static int sustain(const Case *c, const char *outdir, int g, double secs, double
     printf("%s | VECLIB_MAXIMUM_THREADS=%s AB_MODE=%s AB_MIN_GPU_DIM=%s AB_STAGING_MB=%s | sustained runs, 1 proc\nstart: %s| load %s\n", ab_build_info(),
            getenv("VECLIB_MAXIMUM_THREADS"), getenv("AB_MODE"), getenv("AB_MIN_GPU_DIM"), getenv("AB_STAGING_MB"), pw, ld);
     fflush(stdout);
-    if (!strstr(pw, "'AC Power'")) { printf("not on AC power: exit 75\n"); return 75; }
+    if (!power_ok(pw)) { printf("not on AC power from an adapter of SPLIT_MIN_W watts or more: exit 75\n"); return 75; }
     shm = mmap(NULL, sizeof(Shm), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
     if (shm == MAP_FAILED) { perror("mmap"); return 1; }
     // configs: 0 ACC, 1 GPU, 2 the split at g, 3 the split rebalanced, 4 HEAD and 5 TAIL at g
@@ -1099,8 +1105,8 @@ static int sustain(const Case *c, const char *outdir, int g, double secs, double
     double bt0[NSB], bt1[NSB], it0[NSB], it1[NSB]; int bn[NSB] = {0}, bchk[NSB] = {0}, bdiff[NSB] = {0};
     for (int s = 0; s < NSB; s++) {
         int b = order[s];
-        sh_line("pmset -g batt | head -1", pw, sizeof pw);
-        if (!strstr(pw, "'AC Power'")) { printf("left AC power before run %d: exit 75\n", s); fflush(stdout); return 75; }
+        machine_state(pw, sizeof pw, ld, sizeof ld);
+        if (!power_ok(pw)) { printf("left AC power, or the adapter is under SPLIT_MIN_W watts, before run %d: exit 75\n", s); fflush(stdout); return 75; }
         if (b == SB_BAL) {  // the share that balances the split block's steady-state slice rates
             int cut0 = axis_len(c) - g;
             double Tc = sstat(c, SB_SPLIT, bt0[SB_SPLIT], steady, 1e9, 1, NULL, NULL, NULL), Tg = sstat(c, SB_SPLIT, bt0[SB_SPLIT], steady, 1e9, 2, NULL, NULL, NULL);

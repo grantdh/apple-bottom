@@ -132,12 +132,15 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
   the comparison would lean towards the seam. `raw.tsv` has the seam's timeline either way. `ZGEMM
   8192²` is not run at 4×2 (see Memory). `g3.py` reads the results.
 - **Machine:** run on an otherwise idle Mac on AC power, from an adapter of at least 90 W
-  (`SPLIT_MIN_W`). The script checks `pmset -g batt` and `pmset -g adapter` at the start and before each
-  case, and stops with exit status 75 if either fails. A case that did not both start and end on AC power
-  is moved aside, and running the script again resumes where it stopped. `SPLIT_DRY=1` makes the checks
-  and prints each case's command without running it. `power.log` has the power source, the adapter's
-  watts and the load averages before and after every case, and `raw.tsv` the load average after every
-  call (`load1`).
+  (`SPLIT_MIN_W`), with the battery at 95% or more (`SPLIT_MIN_BATT`) and neither charging nor finishing
+  its charge, as the AB_SPLIT pilot required. The script checks all three at the start and before each
+  case, waiting up to 900 s (`SPLIT_BATT_WAIT_S`) for the battery, and stops with exit status 75 if a
+  check fails. `bench_split` prints the adapter's watts on its `start:` and `end:` lines (and its
+  sustained mode checks them before every run); a case whose report does not start and end on AC power
+  from such an adapter is moved aside, and running the script again resumes where it stopped.
+  `SPLIT_DRY=1` makes the checks, without waiting, and prints each case's command without running it.
+  `power.log` has the power source, the battery's charge and state, the adapter's watts and the load
+  averages before and after every case, and `raw.tsv` the load average after every call (`load1`).
 - **Settings per suite:** a suite's own variables (`SPLIT_NOREG=1`, `AB_STAGING_MB=2048`, `AB_TRACE=`, ...)
   come last on the `env` line, so they override the common ones and the trace file.
 - **Memory:** the 8192² cases needed about 15 GB in the 2026-10-28 runs; the arms keep one more copy of
