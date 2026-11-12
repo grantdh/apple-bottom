@@ -288,8 +288,10 @@ Frobenius-class error is appropriate.
 
 **Subnormal handling**: the GPU flushes FP32 subnormals (below 2⁻¹²⁶) to zero, as inputs and as results, and a DD product keeps its full precision only above about 2⁻⁸⁰. The power-of-two scaling keeps data out of that region where it can, and the BLAS ABI's guard sends to Accelerate the calls it finds it cannot. Data can stay in the region and lose accuracy on the GPU in these cases:
 - native or device API: a matrix spanning more than 2⁷⁸;
-- native API: a result drifting from its scale (results are not re-centred), or one an alpha in [2⁻³⁹, 2⁴⁰) makes small;
-- `ab_dgemm_scaled` (and its batch and Strassen forms) and `ab_dev_dgemm`: alpha·op(A)op(B) and beta·C on scales far apart;
+- native API: a result drifting from its scale (results are not re-centred);
+- native API and `ab_dev_dgemm`: an alpha with |alpha| in [2⁻³⁹, 2⁴⁰) that makes the result small;
+- alpha·op(A)op(B) and beta·C on scales far apart (`ab_dgemm_scaled` and its batch and Strassen forms, `ab_dev_dgemm`);
+- operands on scales far apart (`ab_matrix_add`, `ab_matrix_sub`);
 - BLAS ABI: the data under `LIMITATIONS.md#what-the-guard-misses`.
 
 See `LIMITATIONS.md#exponent-range` for the measurements and the guard's thresholds.

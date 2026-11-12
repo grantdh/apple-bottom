@@ -580,20 +580,22 @@ All notable changes to this project will be documented in this file.
   same arithmetic. The header now states the units, the increment rule and
   the return codes. `test_device_api` adds `test_elementwise_bounds`, which
   fails on c8be67d.
-- **Every native ZGEMM entry checks all six handles.** `zgemm_ex` compared
-  only op(A)'s and op(B)'s K and Cr's shape, and `ab_zgemm_async`,
-  `ab_batch_zgemm` and `ab_zgemm_batched` with more than one entry compared
-  no dimension, so an imaginary part whose shape differed from its real
-  part's was read or written past its end with `AB_OK` (hostile audit
+- **Every native ZGEMM entry checks all six handles.** `ab_zgemm` and
+  `ab_zgemm_ex` compared only op(A)'s and op(B)'s K and Cr's shape, and
+  `ab_zgemm_async`, `ab_batch_zgemm` and `ab_zgemm_batched` with more than one
+  entry compared no dimension, so an imaginary part whose shape differed from
+  its real part's was read or written past its end with `AB_OK` (hostile audit
   2026-11-10, L5). Each now checks, before any GPU work, that every imaginary
   part has its real part's shape and that op(A) is M × K, op(B) K × N and C
   M × N. Otherwise it returns `AB_ERROR_DIMENSION_MISMATCH`: `ab_zgemm_async`
   as a completed future, `ab_zgemm_batched` before any entry runs. Valid
-  shapes take the same path as before. `test_correctness` adds one test per
-  entry point, each failing on c8be67d. Each test also makes one call per
-  op() rule (K, M and N) with every imaginary part in its real part's shape;
-  with any one rule deleted from the check, all four fail (mutants built from
-  fresh trees, 2026-11-10).
+  shapes take the same path as before. `test_correctness` adds four tests,
+  each failing on c8be67d: one shared by `ab_zgemm`, `ab_zgemm_ex` and
+  `ab_zgemm_strassen`, and one each for `ab_zgemm_async`, `ab_batch_zgemm` and
+  `ab_zgemm_batched`. Each test also makes one call per op() rule (K, M and N)
+  with every imaginary part in its real part's shape; with any one rule
+  deleted from the check, all four fail (mutants built from fresh trees,
+  2026-11-10).
 
 ### Corrected claims
 - **"No silent errors outside FP32's exponent range" and "every product keeps
@@ -659,9 +661,10 @@ All notable changes to this project will be documented in this file.
     in [2⁻³⁹, 2⁴⁰) multiplies the stored values (L4);
   - no API limits K, and the closed-form bounds are stated for K ≤ 2²⁰ (L6,
     [Framing](docs/vv/LIMITATIONS.md#framing));
-  - the BLAS-ABI ZGEMM epilogue can underflow before alpha, BLAS-2 rounds its
-    sum to FP64 before alpha (so a sum beyond FP64's range gives Inf or NaN
-    even with |alpha| < 1), and the FFT has FP32's exponent range (L9).
+  - the BLAS-ABI ZGEMM epilogue can underflow before alpha; BLAS-2 rounds its
+    sum to FP64 before alpha, so a sum of about 2¹⁰²⁴ or more gives Inf or
+    NaN even when |alpha| < 1 or beta·y would cancel alpha times the sum;
+    and the FFT has FP32's exponent range (L9).
 
 ## [1.5.1] - 2026-11-01
 

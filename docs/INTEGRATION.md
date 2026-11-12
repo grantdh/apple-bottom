@@ -308,8 +308,9 @@ machine, and `AB_DISPATCH_TABLE=<file>` uses it without a rebuild
   - a matrix whose nonzero entries span more than about 2⁷⁸;
   - a chain of results that drifted from its scale;
   - an alpha with |alpha| in [2⁻³⁹, 2⁴⁰) on small data;
-  - alpha·op(A)op(B) and beta·C on scales far apart (`ab_dgemm_scaled`,
-    `ab_dev_dgemm`);
+  - alpha·op(A)op(B) and beta·C on scales far apart (`ab_dgemm_scaled` and
+    its batch and Strassen forms, `ab_dev_dgemm`);
+  - operands on scales far apart (`ab_matrix_add`, `ab_matrix_sub`);
   - an `ab_dev_zgemm` epilogue outside FP64's range.
 
 ---

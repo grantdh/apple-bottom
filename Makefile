@@ -20,9 +20,11 @@ OBJC = clang
 # not the error bounds, of the FP64 epilogues: zgemm_, ab_dev_zgemm,
 # ab_dev_scale_z and ab_dev_axpy_z with complex alpha or beta, and BLAS-2
 # (DGEMV's alpha t + beta y for real scalars too); it can also move the
-# guard's stage-2 decision on complex data at an exact tie and
-# ab_dgesv_mpir's stop near its threshold.
-# tests/test_qe_golden.c pins zgemm_'s bits. The Metal shaders, compiled at run time with MTLMathModeSafe, are not affected.
+# guard's stage-2 decision on complex data near a tie, where the guard's
+# threshold lies between the fused and unfused roundings of |Ar||Br| +
+# |Ai||Bi| or |Ar||Bi| + |Ai||Br|, and ab_dgesv_mpir's stop near its
+# threshold. tests/test_qe_golden.c pins zgemm_'s bits. The Metal shaders,
+# compiled at run time with MTLMathModeSafe, are not affected.
 # Code that needs every rounding turns it off: #pragma STDC FP_CONTRACT OFF
 # (src/fft/fft_host.h, which covers fft.m; tests/test_dot2.h;
 # tests/test_precision.c) or -ffp-contract=off (FFT_EMU_FLAGS, test-dd-bound).

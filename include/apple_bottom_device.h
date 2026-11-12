@@ -226,9 +226,10 @@ ABStatus ab_dev_zgemm_offset(ABTranspose transA, ABTranspose transB,
 // most 1e-14 in tests/test_blas2.c, dot products up to 65536 long), about
 // ten times an FP64 BLAS's, plus an absolute term of order
 // (1 + |alpha|) 2^-1074, as in an FP64 BLAS. The sum op(A) x is rounded to
-// FP64 before alpha multiplies it, so where the sum itself overflows FP64,
-// finite data with |alpha| < 1 give Inf or NaN (predicted from the code, not
-// run).
+// FP64 before alpha multiplies it. A sum of about 2^1024 or more therefore
+// overflows, and finite data give Inf or NaN even when the exact result is
+// finite: with |alpha| < 1, or when beta y cancels alpha times the sum, as
+// with alpha = 1, beta = -1, y = DBL_MAX (predicted from the code, not run).
 // Each call checks, at no extra memory traffic, that its data stay in
 // double-float's range (docs/vv/LIMITATIONS.md, Exponent
 // range), each part of a complex output against its own products. A call
