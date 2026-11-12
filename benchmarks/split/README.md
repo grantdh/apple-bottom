@@ -113,8 +113,9 @@ same call through its seam (`SEAM`, below), which `AB_SPLIT` uses inside `dgemm_
 
   C is not reset between calls, so the GPU does not wait for a copy of C between them. With β = 0 every
   call writes the same C, and every 5th is compared with the run's first; with β = 1 C accumulates and
-  is not compared. Every call is kept, however many (the records grow as needed). `SPLIT_NOREG=1`
-  copies the operands, as in the run mode. It logs every call's throughput, the wall power and the GPU
+  is not compared. `TAIL` on the K axis writes only the partial P, so P is compared there. Every call is
+  kept, however many (the records grow as needed). `SPLIT_NOREG=1` copies the operands, and the
+  optional last argument `data` (0 uniform, 1 QE-like) picks the data, as in the run mode. It logs every call's throughput, the wall power and the GPU
   clock over time, and reports the slices alone against the split: (HEAD + TAIL) ÷ split, and how much
   longer each slice takes in the split than alone. `SUSTAIN`'s first fields keep their order (split,
   GPU alone, Accelerate alone at the start, rebalanced); the rest are added after them.

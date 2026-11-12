@@ -33,7 +33,7 @@
 //
 // usage: bench_split run <case> <np> <outdir> [data]    data 0 = uniform [-1,1), 1 = QE-like row decay
 //        bench_split child <case> <np> <id> <shmfile> <data>   (internal)
-//        bench_split sustain <case> <outdir> <g> [secs=80] [idle=30] [steady_after=20]
+//        bench_split sustain <case> <outdir> <g> [secs=80] [idle=30] [steady_after=20] [data=0]
 //               one process, back-to-back calls in runs of `secs` after `idle` seconds of idle each:
 //               Accelerate alone, then in a shuffled order (SPLIT_SEED) the split at GPU part g, the GPU
 //               alone, the CPU slice alone and the GPU slice alone, then the split at the share that
@@ -1167,7 +1167,7 @@ static double sstat(const Case *c, int b, double bt0, double a, double z, int f,
     if (mx) *mx = n ? hi : NAN;
     free(v); return m;
 }
-static int sustain(const Case *c, const char *outdir, int g, double secs, double idle_s, double steady) {
+static int sustain(const Case *c, const char *outdir, int g, double secs, double idle_s, double steady, int data) {
     char pw[256], ld[256], path[1100];
     alarm((unsigned)(NSB * (secs + idle_s)) + 900);   // never hold the machine lock on a hang
     machine_state(pw, sizeof pw, ld, sizeof ld);
@@ -1190,10 +1190,10 @@ static int sustain(const Case *c, const char *outdir, int g, double secs, double
     int order[NSB] = {SB_ACC, SB_SPLIT, SB_GPU, SB_HEAD, SB_TAIL, SB_BAL, SB_ACC_END};
     for (int i = 4; i > 1; i--) { int j = 1 + (int)(splitmix64(&st_) % (uint64_t)i); int t = order[i]; order[i] = order[j]; order[j] = t; }
     Ctx *x = &X;
-    int ok = setup_operands(x, c, 0);
+    int ok = setup_operands(x, c, data);
     if (ok < 0) return 1;
-    size_t es_ = x->es;
-    void *Cref = palloc(x->nC * es_);
+    size_t es_ = x->es, nP = (size_t)c->M * c->N;
+    void *Cref = palloc(x->nC * es_), *Pref = c->axis == 'K' ? palloc(nP * es_) : NULL;
     bool smc = sampler_on() && smc_open(); g_ior = sampler_on() && ior_init(true);
     sem_go = dispatch_semaphore_create(0); sem_done = dispatch_semaphore_create(0); sem_cpu_done = dispatch_semaphore_create(0);
     pthread_t th, st; pthread_create(&th, NULL, gpu_thread, NULL);
@@ -1201,6 +1201,7 @@ static int sustain(const Case *c, const char *outdir, int g, double secs, double
     Call call; const double *v = call.v;
     g_noreset = true;
     for (int k = 0; k < 6; k++) { set_cfg(x, k); one_call(x, k, &call); }   // warm-up
+    // with beta = 0 every call writes the same C; TAIL on the K axis writes only P (beta 0), so P is compared
     bool check = c->beta == 0;
     double bt0[NSB], bt1[NSB], it0[NSB], it1[NSB]; int bn[NSB] = {0}, bchk[NSB] = {0}, bdiff[NSB] = {0};
     for (int s = 0; s < NSB; s++) {
@@ -1223,17 +1224,19 @@ static int sustain(const Case *c, const char *outdir, int g, double secs, double
                 if (!(srec = realloc(srec, sizeof(SRec) * (size_t)capsr))) { fprintf(stderr, "out of memory for records\n"); return 1; }
             }
             srec[nsrec++] = (SRec){b, k, cfg_g(c, k), i, v[V_T0], v[V_T1], v[V_TOTAL], v[V_CPU], v[V_GPU], v[V_JOIN], v[V_WAKE], v[V_KADD]};
-            if (check && i == 0) memcpy(Cref, x->C, x->nC * es_);
-            else if (check && i % 5 == 0) { bchk[b]++; bdiff[b] += memcmp(Cref, x->C, x->nC * es_) != 0; }
+            bool tail_p = b == SB_TAIL && Pref;
+            void *got = tail_p ? x->P : x->C, *ref = tail_p ? Pref : Cref; size_t nb = tail_p ? nP * es_ : x->nC * es_;
+            if ((check || tail_p) && i == 0) memcpy(ref, got, nb);
+            else if ((check || tail_p) && i % 5 == 0) { bchk[b]++; bdiff[b] += memcmp(ref, got, nb) != 0; }
             i++;
         }
         bt1[b] = now(); bn[b] = i;
     }
     if (smc || g_ior) { atomic_store(&g_stop, 1); pthread_join(st, NULL); }
     // ---- report
-    printf("case %s: %cGEMM M=%d N=%d K=%d, split axis %c; %.2f GF per call; registration %d/4 arrays%s; IOReport %s\n",
+    printf("case %s: %cGEMM M=%d N=%d K=%d, split axis %c; %.2f GF per call; registration %d/4 arrays%s; IOReport %s; data %s\n",
            c->name, c->prec == 'z' ? 'Z' : 'D', c->M, c->N, c->K, c->axis, flops(c) / 1e9, ok, noreg() ? " (SPLIT_NOREG=1)" : "",
-           g_ior ? "on" : sampler_on() ? "unavailable" : "off (SPLIT_SAMPLER=0)");
+           g_ior ? "on" : sampler_on() ? "unavailable" : "off (SPLIT_SAMPLER=0)", data ? "QE-like (rows decay 9 decades)" : "uniform [-1,1)");
     printf("runs of %.0f s back to back, each after %.0f s idle; burst = calls starting in the first 10 s, steady = calls starting %.0f s or more into the run\n", secs, idle_s, steady);
     printf("order (SPLIT_SEED=%llu):", (unsigned long long)seed);
     for (int s = 0; s < NSB; s++) printf("%s %s", s ? "," : "", SB_NAME[order[s]]);
@@ -1259,7 +1262,8 @@ static int sustain(const Case *c, const char *outdir, int g, double secs, double
             printf("   steady split parts: cpu slice %.1f ms, gpu slice %.1f ms, join wait %.1f ms (medians)\n",
                    sstat(c, b, bt0[b], steady, 1e9, 1, NULL, NULL, NULL) * 1e3, sstat(c, b, bt0[b], steady, 1e9, 2, NULL, NULL, NULL) * 1e3,
                    sstat(c, b, bt0[b], steady, 1e9, 3, NULL, NULL, NULL) * 1e3);
-        if (check) printf("   bits: %d of %d checked calls differ from the run's first result\n", bdiff[b], bchk[b]);
+        if (b == SB_TAIL && Pref) printf("   bits: %d of %d checked calls differ from the run's first result (P, which TAIL writes)\n", bdiff[b], bchk[b]);
+        else if (check) printf("   bits: %d of %d checked calls differ from the run's first result\n", bdiff[b], bchk[b]);
         else printf("   bits: not checked (beta = 1: C accumulates, as it is never reset)\n");
         printf("   every 5 s (s into the run: GF/s, wall W, GPU MHz):");
         for (double s0 = 0; s0 < bt1[b] - bt0[b]; s0 += 5) {
@@ -1282,11 +1286,11 @@ static int sustain(const Case *c, const char *outdir, int g, double secs, double
     printf("SUSTAIN case=%s g=%d g_bal=%d steady_gfs=%.1f/%.1f/%.1f/%.1f burst_gfs=%.1f/%.1f/%.1f/%.1f sp_gpu=%.3f sp_acc=%.3f sp_gpu_bal=%.3f sp_acc_bal=%.3f "
            "wall_w=%.1f/%.1f/%.1f/%.1f sys_w=%.1f/%.1f/%.1f/%.1f batt_w=%.1f/%.1f/%.1f/%.1f mhz=%.0f/%.0f/%.0f/%.0f burst_mhz=%.0f/%.0f/%.0f/%.0f bits_diff=%d/%d/%d/%d "
            "acc_end_gfs=%.1f acc_end_w=%.1f head_ms=%.3f tail_ms=%.3f split_steady_ms=%.3f split_cpu_ms=%.3f split_gpu_ms=%.3f overlap=%.3f cpu_x=%.3f gpu_x=%.3f "
-           "head_w=%.1f tail_w=%.1f head_mhz=%.0f tail_mhz=%.0f bits_checked=%s noreg=%d seed=%llu order=",
+           "head_w=%.1f tail_w=%.1f head_mhz=%.0f tail_mhz=%.0f bits_checked=%s noreg=%d data=%d seed=%llu order=",
            c->name, g, shm->g[bcfg[SB_BAL]], F4(sg), F4(bg), sg[SB_SPLIT] / sg[SB_GPU], sg[SB_SPLIT] / sg[SB_ACC], sg[SB_BAL] / sg[SB_GPU], sg[SB_BAL] / sg[SB_ACC],
            F4(sw), F4(ss), F4(sb), F4(smhz), F4(bmhz), F4(bdiff),
            sg[SB_ACC_END], sw[SB_ACC_END], sms[SB_HEAD], sms[SB_TAIL], sms[SB_SPLIT], scpu, sgpu, (sms[SB_HEAD] + sms[SB_TAIL]) / sms[SB_SPLIT],
-           scpu / sms[SB_HEAD], sgpu / sms[SB_TAIL], sw[SB_HEAD], sw[SB_TAIL], smhz[SB_HEAD], smhz[SB_TAIL], check ? "yes" : "no", noreg(), (unsigned long long)seed);
+           scpu / sms[SB_HEAD], sgpu / sms[SB_TAIL], sw[SB_HEAD], sw[SB_TAIL], smhz[SB_HEAD], smhz[SB_TAIL], check ? "yes" : "no", noreg(), data, (unsigned long long)seed);
 #undef F4
     static const char *const SB_TAG[NSB] = {"split", "GPU", "ACC", "bal", "HEAD", "TAIL", "ACC2"};
     for (int s = 0; s < NSB; s++) printf("%s%s", s ? "," : "", SB_TAG[order[s]]);
@@ -1323,10 +1327,11 @@ int main(int argc, char **argv) {
     if (argc >= 5 && !strcmp(argv[1], "sustain")) {
         const Case *c = find_case(argv[2]);
         if (!c) { fprintf(stderr, "unknown case\n"); return 2; }
-        return sustain(c, argv[3], atoi(argv[4]), argc > 5 ? atof(argv[5]) : 80, argc > 6 ? atof(argv[6]) : 30, argc > 7 ? atof(argv[7]) : 20);
+        return sustain(c, argv[3], atoi(argv[4]), argc > 5 ? atof(argv[5]) : 80, argc > 6 ? atof(argv[6]) : 30, argc > 7 ? atof(argv[7]) : 20,
+                       argc > 8 ? atoi(argv[8]) : 0);
     }
     if (argc >= 7 && !strcmp(argv[1], "child")) return child(with_reps(find_case(argv[2])), atoi(argv[4]), argv[5], atoi(argv[6]));
-    if (argc < 5 || strcmp(argv[1], "run")) { fprintf(stderr, "usage: bench_split run <case> <np> <outdir> [data] | bench_split sustain <case> <outdir> <g> [secs] [idle] [steady_after] | bench_split list\n"); return 2; }
+    if (argc < 5 || strcmp(argv[1], "run")) { fprintf(stderr, "usage: bench_split run <case> <np> <outdir> [data] | bench_split sustain <case> <outdir> <g> [secs] [idle] [steady_after] [data] | bench_split list\n"); return 2; }
     const Case *c = with_reps(find_case(argv[2])); int np = atoi(argv[3]), data = argc > 5 ? atoi(argv[5]) : 0;
     if (!c || np < 1 || np > NPMAX) { fprintf(stderr, "bad case or np\n"); return 2; }
     // a fixed GPU part: SPLIT_G as given, or SPLIT_F cut by the library's rule with its AB_MIN_GPU_DIM floor
