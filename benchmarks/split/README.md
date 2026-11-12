@@ -136,10 +136,11 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
   and an `AB_TRACE` file per process.
 - **G3 suites** (`g3-1x8-s8192`, `g3-1x8-s2048`, `g3-4x2-s8192`, `g3-4x2-s2048`, or `g3` for all four;
   not in the default run): the six squares and the seven QE-shaped cases of the 2026-10-28 results with
-  copied operands (`SPLIT_NOREG=1`), at 1×8 and at 4×2, with `AB_STAGING_MB` 8192 and 2048, so that the
-  library's seam and the user split meet the staged path's copies and a small pool. Each runs 6 rounds
-  of 2 repeats (`SPLIT_ROUNDS=6 SPLIT_REPS=2`): the trio's order is balanced over the 6 rounds, and
-  rounds are the unit of the by-round interval in `g3.py`. They run with `AB_TRACE` and `AB_REPORT`
+  copied operands (`SPLIT_NOREG=1`), at 1×8 and at 4×2, with `AB_STAGING_MB` 8192 and 2048, so that
+  the library's seam and the user split meet the staged path's copies and a small pool. Design section
+  12's 20 cases are those results' rows (the squares at 1×8, the QE shapes at 4×2 and at 1×8); the
+  squares at 4×2 are extra. Each runs 6 rounds of 2 repeats (`SPLIT_ROUNDS=6 SPLIT_REPS=2`): the trio's
+  order is balanced over the 6 rounds, and rounds are the unit of `g3.py`'s reading (b). They run with `AB_TRACE` and `AB_REPORT`
   off: those profile the user split's GPU slices (`ab_[dz]gemm_blas` takes the profiler's lock and
   writes a trace line per call) but not the seam, which the library does not profile, so with them on
   the comparison would lean towards the seam. `raw.tsv` has the seam's timeline either way. `ZGEMM
@@ -204,4 +205,24 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 | `table.py <outdir>` | the results tables: medians [min–max] of the lockstep times, speedups, bits, errors, power state; with the arms, the seam and twin against the user split (paired medians), the slices alone and the seam's outcomes; sustained runs |
 | `classify_trace.py <dir>` | every traced GPU call as staged path, host path or fallback, by shape, with median stage times |
 | `power.py <dir>/<case>.np<N>.d<data> ...` | wall power by run of consecutive calls, trimming SMC's ~1 s lag |
-| `g3.py <dir> ... [--tsv FILE]` | G3 per case and layout: `SEAM` ÷ `S<g>` and `S<g>b` ÷ `S<g>` paired by (round, repeat), each as the median ratio, a BCa bootstrap interval and the Hodges-Lehmann estimate with its exact Wilcoxon interval; the verdict (the upper bound of `SEAM` ÷ `S<g>` against max(1.03, the twin's upper bound), on the BCa bounds, the Hodges-Lehmann ones as a check), only for rows under G3's conditions (copied operands, uniform data, 1×8 or 4×2, staging 2048 or 8192 MB; others read "not G3"); the outside load from `.rounds.tsv`, flagged over 1.5 cores or a GPU busy fraction of 0.25 (`--max-fcpu`, `--max-gpu-busy`); and the seam's timeline per call (init and thread start beside the user split's GPU start, the CPU and GPU parts and the wait for the GPU each beside the user split's, submit, GPU execution, wake). It leaves out cases run.sh set aside and reports that did not start and end on AC power, and lists them. BCa needs scipy (`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3` on the M2 Max) |
+| `g3.py <dir> ... [--tsv FILE]` | G3 per case and layout: `SEAM` ÷ `S<g>` and `S<g>b` ÷ `S<g>` paired by (round, repeat), each as the median ratio, a BCa bootstrap interval and the Hodges-Lehmann estimate with its exact Wilcoxon interval; G3's two readings (below); the outside load from the report, flagged over 1.5 cores or a GPU busy fraction of 0.25 (`--max-fcpu`, `--max-gpu-busy`); and the seam's timeline per call (init and thread start beside the user split's GPU start, the CPU and GPU parts and the wait for the GPU each beside the user split's, submit, GPU execution, wake). Verdicts go only to rows under G3's conditions (copied operands, uniform data, 1×8 or 4×2, staging 2048 or 8192 MB; others read "not G3"); cases run.sh set aside and reports that did not start and end on AC power are left out and listed. BCa and reading (b) need scipy (`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3` on the M2 Max). `g3.py --simulate` gives the readings' false-alarm rates |
+
+## G3's two readings
+
+Design section 12's G3 line reads "upper bound over max(1.03, null spread): fix first", and does not
+define the null spread. `g3.py` prints two readings for every G3 row; choosing between them, or
+another, is a gate-line decision for Grant.
+
+- **(a) As designed:** the upper bound of `SEAM` ÷ `S<g>` against max(1.03, the upper bound of
+  `S<g>b` ÷ `S<g>`), both two-sided 95% intervals over the (round, repeat) pairs (BCa, with the
+  Hodges-Lehmann interval as a check); above it, "fix first". The pairs of one round share its
+  position and state, so they are not independent, and the threshold is itself a random upper bound:
+  when the user split is noisy against itself, the verdict is close to a coin flip.
+- **(b) Proposed, needs Grant:** rounds as the unit, as Grant chose for G5. Per round, the mean over
+  its repeats of log(`SEAM` ÷ `S<g>`) and of log(`S<g>b` ÷ `S<g>`); over the rounds a one-sided 95% t
+  upper bound on each mean. "pass" if the seam's bound is 1.03 or less; else "inconclusive: add
+  rounds" if the null's own bound is above 1.03; else "fix first". Noise alone never gives "fix
+  first".
+
+Each row also gives the null spread by round: the sd of the null's per-round mean log ratios and the
+range of its per-round ratios.
