@@ -815,6 +815,7 @@ static void test_split_caller_fpcr(void) {
 // =============================================================================
 
 static char self_path[PATH_MAX], g_dir[PATH_MAX], g_table[PATH_MAX + 32];
+static char g_label[PATH_MAX + 64];   // ab_split_source(): "file:<g_table>@<TABLE_SHA256>"
 
 // The split table the children run with, and the calls they make: row, axis
 // and cut as the plan gives them (-1: no row).
@@ -827,6 +828,8 @@ static const char TABLE[] =
     "dgemm N N N m=512: f=0.5\n"                       // 3
     "dgemm T N K k=4096: f=0.5\n"                      // 4
     "zgemm N T N m=200: f=0\n";                        // 5: attributed, never cut
+// The first 12 hex digits of `shasum -a 256` of TABLE: the reports name the file with them.
+#define TABLE_SHA256 "99da8cd29a2b"
 
 typedef struct {
     Call c;
@@ -1196,9 +1199,7 @@ static void check_calls(const Scenario *s, const char *out, int status) {
     }
     if (!strcmp(s->name, "cpu")) check(gpu_gemms == 0, "AB_SPLIT=1 AB_MODE=cpu ran %llu GPU GEMMs",
                                        (unsigned long long)gpu_gemms);
-    char want_src[sizeof g_table + 8];
-    snprintf(want_src, sizeof want_src, "file:%s", g_table);
-    check(!strcmp(source, want_src), "scenario %s: ab_split_source() is %s", s->name, source);
+    check(!strcmp(source, g_label), "scenario %s: ab_split_source() is %s", s->name, source);
 }
 
 // The extra settings of a scenario with the split on.
@@ -1410,8 +1411,8 @@ static void test_split_reports(void) {
     char *out = run_child("calls", env, &status);
     check(status == 0 && out, "child status %d", status);
     if (!out) { finish(); return; }
-    char want[sizeof g_table + 64];
-    snprintf(want, sizeof want, " AB_SPLIT=1 split_table=file:%s", g_table);
+    char want[sizeof g_label + 32];
+    snprintf(want, sizeof want, " AB_SPLIT=1 split_table=%s\n", g_label);
     check(strstr(out, want) != NULL, "the report header lacks '%s'", want);
     // routine lines: calls = gpu_calls + cpu_calls + split_calls; split lines; row lines
     long long split_total = 0;
@@ -1456,8 +1457,10 @@ static void test_split_reports(void) {
     // JSON
     FILE *f = fopen(json, "r");
     char *js = f ? slurp(f) : NULL;
-    check(js && strstr(js, "\"split_table\": \"file:") && strstr(js, "\"split_rows\"") &&
-          strstr(js, "\"split_calls\": "), "the JSON dump lacks the split fields");
+    char want_js[sizeof g_label + 32];
+    snprintf(want_js, sizeof want_js, "\"split_table\": \"%s\"", g_label);
+    check(js && strstr(js, want_js) && strstr(js, "\"split_rows\"") && strstr(js, "\"split_calls\": "),
+          "the JSON dump lacks the split fields");
     free(js);
     // the trace: a split line's stages sum to t1 - t0, its GPU part's to gpu_wall_ns
     char cmd[PATH_MAX * 2];
@@ -1634,6 +1637,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "test_split: cannot write %s\n", g_table);
         return 1;
     }
+    snprintf(g_label, sizeof g_label, "file:%s@" TABLE_SHA256, g_table);
     clear_ab_env();   // AB_SPLIT and the rest only where a test sets them
     if (ab_init() != AB_OK) {
         fprintf(stderr, "test_split: no Metal device\n");

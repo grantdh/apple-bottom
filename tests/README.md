@@ -142,7 +142,8 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     cblas parts, the GPU's bits, or the whole call's as with `AB_SPLIT`
     unset); `AB_STRASSEN`, `AB_STAGING_MB=0` and `AB_MIN_GPU_DIM=0` keeping
     the bits; `VECLIB_MAXIMUM_THREADS` 1, 2 and 8 repeating; `fork()` with
-    `_exit` and `exit`; the reports (counts that add up, a line per row,
+    `_exit` and `exit`; the reports (the table's path and digest in the
+    headers, counts that add up, a line per row,
     trace stages that sum exactly, every split line's timeline whole and in
     order, the JSON fields; which stage a piece of
     work is charged to, such as the NaN scan's time to `join_ns`, is checked
@@ -551,7 +552,8 @@ classes (`'C'` is `'T'`), and the `AB_DISPATCH_TABLE` format: parsing,
 loading, malformed and missing files.
 
 For `AB_SPLIT` it checks the split table's row format and file loading
-(`AB_SPLIT_TABLE`, `benchmarks/split/start_table.txt` and `start_M2-Max-38c.txt`), the plan of a
+(`AB_SPLIT_TABLE`, `benchmarks/split/start_table.txt` and `start_M2-Max-38c.txt`; the label
+names a file with the first 12 hex digits of the SHA-256 of its bytes, `\r` included), the plan of a
 call (window edges, exact TRANS, scalar classes, GFLOP and ratio limits,
 the code's K limits, first match, the cut, its clamps and floors, huge
 shapes), that `AB_MODE=cpu` and `AB_MIN_GPU_DIM` come before it and

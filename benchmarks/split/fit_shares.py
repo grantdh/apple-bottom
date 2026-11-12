@@ -5,10 +5,13 @@ Each RUN is an err.txt file or a directory searched for them (set-aside .bad*/in
 tmp and *.save are skipped; a file found twice counts once): the stderr of programs run with
 AB_SPLIT=1 AB_SPLIT_TABLE=TABLE AB_REPORT=1, such as pw.x's every rank. Choose the runs to fit from
 your campaign's ledger (failed or flagged runs left out); this script checks only that they belong
-together. A file whose AB_REPORT headers name another table (split_table=file:PATH, read relative to
-the file's directory, where the run started) is skipped with a note. The fit stops if a report's
-rows differ from TABLE's (count, routine, axis or share), or if the reports come from more than one
-build of the library; a row reported by fewer ranks than printed headers is noted.
+together. Its AB_REPORT headers name the table as split_table=file:PATH@DIGEST (the first 12 hex
+digits of the SHA-256 of the bytes the library read): a file counts only if DIGEST is TABLE's now. A
+header without a digest (an older library) is matched by PATH, read relative to the file's directory
+(where the run started), with a note. Other files are skipped, with a note if they name TABLE's path.
+The fit stops if a report's rows differ from TABLE's (count, routine, axis or share), or if the
+reports come from more than one build of the library; a row reported by fewer ranks than printed
+headers is noted.
 
 For each row, its split_row lines (every rank of every run) give the seconds and the GFLOP of the
 calls' CPU and GPU parts. Their ratios are the rates the two engines reached while running together
@@ -45,7 +48,7 @@ from collections import Counter, defaultdict
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 sys.path.insert(0, os.path.join(ROOT, "benchmarks", "qe"))
-from ingest_split import KEY_RE, SQUARE_RATIO, byte_lines, parse_row, table_line  # noqa: E402
+from ingest_split import KEY_RE, SQUARE_RATIO, parse_row, table_line  # noqa: E402
 from analyze import AB_HEADER, AB_SPLIT_ROW  # noqa: E402
 
 KV = re.compile(r"(\w+)=(\S+)")
@@ -78,8 +81,14 @@ def cut(axis, L, f, min_dim):
     return g
 
 
+def table_label(value):
+    """(PATH, DIGEST) of a split_table=file: value; DIGEST None unless it ends in '@' and 12 hex digits."""
+    m = re.fullmatch(r"(.*)@([0-9a-f]{12})", value)
+    return m.groups() if m else (value, None)
+
+
 def self_test():
-    """cut() against tests/test_dispatch.c's test_split_cut vectors."""
+    """cut() against tests/test_dispatch.c's test_split_cut vectors, and table_label() on labels."""
     src = open(os.path.join(ROOT, "tests", "test_dispatch.c")).read()
     body = src[src.index("test_split_cut(void)"):]
     vec = re.findall(r"\{'([NMK])', ([^,]+), ([-0-9.]+), ([^,]+), ([^}]+)\}", body[:body.index("begin();")])
@@ -87,10 +96,18 @@ def self_test():
     def ints(s):   # an int literal, INT_MAX, or INT_MAX - n
         s = s.strip()
         return 2**31 - 1 - int(s.split("-", 1)[1] if "-" in s else 0) if s.startswith("INT_MAX") else int(s)
-    bad = [v for v in vec if cut(v[0], ints(v[1]), float(v[2]), ints(v[3])) != ints(v[4])]
-    print(f"fit_shares: cut() on {len(vec)} vectors from tests/test_dispatch.c: "
-          f"{'all agree' if vec and not bad else f'{len(bad)} differ: {bad}'}")
-    return 0 if vec and not bad else 1
+    labels = {"/a/t.txt@0123456789ab": ("/a/t.txt", "0123456789ab"), "/a@b/t.txt": ("/a@b/t.txt", None),
+              "/a/t@x@0123456789ab": ("/a/t@x", "0123456789ab"), "t@0123456789abc": ("t@0123456789abc", None),
+              "t@0123456789AB": ("t@0123456789AB", None), "t": ("t", None)}
+
+    def agree(what, n, bad):
+        print(f"fit_shares: {what}: {'all agree' if n and not bad else f'{len(bad)} differ: {bad}'}")
+        return bool(n and not bad)
+    ok = agree(f"cut() on {len(vec)} vectors from tests/test_dispatch.c", len(vec),
+               [v for v in vec if cut(v[0], ints(v[1]), float(v[2]), ints(v[3])) != ints(v[4])])
+    ok &= agree(f"table_label() on {len(labels)} labels", len(labels),
+                [v for v, want in labels.items() if table_label(v) != want])
+    return 0 if ok else 1
 
 
 def err_files(paths):
@@ -108,23 +125,33 @@ def err_files(paths):
                 yield f
 
 
-def read_reports(path, table):
-    """(build, split_row fields per row and rank, ranks) of one stderr file; None if it names another table."""
+def read_reports(path, table, digest):
+    """(build, split_row fields per row and rank, ranks, matched by digest) of one stderr file whose
+    headers name TABLE (module docstring); None if they name another table or none."""
     text = open(path, errors="replace").read()
     start = text.find("AB_REPORT[")
     if start < 0:
         return None
-    builds, ranks, rows, named = set(), set(), defaultdict(list), False
+    builds, ranks, rows, named = set(), set(), defaultdict(list), set()
     for line in text[text.rfind("\n", 0, start) + 1:].splitlines():
         if h := AB_HEADER.search(line):
             ranks.add(h[1])
             if m := re.search(r"apple-bottom \S+ \((\w+)\)", line):
                 builds.add(m[1])
             if m := re.search(r"split_table=file:(\S+)", line):
-                named |= os.path.realpath(os.path.join(os.path.dirname(path), m[1])) == table
+                named.add(m[1])
         elif m := AB_SPLIT_ROW.search(line):
             rows[int(m[2])].append(dict(KV.findall(m[3])))
-    return (builds, rows, ranks) if named else None
+    # (TABLE's path?, digest) per label the headers printed
+    labels = {(os.path.realpath(os.path.join(os.path.dirname(path), p)) == table, d)
+              for p, d in map(table_label, named)}
+    digests = {d for _, d in labels}
+    if digest in digests or (True, None) in labels:
+        return builds, rows, ranks, digest in digests
+    if old := sorted(d for same, d in labels if same and d):
+        print(f"fit_shares: {path}: made with {table} at sha256 {', '.join(old)}, not {digest}; skipped",
+              file=sys.stderr)
+    return None
 
 
 def rates(t):
@@ -157,7 +184,12 @@ def main():
     if not a.table or not a.runs:
         ap.error("--table and at least one RUN are needed")
     table = os.path.realpath(a.table)
-    raw = byte_lines(table)
+    with open(table, "rb") as f:
+        data = f.read()
+    digest = hashlib.sha256(data).hexdigest()[:12]      # as the library prints it
+    raw = data.split(b"\n")                             # its lines, as ingest_split's byte_lines() reads them
+    if data.endswith(b"\n"):
+        raw.pop()
     lines = [table_line(r, f"{table}:{n + 1}") for n, r in enumerate(raw)]
     rows = []                                           # (line index, row)
     for n, l in enumerate(lines):
@@ -168,14 +200,15 @@ def main():
             sys.exit(f"{table}:{n + 1}: not a split row or a comment: {l!r}")
     want = [(r["routine"] + "gemm", r["axis"], f"{r['f']:g}") for _, r in rows]
 
-    tot, builds, used, skipped = defaultdict(Counter), set(), 0, 0
+    tot, builds, used, skipped, by_path = defaultdict(Counter), set(), 0, 0, 0
     for path in err_files(a.runs):
-        rep = read_reports(path, table)
+        rep = read_reports(path, table, digest)
         if rep is None:
             skipped += 1
             continue
-        b, got, ranks = rep
+        b, got, ranks, by_digest = rep
         builds |= b
+        by_path += not by_digest
         have = [sorted({(kv["routine"], kv["axis"], kv["f"]) for kv in v}) for _, v in sorted(got.items())]
         if have != [[w] for w in want]:
             sys.exit(f"{path}: its split rows {have} are not {table}'s {want}")
@@ -191,6 +224,9 @@ def main():
         sys.exit(f"the reports come from {len(builds) or 'no'} builds ({', '.join(sorted(builds))}); fit one at a time")
     build = builds.pop()
     print(f"fit_shares: {used} reports used (build {build}), {skipped} skipped (another table or none)", file=sys.stderr)
+    if by_path:
+        print(f"fit_shares: {by_path} of them name the table by path alone (no digest in their headers): "
+              f"an edit of {table} in place since they ran would go unseen", file=sys.stderr)
 
     square = [0 < r["ratio"] <= SQUARE_RATIO for _, r in rows]
     pooled = defaultdict(Counter)
@@ -221,7 +257,6 @@ def main():
         print(f"{i:3d} {r['axis']:>4} {f:5.2f} {t['calls']:7.0f} {t['split']:7.0f} {rc:7.1f} {rg:7.1f} {fb:6.3f} "
               f"{first:9.3f} {wait:8.2f} {src:>7} {nxt:5.2f}  {cs}", file=sys.stderr)
 
-    digest = hashlib.sha256(b"\n".join(raw) + (b"\n" if raw else b"")).hexdigest()[:12]
     keys = {"method": f"fit_shares.py from {used} reports of build {build} made with {os.path.basename(table)} "
                       f"(sha256 {digest}); damp {a.damp:g}, floor {a.floor:g}, min-calls {a.min_calls}",
             "date": datetime.date.today().isoformat()}

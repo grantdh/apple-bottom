@@ -1034,16 +1034,20 @@ static void test_split_load_table(void) {
     expect(write_temp("# AB_SPLIT table\n# chip: Apple M5 Max\n# gpu_cores: 40\n# library: abc1234\n"
                       "zgemm N N N m=8192: f=0.45  # updates\n\nzgemm C N K f=0.51\n", path, sizeof path),
            "mkstemp");
+    // the digest: the first 12 hex digits of `shasum -a 256` of the file
     expect(ab_split_load_table(&c, path, err, sizeof err) && c.split_nrows == 2 &&
            c.split_rows[0].min_m == 8192 && c.split_rows[1].axis == 'K' &&
-           !strcmp(c.split_table_chip, "Apple M5 Max") && c.split_table_gpu_cores == 40,
-           "valid file: %d rows, '%s'/%d (%s)", c.split_nrows, c.split_table_chip, c.split_table_gpu_cores, err);
+           !strcmp(c.split_table_chip, "Apple M5 Max") && c.split_table_gpu_cores == 40 &&
+           !strcmp(c.split_table_digest, "5a72829eed33"),
+           "valid file: %d rows, '%s'/%d, digest %s (%s)", c.split_nrows, c.split_table_chip,
+           c.split_table_gpu_cores, c.split_table_digest, err);
     unlink(path);
 
     expect(write_temp("zgemm N N N f=0.5\nzgemm N N N f=0.5 f=0.4\n", path, sizeof path), "mkstemp");
     err[0] = '\0';
     expect(!ab_split_load_table(&c, path, err, sizeof err) && strstr(err, "line 2") && c.split_nrows == 2 &&
-           c.split_rows[0].min_m == 8192 && !strcmp(c.split_table_chip, "Apple M5 Max"),
+           c.split_rows[0].min_m == 8192 && !strcmp(c.split_table_chip, "Apple M5 Max") &&
+           !strcmp(c.split_table_digest, "5a72829eed33"),
            "a malformed line must fail with its number and leave the config alone: %s", err);
     unlink(path);
     // A dispatch-table row is not a split row.
@@ -1074,12 +1078,14 @@ static void test_split_load_table(void) {
                "refused bytes %zu: expected '%s', got '%s'", i, BYTES[i].why, err);
         unlink(path);
     }
-    // A "\r\n" end and tabs, between fields and around a key's value, are fine.
+    // A "\r\n" end and tabs, between fields and around a key's value, are
+    // fine; the digest is of the bytes as read, "\r" included.
     expect(write_temp("#\tchip:\tApple M5 Max\t\r\nzgemm\tN\tN\tN\tm=8192:\tf=0.5\r\n", path, sizeof path),
            "mkstemp");
     expect(ab_split_load_table(&c, path, err, sizeof err) && c.split_nrows == 1 && c.split_rows[0].min_m == 8192 &&
-           !strcmp(c.split_table_chip, "Apple M5 Max"), "CRLF and tabs: %d rows, chip '%s' (%s)", c.split_nrows,
-           c.split_table_chip, err);
+           !strcmp(c.split_table_chip, "Apple M5 Max") && !strcmp(c.split_table_digest, "0040cacdc3bf"),
+           "CRLF and tabs: %d rows, chip '%s', digest %s (%s)", c.split_nrows, c.split_table_chip,
+           c.split_table_digest, err);
     unlink(path);
     // A U+3000 after the '#' is no blank: no chip key (the script refuses
     // such a table for its missing '# chip:').
@@ -1197,8 +1203,8 @@ static void test_split_config_from_env(void) {
         {NULL, false}, {"", false}, {"0", false}, {"00", false}, {"0yes", false},
         {"1", true}, {"yes", true}, {"on", true},
     };
-    char path[1024], want[AB_DISPATCH_LABEL_LEN];
     ab_dispatch_config_t c;
+    char path[1024], want[sizeof c.split_table];
     begin();
     for (size_t i = 0; i < TEST_REGISTRY_SIZE(VALUES); i++) {
         clear_env();
@@ -1212,7 +1218,8 @@ static void test_split_config_from_env(void) {
                "AB_SPLIT=%s: on %d, %d rows, '%s'", VALUES[i].value ? VALUES[i].value : "(unset)",
                c.split_on, c.split_nrows, c.split_table);
     }
-    // A file replaces the rows; one from another chip is used.
+    // A file replaces the rows; one from another chip is used. The label
+    // names it with its digest (`shasum -a 256`).
     expect(write_temp("# chip: Apple M2 Max\n# gpu_cores: 38\nzgemm N N N m=8192: scalars=u f=0.45\n", path,
                       sizeof path), "mkstemp");
     clear_env();
@@ -1222,7 +1229,7 @@ static void test_split_config_from_env(void) {
     setenv("AB_SPLIT_TABLE", path, 1);
     fprintf(stderr, "(expected note follows) ");
     ab_dispatch_config_from_env(&c);
-    snprintf(want, sizeof want, "file:%s", path);
+    snprintf(want, sizeof want, "file:%s@d351c4c5381a", path);
     expect(c.split_on && c.split_nrows == 1 && c.split_rows[0].share == 0.45 && !strcmp(c.split_table, want) &&
            !strcmp(c.split_table_chip, "Apple M2 Max") && c.split_table_gpu_cores == 38,
            "AB_SPLIT_TABLE replaces the rows (%d rows, %s)", c.split_nrows, c.split_table);
@@ -1247,7 +1254,7 @@ static void test_split_config_from_env(void) {
     expect(write_temp_in(dir, "zgemm N N N m=8192: scalars=u f=0.45\n", path, sizeof path), "mkstemp in %s", dir);
     for (int extra = 1; extra >= 0; extra--) {
         const char *file = path + strlen(dir);
-        char padded[AB_DISPATCH_LABEL_LEN + 16], want_label[AB_DISPATCH_LABEL_LEN + 8];
+        char padded[AB_SPLIT_PATH_MAX + 16], want_label[sizeof c.split_table + 8];
         size_t want = AB_SPLIT_PATH_MAX + (size_t)extra, n = strlen(dir), tail = strlen(file);
         memcpy(padded, path, n);
         for (; n + tail + 2 <= want; n += 2) memcpy(padded + n, "/.", 2);
@@ -1256,7 +1263,7 @@ static void test_split_config_from_env(void) {
         setenv("AB_SPLIT_TABLE", padded, 1);
         if (extra) fprintf(stderr, "(expected notes follow) ");
         ab_dispatch_config_from_env(&c);
-        snprintf(want_label, sizeof want_label, "file:%s", padded);
+        snprintf(want_label, sizeof want_label, "file:%s@dabfe635859b", padded);
         expect(strlen(padded) == want && (extra ? c.split_nrows == 0 && !strcmp(c.split_table, "none:uncalibrated-chip")
                                                 : c.split_nrows == 1 && !strcmp(c.split_table, want_label)),
                "AB_SPLIT_TABLE through %zu bytes: %d rows, label %s", strlen(padded), c.split_nrows, c.split_table);

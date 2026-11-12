@@ -375,7 +375,7 @@ void ab_prof_record_split(const char* routine, uint64_t elapsed_ns, size_t m, si
 // " AB_SPLIT=1 split_table=<source>" for the report headers when AB_SPLIT is
 // on, else nothing, so that default reports read as before.
 static const char* split_token(void) {
-    static char token[AB_DISPATCH_LABEL_LEN + 32];
+    static char token[sizeof " AB_SPLIT=1 split_table=" + sizeof ((ab_dispatch_config_t*)0)->split_table];
     const ab_dispatch_config_t* dc = ab_dispatch_process_config();
     if (!dc->split_on) return "";
     snprintf(token, sizeof token, " AB_SPLIT=1 split_table=%s", dc->split_table);
