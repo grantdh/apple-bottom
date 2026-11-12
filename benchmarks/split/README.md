@@ -83,6 +83,18 @@ same call through its seam (`SEAM`, below), which `AB_SPLIT` uses inside `dgemm_
   - The parent process samples SMC keys at 20 Hz: PDTR (DC input, the wall side on AC power), PSTR,
     PPBR (battery) and the GPU rails.
   - Sustained runs also read IOReport's GPU energy and clock residency.
+  - **Outside load** (run mode): process 0 takes a snapshot at each round boundary of the fixed block,
+    between timed calls: the host's CPU ticks, this run's own CPU time (its processes', by
+    `proc_pidinfo`) and, unless `SPLIT_SAMPLER=0`, IOReport's GPU state residency. The CPU used by
+    everything else is the busy share times the CPUs minus this run's own. Root's processes cannot be
+    read one by one without root, so `kernel_task`'s work counts as outside. With the arms each round
+    has a GPU-idle stretch, the idle gap and the CPU-only configs, when none of this run's processes
+    uses the GPU: over it `.rounds.tsv` and the report give other processes' CPU in cores
+    (`fcpu_idle`, without this run's GPU driver work) and the GPU's busy fraction (`gpu_busy_idle`,
+    someone else's GPU work). Over the whole round they give other processes' CPU too (`fcpu_round`,
+    which includes this run's GPU driver work in `kernel_task`). `SUMMARY` has the largest of each
+    (`fcpu_max`, `gpu_idle_busy_max`, `fcpu_round_max`). The AB_SPLIT pilot flagged 1.5 cores (by `ps`,
+    without `kernel_task`) and saw outside GPU work as busy 0.34-0.36 against 0.07-0.20 without it.
   - Both are read without root through interfaces Apple does not document. Where they are unavailable,
     the power figures read `nan`.
   - `powerlog` (`benchmarks/powerlog.c`, `make build/powerlog`) streams the same SMC keys through any
@@ -161,6 +173,7 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 | `.raw.tsv` | every timed call: process, phase (0 sweep, 1 fixed block, 2 completion order), round, configuration (`cfg` index and `name`: `ACC`, `GPU`, `S<g>`, `S<g>b`, `SEAM`, `HEAD`, `TAIL`), GPU part g, repeat, times in s (`total`, the slices `cpu` and `gpu`, the caller's wait `join`, the GPU slice's start after the call's `wake`, the K axis's sum `kadd`, and the call's `t0`, `t1` on `mach_absolute_time`); for `SEAM` calls also the outcome (`KEPT`, `KEPT_4M`, `RANGE`, `GPU_FAILED`, ...; `-` on other rows), retries, operands in place, and the timeline in ns on the same clock (`at_*`: cut, thread created, CPU part start and end, GPU part start and end, join, end; `gpu_*`: first commit, `GPUStartTime`, `GPUEndTime`, last completion, encode, submit, wake and temporaries times, threadgroups, largest grid, dispatches, command buffers, kernel kinds, Metal error), 0 where a step did not happen |
 | `.power.tsv` | the SMC samples |
 | `.ior.tsv` | IOReport samples (power runs only) |
+| `.rounds.tsv` | per round of the fixed block: its start, the end of its GPU-idle stretch and its end (`t0`, `idle_t1`, `t1`), other processes' CPU in cores over the stretch and the round (`fcpu_idle`, `fcpu_round`), the GPU's busy fraction over the stretch (`gpu_busy_idle`) |
 | `.trace.<pid>` | `AB_TRACE`, one line per GPU-routed call |
 | `sustain/<case>.sustain.*` | report and `SUSTAIN` line, per-call TSV (`run` is the run's id: 0 split, 1 GPU alone, 2 Accelerate alone, 3 rebalanced, 4 `HEAD`, 5 `TAIL`, 6 Accelerate again; `name` the config), run windows in the order run (`position`), SMC and IOReport samples |
 | `power.log` | `pmset` and load before and after every case |
