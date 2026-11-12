@@ -163,6 +163,8 @@ ABStatus ab_dev_stream_sync(ab_dev_stream_t stream);
 //     ab_dgemm_scaled (apple_bottom.h), or, for operands and C in the window,
 //     an alpha with |alpha| in [2^-39, 2^40) that takes the result below
 //     about 2^-80;
+//   - ab_dev_zgemm: real and imaginary parts (3M) or their products (4M) on
+//     scales far apart, as for ab_zgemm (apple_bottom.h);
 //   - ab_dev_zgemm: P = op(A) op(B), alpha P or beta C beyond FP64's range
 //     (Inf or NaN parts); a part of P below 2^-1022 also loses bits before
 //     alpha multiplies it.

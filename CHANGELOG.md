@@ -652,10 +652,12 @@ All notable changes to this project will be documented in this file.
   and BLAS-2 scale-back (L9) are [planned](docs/ROADMAP.md#planned):
   - the device GEMMs have no range guard and no Accelerate fallback (L2);
   - `ab_dgemm_scaled` (with its batch and Strassen forms) and `ab_dev_dgemm`
-    give C the larger of the scales of alpha·op(A)op(B) and beta·C, and
+    give C the larger of the scales of alpha·op(A)op(B) and beta·C,
     `ab_matrix_add` and `ab_matrix_sub` align their operands the same way,
-    so in an element where the larger term is 0 the smaller can lose
-    precision or become 0 (L2);
+    and native and device ZGEMM align their parts (3M) or their products
+    (4M), as `ab_zherk` does its real part, so in an element where the larger
+    term is 0 the smaller can lose precision or become 0, and under 3M a part
+    far below the other loses precision in every product (L2);
   - native results are not re-centred, so chains of products drift out of
     the window and lose accuracy with `AB_OK` (L3), and an alpha with |alpha|
     in [2⁻³⁹, 2⁴⁰) multiplies the stored values (L4);

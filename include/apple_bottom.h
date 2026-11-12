@@ -70,10 +70,12 @@
 //     grow drifts away from it: lost precision below about 2^-80, 0 below
 //     2^-126, Inf past 2^128, with AB_OK. ab_matrix_download +
 //     ab_matrix_upload re-centres a result (one FP64 rounding);
-//     ab_matrix_copy does not. A sum of terms on different scales (alpha
-//     op(A) op(B) + beta C in ab_dgemm_scaled, ab_matrix_add, ab_matrix_sub)
-//     takes the larger scale, so a term that is the whole of an element can
-//     be lost when its scale is far below the other's. The native API has no
+//     ab_matrix_copy does not. A sum of terms on different scales takes the
+//     larger scale: alpha op(A) op(B) + beta C in ab_dgemm_scaled, the
+//     operands of ab_matrix_add and ab_matrix_sub, and the parts or products
+//     a ZGEMM combines. A term that is the whole of an element can then be
+//     lost when its scale is far below the other's, and under ZGEMM's 3M a
+//     part far below the other loses precision in every product. The native API has no
 //     guard and no fallback. The BLAS ABI instead scales each row of op(A)
 //     and column of op(B), and runs on Accelerate what its guard refuses
 //     (docs/vv/LIMITATIONS.md, Exponent range).
@@ -205,6 +207,11 @@ ABStatus ab_zgemm(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix C
 // part's shape, op(A) M x K, op(B) K x N and C M x N. Otherwise it returns
 // AB_ERROR_DIMENSION_MISMATCH before any GPU work: ab_zgemm_async as a
 // completed future holding it, ab_zgemm_batched before any entry runs.
+// Each brings real and imaginary parts (3M) or paired products (4M) to the
+// larger of their scales before combining them, so a part or product on a
+// scale far below the other's can lose precision or become 0, with AB_OK:
+// under 3M in every product that uses it, under 4M where the larger product
+// is 0 (Exponent range, above).
 ABStatus ab_zgemm_ex(
     ABTranspose transA, ABTranspose transB,
     ABMatrix Ar, ABMatrix Ai,
@@ -287,6 +294,8 @@ ABStatus ab_dgesv_mpir(ABMatrix A, ABMatrix B);
 
 // ZHERK: C = A × Aᴴ (Hermitian rank-K update)
 // Computes Cr = Ar×Arᵀ + Ai×Aiᵀ, Ci = Ai×Arᵀ - Ar×Aiᵀ
+// (Cr's two terms are brought to the larger of their scales, as in
+// ab_matrix_add).
 // Uses GPU DSYRK for real part + GPU transpose + DGEMM for imaginary part.
 // All operations stay on GPU — no CPU-side data transfer.
 ABStatus ab_zherk(ABMatrix Ar, ABMatrix Ai, ABMatrix Cr, ABMatrix Ci);

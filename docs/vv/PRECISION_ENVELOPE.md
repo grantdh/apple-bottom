@@ -292,6 +292,7 @@ Frobenius-class error is appropriate.
 - native API and `ab_dev_dgemm`: an alpha with |alpha| in [2⁻³⁹, 2⁴⁰) that makes the result small;
 - alpha·op(A)op(B) and beta·C on scales far apart (`ab_dgemm_scaled` and its batch and Strassen forms, `ab_dev_dgemm`);
 - operands on scales far apart (`ab_matrix_add`, `ab_matrix_sub`);
+- real and imaginary parts, or their products, on scales far apart (native and device ZGEMM);
 - BLAS ABI: the data under `LIMITATIONS.md#what-the-guard-misses`.
 
 See `LIMITATIONS.md#exponent-range` for the measurements and the guard's thresholds.
@@ -330,9 +331,10 @@ The following conditions are **outside the validated envelope**. Results are und
     parts, and values beyond FP32's range overflow or flush
 - **Native and device data that leave the window**: results that drift from
   their scale (not re-centred), small results of an alpha in [2⁻³⁹, 2⁴⁰),
-  terms on far-apart scales in `ab_dgemm_scaled`, `ab_matrix_add`,
-  `ab_matrix_sub` and `ab_dev_dgemm`, and the device GEMMs, which have no
-  guard (`LIMITATIONS.md#exponent-range`)
+  terms on far-apart scales (`ab_dgemm_scaled`, `ab_matrix_add`,
+  `ab_matrix_sub`, `ab_dev_dgemm`, and the parts or products of native and
+  device ZGEMM), and the device GEMMs, which have no guard
+  (`LIMITATIONS.md#exponent-range`)
 - **Condition numbers `κ > 10¹²`**: Error bound becomes `κ · N · 2⁻⁴⁸ > 10⁻³`
   - **Workaround**: Use IEEE FP64 (`cblas_dgemm`) for ill-conditioned problems
 

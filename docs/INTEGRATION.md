@@ -124,10 +124,14 @@ in-range data unchanged:
     of the scales of alpha·op(A)op(B) and beta·C, so in an element where the
     larger term is 0 and the scales are far apart, the smaller term loses
     precision or becomes 0. `ab_matrix_add` and `ab_matrix_sub` align their
-    operands to the larger scale the same way.
+    operands to the larger scale the same way. Native ZGEMM brings its real
+    and imaginary parts (3M) or its paired products (4M) to the larger scale
+    too; under 3M a part far below the other loses precision in every
+    product.
 - **Device-buffer API** (`ab_dev_dgemm`, `ab_dev_zgemm`): converts through
   `ABMatrix` handles, measured on every call (`ab_dev_dgemm` gives C the
-  larger scale as `ab_dgemm_scaled` does), with no range guard and no
+  larger scale as `ab_dgemm_scaled` does, and `ab_dev_zgemm` aligns its
+  parts or products as native ZGEMM does), with no range guard and no
   fallback: some data the BLAS ABI would scale or refuse returns `AB_OK`
   with degraded or non-finite results
   ([the cases](vv/LIMITATIONS.md#exponent-range)). Use the BLAS ABI for
@@ -146,7 +150,10 @@ nearly imaginary data). Such calls run as four real products instead, at
 1.00–1.10× the time through `zgemm_`. The BLAS ABI and the device API decide
 per row of op(A) and column of op(B); the native API decides per matrix, from
 the magnitudes `ab_matrix_upload` measured, and keeps the three-product form
-for matrices computed on the GPU. Details: [LIMITATIONS.md](vv/LIMITATIONS.md#complex-products).
+for matrices computed on the GPU. In the native and device APIs, parts (or
+4M's paired products) on scales far apart can still lose precision under
+either form ([Values far from 1](#values-far-from-1)); the BLAS ABI's guard
+refuses such data. Details: [LIMITATIONS.md](vv/LIMITATIONS.md#complex-products).
 
 ### Where the GPU pays off
 
@@ -311,6 +318,8 @@ machine, and `AB_DISPATCH_TABLE=<file>` uses it without a rebuild
   - alpha·op(A)op(B) and beta·C on scales far apart (`ab_dgemm_scaled` and
     its batch and Strassen forms, `ab_dev_dgemm`);
   - operands on scales far apart (`ab_matrix_add`, `ab_matrix_sub`);
+  - real and imaginary parts, or their products, on scales far apart (native
+    ZGEMM, `ab_dev_zgemm`);
   - an `ab_dev_zgemm` epilogue outside FP64's range.
 
 ---
