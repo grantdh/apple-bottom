@@ -126,8 +126,11 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
   copied operands (`SPLIT_NOREG=1`), at 1×8 and at 4×2, with `AB_STAGING_MB` 8192 and 2048, so that the
   library's seam and the user split meet the staged path's copies and a small pool. Each runs 6 rounds
   of 2 repeats (`SPLIT_ROUNDS=6 SPLIT_REPS=2`): the trio's order is balanced over the 6 rounds, and
-  rounds are the unit of the by-round interval in `g3.py`. `ZGEMM 8192²` is not run at 4×2 (see
-  Memory). `g3.py` reads the results.
+  rounds are the unit of the by-round interval in `g3.py`. They run with `AB_TRACE` and `AB_REPORT`
+  off: those profile the user split's GPU slices (`ab_[dz]gemm_blas` takes the profiler's lock and
+  writes a trace line per call) but not the seam, which the library does not profile, so with them on
+  the comparison would lean towards the seam. `raw.tsv` has the seam's timeline either way. `ZGEMM
+  8192²` is not run at 4×2 (see Memory). `g3.py` reads the results.
 - **Machine:** run on an otherwise idle Mac on AC power, from an adapter of at least 90 W
   (`SPLIT_MIN_W`). The script checks `pmset -g batt` and `pmset -g adapter` at the start and before each
   case, and stops with exit status 75 if either fails. A case that did not both start and end on AC power
@@ -135,8 +138,8 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
   and prints each case's command without running it. `power.log` has the power source, the adapter's
   watts and the load averages before and after every case, and `raw.tsv` the load average after every
   call (`load1`).
-- **Settings per suite:** a suite's own variables (`SPLIT_NOREG=1`, `AB_STAGING_MB=2048`, ...) come after
-  the common ones on the `env` line, so they override them.
+- **Settings per suite:** a suite's own variables (`SPLIT_NOREG=1`, `AB_STAGING_MB=2048`, `AB_TRACE=`, ...)
+  come last on the `env` line, so they override the common ones and the trace file.
 - **Memory:** the 8192² cases needed about 15 GB in the 2026-10-28 runs; the arms keep one more copy of
   C (1 GiB at `ZGEMM 8192²`). An estimate from the code, per process:
   - Each process holds A, B, C, C₀, the partial P and four reference copies of C (the user split's, the

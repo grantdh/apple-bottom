@@ -106,6 +106,7 @@ static double median(const double *v, int n) {
 }
 static double envd(const char *name, double d) { const char *v = getenv(name); return v ? atof(v) : d; }
 static void sleep_s(double s) { usleep((useconds_t)(s * 1e6)); }
+static const char *on_off(const char *name) { const char *v = getenv(name); return v && *v && *v != '0' ? "on" : "off"; }   // as the library reads it
 static bool noreg(void) { return envd("SPLIT_NOREG", 0) != 0; }   // SPLIT_NOREG=1: the operands are not registered
 static void sh_line(const char *cmd, char *out, size_t n) {
     FILE *f = popen(cmd, "r"); out[0] = 0;
@@ -1237,8 +1238,8 @@ int main(int argc, char **argv) {
     if (getenv("SPLIT_REPS") && envd("SPLIT_REPS", 0) < 1) { fprintf(stderr, "SPLIT_REPS must be at least 1\n"); return 2; }
     char pw[256], ld[256], path[1024];
     machine_state(pw, sizeof pw, ld, sizeof ld);
-    printf("%s | VECLIB_MAXIMUM_THREADS=%s AB_MODE=%s AB_MIN_GPU_DIM=%s AB_STAGING_MB=%s AB_TRACE=%s | %d procs\nstart: %s| load %s\n", ab_build_info(),
-           getenv("VECLIB_MAXIMUM_THREADS"), getenv("AB_MODE"), getenv("AB_MIN_GPU_DIM"), getenv("AB_STAGING_MB"), getenv("AB_TRACE") ? "on" : "off", np, pw, ld);
+    printf("%s | VECLIB_MAXIMUM_THREADS=%s AB_MODE=%s AB_MIN_GPU_DIM=%s AB_STAGING_MB=%s AB_TRACE=%s AB_REPORT=%s | %d procs\nstart: %s| load %s\n", ab_build_info(),
+           getenv("VECLIB_MAXIMUM_THREADS"), getenv("AB_MODE"), getenv("AB_MIN_GPU_DIM"), getenv("AB_STAGING_MB"), on_off("AB_TRACE"), on_off("AB_REPORT"), np, pw, ld);
     fflush(stdout);
     snprintf(path, sizeof path, "%s/shm.%s.%d.%d", argv[4], c->name, np, getpid());
     int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644); if (fd < 0 || ftruncate(fd, sizeof(Shm))) { perror("shm"); return 1; }
