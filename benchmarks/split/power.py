@@ -10,19 +10,17 @@ about a second, so each run is averaged from 1 s after its first call starts to 
 end; runs shorter than 1.5 s after trimming are skipped. Reports mean PDTR (DC input = wall side on
 AC), the GPU rails (PC10+PC12+PC20+PC22) and PPBR (battery; ~0 means the adapter carries the load).
 """
-import re
+import os
 import sys
 from collections import defaultdict
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # rawtsv.py, also under python3 -I
+from rawtsv import read  # noqa: E402
+
 LAG, MINLEN = 1.0, 1.5
+LABEL = {"SPLIT": "split", "SPLIT2": "split2"}   # the other roles print as they are
 for pre in sys.argv[1:]:
-    rows = [l.rstrip("\n").split("\t") for l in open(pre + ".raw.tsv")]
-    h = rows[0]; recs = [dict(zip(h, r)) for r in rows[1:]]
-    recs = [r for r in recs if r["proc"] == "0" and r["phase"] == "1"]
-    if "name" in h:
-        label = lambda r: "split" if re.fullmatch(r"S\d+", r["name"]) else "split2" if re.fullmatch(r"S\d+b", r["name"]) else r["name"]
-    else:
-        label = lambda r: {"0": "ACC", "1": "GPU"}.get(r["cfg"], "split")
+    recs = [r for r in read(pre + ".raw.tsv") if r["proc"] == "0" and r["phase"] == "1"]
     lines = [l.rstrip("\n").split("\t") for l in open(pre + ".power.tsv")]
     col = {k: i for i, k in enumerate(lines[0])}
     rails = [col[k] for k in ("PC10", "PC12", "PC20", "PC22")]
@@ -33,7 +31,7 @@ for pre in sys.argv[1:]:
         if cur and cur[0] == key:
             cur[2] = float(r["t1"])
         else:
-            cur = [key, float(r["t0"]), float(r["t1"]), label(r)]
+            cur = [key, float(r["t0"]), float(r["t1"]), LABEL.get(r["role"], r["role"])]
             runs.append(cur)
     acc = defaultdict(lambda: [0.0, 0.0, 0.0, 0, 0.0])
     for _, t0, t1, name in runs:

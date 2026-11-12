@@ -28,32 +28,14 @@ without it those columns read n/a and the verdict uses the Hodges-Lehmann bounds
 import argparse, glob, math, os, re, statistics, sys
 from collections import defaultdict
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # rawtsv.py, also under python3 -I
+from rawtsv import env, fixed_pairs, parse, read  # noqa: E402
+
 try:
     import numpy as np
     from scipy import stats as sps
 except ImportError:
     np = sps = None
-
-
-def role(name):
-    return "SPLIT" if re.fullmatch(r"S\d+", name) else "SPLIT2" if re.fullmatch(r"S\d+b", name) else name
-
-
-def read_raw(path):
-    rows = [l.rstrip("\n").split("\t") for l in open(path)]
-    return [dict(zip(rows[0], r)) for r in rows[1:]]
-
-
-def lockstep(recs):
-    """{role: {(round, rep): seconds}} of the fixed block, the slowest process per repeat"""
-    out = defaultdict(dict)
-    for d in recs:
-        if d["phase"] != "1":
-            continue
-        k = (int(d["round"]), int(d["rep"]))
-        r = role(d["name"])
-        out[r][k] = max(out[r].get(k, 0.0), float(d["total"]))
-    return out
 
 
 def walsh(d):
@@ -133,7 +115,7 @@ def timeline(recs):
     """{span: [ms per SEAM call]} over every process's fixed-block SEAM calls; a span with a 0 end is left out"""
     out = defaultdict(list)
     for d in recs:
-        if d["phase"] != "1" or d["name"] != "SEAM":
+        if d["phase"] != "1" or d["role"] != "SEAM":
             continue
         for name, cols in SPANS:
             v = [int(d[c]) for c in cols]
@@ -147,7 +129,7 @@ def timeline(recs):
 def user_parts(recs):
     out = defaultdict(list)
     for d in recs:
-        if d["phase"] == "1" and role(d["name"]) == "SPLIT":
+        if d["phase"] == "1" and d["role"] == "SPLIT":
             for c in ("cpu", "gpu", "join", "wake"):
                 out[c].append(float(d[c]) * 1e3)
     return out
@@ -155,11 +137,6 @@ def user_parts(recs):
 
 def mr(v):
     return f"{statistics.median(v):.3f} [{min(v):.3f}-{max(v):.3f}]" if v else "-"
-
-
-def summary(txt):
-    m = re.search(r"^SUMMARY (.*)$", txt, re.M)
-    return dict(kv.split("=", 1) for kv in m.group(1).split() if "=" in kv) if m else {}
 
 
 def main():
@@ -173,19 +150,18 @@ def main():
     files = sorted({f for d in a.dirs for f in glob.glob(os.path.join(d, "**", "*.raw.tsv"), recursive=True)})
     rows = []
     for f in files:
-        recs = read_raw(f)
-        if not recs or "name" not in recs[0] or not any(d["name"] == "SEAM" for d in recs):
+        recs = read(f)
+        if not any(d["role"] == "SEAM" for d in recs):
             continue
         txt = open(f[:-8] + ".out").read() if os.path.exists(f[:-8] + ".out") else ""
-        v = summary(txt)
-        vl = re.search(r"VECLIB_MAXIMUM_THREADS=(\S+)", txt)
-        st = re.search(r"AB_STAGING_MB=(\S+)", txt)
-        L = lockstep(recs)
+        v = parse(txt, "SUMMARY") or {}
+        vl, st = env(txt, "VECLIB_MAXIMUM_THREADS"), env(txt, "AB_STAGING_MB")
+        L = fixed_pairs(recs)
         seam = paired(L, "SEAM", "SPLIT", a.level, a.resamples, a.seed)
         null = paired(L, "SPLIT2", "SPLIT", a.level, a.resamples, a.seed)
         rows.append({
             "suite": os.path.basename(os.path.dirname(f)), "case": v.get("case", os.path.basename(f).split(".")[0]),
-            "layout": f"{v.get('np', '?')}x{vl.group(1) if vl else '?'}", "staging": st.group(1) if st else "?",
+            "layout": f"{v.get('np', '?')}x{vl or '?'}", "staging": st or "?",
             "copied": v.get("reg") == "0", "g": v.get("g", "?"), "seam": seam, "null": null,
             "gate": verdict(seam["bca_hi"], null["bca_hi"]) if sps is not None else verdict(seam["hl_hi"], null["hl_hi"]),
             "check": verdict(seam["hl_hi"], null["hl_hi"]), "out": v.get("seam_out", "?"),
