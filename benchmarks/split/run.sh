@@ -15,7 +15,8 @@
 #                  sq1x8's case (measured first if sq1x8 has not run)
 #   g3-1x8-s8192, g3-1x8-s2048, g3-4x2-s8192, g3-4x2-s2048 (or g3 for all four)
 #                  G3 (library seam against user code): the squares and the QE-shaped cases with copied
-#                  operands (SPLIT_NOREG=1) at 1x8 and 4x2, AB_STAGING_MB 8192 or 2048; no Z8192 at 4x2
+#                  operands (SPLIT_NOREG=1) at 1x8 and 4x2, AB_STAGING_MB 8192 or 2048; no Z8192 at 4x2;
+#                  6 rounds of 2 repeats, so the arms' order is balanced and intervals can be by round
 # Default: every suite but smoke and the G3 suites, in that order (about 50 min).
 #
 # Run on an otherwise idle Mac on AC power from an adapter of at least SPLIT_MIN_W watts (default 90).
@@ -103,7 +104,7 @@ for s in $suites; do
     sustain)       sus D8192; sus Z8192 ;;
     g3-1x8-s8192|g3-1x8-s2048|g3-4x2-s8192|g3-4x2-s2048)
         case $s in g3-1x8-*) np=1 vl=8 cs="$SQ $QE" ;; *) np=4 vl=2 cs="$SQ4X2 $QE" ;; esac
-        for c in $cs; do one "$s" "$np" "$vl" 0 "$c" SPLIT_NOREG=1 AB_STAGING_MB="${s##*-s}"; done ;;
+        for c in $cs; do one "$s" "$np" "$vl" 0 "$c" SPLIT_NOREG=1 AB_STAGING_MB="${s##*-s}" SPLIT_ROUNDS=6 SPLIT_REPS=2; done ;;
     *)             echo "unknown suite: $s" >&2; exit 2 ;;
     esac
 done

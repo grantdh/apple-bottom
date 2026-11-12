@@ -14,8 +14,9 @@
 // Per case: warm-up, a sweep over the GPU share (3 rounds, configs interleaved), then a fixed block
 // at the sweep's best share (SPLIT_ROUNDS rounds, default 3, of Accelerate / GPU / split, interleaved)
 // whose medians are the headline (so the choice of f does not bias them), bit checks, and Dot2 errors
-// on sampled columns. SPLIT_G=g, or SPLIT_F=f (cut as the library cuts it, ab_split_cut with the
-// AB_MIN_GPU_DIM floor), skips the sweep and runs the fixed block at that GPU part.
+// on sampled columns. SPLIT_REPS=n gives every config of the fixed block n repeats per round.
+// SPLIT_G=g, or SPLIT_F=f (cut as the library cuts it, ab_split_cut with the AB_MIN_GPU_DIM floor),
+// skips the sweep and runs the fixed block at that GPU part.
 // SPLIT_POWER_S=s adds runs of s seconds per engine for wall power (SPLIT_IDLE_S: idle before).
 // The fixed block also runs four arms at the split's GPU part g (SPLIT_ARMS=0 leaves them out):
 //   SEAM   the library's own split of the same call through its seam (ab_internal_[dz]gemm_split,
@@ -153,6 +154,14 @@ static const Case CASES[] = {
 };
 #define NCASES (int)(sizeof CASES / sizeof CASES[0])
 static const Case *find_case(const char *n) { for (int i = 0; i < NCASES; i++) if (!strcmp(CASES[i].name, n)) return &CASES[i]; return NULL; }
+// the case with SPLIT_REPS=n repeats per round for every config of the fixed block, if set
+static const Case *with_reps(const Case *c) {
+    static Case cc;
+    int n = (int)envd("SPLIT_REPS", 0);
+    if (!c || n <= 0) return c;
+    cc = *c; cc.fx_acc = cc.fx_gpu = cc.fx_split = n;
+    return &cc;
+}
 static int axis_len(const Case *c) { return c->axis == 'N' ? c->N : c->axis == 'M' ? c->M : c->K; }
 // the GPU part at share f: the library's cut with no AB_MIN_GPU_DIM floor, round(f L / a) a clamped
 // to [a, L - a]; a is the axis's unit (ab_split_align), which every case's `align` states
@@ -475,9 +484,12 @@ static int fixed_plan(const Case *c, int r, int bk, Step *p) {
         for (int j = 0; j < 3; j++) p[n++] = (Step){trio[W6[r % NW6][j]], rep};
     return n;
 }
+// Watchdogs, so a hang never holds the machine lock: setup, warm-up and sweep, then each round of the
+// fixed block, then the rest (orders, power runs, checks) each get this long.
+static unsigned watchdog(const Case *c) { return c->big ? 2400 : 600; }
 static int child(const Case *c, int id, const char *shmpath, int data) {   // np: shm->np
     double T0 = now();
-    alarm(c->big ? 2400 : 600);
+    alarm(watchdog(c));
     myid = id;
     int fd = open(shmpath, O_RDWR); if (fd < 0) { perror("open shm"); return 1; }
     shm = mmap(NULL, sizeof(Shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0); if (shm == MAP_FAILED) { perror("mmap"); return 1; }
@@ -538,6 +550,7 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
     const double gap_s = envd("SPLIT_GAP_S", 1.0);
     Step plan[MAXSTEP];
     for (int r = 0; r < shm->rounds; r++) {
+        alarm(watchdog(c));
         if (shm->narm) { barrier(); sleep_s(gap_s); g_prev = PREV_IDLE; }   // the idle gap that starts a round
         int nst = fixed_plan(c, r, bk, plan);
         for (int st = 0; st < nst; st++) {
@@ -566,6 +579,7 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
             (*nr)++;
         }
     }
+    alarm(watchdog(c));
     // ---- completion order: GPU slice starts after the CPU slice, then the reverse
     set_cfg(x, bk);
     for (int o = 1; o <= 2; o++) {
@@ -999,12 +1013,12 @@ static void report(const Case *c, int np, int data, bool smc, double idle_w) {
     bool bits = sd == 0 && od == 0 && hs;
     printf("SUMMARY case=%s np=%d data=%d acc_ms=%.3f gpu_ms=%.3f split_ms=%.3f g=%d f=%.3f sp_acc=%.3f sp_gpu=%.3f sp_best=%.3f acc_gfs=%.1f gpu_gfs=%.1f split_gfs=%.1f "
            "bits_repeat=%s split_reps=%d gpu_rep_diff=%d acc_rep_diff=%d err_u2=%.3f err_gpu_u2=%.3f err_acc_u2=%.4f notgpu=%d pdtr_acc=%.1f pdtr_gpu=%.1f pdtr_split=%.1f idle=%.1f n=%d/%d/%d "
-           "reg=%d sus_w=%.1f/%.1f/%.1f sus_j=%.3f/%.3f/%.3f h_split=%016llx h_gpu=%016llx h_acc=%016llx share=%s rounds=%d arms=%d",
+           "reg=%d sus_w=%.1f/%.1f/%.1f sus_j=%.3f/%.3f/%.3f h_split=%016llx h_gpu=%016llx h_acc=%016llx share=%s rounds=%d reps=%d/%d/%d arms=%d",
            c->name, np, data, La * 1e3, Lg * 1e3, Ls * 1e3, shm->g[bk], fb, La / Ls, Lg / Ls, best1 / Ls, F / La / 1e9, F / Lg / 1e9, F / Ls / 1e9,
            bits ? "yes" : "NO", sr, gd, ad, emax / U2, shm->err_gpu / U2, shm->err_acc / U2, notgpu, pw[0], pw[1], pw[2], idle_w, na, ng, ns,
            shm->reg_ok[0], sw[0], sw[1], sw[2], sj[0], sj[1], sj[2],
            (unsigned long long)shm->hash_split[0], (unsigned long long)shm->hash_gpu[0], (unsigned long long)shm->hash_acc[0],
-           shm->fixed ? "fixed" : "sweep", shm->rounds, shm->narm);
+           shm->fixed ? "fixed" : "sweep", shm->rounds, c->fx_acc, c->fx_gpu, c->fx_split, shm->narm);
     if (shm->narm) {
         printf(" seam_ms=%.3f split2_ms=%.3f head_ms=%.3f tail_ms=%.3f seam_ratio=%.4f null_ratio=%.4f pairs=%d seam_out=", Lm * 1e3, Ls2 * 1e3, Lh * 1e3, Lt * 1e3, rseam, rnull, nseam);
         bool first = true;
@@ -1204,9 +1218,9 @@ int main(int argc, char **argv) {
         if (!c) { fprintf(stderr, "unknown case\n"); return 2; }
         return sustain(c, argv[3], atoi(argv[4]), argc > 5 ? atof(argv[5]) : 80, argc > 6 ? atof(argv[6]) : 30, argc > 7 ? atof(argv[7]) : 20);
     }
-    if (argc >= 7 && !strcmp(argv[1], "child")) return child(find_case(argv[2]), atoi(argv[4]), argv[5], atoi(argv[6]));
+    if (argc >= 7 && !strcmp(argv[1], "child")) return child(with_reps(find_case(argv[2])), atoi(argv[4]), argv[5], atoi(argv[6]));
     if (argc < 5 || strcmp(argv[1], "run")) { fprintf(stderr, "usage: bench_split run <case> <np> <outdir> [data] | bench_split sustain <case> <outdir> <g> [secs] [idle] [steady_after] | bench_split list\n"); return 2; }
-    const Case *c = find_case(argv[2]); int np = atoi(argv[3]), data = argc > 5 ? atoi(argv[5]) : 0;
+    const Case *c = with_reps(find_case(argv[2])); int np = atoi(argv[3]), data = argc > 5 ? atoi(argv[5]) : 0;
     if (!c || np < 1 || np > NPMAX) { fprintf(stderr, "bad case or np\n"); return 2; }
     // a fixed GPU part: SPLIT_G as given, or SPLIT_F cut by the library's rule with its AB_MIN_GPU_DIM floor
     int fixed_g = 0, L = axis_len(c), rounds = (int)envd("SPLIT_ROUNDS", 3);
@@ -1220,6 +1234,7 @@ int main(int argc, char **argv) {
     }
     if ((eg || ef) && (fixed_g <= 0 || fixed_g >= L)) { fprintf(stderr, "SPLIT_G or SPLIT_F gives GPU part %d of %d: not a split\n", fixed_g, L); return 2; }
     if (rounds < 1) { fprintf(stderr, "SPLIT_ROUNDS must be at least 1\n"); return 2; }
+    if (getenv("SPLIT_REPS") && envd("SPLIT_REPS", 0) < 1) { fprintf(stderr, "SPLIT_REPS must be at least 1\n"); return 2; }
     char pw[256], ld[256], path[1024];
     machine_state(pw, sizeof pw, ld, sizeof ld);
     printf("%s | VECLIB_MAXIMUM_THREADS=%s AB_MODE=%s AB_MIN_GPU_DIM=%s AB_STAGING_MB=%s AB_TRACE=%s | %d procs\nstart: %s| load %s\n", ab_build_info(),

@@ -71,8 +71,12 @@ same call through its seam (`SEAM`, below), which `AB_SPLIT` uses inside `dgemm_
 - **Fixed share:** `SPLIT_G=<g>` skips the sweep and runs the fixed block at GPU part g. `SPLIT_F=<f>`
   does the same at the GPU part the library would cut at share f (`ab_split_cut` in `src/split_slice.h`,
   with the `AB_MIN_GPU_DIM` floor, default 32); a share that does not cut the axis is refused.
-- **Rounds:** `SPLIT_ROUNDS=<n>` (default 3) sets the fixed block's rounds. The program refuses a count
-  whose records would not fit (`MAXREC`, 2048 timed calls per process).
+- **Rounds:** `SPLIT_ROUNDS=<n>` (default 3) sets the fixed block's rounds, and `SPLIT_REPS=<n>` gives
+  every config n repeats per round instead of the case's own (3 or 2 for Accelerate and the
+  GPU, 4 for the split and the arms; SUMMARY's `reps=` gives them). The program refuses counts whose
+  records would not fit (`MAXREC`, 2048 timed calls per process) or whose round would exceed `MAXSTEP`
+  (512) calls. Each process's watchdog (600 s, 2400 s for the 8192²
+  cases) restarts for each round, so more rounds do not trip it.
 - **Data:** `data 0` is uniform in [−1, 1). `data 1` is QE-like: the rows of the plane-wave arrays decay
   over 9 decades. That is synthetic data chosen to exercise the exponent-range guard, not data from QE.
 - **Power:**
@@ -120,8 +124,10 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 - **G3 suites** (`g3-1x8-s8192`, `g3-1x8-s2048`, `g3-4x2-s8192`, `g3-4x2-s2048`, or `g3` for all four;
   not in the default run): the six squares and the seven QE-shaped cases of the 2026-10-28 results with
   copied operands (`SPLIT_NOREG=1`), at 1×8 and at 4×2, with `AB_STAGING_MB` 8192 and 2048, so that the
-  library's seam and the user split meet the staged path's copies and a small pool. `ZGEMM 8192²` is not
-  run at 4×2 (see Memory). `g3.py` reads the results.
+  library's seam and the user split meet the staged path's copies and a small pool. Each runs 6 rounds
+  of 2 repeats (`SPLIT_ROUNDS=6 SPLIT_REPS=2`): the trio's order is balanced over the 6 rounds, and
+  rounds are the unit of the by-round interval in `g3.py`. `ZGEMM 8192²` is not run at 4×2 (see
+  Memory). `g3.py` reads the results.
 - **Machine:** run on an otherwise idle Mac on AC power, from an adapter of at least 90 W
   (`SPLIT_MIN_W`). The script checks `pmset -g batt` and `pmset -g adapter` at the start and before each
   case, and stops with exit status 75 if either fails. A case that did not both start and end on AC power
