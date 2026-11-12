@@ -24,10 +24,17 @@ rows with its routine and axis; a row with none keeps its share, and so does a s
 2, scripts/ingest_split.py's rule 4), whose share is fitted from bench_split's grid. This is
 .dev/active/split/design.md section 8's rule (a port of Espressivo's calibrate.py).
 
-The part times include each process's first split call, whose GPU part carries the Metal start-up
-(the evidence excludes it: scripts/ingest_split.py); first/gpu is that call's wall time over the
-row's GPU-part time, so a row dominated by it shows. wait g/c above 1 means the GPU part ended
-first more of the time (it waited for the CPU's head), which f_bal > f also says.
+The part sums include each process's first split call, whose GPU part carries the Metal start-up;
+the evidence leaves it out (scripts/ingest_split.py). The library prints the parts of each row's
+first split call in the process (first_cpu_ms, first_gpu_ms, first_gf_cpu, first_gf_gpu), and
+--exclude-first (the default) leaves that call out of each rank line's rates and split count: for one
+row of each process it is the start-up, for the others an ordinary call. Reports without the parts
+(an older library) keep their first calls, with a note.
+
+Columns: dfirst is how far leaving the first calls out moved f_bal; first/gpu is the first calls' GPU
+parts (their wall times, for an older library) over the row's GPU-part time, so a row dominated by
+them shows; wait g/c (every call) above 1 means the GPU part ended first more of the time (it waited
+for the CPU's head), which f_bal > f also says.
 
 Prints TABLE with the new shares on stdout (only changed rows rewritten; "# method:" and "# date:"
 set, citing the build and TABLE's sha256), and the estimates on stderr. --cut ROW=L,... adds the GPU
@@ -53,6 +60,7 @@ from analyze import AB_HEADER, AB_SPLIT_ROW  # noqa: E402
 
 KV = re.compile(r"(\w+)=(\S+)")
 SUMS = ("calls", "split", "cpu_ms", "gpu_ms", "gf_cpu", "gf_gpu", "first_ms", "wait_cpu_ms", "wait_gpu_ms")
+PARTS = ("cpu_ms", "gpu_ms", "gf_cpu", "gf_gpu")   # first_<part>: those of the row's first split call
 SKIP_DIR = re.compile(r"(\.bad\d*|^incomplete-.*|^tmp|\.save)$")
 
 
@@ -154,6 +162,15 @@ def read_reports(path, table, digest):
     return None
 
 
+def less_first(c):
+    """Sums c without the n_first first split calls summed into its first_<part> keys."""
+    d = Counter(c)
+    for k in PARTS:
+        d[k] -= c["first_" + k]
+    d["split"] -= c["n_first"]
+    return d
+
+
 def rates(t):
     if min(t["cpu_ms"], t["gpu_ms"], t["gf_cpu"], t["gf_gpu"]) <= 0:
         return None
@@ -176,6 +193,8 @@ def main():
     ap.add_argument("--min-calls", type=int, default=20)
     ap.add_argument("--min-dim", type=int, default=MIN_DIM, help=f"AB_MIN_GPU_DIM of the runs (default {MIN_DIM})")
     ap.add_argument("--cut", type=cut_arg, action="append", default=[], metavar="ROW=L[,L...]")
+    ap.add_argument("--exclude-first", action=argparse.BooleanOptionalAction, default=True,
+                    help="leave each rank line's first split call per row out of the rates (default)")
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("runs", nargs="*")
     a = ap.parse_args()
@@ -200,7 +219,7 @@ def main():
             sys.exit(f"{table}:{n + 1}: not a split row or a comment: {l!r}")
     want = [(r["routine"] + "gemm", r["axis"], f"{r['f']:g}") for _, r in rows]
 
-    tot, builds, used, skipped, by_path = defaultdict(Counter), set(), 0, 0, 0
+    tot, builds, used, skipped, by_path, absent = defaultdict(Counter), set(), 0, 0, 0, 0
     for path in err_files(a.runs):
         rep = read_reports(path, table, digest)
         if rep is None:
@@ -216,7 +235,12 @@ def main():
             if len(lines_i) < len(ranks):
                 print(f"fit_shares: {path}: row {i} reported by {len(lines_i)} of {len(ranks)} ranks", file=sys.stderr)
             for kv in lines_i:
-                tot[i].update({k: float(kv[k]) for k in SUMS})
+                v = {k: float(kv[k]) for k in SUMS}
+                if v["split"] and all("first_" + k in kv for k in PARTS):
+                    v.update({"first_" + k: float(kv["first_" + k]) for k in PARTS}, n_first=1)
+                elif v["split"]:
+                    absent += 1
+                tot[i].update(v)
         used += 1
     if not used:
         sys.exit(f"no err.txt under {' '.join(a.runs)} names {table}")
@@ -227,6 +251,14 @@ def main():
     if by_path:
         print(f"fit_shares: {by_path} of them name the table by path alone (no digest in their headers): "
               f"an edit of {table} in place since they ran would go unseen", file=sys.stderr)
+    view = less_first if a.exclude_first else Counter
+    excluded = sum(c["n_first"] for c in tot.values()) if a.exclude_first else 0
+    if excluded:
+        print(f"fit_shares: --exclude-first: {excluded} first split calls left out (one per row per rank line)",
+              file=sys.stderr)
+    if absent and a.exclude_first:
+        print(f"fit_shares: {absent} rank lines with split calls have no first-call parts (an older library): "
+              f"their first calls stay in", file=sys.stderr)
 
     square = [0 < r["ratio"] <= SQUARE_RATIO for _, r in rows]
     pooled = defaultdict(Counter)
@@ -236,12 +268,13 @@ def main():
     cuts = dict(a.cut)
 
     print(f"{'row':>3} {'axis':>4} {'f':>5} {'calls':>7} {'split':>7} {'r_cpu':>7} {'r_gpu':>7} {'f_bal':>6} "
-          f"{'first/gpu':>9} {'wait g/c':>8} {'source':>7} {'next':>5}  cut old -> new", file=sys.stderr)
+          f"{'dfirst':>7} {'first/gpu':>9} {'wait g/c':>8} {'source':>7} {'next':>5}  cut old -> new", file=sys.stderr)
     for i, (n, r) in enumerate(rows):
-        t, f = tot[i], r["f"]
-        est, src = rates(t), "own"
+        own, f = tot[i], r["f"]
+        t, c, src = view(own), own, "own"
         if 0 < t["split"] < a.min_calls:
-            est, src = rates(pooled[(r["routine"], r["axis"])]), "pooled"
+            c, src = pooled[(r["routine"], r["axis"])], "pooled"
+        est, est_full = rates(view(c)), rates(c)
         if square[i] or f <= 0 or est is None:
             nxt, src = f, "square" if square[i] else "kept"
         else:
@@ -250,15 +283,17 @@ def main():
             if nxt != f:
                 lines[n] = re.sub(r"(?<![^ \t])f=[^ \t#]+", f"f={nxt:.2f}", lines[n], count=1)
         rc, rg, fb = est or (math.nan,) * 3
-        first = t["first_ms"] / t["gpu_ms"] if t["gpu_ms"] else math.nan
-        wait = t["wait_gpu_ms"] / t["wait_cpu_ms"] if t["wait_cpu_ms"] else math.nan
+        moved = fb - est_full[2] if est_full else math.nan
+        first = own["first_gpu_ms" if own["n_first"] else "first_ms"] / own["gpu_ms"] if own["gpu_ms"] else math.nan
+        wait = own["wait_gpu_ms"] / own["wait_cpu_ms"] if own["wait_cpu_ms"] else math.nan
         cs = "  ".join(f"{L}: {cut(r['axis'], L, f, a.min_dim)} -> {cut(r['axis'], L, nxt, a.min_dim)}"
                        for L in cuts.get(i, []))
         print(f"{i:3d} {r['axis']:>4} {f:5.2f} {t['calls']:7.0f} {t['split']:7.0f} {rc:7.1f} {rg:7.1f} {fb:6.3f} "
-              f"{first:9.3f} {wait:8.2f} {src:>7} {nxt:5.2f}  {cs}", file=sys.stderr)
+              f"{moved:+7.3f} {first:9.3f} {wait:8.2f} {src:>7} {nxt:5.2f}  {cs}", file=sys.stderr)
 
     keys = {"method": f"fit_shares.py from {used} reports of build {build} made with {os.path.basename(table)} "
-                      f"(sha256 {digest}); damp {a.damp:g}, floor {a.floor:g}, min-calls {a.min_calls}",
+                      f"(sha256 {digest}); damp {a.damp:g}, floor {a.floor:g}, min-calls {a.min_calls}, "
+                      f"first calls {'left out' if excluded else 'in'}",
             "date": datetime.date.today().isoformat()}
     for n, l in enumerate(lines):
         m = KEY_RE.match(l)
