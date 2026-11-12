@@ -78,12 +78,13 @@ static double now(void) {
     if (!tb.denom) mach_timebase_info(&tb);
     return (double)mach_absolute_time() * tb.numer / tb.denom * 1e-9;
 }
-static uint64_t sm;
-static double rnd(void) {  // splitmix64 -> [-1, 1), identical in every process
-    uint64_t z = (sm += 0x9E3779B97F4A7C15ull);
+static uint64_t splitmix64(uint64_t *s) {
+    uint64_t z = (*s += 0x9E3779B97F4A7C15ull);
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull; z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
-    z ^= z >> 31; return (double)(z >> 11) * 0x1p-53 * 2.0 - 1.0;
+    return z ^ (z >> 31);
 }
+static uint64_t sm;
+static double rnd(void) { return (double)(splitmix64(&sm) >> 11) * 0x1p-53 * 2.0 - 1.0; }   // [-1, 1), identical in every process
 // result hashes in SUMMARY (h_split, h_gpu, h_acc): this program's own, over 64-bit words; not
 // comparable with AB_TRACE_HASH or the golden files' hashes
 static uint64_t h64(const void *p, size_t n) {
@@ -103,6 +104,7 @@ static double median(const double *v, int n) {
     double m = n % 2 ? t[n / 2] : 0.5 * (t[n / 2 - 1] + t[n / 2]); free(t); return m;
 }
 static double envd(const char *name, double d) { const char *v = getenv(name); return v ? atof(v) : d; }
+static bool noreg(void) { return envd("SPLIT_NOREG", 0) != 0; }   // SPLIT_NOREG=1: the operands are not registered
 static void sh_line(const char *cmd, char *out, size_t n) {
     FILE *f = popen(cmd, "r"); out[0] = 0;
     if (f) { if (!fgets(out, (int)n, f)) out[0] = 0; pclose(f); }
@@ -335,6 +337,28 @@ static void fill(Ctx *x, int data) {
     fill_mat(x->C0, c->N, c->ldc, w, data && c->ta == 'N' && c->axis != 'K' && c->M > 4096);
 }
 
+// the case's operands (A, B, C, C0 and the K axis's partial P), filled with `data`, C = C0, and the
+// library initialised; registered with ab_register_host_memory unless SPLIT_NOREG=1 (then the staged
+// path copies them). Returns how many of the four arrays (A, B, C, P) registered, or -1.
+static int setup_operands(Ctx *x, const Case *c, int data) {
+    x->c = c; x->es = c->prec == 'z' ? 16 : 8;
+    int acols = c->ta == 'C' ? c->M : c->K;
+    x->nA = (size_t)c->lda * acols; x->nB = (size_t)c->ldb * c->N; x->nC = (size_t)c->ldc * c->N;
+    size_t es = x->es, nP = (size_t)c->M * c->N;
+    x->A = palloc(x->nA * es); x->B = palloc(x->nB * es); x->C = palloc(x->nC * es); x->C0 = palloc(x->nC * es); x->P = palloc(nP * es);
+    fill(x, data);
+    memcpy(x->C, x->C0, x->nC * es); memset(x->P, 0, nP * es);
+    if (ab_init() != AB_OK) { fprintf(stderr, "ab_init failed\n"); return -1; }
+    int ok = 0;
+    if (!noreg()) {
+        ok += ab_register_host_memory(x->A, x->nA * es) == AB_OK;
+        ok += ab_register_host_memory(x->B, x->nB * es) == AB_OK;
+        ok += ab_register_host_memory(x->C, x->nC * es) == AB_OK;
+        ok += ab_register_host_memory(x->P, nP * es) == AB_OK;
+    }
+    return ok;
+}
+
 // ---------------------------------------------------------------- checks
 static long cmp_block(const Ctx *x, const void *a, const void *b, int r0, int r1, int c0, int c1) {
     long d = 0; const char *p = a, *q = b; size_t es = x->es;
@@ -419,22 +443,11 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
     myid = id;
     int fd = open(shmpath, O_RDWR); if (fd < 0) { perror("open shm"); return 1; }
     shm = mmap(NULL, sizeof(Shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0); if (shm == MAP_FAILED) { perror("mmap"); return 1; }
-    Ctx *x = &X; x->c = c; x->es = c->prec == 'z' ? 16 : 8;
-    int acols = c->ta == 'C' ? c->M : c->K;
-    x->nA = (size_t)c->lda * acols; x->nB = (size_t)c->ldb * c->N; x->nC = (size_t)c->ldc * c->N;
-    size_t es = x->es, nP = (size_t)c->M * c->N;
-    x->A = palloc(x->nA * es); x->B = palloc(x->nB * es); x->C = palloc(x->nC * es); x->C0 = palloc(x->nC * es); x->P = palloc(nP * es);
+    Ctx *x = &X;
+    int ok = setup_operands(x, c, data);
+    if (ok < 0) return 1;
+    size_t es = x->es;
     void *Cs0 = palloc(x->nC * es), *Cg0 = palloc(x->nC * es), *Ca0 = palloc(x->nC * es), *Cm0 = shm->narm ? palloc(x->nC * es) : NULL;
-    fill(x, data);
-    memcpy(x->C, x->C0, x->nC * es); memset(x->P, 0, nP * es);
-    if (ab_init() != AB_OK) { fprintf(stderr, "ab_init failed\n"); return 1; }
-    int ok = 0;
-    if (!(getenv("SPLIT_NOREG") && atoi(getenv("SPLIT_NOREG")))) {  // SPLIT_NOREG=1: the staged path copies the operands
-        ok += ab_register_host_memory(x->A, x->nA * es) == AB_OK;
-        ok += ab_register_host_memory(x->B, x->nB * es) == AB_OK;
-        ok += ab_register_host_memory(x->C, x->nC * es) == AB_OK;
-        ok += ab_register_host_memory(x->P, nP * es) == AB_OK;
-    }
     shm->reg_ok[id] = ok;
     sem_go = dispatch_semaphore_create(0); sem_done = dispatch_semaphore_create(0); sem_cpu_done = dispatch_semaphore_create(0);
     pthread_t th; pthread_create(&th, NULL, gpu_thread, NULL);
@@ -990,16 +1003,10 @@ static double sstat(const Case *c, int b, double bt0, double a, double z, int f,
     if (mx) *mx = n ? hi : NAN;
     free(v); return m;
 }
-static uint64_t sm_next(uint64_t *s) {   // splitmix64
-    uint64_t z = (*s += 0x9E3779B97F4A7C15ull);
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull; z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
-    return z ^ (z >> 31);
-}
 static int sustain(const Case *c, const char *outdir, int g, double secs, double idle_s, double steady) {
     char pw[256], ld[256], path[1100];
     alarm((unsigned)(NSB * (secs + idle_s)) + 900);   // never hold the machine lock on a hang
     machine_state(pw, sizeof pw, ld, sizeof ld);
-    bool noreg = getenv("SPLIT_NOREG") && atoi(getenv("SPLIT_NOREG"));
     printf("%s | VECLIB_MAXIMUM_THREADS=%s AB_MODE=%s AB_MIN_GPU_DIM=%s AB_STAGING_MB=%s | sustained runs, 1 proc\nstart: %s| load %s\n", ab_build_info(),
            getenv("VECLIB_MAXIMUM_THREADS"), getenv("AB_MODE"), getenv("AB_MIN_GPU_DIM"), getenv("AB_STAGING_MB"), pw, ld);
     fflush(stdout);
@@ -1017,23 +1024,12 @@ static int sustain(const Case *c, const char *outdir, int g, double secs, double
     const char *seed_env = getenv("SPLIT_SEED");
     uint64_t seed = seed_env ? strtoull(seed_env, NULL, 0) : mach_absolute_time(), st_ = seed;
     int order[NSB] = {SB_ACC, SB_SPLIT, SB_GPU, SB_HEAD, SB_TAIL, SB_BAL, SB_ACC_END};
-    for (int i = 4; i > 1; i--) { int j = 1 + (int)(sm_next(&st_) % (uint64_t)i); int t = order[i]; order[i] = order[j]; order[j] = t; }
-    Ctx *x = &X; x->c = c; x->es = c->prec == 'z' ? 16 : 8;
-    int acols = c->ta == 'C' ? c->M : c->K;
-    x->nA = (size_t)c->lda * acols; x->nB = (size_t)c->ldb * c->N; x->nC = (size_t)c->ldc * c->N;
-    size_t es_ = x->es, nP = (size_t)c->M * c->N;
-    x->A = palloc(x->nA * es_); x->B = palloc(x->nB * es_); x->C = palloc(x->nC * es_); x->C0 = palloc(x->nC * es_); x->P = palloc(nP * es_);
+    for (int i = 4; i > 1; i--) { int j = 1 + (int)(splitmix64(&st_) % (uint64_t)i); int t = order[i]; order[i] = order[j]; order[j] = t; }
+    Ctx *x = &X;
+    int ok = setup_operands(x, c, 0);
+    if (ok < 0) return 1;
+    size_t es_ = x->es;
     void *Cref = palloc(x->nC * es_);
-    fill(x, 0);
-    memcpy(x->C, x->C0, x->nC * es_); memset(x->P, 0, nP * es_);
-    if (ab_init() != AB_OK) { fprintf(stderr, "ab_init failed\n"); return 1; }
-    int ok = 0;
-    if (!noreg) {   // SPLIT_NOREG=1: the staged path copies the operands
-        ok += ab_register_host_memory(x->A, x->nA * es_) == AB_OK;
-        ok += ab_register_host_memory(x->B, x->nB * es_) == AB_OK;
-        ok += ab_register_host_memory(x->C, x->nC * es_) == AB_OK;
-        ok += ab_register_host_memory(x->P, nP * es_) == AB_OK;
-    }
     bool smc = sampler_on() && smc_open(); g_ior = sampler_on() && ior_init();
     sem_go = dispatch_semaphore_create(0); sem_done = dispatch_semaphore_create(0); sem_cpu_done = dispatch_semaphore_create(0);
     pthread_t th, st; pthread_create(&th, NULL, gpu_thread, NULL);
@@ -1072,7 +1068,7 @@ static int sustain(const Case *c, const char *outdir, int g, double secs, double
     if (smc || g_ior) { atomic_store(&g_stop, 1); pthread_join(st, NULL); }
     // ---- report
     printf("case %s: %cGEMM M=%d N=%d K=%d, split axis %c; %.2f GF per call; registration %d/4 arrays%s; IOReport %s\n",
-           c->name, c->prec == 'z' ? 'Z' : 'D', c->M, c->N, c->K, c->axis, flops(c) / 1e9, ok, noreg ? " (SPLIT_NOREG=1)" : "",
+           c->name, c->prec == 'z' ? 'Z' : 'D', c->M, c->N, c->K, c->axis, flops(c) / 1e9, ok, noreg() ? " (SPLIT_NOREG=1)" : "",
            g_ior ? "on" : sampler_on() ? "unavailable" : "off (SPLIT_SAMPLER=0)");
     printf("runs of %.0f s back to back, each after %.0f s idle; burst = calls starting in the first 10 s, steady = calls starting %.0f s or more into the run\n", secs, idle_s, steady);
     printf("order (SPLIT_SEED=%llu):", (unsigned long long)seed);
@@ -1126,7 +1122,7 @@ static int sustain(const Case *c, const char *outdir, int g, double secs, double
            c->name, g, shm->g[bcfg[SB_BAL]], F4(sg), F4(bg), sg[SB_SPLIT] / sg[SB_GPU], sg[SB_SPLIT] / sg[SB_ACC], sg[SB_BAL] / sg[SB_GPU], sg[SB_BAL] / sg[SB_ACC],
            F4(sw), F4(ss), F4(sb), F4(smhz), F4(bmhz), F4(bdiff),
            sg[SB_ACC_END], sw[SB_ACC_END], sms[SB_HEAD], sms[SB_TAIL], sms[SB_SPLIT], scpu, sgpu, (sms[SB_HEAD] + sms[SB_TAIL]) / sms[SB_SPLIT],
-           scpu / sms[SB_HEAD], sgpu / sms[SB_TAIL], sw[SB_HEAD], sw[SB_TAIL], smhz[SB_HEAD], smhz[SB_TAIL], check ? "yes" : "no", noreg, (unsigned long long)seed);
+           scpu / sms[SB_HEAD], sgpu / sms[SB_TAIL], sw[SB_HEAD], sw[SB_TAIL], smhz[SB_HEAD], smhz[SB_TAIL], check ? "yes" : "no", noreg(), (unsigned long long)seed);
 #undef F4
     static const char *const SB_TAG[NSB] = {"split", "GPU", "ACC", "bal", "HEAD", "TAIL", "ACC2"};
     for (int s = 0; s < NSB; s++) printf("%s%s", s ? "," : "", SB_TAG[order[s]]);
