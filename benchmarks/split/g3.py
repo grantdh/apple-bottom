@@ -278,10 +278,12 @@ def main():
         ap.error("give run.sh's <outdir> or suite directories")
     # each file with its label: the given directory's name and the path below it, so that rows of two
     # outdirs (two days, say) stay apart
-    files = sorted({(f, os.path.normpath(os.path.join(os.path.basename(os.path.normpath(d)), os.path.relpath(os.path.dirname(f), d))))
-                    for d in a.dirs for f in glob.glob(os.path.join(d, "**", "*.raw.tsv"), recursive=True)})
+    files = {}
+    for d in a.dirs:
+        for f in glob.glob(os.path.join(d, "**", "*.raw.tsv"), recursive=True):
+            files.setdefault(os.path.realpath(f), os.path.normpath(os.path.join(os.path.basename(os.path.normpath(d)), os.path.relpath(os.path.dirname(f), d))))
     rows, skipped = [], []
-    for f, label in files:
+    for f, label in sorted(files.items()):
         if any(part.startswith("incomplete-") for part in f.split(os.sep)):
             skipped.append((f, "set aside by run.sh"))
             continue

@@ -1,4 +1,5 @@
 """Readers shared by table.py, power.py and g3.py: bench_split's raw.tsv and report (.out) files."""
+import os
 import re
 from collections import defaultdict
 
@@ -53,10 +54,13 @@ def on_ac(txt):
     return all(re.search(rf"^{w}: Now drawing from 'AC Power'", txt, re.M) for w in ("start", "end"))
 
 
-def power_problem(txt, min_w=90, min_batt=95):
+def power_problem(txt, min_w=None, min_batt=None):
     """why the report's power does not meet run.sh's conditions, or None: AC power on its start and end
     lines, an adapter of min_w W or more on both (bench_split prints '| adapter N W'), and at the start a
-    battery of min_batt percent or more, neither charging nor finishing its charge (when printed)"""
+    battery of min_batt percent or more, neither charging nor finishing its charge (when printed); the
+    limits default to run.sh's SPLIT_MIN_W (90) and SPLIT_MIN_BATT (95)"""
+    min_w = int(os.environ.get("SPLIT_MIN_W", 90)) if min_w is None else min_w
+    min_batt = int(os.environ.get("SPLIT_MIN_BATT", 95)) if min_batt is None else min_batt
     if not on_ac(txt):
         return "did not start and end on AC power"
     for w in ("start", "end"):
