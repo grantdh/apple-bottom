@@ -114,11 +114,15 @@ static double median(const double *v, int n) {
 }
 static double envd(const char *name, double d) { const char *v = getenv(name); return v ? atof(v) : d; }
 static void sleep_s(double s) { usleep((useconds_t)(s * 1e6)); }
-// a profiler variable as the library reads it: AB_TRACE is on for any non-empty value (a trace path,
-// "0" included), the flags (AB_REPORT) for a non-empty value not starting with '0'
-static const char *on_off(const char *name) {
+static int calls_for(double s, double t, int lo, int hi) {   // calls of t seconds to fill s seconds, in [lo, hi]
+    double n = ceil(s / fmax(t, 1e-6));
+    return n < lo ? lo : n > hi ? hi : (int)n;
+}
+// a profiler variable as the library reads it: a flag (AB_REPORT) is on for a non-empty value not
+// starting with '0'; a path (AB_TRACE, any_value) for any non-empty value, "0" included
+static const char *on_off(const char *name, bool any_value) {
     const char *v = getenv(name);
-    return v && *v && (!strcmp(name, "AB_TRACE") || *v != '0') ? "on" : "off";
+    return v && *v && (any_value || *v != '0') ? "on" : "off";
 }
 static bool noreg(void) { return envd("SPLIT_NOREG", 0) != 0; }   // SPLIT_NOREG=1: the operands are not registered
 static void sh_line(const char *cmd, char *out, size_t n) {
@@ -584,21 +588,24 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
     for (int k = shm->ncfg; k < shm->ncfg + shm->narm; k++) { set_cfg(x, k); barrier(); one_call(x, k, &v); }
     // the groups' openers (fixed_plan): untimed calls of HEAD, TAIL and the user split lasting about
     // SPLIT_OPEN_S (default 0.05 s), 1 to NOPEN_MAX calls, sized by process 0's call times
+    double t_split = NAN;   // process 0's: one call of the user split, sizing the warm-up below too
     if (shm->narm) {
         const int opener[3] = {shm->k_head, shm->k_tail, bk};
+        const double open_s = envd("SPLIT_OPEN_S", 0.05);
         for (int e = 0; e < 3; e++) {
             set_cfg(x, opener[e]); barrier(); one_call(x, opener[e], &v);
-            double n = ceil(envd("SPLIT_OPEN_S", 0.05) / fmax(v.v[V_TOTAL], 1e-6));
-            if (id == 0) shm->nopen[e] = n < 1 ? 1 : n > NOPEN_MAX ? NOPEN_MAX : (int)n;
+            if (id == 0) shm->nopen[e] = calls_for(open_s, v.v[V_TOTAL], 1, NOPEN_MAX);
         }
+        t_split = v.v[V_TOTAL];
         barrier();
     }
     // warm-up before the block (untimed): the split at g for SPLIT_WARM_S seconds (default 2 with the
     // arms, 0 without), so the block does not start cool; process 0's call time sets the count for all
     const double warm_s = envd("SPLIT_WARM_S", shm->narm ? 2 : 0);
     if (warm_s > 0) {
-        set_cfg(x, bk); barrier(); one_call(x, bk, &v);
-        if (id == 0) { double n = ceil(warm_s / fmax(v.v[V_TOTAL], 1e-6)) - 1; shm->nwarm = n < 0 ? 0 : n > 10000 ? 10000 : (int)n; }
+        set_cfg(x, bk);
+        if (isnan(t_split)) { barrier(); one_call(x, bk, &v); t_split = v.v[V_TOTAL]; }
+        if (id == 0) shm->nwarm = calls_for(warm_s, t_split, 1, 10001) - 1;   // the call just timed is the first
         barrier();
         for (int i = 0; i < shm->nwarm; i++) { barrier(); one_call(x, bk, &v); }
     }
@@ -619,7 +626,7 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
         alarm(watchdog(c));
         barrier();
         if (id == 0) { load_snap(&s0); shm->rt0[r] = s0.t; }
-        if (shm->narm) { sleep_s(gap_s); g_prev = PREV_IDLE; g_prev_untimed = false; }   // the idle gap that starts a round
+        if (shm->narm) { sleep_s(gap_s); g_prev = PREV_IDLE; }   // the idle gap that starts a round
         int nst = fixed_plan(c, r, bk, plan), ncpu_steps = 0;   // the plan's CPU-only calls come first
         while (shm->narm && ncpu_steps < nst && (shm->kind[plan[ncpu_steps].k] == KD_ACC || shm->kind[plan[ncpu_steps].k] == KD_HEAD)) ncpu_steps++;
         for (int st = 0; st < nst; st++) {
@@ -1391,7 +1398,7 @@ int main(int argc, char **argv) {
     char pw[256], ld[256], path[1024];
     machine_state(pw, sizeof pw, ld, sizeof ld);
     printf("%s | VECLIB_MAXIMUM_THREADS=%s AB_MODE=%s AB_MIN_GPU_DIM=%s AB_STAGING_MB=%s AB_TRACE=%s AB_REPORT=%s | %d procs\nstart: %s| load %s\n", ab_build_info(),
-           getenv("VECLIB_MAXIMUM_THREADS"), getenv("AB_MODE"), getenv("AB_MIN_GPU_DIM"), getenv("AB_STAGING_MB"), on_off("AB_TRACE"), on_off("AB_REPORT"), np, pw, ld);
+           getenv("VECLIB_MAXIMUM_THREADS"), getenv("AB_MODE"), getenv("AB_MIN_GPU_DIM"), getenv("AB_STAGING_MB"), on_off("AB_TRACE", true), on_off("AB_REPORT", false), np, pw, ld);
     fflush(stdout);
     snprintf(path, sizeof path, "%s/shm.%s.%d.%d", argv[4], c->name, np, getpid());
     int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644); if (fd < 0 || ftruncate(fd, sizeof(Shm))) { perror("shm"); return 1; }
@@ -1408,7 +1415,7 @@ int main(int argc, char **argv) {
     }
     int need = (shm->fixed ? 0 : 3 * shm->ncfg * c->sweep_reps) + rounds * (c->fx_acc + c->fx_gpu + c->fx_split * (1 + shm->narm)) + 2;
     if (c->fx_acc + c->fx_gpu + c->fx_split * (1 + shm->narm) + (shm->narm ? 3 * NOPEN_MAX : 0) > MAXSTEP) {   // fixed_plan's calls, openers included
-        fprintf(stderr, "%d repeats per round need more than MAXSTEP %d calls\n", c->fx_split, MAXSTEP);
+        fprintf(stderr, "repeats per round of %d/%d/%d (Accelerate/GPU/split) need more than MAXSTEP %d calls\n", c->fx_acc, c->fx_gpu, c->fx_split, MAXSTEP);
         unlink(path); return 2;
     }
     if (need > MAXREC) {   // records per process: the sweep, the fixed block, the two completion orders
@@ -1447,10 +1454,11 @@ int main(int argc, char **argv) {
             char nb[24];
             for (int p = 0; p < np; p++) for (int i = 0; i < shm->nrec[p]; i++) {
                 const Rec *r = &shm->rec[p][i]; const ab_split_times_t *m = &r->k.tm; const ab_prof_kernel_split_t *q = &m->gpu;
-                int pv = r->k.prev; char pb[24], pn[40];
-                snprintf(pn, sizeof pn, "%s%s", r->k.prev_untimed ? "untimed:" : "", pv >= 0 ? cfg_name(pv, pb) : "");
+                int pv = r->k.prev; char pb[24], pn[40] = "-";
+                if (pv == PREV_IDLE) snprintf(pn, sizeof pn, "idle");
+                else if (pv >= 0) snprintf(pn, sizeof pn, "%s%s", r->k.prev_untimed ? "untimed:" : "", cfg_name(pv, pb));
                 fprintf(f, "%d\t%d\t%d\t%d\t%s\t%d\t%d\t%s", p, r->phase, r->round, r->cfg, cfg_name(r->cfg, nb), cfg_g(c, r->cfg), r->rep,
-                        pv == PREV_IDLE ? "idle" : pv == PREV_NONE ? "-" : pn);
+                        pn);
                 for (int k = 0; k < NV; k++) fprintf(f, "\t%.6f", r->k.v[k]);
                 fprintf(f, "\t%s\t%d\t%d\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu", outcome_name(r->k.outcome), r->k.retries, r->k.in_place,
                         (unsigned long long)m->cut_ns, (unsigned long long)m->create_ns, (unsigned long long)m->cpu0_ns, (unsigned long long)m->cpu1_ns,
