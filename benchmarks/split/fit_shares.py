@@ -10,7 +10,9 @@ field of the line (the first 12 hex digits of the SHA-256 of the bytes the libra
 split_row lines count only if DIGEST is TABLE's now. A header without a digest (an older library) is
 matched by PATH, read relative to the file's directory (where the run started), with a note. Other
 ranks' lines are left out: noted if the file is used, and also if a header names TABLE's path at
-another digest. A file with no counting rank is skipped. The fit stops if a report's rows differ from
+another digest. A record that another rank's was written into (an AB_REPORT[ before its line ends) is
+left out with a note: a header without its digest (its table unknown, so its rank's lines too) or a
+split_row line. A file with no counting rank is skipped. The fit stops if a report's rows differ from
 TABLE's (count, routine, axis or share), or if the ranks come from more than one build (the id in the
 header's parentheses, "?" if none). A dirty or unknown build is noted, as it names no one library. A
 row reported by fewer ranks than the file has counting headers is noted.
@@ -103,7 +105,8 @@ def table_label(value):
 
 
 def self_test():
-    """cut() against tests/test_dispatch.c's test_split_cut vectors, and table_label() on labels."""
+    """cut() against tests/test_dispatch.c's test_split_cut vectors, table_label() on labels, and records()
+    and header() on a line where another rank's header was written into one."""
     src = open(os.path.join(ROOT, "tests", "test_dispatch.c")).read()
     body = src[src.index("test_split_cut(void)"):]
     vec = re.findall(r"\{'([NMK])', ([^,]+), ([-0-9.]+), ([^,]+), ([^}]+)\}", body[:body.index("begin();")])
@@ -123,6 +126,11 @@ def self_test():
                [v for v in vec if cut(v[0], ints(v[1]), float(v[2]), ints(v[3])) != ints(v[4])])
     ok &= agree(f"table_label() on {len(labels)} labels", len(labels),
                 [v for v, want in labels.items() if table_label(v) != want])
+    head = "AB_REPORT[{}] apple-bottom 1.6.0 (abc) AB_MODE=auto chip=\"Apple M2 Max\" AB_SPLIT=1 split_table=file:"
+    spliced = "w=1 " + head.format(11) + "/t/ta" + head.format(22) + "/t/t.txt@0123456789ab"
+    got = [(header(r), c) for r, c in records(spliced)]
+    want = [(("11", "abc", "/t/ta", None), True), (("22", "abc", "/t/t.txt", "0123456789ab"), False)]
+    ok &= agree("records() and header() on a header cut by another's", 1, [got] if got != want else [])
     return 0 if ok else 1
 
 
@@ -141,6 +149,22 @@ def err_files(paths):
                 yield f
 
 
+def records(line):
+    """The AB_REPORT records on a line as (text, cut), each from its "AB_REPORT[" to the next one or the
+    line's end (before the first: another rank's partial line); cut if another follows, written into it,
+    so that its end (a header's label, a split_row line's last fields) may be lost."""
+    starts = [m.start() for m in re.finditer(r"AB_REPORT\[", line)] + [len(line)]
+    return [(line[a:b], b < len(line)) for a, b in zip(starts, starts[1:])]
+
+
+def header(rec):
+    """(pid, build, PATH, DIGEST) of a header record, else None."""
+    if not (h := AB_HEADER.match(rec)):
+        return None
+    b, lab = BUILD.search(rec), LABEL.search(rec)
+    return (h[1], b[1] if b else "?") + (table_label(lab[1]) if lab else (None, None))
+
+
 def read_reports(path, table, digest):
     """Of one stderr file, the ranks whose header names TABLE (module docstring): (their builds, their
     split_row fields per row, their pids, whether one matched by path only); None if no line counts."""
@@ -148,29 +172,40 @@ def read_reports(path, table, digest):
     start = text.find("AB_REPORT[")
     if start < 0:
         return None
-    ours, old, lines = {}, set(), []    # pid: (build, matched by path only); stale digests; (pid, row, fields)
+    ours, old, cut, cut_rows, lines = {}, set(), set(), 0, []
+    # ours: pid -> (build, matched by path only); old: stale digests; cut: pids whose header was cut
     for line in text[text.rfind("\n", 0, start) + 1:].splitlines():
-        if h := AB_HEADER.search(line):
-            head = line[h.start():]     # not another rank's partial line before it
-            lab = LABEL.search(head)
-            p, d = table_label(lab[1]) if lab else (None, None)
-            same = p is not None and os.path.realpath(os.path.join(os.path.dirname(path), p)) == table
-            ours.pop(h[1], None)
-            if d == digest or (same and d is None):
-                b = BUILD.search(head)
-                ours[h[1]] = (b[1] if b else "?", d is None)
-            elif same and d:
-                old.add(d)
-        elif m := AB_SPLIT_ROW.search(line):
-            lines.append((m[1], int(m[2]), dict(KV.findall(m[3]))))
+        for rec, was_cut in records(line):
+            if h := header(rec):
+                pid, build, p, d = h
+                ours.pop(pid, None)
+                cut.discard(pid)
+                if was_cut and d is None:   # its label lost or cut short: its table is unknown
+                    cut.add(pid)
+                    continue
+                same = p is not None and os.path.realpath(os.path.join(os.path.dirname(path), p)) == table
+                if d == digest or (same and d is None):
+                    ours[pid] = (build, d is None)
+                elif same and d:
+                    old.add(d)
+            elif m := AB_SPLIT_ROW.match(rec):
+                if was_cut:
+                    cut_rows += 1
+                else:
+                    lines.append((m[1], int(m[2]), dict(KV.findall(m[3]))))
     if old:
         print(f"fit_shares: {path}: ranks made with {table} at sha256 {', '.join(sorted(old))}, not {digest}; "
               f"left out", file=sys.stderr)
+    if cut:
+        print(f"fit_shares: {path}: the headers of ranks {', '.join(sorted(cut))} were cut by another rank's, their "
+              f"tables unknown; their lines left out", file=sys.stderr)
+    if cut_rows:
+        print(f"fit_shares: {path}: {cut_rows} split_row lines cut by another rank's left out", file=sys.stderr)
     rows, dropped = defaultdict(list), 0
     for pid, i, kv in lines:
         if pid in ours:
             rows[i].append(kv)
-        else:
+        elif pid not in cut:
             dropped += 1
     if not rows:
         return None
