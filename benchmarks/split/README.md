@@ -220,7 +220,7 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 | `table.py <outdir>` | the results tables: medians [min–max] of the lockstep times, speedups, bits, errors, power state; with the arms, the seam and twin against the user split (paired medians), the slices alone and the seam's outcomes; sustained runs |
 | `classify_trace.py <dir>` | every traced GPU call as staged path, host path or fallback, by shape, with median stage times |
 | `power.py <dir>/<case>.np<N>.d<data> ...` | wall power by run of consecutive calls, trimming SMC's ~1 s lag. With the arms the trio alternates call by call and forms no runs, so only Accelerate, the GPU, `HEAD` and `TAIL` get figures; for the split's use `SPLIT_ARMS=0`, `power4x2` or the sustained runs |
-| `g3.py <dir> ... [--tsv FILE]` | G3 per case and layout: `SEAM` ÷ `S<g>` and `S<g>b` ÷ `S<g>` paired by (round, repeat) with BCa and Hodges-Lehmann intervals, G3's three readings (below), the outside load (flagged over 1.5 cores or a GPU busy fraction of 0.05, or with a round not measured, or from a report older than `load_unmeasured`), and the seam's timeline beside the user split's parts. Verdicts go only to rows under G3's conditions and protocol; reports run.sh set aside or whose power fails run.sh's conditions are left out and listed. The docstring has the details; scipy is needed for BCa and readings (b) and (c) (`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3` on the M2 Max) |
+| `g3.py <dir> ... [--tsv FILE]` | G3 per case and layout: `SEAM` ÷ `S<g>` and `S<g>b` ÷ `S<g>` paired by (round, repeat) with BCa and Hodges-Lehmann intervals, G3's three readings (below), the outside load (flagged over 1.5 cores or a GPU busy fraction of 0.05, or with a round not measured, or from a report older than `load_unmeasured`), and the seam's timeline beside the user split's parts. Verdicts go only to rows under G3's conditions and protocol; reports run.sh set aside or whose power fails run.sh's conditions are left out and listed. The docstring has the details. A verdict needs scipy (`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3` on the M2 Max): the null check below uses its t quantile, as do BCa and readings (b) and (c); without it every row reads "null check needs scipy: no verdict" and only the Hodges-Lehmann intervals are given |
 
 ## G3's three readings
 
@@ -249,7 +249,9 @@ null's per-round mean log ratios and the range of its per-round ratios.
 No reading gives a verdict on a row flagged for outside load ("flagged: rerun on a quiet machine"),
 or on one whose null failed: the null's two-sided 95% t interval over rounds excludes 1.00, so two
 identical user splits measured differently ("null failed: rerun"). A loaded run, or one whose
-instrument is off, can neither pass nor fail G3.
+instrument is off, can neither pass nor fail G3. Without scipy the null check cannot be made, so no
+row gets a verdict ("null check needs scipy: no verdict"); `g3.py` does not approximate the t
+quantile.
 
 `g3.py --simulate --sims 400 --resamples 999` estimates how often each reading says "fix first" for a
 seam exactly as fast as the user split (a false alarm) and for one 5%, 10% and 20% slower, at G3's 6

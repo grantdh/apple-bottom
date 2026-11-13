@@ -43,9 +43,10 @@ layout:
   "inconclusive") for a seam exactly as fast as the user split and for one 5%, 10% and 20% slower,
   at 6 rounds of 2 repeats, per-call noise of 1-5% and per-round offsets of each arm of 0-2%.
 - Verdicts are withheld, in every reading, from a row flagged for outside load (below): "flagged:
-  rerun on a quiet machine"; and from a row whose null failed, the two identical user splits
-  differing (a two-sided 95% t interval of S<g>b / S<g> over rounds that excludes 1.00): "null failed:
-  rerun". So a loaded run, or one whose instrument is off, can neither pass nor fail G3.
+  rerun on a quiet machine"; from a row whose null failed, the two identical user splits differing
+  (a two-sided 95% t interval of S<g>b / S<g> over rounds that excludes 1.00): "null failed: rerun";
+  and from every row when that check cannot be made: "null check needs scipy: no verdict". So a
+  loaded run, or one whose instrument is off, can neither pass nor fail G3.
 - Outside load, from the report's SUMMARY (the largest over the rounds, .rounds.tsv has each): other
   processes' CPU in cores over the GPU-idle stretches (over whole rounds without the arms) and the
   GPU's busy fraction over those stretches; a row with either over --max-fcpu or --max-gpu-busy, with
@@ -60,9 +61,11 @@ layout:
   (the K axis's sum or a redo); and the GPU part's submit (commit to GPUStartTime), GPU execution
   (GPUStartTime to GPUEndTime) and wake (GPUEndTime to waitUntilCompleted's return).
 
-BCa and the t quantile of readings (b) and (c) need scipy (on this Mac:
-/Library/Frameworks/Python.framework/Versions/3.13/bin/python3); without it those read n/a and (a)'s
-verdict uses the Hodges-Lehmann bounds.
+A verdict, in any reading, needs scipy (on this Mac:
+/Library/Frameworks/Python.framework/Versions/3.13/bin/python3): the null check's t quantile, as well
+as BCa and the t bounds of (b) and (c). Without it every row's verdict is withheld ("null check needs
+scipy: no verdict"), BCa and the t bounds read n/a, and the Hodges-Lehmann intervals are still
+printed.
 """
 import argparse, glob, math, os, re, statistics, sys
 from collections import defaultdict
@@ -157,6 +160,23 @@ def by_round(L, a, b, q):
             half = float(sps.t.ppf(q, len(m) - 1)) * out["sd"] / math.sqrt(len(m))
             out["t_hi"], out["t_lo"] = math.exp(mu + half), math.exp(mu - half)
     return out
+
+
+def null_check(null95):
+    """"" if the two identical user splits agree (null95: by_round(..., 0.975), whose t_lo and t_hi are a
+    two-sided 95% t interval of S<g>b / S<g> over rounds; it holds 1.00), else why no verdict is given"""
+    if math.isnan(null95["t_lo"]):
+        return "null check needs scipy: no verdict" if sps is None else "null check needs 2 rounds: no verdict"
+    return "null failed: rerun" if null95["t_lo"] > 1.0 or null95["t_hi"] < 1.0 else ""
+
+
+def fx(x, p=3):
+    return "n/a" if math.isnan(x) else f"{x:.{p}f}"
+
+
+def iv(*xs):
+    """bounds in brackets, or n/a when one is missing"""
+    return "n/a" if any(math.isnan(x) for x in xs) else "[" + ", ".join(f"{x:.3f}" for x in xs) + "]"
 
 
 def recommended(seam):
@@ -310,19 +330,16 @@ def main():
         fcpu = float(v.get("fcpu_max", "nan"))
         if math.isnan(fcpu):   # runs without the arms have no GPU-idle stretch
             fcpu = float(v.get("fcpu_round_max", "nan"))
-        gk = "bca_hi" if sps is not None else "hl_hi"
         gbusy = float(v.get("gpu_idle_busy_max", "nan"))
         # rounds whose outside load was not measured; None for a report older than the count: unknown
         unmeasured = int(v["load_unmeasured"]) if "load_unmeasured" in v else None
         null95 = by_round(L, "SPLIT2", "SPLIT", 0.975)   # two-sided 95% over rounds: its t_lo and t_hi
         # no verdict, in any reading, for a row that is not G3's, a loaded run (a value or a round not
-        # measured counts as loaded) or a failed null (the two identical user splits differ)
+        # measured counts as loaded), or a failed or impossible null check
         quiet = fcpu <= a.max_fcpu and gbusy <= a.max_gpu_busy and unmeasured == 0
-        withhold = not_g3(v, txt, layout, staging) or \
-            ("flagged: rerun on a quiet machine" if not quiet else
-             "null failed: rerun" if null95["t_lo"] > 1.0 or null95["t_hi"] < 1.0 else "")
+        withhold = not_g3(v, txt, layout, staging) or ("" if quiet else "flagged: rerun on a quiet machine") or null_check(null95)
         if not withhold:
-            gate, check = designed(seam[gk], null[gk]), designed(seam["hl_hi"], null["hl_hi"])
+            gate, check = designed(seam["bca_hi"], null["bca_hi"]), designed(seam["hl_hi"], null["hl_hi"])
             prop, rec = proposed(seam_r["t_hi"], null_r["t_hi"]), recommended(seam_r)
         else:
             gate = check = (withhold, NAN); prop = rec = withhold
@@ -343,17 +360,16 @@ def main():
         lu = "" if r["unmeasured"] == 0 else ", rounds not measured: " + ("unknown" if r["unmeasured"] is None else str(r["unmeasured"]))
         return f"{'' if r['quiet'] else 'FLAG '}{cpu}, {gpu}{lu}"
     print(f"## G3: SEAM / S<g> against max(1.03, S<g>b / S<g>), {pct} intervals"
-          + ("" if sps is not None else " (no scipy: BCa n/a, gate on Hodges-Lehmann)") + "\n")
+          + ("" if sps is not None else " (no scipy: BCa, the t bounds and the null check n/a, so no verdict)") + "\n")
     print("| suite | case | layout | staging MB | g | pairs | SEAM/S median | BCa | HL [exact] | S_b/S median | BCa | HL [exact] "
           "| G3 (BCa) | check (HL) | outside load (max over rounds) | seam outcomes | seam bits: repeats, vs S |")
     print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in rows:
         s, n = r["seam"], r["null"]
-        f3 = lambda x: "n/a" if math.isnan(x) else f"{x:.3f}"
-        hl = lambda p: f"{p['hl']:.3f} [{p['hl_lo']:.3f}, {p['hl_hi']:.3f}]" + ("" if p["hl_conf"] >= a.level - 1e-9 else f" ({p['hl_conf']:.0%})")
+        hl = lambda p: f"{fx(p['hl'])} {iv(p['hl_lo'], p['hl_hi'])}" + ("" if p["hl_conf"] >= a.level - 1e-9 else f" ({p['hl_conf']:.0%})")
         print(f"| {r['suite']} | {r['case']} | {r['layout']} | {r['staging']}{' copied' if r['copied'] else ''} | {r['g']} | {s['n']} | "
-              f"{s['median']:.3f} | [{f3(s['bca_lo'])}, {f3(s['bca_hi'])}] | {hl(s)} | {n['median']:.3f} | [{f3(n['bca_lo'])}, {f3(n['bca_hi'])}] | "
-              f"{hl(n)} | {vtext(r, 'gate', 'bca_hi' if sps is not None else 'hl_hi')} | {vtext(r, 'check', 'hl_hi')} | {load(r)} | {r['out']} | {r['bits']} |")
+              f"{fx(s['median'])} | {iv(s['bca_lo'], s['bca_hi'])} | {hl(s)} | {fx(n['median'])} | {iv(n['bca_lo'], n['bca_hi'])} | "
+              f"{hl(n)} | {vtext(r, 'gate', 'bca_hi')} | {vtext(r, 'check', 'hl_hi')} | {load(r)} | {r['out']} | {r['bits']} |")
     print("\n## The seam's timeline per call, ms, median [min-max] over every process's SEAM calls; the user split's parts beside\n")
     names = [n for n, _, _ in TIMELINE]
     print("| suite | case | layout | staging MB | " + " | ".join(names) + " |")
@@ -363,15 +379,15 @@ def main():
     print(f"\n## G3 readings (b), proposed, needs Grant, and (c), recommended, not decided: rounds as the unit, one-sided "
           f"{a.t_level:.0%} t bounds on per-round mean log ratios; (b) passes at 1.03, inconclusive when the null's own bound is "
           f"above 1.03; (c) passes at 1.03, fix first when the seam's lower bound is above 1.00, else inconclusive "
-          f"((a), as designed, is in the first table)" + ("" if sps is not None else " (no scipy: n/a)") + "\n")
+          f"((a), as designed, is in the first table)" + ("" if sps is not None else " (no scipy: bounds n/a, no verdict)") + "\n")
     print("| suite | case | layout | staging MB | rounds | SEAM/S by round [lower, upper t bound] | S_b/S by round [upper t bound] "
           "| S_b/S two-sided 95% by round | null spread by round: sd of log, range | (b) proposed, needs Grant | (c) recommended, not decided |")
     print("|---|---|---|---|---|---|---|---|---|---|---|")
     for r in rows:
         sr, nr = r["seam_r"], r["null_r"]
-        print(f"| {r['suite']} | {r['case']} | {r['layout']} | {r['staging']} | {sr['n']} | {sr['mean']:.3f} [{sr['t_lo']:.3f}, {sr['t_hi']:.3f}] | "
-              f"{nr['mean']:.3f} [{nr['t_hi']:.3f}] | [{r['null95']['t_lo']:.3f}, {r['null95']['t_hi']:.3f}] | "
-              f"{nr['sd']:.4f}, {nr['lo']:.3f}-{nr['hi']:.3f} | {r['proposed']} | {r['recommended']} |")
+        print(f"| {r['suite']} | {r['case']} | {r['layout']} | {r['staging']} | {sr['n']} | {fx(sr['mean'])} {iv(sr['t_lo'], sr['t_hi'])} | "
+              f"{fx(nr['mean'])} {iv(nr['t_hi'])} | {iv(r['null95']['t_lo'], r['null95']['t_hi'])} | "
+              f"{fx(nr['sd'], 4)}, {fx(nr['lo'])}-{fx(nr['hi'])} | {r['proposed']} | {r['recommended']} |")
     if skipped:
         print("\nLeft out:\n" + "\n".join(f"- {f}: {why}" for f, why in skipped))
     if a.tsv:
