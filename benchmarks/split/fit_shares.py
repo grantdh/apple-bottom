@@ -10,12 +10,20 @@ field of the line (the first 12 hex digits of the SHA-256 of the bytes the libra
 split_row lines count only if DIGEST is TABLE's now. A header without a digest (an older library) is
 matched by PATH, read relative to the file's directory (where the run started), with a note. Other
 ranks' lines are left out: noted if the file is used, and also if a header names TABLE's path at
-another digest. A record that another rank's was written into (an AB_REPORT[ before its line ends) is
-left out with a note: a header without its digest (its table unknown, so its rank's lines too) or a
-split_row line. A file with no counting rank is skipped. The fit stops if a report's rows differ from
+another digest. A file with no counting rank is skipped. The fit stops if a report's rows differ from
 TABLE's (count, routine, axis or share), or if the ranks come from more than one build (the id in the
 header's parentheses, "?" if none). A dirty or unknown build is noted, as it names no one library. A
 row reported by fewer ranks than the file has counting headers is noted.
+
+Ranks that share stderr can have their lines cut and joined; a record runs from "AB_REPORT[<pid>] " to
+the next on its line or to the line's end. These damaged records are left out, with a note:
+  - a split_row line whose fields are not the library's keys in its order (ROW_KEYS, or an older
+    library's) with numbers for values;
+  - a header whose digest was lost: cut, or missing where its build prints digests (its rank's lines
+    go with it, its table unknown);
+  - a record cut before its kind shows (a split_row line if its rank has a counting header, else that
+    rank's header).
+What the text cannot show is a join of two lines cut at the same field.
 
 For each row, its split_row lines (every rank of every run) give the seconds and the GFLOP of the
 calls' CPU and GPU parts. Their ratios are the rates the two engines reached while running together
@@ -51,25 +59,33 @@ nothing. --self-test checks that cut against tests/test_dispatch.c.
 Python 3.9, standard library only.
 """
 import argparse
+import contextlib
 import datetime
 import hashlib
+import io
 import math
 import os
 import re
 import sys
+import tempfile
 from collections import Counter, defaultdict
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
-sys.path.insert(0, os.path.join(ROOT, "benchmarks", "qe"))
 from ingest_split import KEY_RE, SQUARE_RATIO, parse_row, table_line  # noqa: E402
-from analyze import AB_HEADER, AB_SPLIT_ROW  # noqa: E402
 
-KV = re.compile(r"(\w+)=(\S+)")
+RECORD = re.compile(r"AB_REPORT\[(\d+)\] ")   # the library's prefix of each AB_REPORT line
 BUILD = re.compile(r"apple-bottom \S+ \(([^)]*)\)")
 LABEL = re.compile(r"split_table=file:(.*)$")   # the header's last field, spaces and all
+# A split_row line's keys after i=, in the library's order; without the first-call parts before them.
+ROW_KEYS = ("routine", "axis", "f", "calls", "split", "wall_ms", "first_ms", "first_cpu_ms", "first_gpu_ms",
+            "first_gf_cpu", "first_gf_gpu", "cpu_ms", "gpu_ms", "wait_cpu_ms", "wait_gpu_ms", "redo_ms",
+            "sum_ms", "gf", "gf_cpu", "gf_gpu", "kept", "kept_4m", "range", "gpu_failed")
+OLD_ROW_KEYS = tuple(k for k in ROW_KEYS if k == "first_ms" or not k.startswith("first_"))
+PRINTED = re.compile(r"[0-9]+(?:\.[0-9]*)?(?:e[-+]?[0-9]+)?")   # a number as %g, %.3f and %llu print it
 SUMS = ("calls", "split", "cpu_ms", "gpu_ms", "gf_cpu", "gf_gpu", "first_ms", "wait_cpu_ms", "wait_gpu_ms")
-PARTS = ("cpu_ms", "gpu_ms", "gf_cpu", "gf_gpu")   # first_<part>: the first-call parts (module docstring)
+# first_<part>: the first-call parts (module docstring)
+PARTS = tuple(k[len("first_"):] for k in ROW_KEYS if k.startswith("first_") and k != "first_ms")
 SKIP_DIR = re.compile(r"(\.bad\d*|^incomplete-.*|^tmp|\.save)$")
 
 
@@ -104,9 +120,21 @@ def table_label(value):
     return m.groups() if m else (value, None)
 
 
+def report_case(lines, table="/t/t.txt", digest="0123456789ab"):
+    """read_reports on a stderr file of lines: (counting pids, rank lines per row, notes)."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "err.txt")
+        with open(path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        notes = io.StringIO()
+        with contextlib.redirect_stderr(notes):
+            rep = read_reports(path, table, digest) or (None, {}, (), None)
+    return sorted(rep[2]), {i: len(v) for i, v in rep[1].items()}, notes.getvalue()
+
+
 def self_test():
-    """cut() against tests/test_dispatch.c's test_split_cut vectors, table_label() on labels, and records()
-    and header() on a line where another rank's header was written into one."""
+    """cut() against tests/test_dispatch.c's test_split_cut vectors, table_label() on labels, and
+    read_reports() on lines of ranks cut and joined."""
     src = open(os.path.join(ROOT, "tests", "test_dispatch.c")).read()
     body = src[src.index("test_split_cut(void)"):]
     vec = re.findall(r"\{'([NMK])', ([^,]+), ([-0-9.]+), ([^,]+), ([^}]+)\}", body[:body.index("begin();")])
@@ -126,11 +154,39 @@ def self_test():
                [v for v in vec if cut(v[0], ints(v[1]), float(v[2]), ints(v[3])) != ints(v[4])])
     ok &= agree(f"table_label() on {len(labels)} labels", len(labels),
                 [v for v, want in labels.items() if table_label(v) != want])
-    head = "AB_REPORT[{}] apple-bottom 1.6.0 (abc) AB_MODE=auto chip=\"Apple M2 Max\" AB_SPLIT=1 split_table=file:"
-    spliced = "w=1 " + head.format(11) + "/t/ta" + head.format(22) + "/t/t.txt@0123456789ab"
-    got = [(header(r), c) for r, c in records(spliced)]
-    want = [(("11", "abc", "/t/ta", None), True), (("22", "abc", "/t/t.txt", "0123456789ab"), False)]
-    ok &= agree("records() and header() on a header cut by another's", 1, [got] if got != want else [])
+
+    def head(pid, label="/t/t.txt@0123456789ab"):
+        return (f"AB_REPORT[{pid}] apple-bottom 1.6.0 (abc) AB_MODE=auto chip=\"Apple M2 Max\" gpu_cores=38 "
+                f"table=builtin:M2-Max-38c AB_SPLIT=1 split_table=file:{label}")
+
+    def row(pid):
+        return f"AB_REPORT[{pid}] split_row i=0 routine=zgemm axis=N f=0.5 " + " ".join(
+            f"{k}={i + 1}.000" for i, k in enumerate(ROW_KEYS[3:]))
+    r22, r33 = row(22), row(33)
+    in_digest, in_label = head(11)[:-9], head(11)[:-25]    # 11's header cut inside its digest, its label
+    cases = {   # name: (lines, the counting pids, rank lines per row, a note that must be there)
+        "a header cut by another's": ([in_digest + head(22), row(11), r22], ["22"], {0: 1}, "ranks 11 were"),
+        "a row joined to another's leftover from another field": (
+            [head(22), head(33), r33, r22.partition(" gpu_ms=")[0] + " gpu_ms=" + r33.partition(" first_gpu_ms=")[2]],
+            ["22", "33"], {0: 1}, "1 damaged"),
+        "a header joined to a row's head, its tail after it": (
+            [head(22), r22, in_label + r22.partition(" cpu_ms=")[0] + head(11)[len(in_label):], row(11)], ["22"],
+            {0: 1}, "ranks 11 were"),
+        "records cut before their kind shows": (   # "AB_REPORT[11] apple-bott", "AB_REPORT[22] split_ro"
+            [head(11)[:24] + head(22), r22[:22] + head(33), r22, r33, row(11)], ["22", "33"], {0: 2},
+            "1 damaged"),
+        "a table path holding AB_REPORT[": (
+            [head(22, "/t/AB_REPORT[x]/t.txt@0123456789ab"), r22], ["22"], {0: 1}, ""),
+    }
+    for name, (lines, pids, rows, note) in cases.items():
+        got = report_case(lines)
+        ok &= agree(f"read_reports() on {name}", 1,
+                    [] if got[:2] == (pids, rows) and note in got[2] else [got])
+    # ROW_KEYS as src/profiling/blas_profiler.c prints a split_row line now
+    c = open(os.path.join(ROOT, "src", "profiling", "blas_profiler.c")).read()
+    c = c[c.index("static void report_split_rows(report_line_t* l, FILE* out, const char* prefix) {"):]
+    keys = tuple(re.findall(r"(\w+)=%", "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', c[:c.index("line_emit(")]))))
+    ok &= agree("ROW_KEYS against blas_profiler.c's split_row line", 1, [] if keys == ("i",) + ROW_KEYS else [keys])
     return 0 if ok else 1
 
 
@@ -150,19 +206,25 @@ def err_files(paths):
 
 
 def records(line):
-    """The AB_REPORT records on a line as (text, cut), each from its "AB_REPORT[" to the next one or the
-    line's end (before the first: another rank's partial line); cut if another follows, written into it,
-    so that its end (a header's label, a split_row line's last fields) may be lost."""
-    starts = [m.start() for m in re.finditer(r"AB_REPORT\[", line)] + [len(line)]
-    return [(line[a:b], b < len(line)) for a, b in zip(starts, starts[1:])]
+    """The AB_REPORT records on a line as (pid, text after the prefix, cut), each running to the next
+    "AB_REPORT[<pid>] " or the line's end (before the first: another rank's partial line); cut if another
+    follows, written into it, so that its end may be lost."""
+    starts = list(RECORD.finditer(line))
+    ends = [m.start() for m in starts[1:]] + [len(line)]
+    return [(m[1], line[m.end():e], e < len(line)) for m, e in zip(starts, ends)]
 
 
-def header(rec):
-    """(pid, build, PATH, DIGEST) of a header record, else None."""
-    if not (h := AB_HEADER.match(rec)):
+def row_fields(body):
+    """(row, fields) of a split_row record's text (after its prefix) whose fields are the library's keys
+    in its order with numbers for values; None for a damaged one."""
+    m = re.fullmatch(r"split_row i=([0-9]+)((?: \w+=\S+)+)", body)
+    if not m:
         return None
-    b, lab = BUILD.search(rec), LABEL.search(rec)
-    return (h[1], b[1] if b else "?") + (table_label(lab[1]) if lab else (None, None))
+    kv = [t.split("=", 1) for t in m[2].split()]
+    if tuple(k for k, _ in kv) not in (ROW_KEYS, OLD_ROW_KEYS) or not all(PRINTED.fullmatch(v) for _, v in kv[2:]):
+        return None
+    f = dict(kv)
+    return (int(m[1]), f) if f["routine"] in ("dgemm", "zgemm") and f["axis"] in ("N", "M", "K") else None
 
 
 def read_reports(path, table, digest):
@@ -172,35 +234,45 @@ def read_reports(path, table, digest):
     start = text.find("AB_REPORT[")
     if start < 0:
         return None
-    ours, old, cut, cut_rows, lines = {}, set(), set(), 0, []
-    # ours: pid -> (build, matched by path only); old: stale digests; cut: pids whose header was cut
+    heads, lines, kindless, damaged = {}, [], [], 0   # pid: (build, PATH, DIGEST, cut); (pid, row, fields)
     for line in text[text.rfind("\n", 0, start) + 1:].splitlines():
-        for rec, was_cut in records(line):
-            if h := header(rec):
-                pid, build, p, d = h
-                ours.pop(pid, None)
-                cut.discard(pid)
-                if was_cut and d is None:   # its label lost or cut short: its table is unknown
-                    cut.add(pid)
-                    continue
-                same = p is not None and os.path.realpath(os.path.join(os.path.dirname(path), p)) == table
-                if d == digest or (same and d is None):
-                    ours[pid] = (build, d is None)
-                elif same and d:
-                    old.add(d)
-            elif m := AB_SPLIT_ROW.match(rec):
-                if was_cut:
-                    cut_rows += 1
+        for pid, body, was_cut in records(line):
+            if body.startswith("apple-bottom "):
+                b, lab = BUILD.match(body), LABEL.search(body)
+                p, d = table_label(lab[1]) if lab else (None, None)
+                heads[pid] = (b[1] if b else "?", p, d, was_cut)
+            elif body.startswith("split_row"):
+                if not was_cut and (r := row_fields(body)):
+                    lines.append((pid, *r))
                 else:
-                    lines.append((m[1], int(m[2]), dict(KV.findall(m[3]))))
+                    damaged += 1
+            elif was_cut and ("apple-bottom ".startswith(body) or "split_row".startswith(body)):
+                kindless.append(pid)
+    digest_builds = {b for b, _, d, _ in heads.values() if d}
+    ours, old, cut = {}, set(), set()   # pid: (build, matched by path only); stale digests; tables unknown
+    for pid, (build, p, d, was_cut) in heads.items():
+        if d is None and (was_cut or (p is not None and build in digest_builds)):   # its digest lost
+            cut.add(pid)
+            continue
+        same = p is not None and os.path.realpath(os.path.join(os.path.dirname(path), p)) == table
+        if d == digest or (same and d is None):
+            ours[pid] = (build, d is None)
+        elif same:
+            old.add(d)
+    for pid in kindless:   # a split_row line of a rank with a counting header, else that rank's header
+        if pid in ours:
+            damaged += 1
+        elif pid not in heads:
+            cut.add(pid)
     if old:
         print(f"fit_shares: {path}: ranks made with {table} at sha256 {', '.join(sorted(old))}, not {digest}; "
               f"left out", file=sys.stderr)
     if cut:
-        print(f"fit_shares: {path}: the headers of ranks {', '.join(sorted(cut))} were cut by another rank's, their "
-              f"tables unknown; their lines left out", file=sys.stderr)
-    if cut_rows:
-        print(f"fit_shares: {path}: {cut_rows} split_row lines cut by another rank's left out", file=sys.stderr)
+        print(f"fit_shares: {path}: the headers of ranks {', '.join(sorted(cut))} were damaged (cut, or no digest), "
+              f"their tables unknown; their lines left out", file=sys.stderr)
+    if damaged:
+        print(f"fit_shares: {path}: {damaged} damaged split_row lines (cut or joined to another rank's) left out",
+              file=sys.stderr)
     rows, dropped = defaultdict(list), 0
     for pid, i, kv in lines:
         if pid in ours:
