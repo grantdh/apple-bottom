@@ -193,6 +193,7 @@ typedef struct {
     double v[NV];
     int prev;                          // the config of this process's call before it: PREV_IDLE after the
                                        // idle gap, PREV_NONE if none; untimed calls count
+    bool prev_untimed;                 // ... and that call was untimed (a warm-up or a group's opener)
     int outcome, retries, in_place;    // ab_split_outcome_t, -1 if not a SEAM call
     ab_split_times_t tm;               // the seam's timeline (ns, mach_absolute_time); zero otherwise
 } Call;
@@ -242,6 +243,7 @@ static dispatch_semaphore_t sem_go, sem_done, sem_cpu_done;
 static int g_delay;                     // 0 none, 1 GPU slice starts after the CPU slice, 2 the reverse
 enum { PREV_NONE = -2, PREV_IDLE = -1 };
 static int g_prev = PREV_NONE;          // the config of this process's last call (Call.prev)
+static bool g_prev_untimed;             // ... and it was not recorded (record() clears this)
 static bool g_noreset;                  // power phase: C is not reset between calls
 static double g_tg0, g_tg1;
 
@@ -312,7 +314,8 @@ static double ns_s(uint64_t ns) { return (double)ns * 1e-9; }
 static void one_call(Ctx *x, int k, Call *o) {
     if (!g_noreset) memcpy(x->C, x->C0, x->nC * x->es);
     double *v = o->v; int kd = shm->kind[k];
-    memset(o, 0, sizeof *o); o->outcome = -1; o->prev = g_prev; g_prev = k;
+    memset(o, 0, sizeof *o); o->outcome = -1; o->prev = g_prev; o->prev_untimed = g_prev_untimed;
+    g_prev = k; g_prev_untimed = true;
     double t0 = now(), tc0 = t0, tc1, tj, tk;
     if (kd == KD_ACC) { acc_full(x); tc1 = tj = tk = now(); v[V_CPU] = tc1 - t0; }
     else if (kd == KD_GPU) { gpu_full(x); tc1 = tj = tk = now(); v[V_GPU] = tc1 - t0; }
@@ -349,6 +352,7 @@ static void set_cfg(Ctx *x, int k) {
 static void record(int phase, int round, int cfg, int rep, const Call *o) {
     int n = shm->nrec[myid];
     if (n >= MAXREC) { fprintf(stderr, "too many records (MAXREC %d)\n", MAXREC); exit(1); }
+    g_prev_untimed = false;   // the call just made is a timed one
     Rec *r = &shm->rec[myid][n]; r->phase = phase; r->round = round; r->cfg = cfg; r->rep = rep;
     double la; r->load1 = getloadavg(&la, 1) == 1 ? (float)la : NAN;
     r->k = *o; shm->nrec[myid] = n + 1;
@@ -602,7 +606,7 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
         alarm(watchdog(c));
         barrier();
         if (id == 0) { load_snap(&s0); shm->rt0[r] = s0.t; }
-        if (shm->narm) { sleep_s(gap_s); g_prev = PREV_IDLE; }   // the idle gap that starts a round
+        if (shm->narm) { sleep_s(gap_s); g_prev = PREV_IDLE; g_prev_untimed = false; }   // the idle gap that starts a round
         int nst = fixed_plan(c, r, bk, plan), ncpu_steps = 0;   // the plan's CPU-only calls come first
         while (shm->narm && ncpu_steps < nst && (shm->kind[plan[ncpu_steps].k] == KD_ACC || shm->kind[plan[ncpu_steps].k] == KD_HEAD)) ncpu_steps++;
         for (int st = 0; st < nst; st++) {
@@ -1430,9 +1434,10 @@ int main(int argc, char **argv) {
             char nb[24];
             for (int p = 0; p < np; p++) for (int i = 0; i < shm->nrec[p]; i++) {
                 const Rec *r = &shm->rec[p][i]; const ab_split_times_t *m = &r->k.tm; const ab_prof_kernel_split_t *q = &m->gpu;
-                int pv = r->k.prev; char pb[24];
+                int pv = r->k.prev; char pb[24], pn[40];
+                snprintf(pn, sizeof pn, "%s%s", r->k.prev_untimed ? "untimed:" : "", pv >= 0 ? cfg_name(pv, pb) : "");
                 fprintf(f, "%d\t%d\t%d\t%d\t%s\t%d\t%d\t%s", p, r->phase, r->round, r->cfg, cfg_name(r->cfg, nb), cfg_g(c, r->cfg), r->rep,
-                        pv == PREV_IDLE ? "idle" : pv == PREV_NONE ? "-" : cfg_name(pv, pb));
+                        pv == PREV_IDLE ? "idle" : pv == PREV_NONE ? "-" : pn);
                 for (int k = 0; k < NV; k++) fprintf(f, "\t%.6f", r->k.v[k]);
                 fprintf(f, "\t%s\t%d\t%d\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu", outcome_name(r->k.outcome), r->k.retries, r->k.in_place,
                         (unsigned long long)m->cut_ns, (unsigned long long)m->create_ns, (unsigned long long)m->cpu0_ns, (unsigned long long)m->cpu1_ns,

@@ -67,7 +67,8 @@ same call through its seam (`SEAM`, below), which `AB_SPLIT` uses inside `dgemm_
 
   Before the block the split runs untimed for `SPLIT_WARM_S` seconds (default 2 with the arms, 0
   without), so the block does not start cool. `raw.tsv`'s `prev` column names each call's
-  predecessor in its process (`idle` after the gap). Without the arms the order is as before:
+  predecessor in its process, `untimed:<name>` when that call was not timed (a warm-up or a group's
+  opener: the first timed call of each group follows its opener). Without the arms the order is as before:
   Accelerate, the GPU and the split, rotated and reversed by round. Bits: `SEAM`'s repeats against its
   first and its C against the user split's; `S<g>b`'s against the user split's first; on N and M the
   part of C that `HEAD` and `TAIL` write against the user split's (their first call after the user
