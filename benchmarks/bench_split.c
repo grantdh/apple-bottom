@@ -476,12 +476,13 @@ static int add_reps(Step *p, int n, int k, int reps) { for (int r = 0; r < reps;
 static const int W6[NW6][3] = {{1, 0, 2}, {2, 0, 1}, {0, 2, 1}, {1, 2, 0}, {2, 1, 0}, {0, 1, 2}};
 // Round r of the fixed block, the user split at config bk. Without the arms, as before: Accelerate,
 // GPU and the split with their repeats back to back, rotated and reversed by round (order_of). With
-// them (after the idle gap child() runs first): the CPU-only configs ACC and HEAD, then the GPU alone
-// and TAIL, each pair's order alternating by round; then one untimed call of the user split and the
-// trio SEAM, S<g>, S<g>b, repeat by repeat, in W6[r % NW6]'s order. So ACC and HEAD never follow a
-// GPU config, no arm of the trio follows ACC, GPU, HEAD or TAIL, and pairs by (round, rep) stay
-// within one repeat of the trio. Round 0 runs the user split before its twin, so its first result
-// (the bit checks' reference) comes first.
+// them (after the idle gap child() runs first), three groups, each opened by an untimed call of its
+// own kind so that no timed call is a group's cold first one (benchmarks/split/README.md): an untimed
+// HEAD, then the CPU-only configs ACC and HEAD; an untimed TAIL, then the GPU alone and TAIL (each
+// pair's order alternating by round); an untimed user split, then the trio SEAM, S<g>, S<g>b, repeat
+// by repeat, in W6[r % NW6]'s order. So ACC and HEAD never follow a GPU config, no arm of the trio follows ACC, GPU,
+// HEAD or TAIL, and pairs by (round, rep) stay within one repeat of the trio. Round 0 runs the user
+// split before its twin, so its first result (the bit checks' reference) comes first.
 static int fixed_plan(const Case *c, int r, int bk, Step *p) {
     int n = 0;
     if (!shm->narm) {
@@ -491,7 +492,10 @@ static int fixed_plan(const Case *c, int r, int bk, Step *p) {
         return n;
     }
     const int cf[2][2] = {{CF_ACC, shm->k_head}, {CF_GPU, shm->k_tail}}, rp[2][2] = {{c->fx_acc, c->fx_split}, {c->fx_gpu, c->fx_split}};
-    for (int e = 0; e < 2; e++) for (int i = 0; i < 2; i++) n = add_reps(p, n, cf[e][i ^ (r & 1)], rp[e][i ^ (r & 1)]);
+    for (int e = 0; e < 2; e++) {
+        p[n++] = (Step){cf[e][1], -1};   // untimed HEAD, then untimed TAIL: each group's warm-up
+        for (int i = 0; i < 2; i++) n = add_reps(p, n, cf[e][i ^ (r & 1)], rp[e][i ^ (r & 1)]);
+    }
     p[n++] = (Step){bk, -1};
     const int trio[3] = {bk, shm->k_seam, shm->k_split2};
     for (int rep = 0; rep < c->fx_split; rep++)
@@ -571,7 +575,6 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
     const int M = c->M, N = c->N, cut = axis_len(c) - shm->g[bk];
     const double gap_s = envd("SPLIT_GAP_S", 1.0);
     Step plan[MAXSTEP];
-    const int ncpu_steps = shm->narm ? c->fx_acc + c->fx_split : 0;   // fixed_plan's CPU-only calls come first
     LoadSnap s0 = {0}, s1 = {0};
     barrier();
     if (id == 0) load_init();
@@ -580,7 +583,8 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
         barrier();
         if (id == 0) { load_snap(&s0); shm->rt0[r] = s0.t; }
         if (shm->narm) { sleep_s(gap_s); g_prev = PREV_IDLE; }   // the idle gap that starts a round
-        int nst = fixed_plan(c, r, bk, plan);
+        int nst = fixed_plan(c, r, bk, plan), ncpu_steps = 0;   // the plan's CPU-only calls come first
+        while (shm->narm && ncpu_steps < nst && (shm->kind[plan[ncpu_steps].k] == KD_ACC || shm->kind[plan[ncpu_steps].k] == KD_HEAD)) ncpu_steps++;
         for (int st = 0; st < nst; st++) {
             int k = plan[st].k, rep = plan[st].rep;
             int kd = shm->kind[k]; set_cfg(x, k);
@@ -1366,7 +1370,7 @@ int main(int argc, char **argv) {
         shm->kind[shm->k_seam] = KD_SEAM; shm->kind[shm->k_split2] = KD_SPLIT2; shm->kind[shm->k_head] = KD_HEAD; shm->kind[shm->k_tail] = KD_TAIL;
     }
     int need = (shm->fixed ? 0 : 3 * shm->ncfg * c->sweep_reps) + rounds * (c->fx_acc + c->fx_gpu + c->fx_split * (1 + shm->narm)) + 2;
-    if (c->fx_acc + c->fx_gpu + c->fx_split * (1 + shm->narm) + 1 > MAXSTEP) { fprintf(stderr, "too many repeats per round (MAXSTEP %d)\n", MAXSTEP); unlink(path); return 2; }
+    if (c->fx_acc + c->fx_gpu + c->fx_split * (1 + shm->narm) + (shm->narm ? 3 : 0) > MAXSTEP)   // fixed_plan's calls: 3 untimed with the arms { fprintf(stderr, "too many repeats per round (MAXSTEP %d)\n", MAXSTEP); unlink(path); return 2; }
     if (need > MAXREC) {   // records per process: the sweep, the fixed block, the two completion orders
         fprintf(stderr, "SPLIT_ROUNDS=%d needs %d records per process, more than MAXREC %d\n", rounds, need, MAXREC);
         unlink(path); return 2;

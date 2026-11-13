@@ -52,14 +52,18 @@ same call through its seam (`SEAM`, below), which `AB_SPLIT` uses inside `dgemm_
 
   With the arms, each round of the fixed block runs:
   1. an idle gap (`SPLIT_GAP_S`, default 1 s);
-  2. the CPU-only configs, Accelerate and `HEAD` (their order alternating by round), so neither
-     follows a config that used the GPU;
-  3. the GPU alone and `TAIL` (alternating likewise);
+  2. one untimed `HEAD` call, then the CPU-only configs, Accelerate and `HEAD` (their order alternating
+     by round), so neither follows a config that used the GPU;
+  3. one untimed `TAIL` call, then the GPU alone and `TAIL` (alternating likewise);
   4. one untimed call of `S<g>`, then the trio `SEAM`, `S<g>`, `S<g>b` repeat by repeat, in round
      r mod 6's order of a Williams design: over every 6 rounds each of the three runs first equally
      often and comes right before and right after each of the others equally often, none follows
      Accelerate, the GPU, `HEAD` or `TAIL`, and the calls paired by (round, repeat) sit within one
      repeat of the trio. Use a multiple of 6 rounds; the report says when the count is not one.
+
+  The untimed calls keep every timed call off a group's cold start: in the smoke runs the first call
+  after the gap took up to twice as long, and the first GPU call after the CPU-only group up to five
+  times.
 
   Before the block the split runs untimed for `SPLIT_WARM_S` seconds (default 2 with the arms, 0
   without), so the block does not start cool. `raw.tsv`'s `prev` column names each call's
