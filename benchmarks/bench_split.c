@@ -25,11 +25,13 @@
 //   HEAD   the CPU slice alone, on the calling thread;
 //   TAIL   the GPU slice alone, on the GPU thread, the caller waiting.
 // Power: the parent samples SMC keys (PDTR, the DC input = wall side on AC power, PSTR, PPBR and
-// the GPU rails) at 20 Hz and IOReport's GPU energy, clock residency and busy fraction, both
-// without root through undocumented interfaces; without them the power columns read nan.
+// the GPU rails) at 20 Hz and, for sustained runs and SPLIT_POWER_S runs, IOReport's GPU energy and
+// clock residency, both without root through undocumented interfaces; without them the power columns
+// read nan.
 // SPLIT_SAMPLER=0 turns that sampler off (power columns nan), e.g. to run under benchmarks/powerlog.
 // Outside load, run mode: other processes' CPU per round (host ticks minus this run's own CPU time)
-// and the GPU's busy fraction while this run left it idle; .rounds.tsv has both.
+// and the GPU's busy fraction while this run left it idle, from process 0's own snapshots and IOReport
+// subscription (load_snap); .rounds.tsv has both, nan where not measured.
 //
 // usage: bench_split run <case> <np> <outdir> [data]    data 0 = uniform [-1,1), 1 = QE-like row decay
 //        bench_split child <case> <np> <id> <shmfile> <data>   (internal)
@@ -587,7 +589,10 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
     Step plan[MAXSTEP];
     LoadSnap s0 = {0}, s1 = {0};
     barrier();
-    if (id == 0) load_init();
+    if (id == 0) {   // nan until measured: without the arms there is no GPU-idle stretch
+        load_init();
+        for (int r = 0; r < shm->rounds; r++) shm->idle_t1[r] = shm->fcpu_idle[r] = shm->gpu_idle[r] = shm->fcpu_round[r] = NAN;
+    }
     for (int r = 0; r < shm->rounds; r++) {
         alarm(watchdog(c));
         barrier();
