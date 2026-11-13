@@ -254,7 +254,7 @@ row gets a verdict ("null check needs scipy: no verdict"); `g3.py` does not appr
 quantile.
 
 The null check is at 95% per row. An instrument that is fine still fails it by chance in 5% of rows
-(3.0-8.5% over the simulation's lines below, 4.8% on average); such a row is rerun, and a fine rerun
+(3.0-8.5% over the simulation's 48 lines, 4.8% on average); such a row is rerun, and a fine rerun
 fails again by chance 5% of the time. Over a run's 50 G3 rows at least one fails by chance with
 probability 1 - 0.95^50 = 92%, and about 2.5 are expected, so a full G3 run should plan for two or
 three reruns. Whether to keep this level is Grant's choice (see Still for Grant, below).
@@ -275,16 +275,21 @@ these lines span it):
 | 1.00 | 0.02 | 0.00 | 4.2% | 82.2% / 13.5% | 84.2% / 11.5% | 88.8% / 6.2% / 0.8% | 88.8% / 1.8% / 5.2% |
 | 1.00 | 0.02 | 0.02 | 5.5% | 65.2% / 29.2% | 66.0% / 28.5% | 51.0% / 15.5% / 28.0% | 51.0% / 3.2% / 40.2% |
 | 1.00 | 0.03 | 0.00 | 4.2% | 64.5% / 31.2% | 62.5% / 33.2% | 62.5% / 18.2% / 15.0% | 62.5% / 4.0% / 29.2% |
+| 1.00 | 0.03 | 0.01 | 6.0% | 58.5% / 35.5% | 59.2% / 34.8% | 54.5% / 13.8% / 25.8% | 54.5% / 5.0% / 34.5% |
 | 1.00 | 0.03 | 0.02 | 6.5% | 56.0% / 37.5% | 56.8% / 36.8% | 42.5% / 17.0% / 34.0% | 42.5% / 2.8% / 48.2% |
 | 1.00 | 0.05 | 0.00 | 3.5% | 52.8% / 43.8% | 51.2% / 45.2% | 32.0% / 15.8% / 48.8% | 32.0% / 3.5% / 61.0% |
+| 1.00 | 0.05 | 0.01 | 3.8% | 51.2% / 45.0% | 51.0% / 45.2% | 29.0% / 15.8% / 51.5% | 29.0% / 4.8% / 62.5% |
 | 1.00 | 0.05 | 0.02 | 4.5% | 52.0% / 43.5% | 54.5% / 41.0% | 29.0% / 13.8% / 52.8% | 29.0% / 4.5% / 62.0% |
 | 1.05 | 0.01 | 0.00 | 3.0% | 0.0% / 97.0% | 0.0% / 97.0% | 0.0% / 97.0% / 0.0% | 0.0% / 97.0% / 0.0% |
 | 1.05 | 0.02 | 0.00 | 4.8% | 0.0% / 95.2% | 0.0% / 95.2% | 0.0% / 88.0% / 7.2% | 0.0% / 95.2% / 0.0% |
 | 1.05 | 0.02 | 0.02 | 3.0% | 0.0% / 97.0% | 0.0% / 97.0% | 0.0% / 57.2% / 39.8% | 0.0% / 84.2% / 12.8% |
 | 1.05 | 0.03 | 0.02 | 3.5% | 1.8% / 94.8% | 0.8% / 95.8% | 0.2% / 46.5% / 49.8% | 0.2% / 79.0% / 17.2% |
 | 1.05 | 0.05 | 0.02 | 3.5% | 7.2% / 89.2% | 3.2% / 93.2% | 1.2% / 23.2% / 72.0% | 1.2% / 54.5% / 40.8% |
+| 1.10 | 0.01 | 0.02 | 8.5% | 0.0% / 91.5% | 0.0% / 91.5% | 0.0% / 55.5% / 36.0% | 0.0% / 91.5% / 0.0% |
+| 1.10 | 0.02 | 0.00 | 4.0% | 0.0% / 96.0% | 0.0% / 96.0% | 0.0% / 89.2% / 6.8% | 0.0% / 96.0% / 0.0% |
 | 1.10 | 0.03 | 0.02 | 5.0% | 0.0% / 95.0% | 0.0% / 95.0% | 0.0% / 43.8% / 51.2% | 0.0% / 95.0% / 0.0% |
 | 1.10 | 0.05 | 0.02 | 7.0% | 0.2% / 92.8% | 0.0% / 93.0% | 0.0% / 26.2% / 66.8% | 0.0% / 89.2% / 3.8% |
+| 1.20 | 0.02 | 0.01 | 4.0% | 0.0% / 96.0% | 0.0% / 96.0% | 0.0% / 79.8% / 16.2% | 0.0% / 96.0% / 0.0% |
 | 1.20 | 0.03 | 0.02 | 6.2% | 0.0% / 93.8% | 0.0% / 93.8% | 0.0% / 39.0% / 54.8% | 0.0% / 93.8% / 0.0% |
 | 1.20 | 0.05 | 0.02 | 5.5% | 0.0% / 94.5% | 0.0% / 94.5% | 0.0% / 27.3% / 67.2% | 0.0% / 94.5% / 0.0% |
 
@@ -293,7 +298,7 @@ for 6-18% and (c) for 1.8-5.0% (its nominal 5% per row, give or take the simulat
 slower seam at that noise (c) says "fix first" for 55-95% of rows at 5% slower, 89-96% at 10% and
 94-96% at 20%; the rest is withheld by the null check (about 5% at any ratio) or, mostly at 5% slower,
 inconclusive. (b) says it for 23-89% however slow, since it never says "fix first" while the null's
-bound is above 1.03. (c)'s cost is "inconclusive" rows at 1.00, up to 62% at 5% noise, which more
+bound is above 1.03. (c)'s cost is "inconclusive" rows at 1.00, up to 62.5% at 5% noise, which more
 rounds resolve.
 
 The null spread in practice: in the round-2 smoke runs (2026-11-12 and -13, G3's settings, one case
