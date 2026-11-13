@@ -1,0 +1,425 @@
+#!/usr/bin/env python3
+"""G3, the library's split against the user code's: paired intervals from bench_split's raw.tsv.
+
+usage: g3.py [--level 0.95] [--t-level 0.95] [--resamples 9999] [--seed 1] [--max-fcpu 1.5]
+             [--max-gpu-busy 0.05] [--tsv FILE] <dir> ...
+       g3.py --simulate [--sims 400] [--seed 1]
+
+Reads every <case>.np<N>.d<data>.raw.tsv below the directories (run.sh's <outdir> or its suites)
+whose fixed block has the SEAM arm, with the .out report beside it. Left out, and listed at the end:
+cases that run.sh set aside (a path with an incomplete- component), reports without a SUMMARY line,
+and reports whose power does not meet run.sh's conditions (AC power from an adapter of 90 W or more on
+the start and end lines, and at the start a battery of 95% or more, neither charging nor finishing
+its charge, when printed). Only rows under G3's conditions get a verdict: copied operands, uniform
+data, 1x8 or 4x2, AB_STAGING_MB 2048 or 8192 (else "not G3"), and G3's protocol, AB_TRACE and
+AB_REPORT off and a positive multiple of 6 rounds (else "not G3 (protocol)"). For each case and
+layout:
+
+- Pairs by (round, rep) of the fixed block's lockstep times (the slowest process per repeat):
+  SEAM with the user split S<g>, and the twin S<g>b with S<g> (the null run: the user split against
+  itself).
+- For both ratios: the median of the paired ratios; a BCa bootstrap interval of that median
+  (scipy.stats.bootstrap, paired); and the Hodges-Lehmann estimate of the ratio (on log ratios) with
+  its exact Wilcoxon signed-rank interval. Two-sided intervals at --level.
+- G3's verdict, three readings (design section 12's line, "upper bound over max(1.03, null spread):
+  fix first", leaves the null spread to be defined; choosing among them is Grant's):
+  (a) as designed: the upper bound of SEAM / S<g> against max(1.03, the upper bound of S<g>b / S<g>),
+      on the pair intervals above; above it: "fix first". BCa bounds, the Hodges-Lehmann ones as a
+      check. At n pairs the exact interval cannot reach the level when n < 6 (it is then the range of
+      the Walsh averages, with its own confidence).
+  (b) proposed, needs Grant: rounds as the unit, as Grant chose for G5. Per round, the mean over its
+      repeats of log(SEAM / S<g>) and of log(S<g>b / S<g>); over the rounds, a one-sided --t-level t
+      upper bound on each mean, exponentiated. "pass" if SEAM's bound is 1.03 or less; else
+      "inconclusive: add rounds" if the null's own bound is above 1.03 (the user split against itself
+      is too noisy to tell); else "fix first". Noise can still give "fix first", when SEAM's bound
+      passes 1.03 by chance and the null's does not; less often than (a) (see --simulate).
+      (b) also never says "fix first" while the null's bound is above 1.03, however slow the seam.
+  (c) recommended, not decided: the same per-round t bounds, the seam's alone: "pass" if its upper
+      bound is 1.03 or less; else "fix first" if its one-sided lower bound is above 1.00 (the seam is
+      slower than the user split); else "inconclusive: add rounds".
+  With each row, SEAM / S<g>'s one-sided lower bound at the same level, and the null spread by round:
+  the sd of the null's per-round mean log ratios and the range of the per-round ratios.
+- --simulate estimates, per line, the share of rows withheld for a failed null and the share of
+  each reading's "pass", "fix first" and "inconclusive" (of all rows), for a seam exactly as fast as
+  the user split and for one 5%, 10% and 20% slower, at 6 rounds of 2 repeats, per-call noise of 1-5%
+  and per-round offsets of each arm of 0-2%.
+- Verdicts are withheld, in every reading, from a row flagged for outside load (below): "flagged:
+  rerun on a quiet machine"; from a row whose null failed, the two identical user splits differing
+  (a two-sided 95% t interval of S<g>b / S<g> over rounds that excludes 1.00): "null failed: rerun";
+  and from every row when that check cannot be made: "null check needs scipy: no verdict". So a
+  loaded run, or one whose instrument is off, can neither pass nor fail G3. The null check is at 95%
+  per row: an instrument that is fine still fails it in 5% of rows (rerun the case; a second failure
+  by chance is again 5%), and in at least one of a run's 50 rows with probability 1 - 0.95^50 = 92%.
+  Whether to keep that level or use one over the run's rows is Grant's.
+- Outside load, from the report's SUMMARY (the largest over the rounds, .rounds.tsv has each): other
+  processes' CPU in cores over the GPU-idle stretches and the GPU's busy fraction over those
+  stretches; a row with either over --max-fcpu or --max-gpu-busy, with a round whose load was not
+  measured (load_unmeasured > 0; SPLIT_SAMPLER=0 leaves the GPU's unmeasured), or from a report older
+  than that count (unknown, not 0), is flagged. The GPU limit, 0.05, is set on this measure: 0.000-0.005 per round in
+  the quiet round-2 smoke runs, 0.12-0.17 with another session's GPU work.
+- The seam's timeline per call, summarised over every process's SEAM calls, median [min-max] in ms:
+  init (thread created - cut) and start (GPU part's start - thread created), beside the user split's
+  GPU start (its GPU thread's start after the call's); the CPU part and the GPU part, each beside the
+  user split's; the wait for the GPU (join - CPU part's end) beside the user split's; after the join
+  (the K axis's sum or a redo); and the GPU part's submit (commit to GPUStartTime), GPU execution
+  (GPUStartTime to GPUEndTime) and wake (GPUEndTime to waitUntilCompleted's return).
+
+A verdict, in any reading, needs scipy (on this Mac:
+/Library/Frameworks/Python.framework/Versions/3.13/bin/python3): the null check's t quantile, as well
+as BCa and the t bounds of (b) and (c). Without it every row's verdict is withheld ("null check needs
+scipy: no verdict"), BCa and the t bounds read n/a, and the Hodges-Lehmann intervals are still
+printed; --simulate needs it too.
+"""
+import argparse, glob, math, os, re, statistics, sys
+from collections import defaultdict
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # rawtsv.py, also under python3 -I
+from rawtsv import env, fixed_pairs, parse, power_problem, read  # noqa: E402
+
+try:
+    import numpy as np
+    from scipy import stats as sps
+except ImportError:
+    np = sps = None
+
+
+def walsh(d):
+    return sorted((d[i] + d[j]) / 2 for i in range(len(d)) for j in range(i, len(d)))
+
+
+def signed_rank_cdf(n):
+    """P(T <= t), t = 0..n(n+1)/2, for the Wilcoxon signed-rank statistic T with n untied pairs"""
+    N = n * (n + 1) // 2
+    c = [1] + [0] * N
+    for k in range(1, n + 1):
+        for t in range(N, k - 1, -1):
+            c[t] += c[t - k]
+    tot, acc, cdf = 2 ** n, 0, []
+    for t in range(N + 1):
+        acc += c[t]
+        cdf.append(acc / tot)
+    return cdf
+
+
+def hodges_lehmann(d, level):
+    """HL estimate of the location of d and its exact Wilcoxon interval: [A_(c), A_(N+1-c)] of the
+    sorted Walsh averages A, c the largest with P(T <= c - 1) <= (1 - level) / 2; the achieved level"""
+    n = len(d)
+    A = walsh(d)
+    est = statistics.median(A)
+    if n == 0:
+        return est, float("nan"), float("nan"), float("nan")
+    cdf = signed_rank_cdf(n)
+    alpha = (1 - level) / 2
+    c = 0
+    while c + 1 <= len(cdf) and cdf[c] <= alpha:   # cdf[c] = P(T <= c) = P(T <= (c + 1) - 1)
+        c += 1
+    if c == 0:   # n too small to reach the level: the full range, at its own confidence
+        return est, A[0], A[-1], 1 - 2 / 2 ** n
+    return est, A[c - 1], A[len(A) - c], 1 - 2 * cdf[c - 1]
+
+
+def bca(x, y, level, resamples, seed):
+    """BCa interval of median(x / y) over pairs; nan if scipy is missing or the ratios do not vary"""
+    if sps is None or len(x) < 3 or len(set(a / b for a, b in zip(x, y))) < 2:
+        return float("nan"), float("nan")
+    res = sps.bootstrap((np.asarray(x), np.asarray(y)), lambda a, b, axis=-1: np.median(a / b, axis=axis), paired=True,
+                        vectorized=True, confidence_level=level, n_resamples=resamples, method="BCa",
+                        random_state=np.random.default_rng(seed))
+    return float(res.confidence_interval.low), float(res.confidence_interval.high)
+
+
+def paired(L, a, b, level, resamples, seed):
+    keys = sorted(k for k in L.get(a, {}) if k in L.get(b, {}))
+    x = [L[a][k] for k in keys]
+    y = [L[b][k] for k in keys]
+    r = [p / q for p, q in zip(x, y)]
+    out = {"n": len(r), "median": statistics.median(r) if r else float("nan")}
+    out["bca_lo"], out["bca_hi"] = bca(x, y, level, resamples, seed)
+    hl, lo, hi, conf = hodges_lehmann([math.log(v) for v in r], level)
+    out["hl"], out["hl_lo"], out["hl_hi"], out["hl_conf"] = math.exp(hl), math.exp(lo), math.exp(hi), conf
+    return out
+
+
+NAN = float("nan")
+
+
+def by_round(L, a, b, q):
+    """rounds as the unit: per round, the mean over its repeats of log(a / b), paired by (round, rep);
+    over the rounds their geometric mean, the exp of one-sided q t upper and lower bounds on their
+    mean (nan with fewer than 2 rounds or without scipy), the sd of the log means and their range"""
+    acc = defaultdict(list)
+    for k in L.get(a, {}):
+        if k in L.get(b, {}):
+            acc[k[0]].append(math.log(L[a][k] / L[b][k]))
+    m = [statistics.fmean(acc[r]) for r in sorted(acc)]
+    out = {"n": len(m), "mean": NAN, "t_hi": NAN, "t_lo": NAN, "sd": NAN, "lo": NAN, "hi": NAN}
+    mu = statistics.fmean(m) if m else NAN
+    if m:
+        out.update(mean=math.exp(mu), lo=math.exp(min(m)), hi=math.exp(max(m)))
+    if len(m) > 1:
+        out["sd"] = statistics.stdev(m)
+        if sps is not None:
+            half = float(sps.t.ppf(q, len(m) - 1)) * out["sd"] / math.sqrt(len(m))
+            out["t_hi"], out["t_lo"] = math.exp(mu + half), math.exp(mu - half)
+    return out
+
+
+NULL_Q = 0.975   # the null check's t interval: two-sided 95%
+
+
+def null_check(null95):
+    """"" if the two identical user splits agree (null95: by_round(L, "SPLIT2", "SPLIT", NULL_Q), whose t_lo
+    and t_hi are a two-sided 95% t interval of S<g>b / S<g> over rounds; it holds 1.00), else why no
+    verdict is given"""
+    if sps is None:
+        return "null check needs scipy: no verdict"
+    if math.isnan(null95["t_lo"]):
+        return "null check needs 2 rounds: no verdict"
+    return "null failed: rerun" if null95["t_lo"] > 1.0 or null95["t_hi"] < 1.0 else ""
+
+
+def fx(x, p=3):
+    return "n/a" if math.isnan(x) else f"{x:.{p}f}"
+
+
+def iv(*xs):
+    """bounds in brackets, or n/a when one is missing"""
+    return "n/a" if any(math.isnan(x) for x in xs) else "[" + ", ".join(f"{x:.3f}" for x in xs) + "]"
+
+
+def recommended(seam):
+    """reading (c): pass at 1.03, fix first when the seam's lower bound is above 1.00, else inconclusive"""
+    if math.isnan(seam["t_hi"]):
+        return "n/a"
+    return "pass" if seam["t_hi"] <= 1.03 else "fix first" if seam["t_lo"] > 1.0 else "inconclusive: add rounds"
+
+
+def designed(seam_hi, null_hi):
+    """reading (a): fix first above max(1.03, the null's own upper bound); (category, bound)"""
+    bound = max(1.03, null_hi) if not math.isnan(null_hi) else 1.03
+    return ("n/a" if math.isnan(seam_hi) else "pass" if seam_hi <= bound else "fix first"), bound
+
+
+def proposed(seam_hi, null_hi):
+    """reading (b): pass at 1.03, inconclusive when the null's own bound is above 1.03, else fix first"""
+    if math.isnan(seam_hi):
+        return "n/a"
+    return "pass" if seam_hi <= 1.03 else "inconclusive: add rounds" if math.isnan(null_hi) or null_hi > 1.03 else "fix first"
+
+
+def readings(seam, null, seam_r, null_r):
+    """G3's verdicts on a row that passed the null check, from paired() and by_round() of SEAM / S<g> and
+    S<g>b / S<g>: (a) on BCa, (a)'s check on Hodges-Lehmann, (b) and (c)"""
+    return (designed(seam["bca_hi"], null["bca_hi"]), designed(seam["hl_hi"], null["hl_hi"]),
+            proposed(seam_r["t_hi"], null_r["t_hi"]), recommended(seam_r))
+
+
+# The timeline table's columns, in order: (name, role, columns). SEAM spans are b - a of two raw.tsv ns
+# columns (left out when either is 0), or one ns column; the user split's (SPLIT) are its s columns.
+TO_MS = {"SEAM": 1e-6, "SPLIT": 1e3}
+TIMELINE = [
+    ("init", "SEAM", ("at_cut_ns", "at_create_ns")), ("start", "SEAM", ("at_create_ns", "at_gpu0_ns")),
+    ("user gpu start", "SPLIT", ("wake",)),
+    ("cpu part", "SEAM", ("at_cpu0_ns", "at_cpu1_ns")), ("user cpu", "SPLIT", ("cpu",)),
+    ("gpu part", "SEAM", ("at_gpu0_ns", "at_gpu1_ns")), ("user gpu", "SPLIT", ("gpu",)),
+    ("wait for gpu", "SEAM", ("at_cpu1_ns", "at_join_ns")), ("user wait", "SPLIT", ("join",)),
+    ("after join", "SEAM", ("at_join_ns", "at_end_ns")),
+    ("submit", "SEAM", ("gpu_submit_ns",)), ("gpu exec", "SEAM", ("gpu_start_ns", "gpu_end_ns")),
+    ("wake", "SEAM", ("gpu_wake_ns",)),
+]
+
+
+def timeline(recs):
+    """{column: [ms per call]} over every process's fixed-block calls of the column's role"""
+    out = defaultdict(list)
+    for d in recs:
+        if d["phase"] != "1":
+            continue
+        for name, role, cols in TIMELINE:
+            if d["role"] != role:
+                continue
+            v = [float(d[c]) for c in cols]
+            if len(v) == 1:
+                out[name].append(v[0] * TO_MS[role])
+            elif v[0] and v[1]:
+                out[name].append((v[1] - v[0]) * TO_MS[role])
+    return out
+
+
+def not_g3(v, txt, layout, staging):
+    """why the row is not a G3 row, or "" if it is: G3's conditions (design section 12: copied operands,
+    uniform data, 1x8 or 4x2, staging 2048 or 8192 MB), then the G3 suites' protocol (AB_TRACE and
+    AB_REPORT off, which would profile only the user split; a positive multiple of 6 rounds, over which
+    the trio's order is balanced)"""
+    if not (v.get("reg") == "0" and v.get("data") == "0" and layout in ("1x8", "4x2") and staging in ("2048", "8192")):
+        return "not G3"
+    rounds = int(v.get("rounds", "0"))
+    if env(txt, "AB_TRACE") != "off" or env(txt, "AB_REPORT") != "off" or rounds <= 0 or rounds % 6:
+        return "not G3 (protocol)"
+    return ""
+
+
+def mr(v):
+    return f"{statistics.median(v):.3f} [{min(v):.3f}-{max(v):.3f}]" if v else "-"
+
+
+def simulate(sims, seed, level, tq, resamples):
+    """per line, the share of rows withheld for a failed null and of each reading's verdicts, of all rows,
+    for a seam as fast as the user split (ratio 1.00: "fix first" is a false alarm) and 5, 10 and 20%
+    slower: 6 rounds x 2 repeats; each call's log time has noise of sd s; each arm in each round an
+    offset of sd o (a round x arm effect, as position and drift give)"""
+    if sps is None:
+        sys.exit("--simulate needs scipy: without it no row gets a verdict")
+    import random
+    rnd = random.Random(seed)
+    print(f"## Simulated G3 readings: {sims} rows per line, 6 rounds of 2 repeats; (a) at two-sided {level:.0%} "
+          f"pair intervals (BCa with {resamples} resamples), (b) and (c) at one-sided {tq:.0%} t bounds over rounds; "
+          f"rows whose null fails (two-sided 95% t over rounds) withheld; shares of all rows\n")
+    print("| true SEAM/S | call noise sd | round x arm sd | withheld: null failed | (a) BCa: pass / fix first "
+          "| (a) HL: pass / fix first | (b): pass / fix first / inconclusive | (c): pass / fix first / inconclusive |")
+    print("|---|---|---|---|---|---|---|---|")
+    pc = lambda k, *vs: " / ".join(f"{n[k, v] / sims:.1%}" for v in vs)   # n: the current line's counts
+    three = ("pass", "fix first", "inconclusive: add rounds")
+    for ratio in (1.00, 1.05, 1.10, 1.20):
+        for sd in (0.01, 0.02, 0.03, 0.05):
+            for o in (0.0, 0.01, 0.02):
+                n = defaultdict(int)
+                for _ in range(sims):
+                    L = {"SPLIT": {}, "SEAM": {}, "SPLIT2": {}}
+                    for r in range(6):
+                        off = {c: rnd.gauss(0, o) for c in L}
+                        for rep_ in range(2):
+                            for c in L:
+                                L[c][(r, rep_)] = math.exp(off[c] + rnd.gauss(0, sd) + (math.log(ratio) if c == "SEAM" else 0))
+                    if null_check(by_round(L, "SPLIT2", "SPLIT", NULL_Q)):
+                        n["withheld"] += 1
+                        continue
+                    ps, pn = paired(L, "SEAM", "SPLIT", level, resamples, rnd.randrange(1 << 30)), paired(L, "SPLIT2", "SPLIT", level, resamples, rnd.randrange(1 << 30))
+                    va, vh, vb, vc = readings(ps, pn, by_round(L, "SEAM", "SPLIT", tq), by_round(L, "SPLIT2", "SPLIT", tq))
+                    for k, verdict in (("a", va[0]), ("h", vh[0]), ("b", vb), ("c", vc)):
+                        n[k, verdict] += 1
+                print(f"| {ratio:.2f} | {sd:.2f} | {o:.2f} | {n['withheld'] / sims:.1%} | {pc('a', 'pass', 'fix first')} | "
+                      f"{pc('h', 'pass', 'fix first')} | {pc('b', *three)} | {pc('c', *three)} |")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("dirs", nargs="*")
+    ap.add_argument("--level", type=float, default=0.95, help="two-sided level of the pair intervals")
+    ap.add_argument("--t-level", type=float, default=0.95, help="one-sided level of reading (b)'s t bound")
+    ap.add_argument("--simulate", action="store_true", help="false-alarm and detection rates of the readings")
+    ap.add_argument("--sims", type=int, default=400)
+    ap.add_argument("--resamples", type=int, default=9999)
+    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--max-fcpu", type=float, default=1.5, help="flag a row whose other processes used more cores (as the AB_SPLIT pilot)")
+    ap.add_argument("--max-gpu-busy", type=float, default=0.05,
+                    help="flag a row whose GPU was busier while this run left it idle (quiet smoke runs: up to 0.005)")
+    ap.add_argument("--tsv", help="also write one row per case here")
+    a = ap.parse_args()
+    if a.simulate:
+        return simulate(a.sims, a.seed, a.level, a.t_level, a.resamples)
+    if not a.dirs:
+        ap.error("give run.sh's <outdir> or suite directories")
+    # each file with its label: the given directory's name and the path below it, so that rows of two
+    # outdirs (two days, say) stay apart
+    files = {}
+    for d in a.dirs:
+        for f in glob.glob(os.path.join(d, "**", "*.raw.tsv"), recursive=True):
+            files.setdefault(os.path.realpath(f), os.path.normpath(os.path.join(os.path.basename(os.path.normpath(d)), os.path.relpath(os.path.dirname(f), d))))
+    rows, skipped = [], []
+    for f, label in sorted(files.items()):
+        if any(part.startswith("incomplete-") for part in f.split(os.sep)):
+            skipped.append((f, "set aside by run.sh"))
+            continue
+        recs = read(f)
+        if not any(d["role"] == "SEAM" for d in recs):
+            continue
+        txt = open(f[:-8] + ".out").read() if os.path.exists(f[:-8] + ".out") else ""
+        v = parse(txt, "SUMMARY")
+        why = "no SUMMARY line" if not v else power_problem(txt)
+        if why:
+            skipped.append((f, why))
+            continue
+        vl, st = env(txt, "VECLIB_MAXIMUM_THREADS"), env(txt, "AB_STAGING_MB")
+        layout, staging = f"{v.get('np', '?')}x{vl or '?'}", st or "?"
+        L = fixed_pairs(recs)
+        seam = paired(L, "SEAM", "SPLIT", a.level, a.resamples, a.seed)
+        null = paired(L, "SPLIT2", "SPLIT", a.level, a.resamples, a.seed)
+        seam_r, null_r = by_round(L, "SEAM", "SPLIT", a.t_level), by_round(L, "SPLIT2", "SPLIT", a.t_level)
+        fcpu, gbusy = float(v.get("fcpu_max", "nan")), float(v.get("gpu_idle_busy_max", "nan"))
+        # rounds whose outside load was not measured; nan for a report older than the count: unknown
+        unmeasured = float(v.get("load_unmeasured", "nan"))
+        null95 = by_round(L, "SPLIT2", "SPLIT", NULL_Q)
+        # no verdict, in any reading, for a row that is not G3's, a loaded run (a value or a round not
+        # measured counts as loaded), or a failed or impossible null check
+        quiet = fcpu <= a.max_fcpu and gbusy <= a.max_gpu_busy and unmeasured == 0
+        withhold = not_g3(v, txt, layout, staging) or ("" if quiet else "flagged: rerun on a quiet machine") or null_check(null95)
+        if not withhold:
+            gate, check, prop, rec = readings(seam, null, seam_r, null_r)
+        else:
+            gate = check = (withhold, NAN); prop = rec = withhold
+        rows.append({
+            "suite": label, "case": v.get("case", os.path.basename(f).split(".")[0]),
+            "layout": layout, "staging": staging, "copied": v.get("reg") == "0", "g": v.get("g", "?"), "seam": seam, "null": null,
+            "gate": gate, "check": check, "proposed": prop, "recommended": rec, "seam_r": seam_r, "null_r": null_r,
+            "fcpu": fcpu, "gbusy": gbusy, "unmeasured": unmeasured, "quiet": quiet, "null95": null95, "out": v.get("seam_out", "?"),
+            "bits": f"{v.get('seam_rep_diff', '?')}, {v.get('seam_vs_split', '?')}", "tl": timeline(recs),
+        })
+    if not rows:
+        sys.exit("no raw.tsv with SEAM calls under " + " ".join(a.dirs))
+    pct = f"{a.level:.0%}"
+    vtext = lambda r, k, hi: f"{r[k][0]} ({r['seam'][hi]:.3f} vs {r[k][1]:.3f})" if r[k][0] in ("pass", "fix first") else r[k][0]
+    def load(r):   # a value or a round not measured is unknown, not quiet: it flags too
+        cpu = "CPU not measured" if math.isnan(r["fcpu"]) else f"{r['fcpu']:.2f} cores"
+        gpu = "GPU not measured" if math.isnan(r["gbusy"]) else f"GPU {r['gbusy']:.3f}"
+        u = r["unmeasured"]
+        lu = "" if u == 0 else ", rounds not measured: " + ("unknown" if math.isnan(u) else f"{u:g}")
+        return f"{'' if r['quiet'] else 'FLAG '}{cpu}, {gpu}{lu}"
+    print(f"## G3: SEAM / S<g> against max(1.03, S<g>b / S<g>), {pct} intervals"
+          + ("" if sps is not None else " (no scipy: BCa, the t bounds and the null check n/a, so no verdict)") + "\n")
+    print("| suite | case | layout | staging MB | g | pairs | SEAM/S median | BCa | HL [exact] | S_b/S median | BCa | HL [exact] "
+          "| G3 (BCa) | check (HL) | outside load (max over rounds) | seam outcomes | seam bits: repeats, vs S |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    for r in rows:
+        s, n = r["seam"], r["null"]
+        hl = lambda p: f"{fx(p['hl'])} {iv(p['hl_lo'], p['hl_hi'])}" + ("" if p["hl_conf"] >= a.level - 1e-9 else f" ({p['hl_conf']:.0%})")
+        print(f"| {r['suite']} | {r['case']} | {r['layout']} | {r['staging']}{' copied' if r['copied'] else ''} | {r['g']} | {s['n']} | "
+              f"{fx(s['median'])} | {iv(s['bca_lo'], s['bca_hi'])} | {hl(s)} | {fx(n['median'])} | {iv(n['bca_lo'], n['bca_hi'])} | "
+              f"{hl(n)} | {vtext(r, 'gate', 'bca_hi')} | {vtext(r, 'check', 'hl_hi')} | {load(r)} | {r['out']} | {r['bits']} |")
+    print("\n## The seam's timeline per call, ms, median [min-max] over every process's SEAM calls; the user split's parts beside\n")
+    names = [n for n, _, _ in TIMELINE]
+    print("| suite | case | layout | staging MB | " + " | ".join(names) + " |")
+    print("|" + "---|" * (4 + len(names)))
+    for r in rows:
+        print(f"| {r['suite']} | {r['case']} | {r['layout']} | {r['staging']} | " + " | ".join(mr(r["tl"][n]) for n in names) + " |")
+    print(f"\n## G3 readings (b), proposed, needs Grant, and (c), recommended, not decided: rounds as the unit, one-sided "
+          f"{a.t_level:.0%} t bounds on per-round mean log ratios; (b) passes at 1.03, inconclusive when the null's own bound is "
+          f"above 1.03; (c) passes at 1.03, fix first when the seam's lower bound is above 1.00, else inconclusive "
+          f"((a), as designed, is in the first table)" + ("" if sps is not None else " (no scipy: bounds n/a, no verdict)") + "\n")
+    print("| suite | case | layout | staging MB | rounds | SEAM/S by round [lower, upper t bound] | S_b/S by round [upper t bound] "
+          "| S_b/S two-sided 95% by round | null spread by round: sd of log, range | (b) proposed, needs Grant | (c) recommended, not decided |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    for r in rows:
+        sr, nr = r["seam_r"], r["null_r"]
+        print(f"| {r['suite']} | {r['case']} | {r['layout']} | {r['staging']} | {sr['n']} | {fx(sr['mean'])} {iv(sr['t_lo'], sr['t_hi'])} | "
+              f"{fx(nr['mean'])} {iv(nr['t_hi'])} | {iv(r['null95']['t_lo'], r['null95']['t_hi'])} | "
+              f"{fx(nr['sd'], 4)}, {fx(nr['lo'])}-{fx(nr['hi'])} | {r['proposed']} | {r['recommended']} |")
+    if skipped:
+        print("\nLeft out:\n" + "\n".join(f"- {f}: {why}" for f, why in skipped))
+    if a.tsv:
+        with open(a.tsv, "w") as fh:
+            cols = ["suite", "case", "layout", "staging", "copied", "g"]
+            stat = ["n", "median", "bca_lo", "bca_hi", "hl", "hl_lo", "hl_hi", "hl_conf"]
+            fh.write("\t".join(cols + [f"seam_{k}" for k in stat] + [f"null_{k}" for k in stat]
+                               + ["gate", "check", "rounds", "t_seam", "t_seam_lo", "t_null", "null95_lo", "null95_hi", "null_sd", "proposed", "recommended", "fcpu_max", "gpu_busy_max", "load_unmeasured", "seam_out"]
+                               + [f"tl_{n.replace(' ', '_')}_med" for n in names]) + "\n")
+            for r in rows:
+                vals = [str(r[c]) for c in cols] + [f"{r['seam'][k]:.6g}" for k in stat] + [f"{r['null'][k]:.6g}" for k in stat]
+                vals += [r["gate"][0], r["check"][0], str(r["seam_r"]["n"]), f"{r['seam_r']['t_hi']:.6g}", f"{r['seam_r']['t_lo']:.6g}", f"{r['null_r']['t_hi']:.6g}", f"{r['null95']['t_lo']:.6g}", f"{r['null95']['t_hi']:.6g}",
+                         f"{r['null_r']['sd']:.6g}", r["proposed"], r["recommended"], f"{r['fcpu']:.6g}", f"{r['gbusy']:.6g}", f"{r['unmeasured']:.6g}", r["out"]] + [f"{statistics.median(r['tl'][n]):.6g}" if r["tl"][n] else "nan" for n in names]
+                fh.write("\t".join(vals) + "\n")
+
+
+if __name__ == "__main__":
+    main()

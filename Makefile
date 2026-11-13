@@ -595,9 +595,10 @@ $(BUILD)/bench_device_residency: benchmarks/bench_device_residency.c lib | $(BUI
 
 # One GEMM split between Accelerate and the GPU against either engine alone. Run via
 # benchmarks/split/run.sh (benchmarks/split/README.md). IOKit and CoreFoundation: SMC wall
-# power and IOReport GPU clock, read without root.
-$(BUILD)/bench_split: benchmarks/bench_split.c tests/test_dot2.h lib | $(BUILD)
-	$(CC) $(CFLAGS) -I$(INCLUDE) -Itests $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) -framework IOKit -framework CoreFoundation $(EXE_RPATH)
+# power and IOReport GPU clock, read without root. -I$(SRC): the library's cut and its split
+# seam (split_slice.h), and the default AB_MIN_GPU_DIM (dispatch.h).
+$(BUILD)/bench_split: benchmarks/bench_split.c tests/test_dot2.h $(SLICE_H) $(SRC)/dispatch.h lib | $(BUILD)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -Itests $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) -framework IOKit -framework CoreFoundation $(EXE_RPATH)
 	@echo "Built: $@"
 
 # Power, energy and clock-state residency through a block, streamed as TSV on the
@@ -861,7 +862,7 @@ build-check: $(BUILD)/fft_metal_src.h | $(BUILD)/check
 	@echo "Compiling probe_zgemm_epilogue.c..."
 	@$(CC) $(CFLAGS) -I$(INCLUDE) -Itests -c benchmarks/probe_zgemm_epilogue.c -o $(BUILD)/check/probe_zgemm_epilogue.o
 	@echo "Compiling bench_split.c..."
-	@$(CC) $(CFLAGS) -I$(INCLUDE) -Itests -c benchmarks/bench_split.c -o $(BUILD)/check/bench_split.o
+	@$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) -Itests -c benchmarks/bench_split.c -o $(BUILD)/check/bench_split.o
 	@echo "Compiling powerlog.c..."
 	@$(CC) $(CFLAGS) -c benchmarks/powerlog.c -o $(BUILD)/check/powerlog.o
 	@echo "Compiling test_chaos.c..."
