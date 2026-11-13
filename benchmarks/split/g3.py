@@ -48,11 +48,10 @@ layout:
   and from every row when that check cannot be made: "null check needs scipy: no verdict". So a
   loaded run, or one whose instrument is off, can neither pass nor fail G3.
 - Outside load, from the report's SUMMARY (the largest over the rounds, .rounds.tsv has each): other
-  processes' CPU in cores over the GPU-idle stretches (over whole rounds without the arms) and the
-  GPU's busy fraction over those stretches; a row with either over --max-fcpu or --max-gpu-busy, with
-  a round whose load was not measured (load_unmeasured > 0: SPLIT_SAMPLER=0 leaves the GPU's
-  unmeasured, and runs without the arms have no stretch), or from a report older than that count
-  (unknown, not 0), is flagged. The GPU limit, 0.05, is set on this measure: 0.000-0.005 per round in
+  processes' CPU in cores over the GPU-idle stretches and the GPU's busy fraction over those
+  stretches; a row with either over --max-fcpu or --max-gpu-busy, with a round whose load was not
+  measured (load_unmeasured > 0; SPLIT_SAMPLER=0 leaves the GPU's unmeasured), or from a report older
+  than that count (unknown, not 0), is flagged. The GPU limit, 0.05, is set on this measure: 0.000-0.005 per round in
   the quiet round-2 smoke runs, 0.12-0.17 with another session's GPU work.
 - The seam's timeline per call, summarised over every process's SEAM calls, median [min-max] in ms:
   init (thread created - cut) and start (GPU part's start - thread created), beside the user split's
@@ -162,11 +161,17 @@ def by_round(L, a, b, q):
     return out
 
 
+NULL_Q = 0.975   # the null check's t interval: two-sided 95%
+
+
 def null_check(null95):
-    """"" if the two identical user splits agree (null95: by_round(..., 0.975), whose t_lo and t_hi are a
-    two-sided 95% t interval of S<g>b / S<g> over rounds; it holds 1.00), else why no verdict is given"""
+    """"" if the two identical user splits agree (null95: by_round(L, "SPLIT2", "SPLIT", NULL_Q), whose t_lo
+    and t_hi are a two-sided 95% t interval of S<g>b / S<g> over rounds; it holds 1.00), else why no
+    verdict is given"""
+    if sps is None:
+        return "null check needs scipy: no verdict"
     if math.isnan(null95["t_lo"]):
-        return "null check needs scipy: no verdict" if sps is None else "null check needs 2 rounds: no verdict"
+        return "null check needs 2 rounds: no verdict"
     return "null failed: rerun" if null95["t_lo"] > 1.0 or null95["t_hi"] < 1.0 else ""
 
 
@@ -197,6 +202,13 @@ def proposed(seam_hi, null_hi):
     if math.isnan(seam_hi):
         return "n/a"
     return "pass" if seam_hi <= 1.03 else "inconclusive: add rounds" if math.isnan(null_hi) or null_hi > 1.03 else "fix first"
+
+
+def readings(seam, null, seam_r, null_r):
+    """G3's verdicts on a row that passed the null check, from paired() and by_round() of SEAM / S<g> and
+    S<g>b / S<g>: (a) on BCa, (a)'s check on Hodges-Lehmann, (b) and (c)"""
+    return (designed(seam["bca_hi"], null["bca_hi"]), designed(seam["hl_hi"], null["hl_hi"]),
+            proposed(seam_r["t_hi"], null_r["t_hi"]), recommended(seam_r))
 
 
 # The timeline table's columns, in order: (name, role, columns). SEAM spans are b - a of two raw.tsv ns
@@ -327,20 +339,16 @@ def main():
         seam = paired(L, "SEAM", "SPLIT", a.level, a.resamples, a.seed)
         null = paired(L, "SPLIT2", "SPLIT", a.level, a.resamples, a.seed)
         seam_r, null_r = by_round(L, "SEAM", "SPLIT", a.t_level), by_round(L, "SPLIT2", "SPLIT", a.t_level)
-        fcpu = float(v.get("fcpu_max", "nan"))
-        if math.isnan(fcpu):   # runs without the arms have no GPU-idle stretch
-            fcpu = float(v.get("fcpu_round_max", "nan"))
-        gbusy = float(v.get("gpu_idle_busy_max", "nan"))
-        # rounds whose outside load was not measured; None for a report older than the count: unknown
-        unmeasured = int(v["load_unmeasured"]) if "load_unmeasured" in v else None
-        null95 = by_round(L, "SPLIT2", "SPLIT", 0.975)   # two-sided 95% over rounds: its t_lo and t_hi
+        fcpu, gbusy = float(v.get("fcpu_max", "nan")), float(v.get("gpu_idle_busy_max", "nan"))
+        # rounds whose outside load was not measured; nan for a report older than the count: unknown
+        unmeasured = float(v.get("load_unmeasured", "nan"))
+        null95 = by_round(L, "SPLIT2", "SPLIT", NULL_Q)
         # no verdict, in any reading, for a row that is not G3's, a loaded run (a value or a round not
         # measured counts as loaded), or a failed or impossible null check
         quiet = fcpu <= a.max_fcpu and gbusy <= a.max_gpu_busy and unmeasured == 0
         withhold = not_g3(v, txt, layout, staging) or ("" if quiet else "flagged: rerun on a quiet machine") or null_check(null95)
         if not withhold:
-            gate, check = designed(seam["bca_hi"], null["bca_hi"]), designed(seam["hl_hi"], null["hl_hi"])
-            prop, rec = proposed(seam_r["t_hi"], null_r["t_hi"]), recommended(seam_r)
+            gate, check, prop, rec = readings(seam, null, seam_r, null_r)
         else:
             gate = check = (withhold, NAN); prop = rec = withhold
         rows.append({
@@ -357,7 +365,8 @@ def main():
     def load(r):   # a value or a round not measured is unknown, not quiet: it flags too
         cpu = "CPU not measured" if math.isnan(r["fcpu"]) else f"{r['fcpu']:.2f} cores"
         gpu = "GPU not measured" if math.isnan(r["gbusy"]) else f"GPU {r['gbusy']:.3f}"
-        lu = "" if r["unmeasured"] == 0 else ", rounds not measured: " + ("unknown" if r["unmeasured"] is None else str(r["unmeasured"]))
+        u = r["unmeasured"]
+        lu = "" if u == 0 else ", rounds not measured: " + ("unknown" if math.isnan(u) else f"{u:g}")
         return f"{'' if r['quiet'] else 'FLAG '}{cpu}, {gpu}{lu}"
     print(f"## G3: SEAM / S<g> against max(1.03, S<g>b / S<g>), {pct} intervals"
           + ("" if sps is not None else " (no scipy: BCa, the t bounds and the null check n/a, so no verdict)") + "\n")
@@ -400,7 +409,7 @@ def main():
             for r in rows:
                 vals = [str(r[c]) for c in cols] + [f"{r['seam'][k]:.6g}" for k in stat] + [f"{r['null'][k]:.6g}" for k in stat]
                 vals += [r["gate"][0], r["check"][0], str(r["seam_r"]["n"]), f"{r['seam_r']['t_hi']:.6g}", f"{r['seam_r']['t_lo']:.6g}", f"{r['null_r']['t_hi']:.6g}", f"{r['null95']['t_lo']:.6g}", f"{r['null95']['t_hi']:.6g}",
-                         f"{r['null_r']['sd']:.6g}", r["proposed"], r["recommended"], f"{r['fcpu']:.6g}", f"{r['gbusy']:.6g}", "nan" if r["unmeasured"] is None else str(r["unmeasured"]), r["out"]] + [f"{statistics.median(r['tl'][n]):.6g}" if r["tl"][n] else "nan" for n in names]
+                         f"{r['null_r']['sd']:.6g}", r["proposed"], r["recommended"], f"{r['fcpu']:.6g}", f"{r['gbusy']:.6g}", f"{r['unmeasured']:.6g}", r["out"]] + [f"{statistics.median(r['tl'][n]):.6g}" if r["tl"][n] else "nan" for n in names]
                 fh.write("\t".join(vals) + "\n")
 
 
