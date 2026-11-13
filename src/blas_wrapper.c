@@ -1718,9 +1718,9 @@ static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis
         p->split.wait_gpu_ns = tm->cpu1_ns > tm->gpu1_ns ? tm->cpu1_ns - tm->gpu1_ns : 0;
         if (j.prof.t0) memcpy(p->split.gpu_stage_ns, j.prof.stage_ns, sizeof j.prof.stage_ns);
     }
-    if (p) {
+    if (p) {   // a tail refused before it ran (run_tail false) did no GPU work
         p->split.gf_cpu = part_gflop(&head);
-        p->split.gf_gpu = part_gflop(tail);
+        p->split.gf_gpu = run_tail ? part_gflop(tail) : 0.0;
     }
 
     // A tail not kept is made again here, on Accelerate: on the K axis into C

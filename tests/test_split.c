@@ -1053,6 +1053,22 @@ static void lossy_ticks(uint64_t *a, uint64_t *b) {
     *b = tb.denom;
 }
 
+// Child (AB_SPLIT_TABLE: one zgemm N N N row, scalars=a): a ZGEMM with beta
+// 0.75 and a NaN in its tail's C, which the staged path refuses before
+// running the tail, then the same call on a clean C, whose tail runs.
+static void child_range_first(void) {
+    Call c = {'z', 'N', 'N', 600, 300, 200, 0, ONE, {0.75, 0}};
+    Operands o = operands(&c);
+    double *C = malloc(o.nC * sizeof *C);
+    for (int clean = 0; clean < 2; clean++) {
+        memcpy(C, o.C0, o.nC * sizeof *C);
+        if (!clean) C[(size_t)o.w * o.ldC * (c.N - 1)] = NAN;   // C(0, N - 1), in the N axis's tail
+        abi_call(&c, &o, C);
+    }
+    free(C);
+    free_operands(&o);
+}
+
 // Child (AB_TRACE set): one trace line, for the call from tick a to tick b.
 static void child_trace_ticks(void) {
     uint64_t a, b;
@@ -1073,6 +1089,7 @@ static int child_main(const char *scenario) {
     else if (!strcmp(scenario, "memory")) child_memory();
     else if (!strcmp(scenario, "k_refused")) child_k_refused();
     else if (!strcmp(scenario, "trace_ticks")) child_trace_ticks();
+    else if (!strcmp(scenario, "range_first")) child_range_first();
     else printf("unknown scenario %s\n", scenario);
     fflush(stdout);
     return 0;
@@ -1530,7 +1547,7 @@ static void test_split_reports(void) {
     snprintf(cmd, sizeof cmd, "/bin/cat %s.*", trace);
     FILE *p = popen(cmd, "r");
     int split_lines = 0, row_lines = 0;
-    long long first_cpu[N_ROWS], first_gpu[N_ROWS];   // each row's first split call, as traced
+    long long first_cpu[N_ROWS], first_gpu[N_ROWS];   // each row's first split call, and first that ran a tail
     for (int r = 0; r < N_ROWS; r++) first_cpu[r] = first_gpu[r] = -1;
     char line[4096];
     bool header = false;
@@ -1539,10 +1556,9 @@ static void test_split_reports(void) {
         if (strstr(line, " path=split") || (strstr(line, " retries=") && strstr(line, " path=fallback:"))) {
             split_lines++;
             long long row = field(line, "row");
-            if (row >= 0 && row < N_ROWS && first_cpu[row] < 0) {
-                first_cpu[row] = field(line, "cpu_part_ns");
+            if (row >= 0 && row < N_ROWS && first_cpu[row] < 0) first_cpu[row] = field(line, "cpu_part_ns");
+            if (row >= 0 && row < N_ROWS && first_gpu[row] < 0 && field(line, "gpu_wall_ns") > 0)
                 first_gpu[row] = field(line, "gpu_wall_ns");
-            }
             long long t = field(line, "t1_ns") - field(line, "t0_ns");
             long long st = field(line, "init_ns") + field(line, "cpu_part_ns") + field(line, "join_ns") +
                            field(line, "redo_ns") + field(line, "sum_ns") + field(line, "other_ns");
@@ -1607,6 +1623,23 @@ static void test_split_reports(void) {
           "difference's conversion: %llu)", (unsigned long long)a, (unsigned long long)b, t0, t1,
           (unsigned long long)ab_prof_ticks_to_ns(a), (unsigned long long)ab_prof_ticks_to_ns(b),
           (unsigned long long)(ab_prof_ticks_to_ns(a) + ab_prof_ticks_to_ns(b - a)));
+    // A row whose first split call's tail was refused before it ran (range) and whose second's ran: the GPU's
+    // GFLOP and first-call parts are the second call's alone.
+    char range_table[PATH_MAX + 16], range_env[PATH_MAX + 32];
+    snprintf(range_table, sizeof range_table, "%s/range_table.txt", g_dir);
+    FILE *rt = fopen(range_table, "w");
+    if (rt) { fputs("zgemm N N N scalars=a f=0.5\n", rt); fclose(rt); }
+    snprintf(range_env, sizeof range_env, "AB_SPLIT_TABLE=%s", range_table);
+    const char *range_envs[] = {"AB_SPLIT=1", range_env, "AB_REPORT=1", NULL};
+    out = run_child("range_first", range_envs, &status);
+    const char *rl = out ? strstr(out, "] split_row i=0 ") : NULL;
+    check(status == 0 && rl && field(rl, "split") == 2 && field(rl, "range") == 1,
+          "a tail refused before it ran, then one that ran: status %d, %.300s", status, rl ? rl : out ? out : "");
+    check(rl && fieldf(rl, "gpu_ms") > 0 && fieldf(rl, "first_gpu_ms") == fieldf(rl, "gpu_ms") &&
+              fieldf(rl, "gf_gpu") > 0 && fieldf(rl, "first_gf_gpu") == fieldf(rl, "gf_gpu"),
+          "GPU parts not the second call's alone: %.400s", rl ? rl : "");
+    free(out);
+    unlink(range_table);
     // The JSON's first split call per row is the trace's, and its GFLOP the plan's for the row's first call.
     bool seen[N_ROWS] = {false};
     for (int i = 0; i < N_TCALLS; i++) {

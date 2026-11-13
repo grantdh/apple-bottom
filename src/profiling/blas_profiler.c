@@ -81,8 +81,9 @@ const char* const ab_prof_split_decline_names[AB_PROF_SPLIT_DECLINE_COUNT] = {
 
 // AB_SPLIT: per row of the split table, the calls it covered (also those it
 // did not cut) and what became of them (AB_REPORT's split_row lines). first_ns
-// is the wall time of the first call the row covered; first_cpu_ns and the
-// other first_ fields are the parts of its first split call, whose GPU part
+// is the wall time of the first call the row covered; first_cpu_ns and
+// first_gf_cpu are the CPU part of its first split call, first_gpu_ns and
+// first_gf_gpu the GPU part of its first split call whose tail ran, which
 // carries Metal's start-up when it is the process's first, so that a fit of
 // the shares can leave that call out.
 typedef struct {
@@ -338,8 +339,10 @@ void ab_prof_record_split(const char* routine, uint64_t elapsed_ns, size_t m, si
         bool k4 = s->staged == AB_PROF_STAGED_KEPT_4M, range = s->staged == AB_PROF_STAGED_RANGE;
         if (!r->split) {
             r->first_cpu_ns = s->cpu_part_ns;
-            r->first_gpu_ns = s->gpu_wall_ns;
             r->first_gf_cpu = s->gf_cpu;
+        }
+        if (s->gpu_wall_ns && !r->first_gpu_ns) {   // a tail refused before it ran has no wall time
+            r->first_gpu_ns = s->gpu_wall_ns;
             r->first_gf_gpu = s->gf_gpu;
         }
         r->split++;

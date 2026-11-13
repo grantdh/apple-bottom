@@ -138,7 +138,8 @@ typedef struct {
     int row;                            // the split table's row; -1 if none covered the call
     char axis;
     int L, g;                           // g = 0: the row did not cut the call
-    bool split;                         // the executor ran both parts
+    bool split;                         // the executor cut the call and made both parts (a tail
+                                        // refused before it ran on Accelerate: gpu_wall_ns 0)
     bool kept;                          // ... and the GPU's stood: the call counts as split
     ab_prof_split_decline_t declined;   // why a cut call was not split
     ab_prof_staged_t staged;            // the GPU part's staged-path outcome
