@@ -37,13 +37,13 @@ share, and so does a square row (ratio <= 2, scripts/ingest_split.py's rule 4), 
 from bench_split's grid. This is .dev/active/split/design.md section 8's rule (a port of Espressivo's
 calibrate.py).
 
-The part sums include each process's first split call, whose GPU part carries the Metal start-up;
-the evidence leaves it out (scripts/ingest_split.py). The library prints the CPU part of each row's
-first split call in the process (first_cpu_ms, first_gf_cpu) and the GPU part of its first split
-call whose tail ran (first_gpu_ms, first_gf_gpu), and --exclude-first (the default) leaves those parts
-out of each rank line's rates, and one call out of its split count: for one row of each process that
-is the start-up, for the others an ordinary call. Reports without the parts (an older library) keep their
-first calls, with a note.
+The part sums include each process's first split calls, which the evidence leaves out
+(scripts/ingest_split.py); the Metal start-up is in the GPU part of the first whose tail ran. The
+library prints the CPU part of each row's first split call in the process (first_cpu_ms,
+first_gf_cpu) and the GPU part of its first split call whose tail ran (first_gpu_ms, first_gf_gpu),
+and --exclude-first (the default) leaves those parts out of each rank line's rates, and one call out
+of its split count: for one row of each process that is the start-up, for the others an ordinary
+call. Reports without the parts (an older library) keep their first calls, with a note.
 
 Columns: dfirst is how far leaving the first calls out moved f_bal; first/gpu is the first calls' GPU
 parts (their wall times, for an older library) over the row's GPU-part time, so a row dominated by
