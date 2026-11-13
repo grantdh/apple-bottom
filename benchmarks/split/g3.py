@@ -39,14 +39,18 @@ layout:
       slower than the user split); else "inconclusive: add rounds".
   With each row, SEAM / S<g>'s one-sided lower bound at the same level, and the null spread by round:
   the sd of the null's per-round mean log ratios and the range of the per-round ratios.
-- --simulate estimates how often each reading says "fix first" (and how often (b) and (c) say
-  "inconclusive") for a seam exactly as fast as the user split and for one 5%, 10% and 20% slower,
-  at 6 rounds of 2 repeats, per-call noise of 1-5% and per-round offsets of each arm of 0-2%.
+- --simulate estimates, per line, the share of rows withheld for a failed null and the share of
+  each reading's "pass", "fix first" and "inconclusive" (of all rows), for a seam exactly as fast as
+  the user split and for one 5%, 10% and 20% slower, at 6 rounds of 2 repeats, per-call noise of 1-5%
+  and per-round offsets of each arm of 0-2%.
 - Verdicts are withheld, in every reading, from a row flagged for outside load (below): "flagged:
   rerun on a quiet machine"; from a row whose null failed, the two identical user splits differing
   (a two-sided 95% t interval of S<g>b / S<g> over rounds that excludes 1.00): "null failed: rerun";
   and from every row when that check cannot be made: "null check needs scipy: no verdict". So a
-  loaded run, or one whose instrument is off, can neither pass nor fail G3.
+  loaded run, or one whose instrument is off, can neither pass nor fail G3. The null check is at 95%
+  per row: an instrument that is fine still fails it in 5% of rows (rerun the case; a second failure
+  by chance is again 5%), and in at least one of a run's 50 rows with probability 1 - 0.95^50 = 92%.
+  Whether to keep that level or use one over the run's rows is Grant's.
 - Outside load, from the report's SUMMARY (the largest over the rounds, .rounds.tsv has each): other
   processes' CPU in cores over the GPU-idle stretches and the GPU's busy fraction over those
   stretches; a row with either over --max-fcpu or --max-gpu-busy, with a round whose load was not
@@ -64,7 +68,7 @@ A verdict, in any reading, needs scipy (on this Mac:
 /Library/Frameworks/Python.framework/Versions/3.13/bin/python3): the null check's t quantile, as well
 as BCa and the t bounds of (b) and (c). Without it every row's verdict is withheld ("null check needs
 scipy: no verdict"), BCa and the t bounds read n/a, and the Hodges-Lehmann intervals are still
-printed.
+printed; --simulate needs it too.
 """
 import argparse, glob, math, os, re, statistics, sys
 from collections import defaultdict
@@ -261,21 +265,26 @@ def mr(v):
 
 
 def simulate(sims, seed, level, tq, resamples):
-    """the readings' "fix first" rates, and (b)'s and (c)'s "inconclusive" rates, for a seam as fast as the
-    user split (ratio 1.00: false alarms) and 5, 10 and 20% slower: 6 rounds x 2 repeats; each call's log
-    time has noise of sd s; each arm in each round an offset of sd o (a round x arm effect, as position
-    and drift give)"""
+    """per line, the share of rows withheld for a failed null and of each reading's verdicts, of all rows,
+    for a seam as fast as the user split (ratio 1.00: "fix first" is a false alarm) and 5, 10 and 20%
+    slower: 6 rounds x 2 repeats; each call's log time has noise of sd s; each arm in each round an
+    offset of sd o (a round x arm effect, as position and drift give)"""
+    if sps is None:
+        sys.exit("--simulate needs scipy: without it no row gets a verdict")
     import random
     rnd = random.Random(seed)
     print(f"## Simulated G3 readings: {sims} rows per line, 6 rounds of 2 repeats; (a) at two-sided {level:.0%} "
-          f"pair intervals (BCa with {resamples} resamples), (b) and (c) at one-sided {tq:.0%} t bounds over rounds\n")
-    print("| true SEAM/S | call noise sd | round x arm sd | (a) BCa: fix first | (a) HL: fix first | (b): fix first | (b): inconclusive "
-          "| (c): fix first | (c): inconclusive |")
-    print("|---|---|---|---|---|---|---|---|---|")
+          f"pair intervals (BCa with {resamples} resamples), (b) and (c) at one-sided {tq:.0%} t bounds over rounds; "
+          f"rows whose null fails (two-sided 95% t over rounds) withheld; shares of all rows\n")
+    print("| true SEAM/S | call noise sd | round x arm sd | withheld: null failed | (a) BCa: pass / fix first "
+          "| (a) HL: pass / fix first | (b): pass / fix first / inconclusive | (c): pass / fix first / inconclusive |")
+    print("|---|---|---|---|---|---|---|---|")
+    pc = lambda k, *vs: " / ".join(f"{n[k, v] / sims:.1%}" for v in vs)   # n: the current line's counts
+    three = ("pass", "fix first", "inconclusive: add rounds")
     for ratio in (1.00, 1.05, 1.10, 1.20):
         for sd in (0.01, 0.02, 0.03, 0.05):
             for o in (0.0, 0.01, 0.02):
-                n_a = n_h = n_b = n_i = n_c = n_ci = 0
+                n = defaultdict(int)
                 for _ in range(sims):
                     L = {"SPLIT": {}, "SEAM": {}, "SPLIT2": {}}
                     for r in range(6):
@@ -283,16 +292,15 @@ def simulate(sims, seed, level, tq, resamples):
                         for rep_ in range(2):
                             for c in L:
                                 L[c][(r, rep_)] = math.exp(off[c] + rnd.gauss(0, sd) + (math.log(ratio) if c == "SEAM" else 0))
+                    if null_check(by_round(L, "SPLIT2", "SPLIT", NULL_Q)):
+                        n["withheld"] += 1
+                        continue
                     ps, pn = paired(L, "SEAM", "SPLIT", level, resamples, rnd.randrange(1 << 30)), paired(L, "SPLIT2", "SPLIT", level, resamples, rnd.randrange(1 << 30))
-                    n_a += designed(ps["bca_hi"], pn["bca_hi"])[0] == "fix first"
-                    n_h += designed(ps["hl_hi"], pn["hl_hi"])[0] == "fix first"
-                    sr = by_round(L, "SEAM", "SPLIT", tq)
-                    vb, vc = proposed(sr["t_hi"], by_round(L, "SPLIT2", "SPLIT", tq)["t_hi"]), recommended(sr)
-                    n_b += vb == "fix first"; n_i += vb == "inconclusive: add rounds"
-                    n_c += vc == "fix first"; n_ci += vc == "inconclusive: add rounds"
-                bca = f"{n_a / sims:.1%}" if sps is not None else "n/a"
-                print(f"| {ratio:.2f} | {sd:.2f} | {o:.2f} | {bca} | {n_h / sims:.1%} | {n_b / sims:.1%} | {n_i / sims:.1%} | "
-                      f"{n_c / sims:.1%} | {n_ci / sims:.1%} |")
+                    va, vh, vb, vc = readings(ps, pn, by_round(L, "SEAM", "SPLIT", tq), by_round(L, "SPLIT2", "SPLIT", tq))
+                    for k, verdict in (("a", va[0]), ("h", vh[0]), ("b", vb), ("c", vc)):
+                        n[k, verdict] += 1
+                print(f"| {ratio:.2f} | {sd:.2f} | {o:.2f} | {n['withheld'] / sims:.1%} | {pc('a', 'pass', 'fix first')} | "
+                      f"{pc('h', 'pass', 'fix first')} | {pc('b', *three)} | {pc('c', *three)} |")
 
 
 def main():

@@ -253,38 +253,48 @@ instrument is off, can neither pass nor fail G3. Without scipy the null check ca
 row gets a verdict ("null check needs scipy: no verdict"); `g3.py` does not approximate the t
 quantile.
 
-`g3.py --simulate --sims 400 --resamples 999` estimates how often each reading says "fix first" for a
-seam exactly as fast as the user split (a false alarm) and for one 5%, 10% and 20% slower, at G3's 6
-rounds of 2 repeats. Each call's log time has noise of sd 1-5%, and each arm in each round an offset of
-sd 0-2% (a round by arm effect, as position and drift give). Rates over 400 simulated rows per line
-(run 2026-11-13; the run has every combination, these lines span it):
+The null check is at 95% per row. An instrument that is fine still fails it by chance in 5% of rows
+(3.0-8.5% over the simulation's lines below, 4.8% on average); such a row is rerun, and a fine rerun
+fails again by chance 5% of the time. Over a run's 50 G3 rows at least one fails by chance with
+probability 1 - 0.95^50 = 92%, and about 2.5 are expected, so a full G3 run should plan for two or
+three reruns. Whether to keep this level is Grant's choice (see Still for Grant, below).
 
-| true SEAM/S | call noise sd | round x arm sd | (a) BCa: fix first | (a) HL: fix first | (b): fix first | (b): inconclusive | (c): fix first | (c): inconclusive |
-|---|---|---|---|---|---|---|---|---|
-| 1.00 | 0.01 | 0.00 | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
-| 1.00 | 0.01 | 0.02 | 20.5% | 16.2% | 16.5% | 16.5% | 2.8% | 30.2% |
-| 1.00 | 0.02 | 0.00 | 11.8% | 9.8% | 5.8% | 1.0% | 1.8% | 5.0% |
-| 1.00 | 0.02 | 0.02 | 29.0% | 30.5% | 19.0% | 26.5% | 6.0% | 39.5% |
-| 1.00 | 0.03 | 0.00 | 35.2% | 37.0% | 21.0% | 17.0% | 4.5% | 33.5% |
-| 1.00 | 0.03 | 0.02 | 38.2% | 37.8% | 18.5% | 37.5% | 4.5% | 51.5% |
-| 1.00 | 0.05 | 0.00 | 43.2% | 42.5% | 17.0% | 44.5% | 4.0% | 57.5% |
-| 1.00 | 0.05 | 0.02 | 49.8% | 47.5% | 16.2% | 56.2% | 6.0% | 66.5% |
-| 1.05 | 0.01 | 0.00 | 100.0% | 100.0% | 100.0% | 0.0% | 100.0% | 0.0% |
-| 1.05 | 0.02 | 0.02 | 99.8% | 100.0% | 60.0% | 39.8% | 89.0% | 10.8% |
-| 1.05 | 0.03 | 0.02 | 98.0% | 99.0% | 51.2% | 47.8% | 82.0% | 17.0% |
-| 1.05 | 0.05 | 0.02 | 93.2% | 97.0% | 29.2% | 69.8% | 55.8% | 43.2% |
-| 1.10 | 0.03 | 0.02 | 100.0% | 100.0% | 41.0% | 59.0% | 100.0% | 0.0% |
-| 1.10 | 0.05 | 0.02 | 99.0% | 100.0% | 29.0% | 71.0% | 95.5% | 4.5% |
-| 1.20 | 0.03 | 0.02 | 100.0% | 100.0% | 45.2% | 54.8% | 100.0% | 0.0% |
-| 1.20 | 0.05 | 0.02 | 100.0% | 100.0% | 29.8% | 70.2% | 100.0% | 0.0% |
+`g3.py --simulate --sims 400 --resamples 999` models the readings and the null check's withholding,
+for a seam exactly as fast as the user split (where "fix first" is a false alarm) and for one 5%, 10%
+and 20% slower, at G3's 6 rounds of 2 repeats. Each call's log time has noise of sd 1-5%, and each arm
+in each round an offset of sd 0-2% (a round by arm effect, as position and drift give). Per line it
+gives the share of rows withheld because the null failed and, as shares of all rows, withheld ones
+included, each reading's "pass" and "fix first" ((a)) or "pass", "fix first" and "inconclusive" ((b)
+and (c)). Rates over 400 simulated rows per line (run 2026-11-13; the run has every combination,
+these lines span it):
 
-At 2-5% call noise and a seam as fast as the user split, (a) says "fix first" for 10-50% of rows, (b)
-for 6-21% and (c) for 1.8-6.0% (its nominal 5% per row, give or take the simulation's 1-2%). For a
-slower seam (c) says "fix first" for 56-100% of rows at 5% slower, 95-100% at 10% and every row at
-20%; (b) for 29-100% however slow, since it never says "fix first" while the null's bound is above
-1.03. (c)'s cost is "inconclusive" rows at 1.00, up to two thirds at 5% noise, which more rounds
-resolve. Across G3's 50 rows, a per-row false-alarm rate of a few percent still expects at least one
-false "fix first"; whether G3 is judged per row or with a family rule is also Grant's call.
+| true SEAM/S | call noise sd | round x arm sd | withheld: null failed | (a) BCa: pass / fix first | (a) HL: pass / fix first | (b): pass / fix first / inconclusive | (c): pass / fix first / inconclusive |
+|---|---|---|---|---|---|---|---|
+| 1.00 | 0.01 | 0.00 | 4.0% | 96.0% / 0.0% | 96.0% / 0.0% | 96.0% / 0.0% / 0.0% | 96.0% / 0.0% / 0.0% |
+| 1.00 | 0.01 | 0.02 | 6.0% | 71.5% / 22.5% | 72.8% / 21.2% | 61.3% / 19.8% / 13.0% | 61.3% / 2.5% / 30.2% |
+| 1.00 | 0.02 | 0.00 | 4.2% | 82.2% / 13.5% | 84.2% / 11.5% | 88.8% / 6.2% / 0.8% | 88.8% / 1.8% / 5.2% |
+| 1.00 | 0.02 | 0.02 | 5.5% | 65.2% / 29.2% | 66.0% / 28.5% | 51.0% / 15.5% / 28.0% | 51.0% / 3.2% / 40.2% |
+| 1.00 | 0.03 | 0.00 | 4.2% | 64.5% / 31.2% | 62.5% / 33.2% | 62.5% / 18.2% / 15.0% | 62.5% / 4.0% / 29.2% |
+| 1.00 | 0.03 | 0.02 | 6.5% | 56.0% / 37.5% | 56.8% / 36.8% | 42.5% / 17.0% / 34.0% | 42.5% / 2.8% / 48.2% |
+| 1.00 | 0.05 | 0.00 | 3.5% | 52.8% / 43.8% | 51.2% / 45.2% | 32.0% / 15.8% / 48.8% | 32.0% / 3.5% / 61.0% |
+| 1.00 | 0.05 | 0.02 | 4.5% | 52.0% / 43.5% | 54.5% / 41.0% | 29.0% / 13.8% / 52.8% | 29.0% / 4.5% / 62.0% |
+| 1.05 | 0.01 | 0.00 | 3.0% | 0.0% / 97.0% | 0.0% / 97.0% | 0.0% / 97.0% / 0.0% | 0.0% / 97.0% / 0.0% |
+| 1.05 | 0.02 | 0.00 | 4.8% | 0.0% / 95.2% | 0.0% / 95.2% | 0.0% / 88.0% / 7.2% | 0.0% / 95.2% / 0.0% |
+| 1.05 | 0.02 | 0.02 | 3.0% | 0.0% / 97.0% | 0.0% / 97.0% | 0.0% / 57.2% / 39.8% | 0.0% / 84.2% / 12.8% |
+| 1.05 | 0.03 | 0.02 | 3.5% | 1.8% / 94.8% | 0.8% / 95.8% | 0.2% / 46.5% / 49.8% | 0.2% / 79.0% / 17.2% |
+| 1.05 | 0.05 | 0.02 | 3.5% | 7.2% / 89.2% | 3.2% / 93.2% | 1.2% / 23.2% / 72.0% | 1.2% / 54.5% / 40.8% |
+| 1.10 | 0.03 | 0.02 | 5.0% | 0.0% / 95.0% | 0.0% / 95.0% | 0.0% / 43.8% / 51.2% | 0.0% / 95.0% / 0.0% |
+| 1.10 | 0.05 | 0.02 | 7.0% | 0.2% / 92.8% | 0.0% / 93.0% | 0.0% / 26.2% / 66.8% | 0.0% / 89.2% / 3.8% |
+| 1.20 | 0.03 | 0.02 | 6.2% | 0.0% / 93.8% | 0.0% / 93.8% | 0.0% / 39.0% / 54.8% | 0.0% / 93.8% / 0.0% |
+| 1.20 | 0.05 | 0.02 | 5.5% | 0.0% / 94.5% | 0.0% / 94.5% | 0.0% / 27.3% / 67.2% | 0.0% / 94.5% / 0.0% |
+
+At 2-5% call noise and a seam as fast as the user split, (a) says "fix first" for 12-45% of rows, (b)
+for 6-18% and (c) for 1.8-5.0% (its nominal 5% per row, give or take the simulation's 1-2%). For a
+slower seam at that noise (c) says "fix first" for 55-95% of rows at 5% slower, 89-96% at 10% and
+94-96% at 20%; the rest is withheld by the null check (about 5% at any ratio) or, mostly at 5% slower,
+inconclusive. (b) says it for 23-89% however slow, since it never says "fix first" while the null's
+bound is above 1.03. (c)'s cost is "inconclusive" rows at 1.00, up to 62% at 5% noise, which more
+rounds resolve.
 
 The null spread in practice: in the round-2 smoke runs (2026-11-12 and -13, G3's settings, one case
 each) the user split against itself had a per-round sd of log ratios of 0.028-0.038 on a quiet
@@ -292,3 +302,20 @@ machine (UM160 1×8, Z4096 4×2, RK160 4×2), and 0.043-0.131 while other sessio
 and a GPU busy fraction of 0.13-0.17, which `g3.py` flags). At 0.03 and 6 rounds the null's one-sided
 bound sits about 2.5% above its mean (t = 2.015 over 6 rounds), so a null mean of 1.005 already puts it
 past 1.03: that is why (b) so often says "inconclusive" at that noise.
+
+### Still for Grant
+
+`g3.py` prints its readings and withholds verdicts as above. These choices it leaves open:
+
+- **The reading:** (a) as designed, (b) proposed, (c) recommended, or another.
+- **The null check's level:** per row at 95%, as now: a failed row is rerun, and a chance repeat is
+  5%; over a run's 50 rows, 92% of runs fail at least one row by chance. Or a family-wise level over
+  the run's rows: Bonferroni over 50 rows puts each row's two-sided interval at 99.9%, so about 5% of
+  runs (4.9%) fail a row by chance, but at 6 rounds that interval is 2.7 times as wide (t = 6.87
+  against 2.57) and lets a larger instrument fault through. `g3.py` keeps 95% per row until Grant
+  chooses.
+- **"fix first" per row or over the run:** at (c)'s false-alarm rate of 2-5% per row, 50 rows of a
+  seam as fast as the user split still expect about 1-2.5 false "fix first"; a family rule would trade
+  some detection for fewer.
+- **The outside-load limits:** 1.5 cores, the AB_SPLIT pilot's, and a GPU busy fraction of 0.05, set
+  on the round-2 smoke runs (`--max-fcpu`, `--max-gpu-busy`).
