@@ -2,7 +2,7 @@
 """G3, the library's split against the user code's: paired intervals from bench_split's raw.tsv.
 
 usage: g3.py [--level 0.95] [--t-level 0.95] [--resamples 9999] [--seed 1] [--max-fcpu 1.5]
-             [--max-gpu-busy 0.25] [--tsv FILE] <dir> ...
+             [--max-gpu-busy 0.05] [--tsv FILE] <dir> ...
        g3.py --simulate [--sims 400] [--seed 1]
 
 Reads every <case>.np<N>.d<data>.raw.tsv below the directories (run.sh's <outdir> or its suites)
@@ -44,8 +44,10 @@ layout:
   at 6 rounds of 2 repeats, per-call noise of 1-5% and per-round offsets of each arm of 0-2%.
 - Outside load, from the report's SUMMARY (the largest over the rounds, .rounds.tsv has each): other
   processes' CPU in cores over the GPU-idle stretches (over whole rounds without the arms) and the
-  GPU's busy fraction over those stretches; a row with either over --max-fcpu or --max-gpu-busy is
-  flagged.
+  GPU's busy fraction over those stretches; a row with either over --max-fcpu or --max-gpu-busy, or
+  with either not measured (SPLIT_SAMPLER=0 leaves the GPU's unmeasured), is flagged. The GPU limit,
+  0.05, is set on this measure: 0.000-0.005 per round in the quiet round-2 smoke runs, 0.12-0.17 with
+  another session's GPU work.
 - The seam's timeline per call, summarised over every process's SEAM calls, median [min-max] in ms:
   init (thread created - cut) and start (GPU part's start - thread created), beside the user split's
   GPU start (its GPU thread's start after the call's); the CPU part and the GPU part, each beside the
@@ -266,7 +268,8 @@ def main():
     ap.add_argument("--resamples", type=int, default=9999)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--max-fcpu", type=float, default=1.5, help="flag a row whose other processes used more cores (as the AB_SPLIT pilot)")
-    ap.add_argument("--max-gpu-busy", type=float, default=0.25, help="flag a row whose GPU was busier while this run left it idle")
+    ap.add_argument("--max-gpu-busy", type=float, default=0.05,
+                    help="flag a row whose GPU was busier while this run left it idle (quiet smoke runs: up to 0.005)")
     ap.add_argument("--tsv", help="also write one row per case here")
     a = ap.parse_args()
     if a.simulate:
@@ -315,8 +318,11 @@ def main():
         sys.exit("no raw.tsv with SEAM calls under " + " ".join(a.dirs))
     pct = f"{a.level:.0%}"
     vtext = lambda r, k, hi: r[k][0] if r[k][0].startswith("not G3") or r[k][0] == "n/a" else f"{r[k][0]} ({r['seam'][hi]:.3f} vs {r[k][1]:.3f})"
-    load = lambda r: "-" if math.isnan(r["fcpu"]) and math.isnan(r["gbusy"]) else \
-        f"{'FLAG ' if r['fcpu'] > a.max_fcpu or r['gbusy'] > a.max_gpu_busy else ''}{r['fcpu']:.2f} cores, GPU {r['gbusy']:.2f}"
+    def load(r):   # a value not measured is unknown, not quiet: it flags too
+        bad = not (r["fcpu"] <= a.max_fcpu) or not (r["gbusy"] <= a.max_gpu_busy)
+        cpu = "CPU not measured" if math.isnan(r["fcpu"]) else f"{r['fcpu']:.2f} cores"
+        gpu = "GPU not measured" if math.isnan(r["gbusy"]) else f"GPU {r['gbusy']:.3f}"
+        return f"{'FLAG ' if bad else ''}{cpu}, {gpu}"
     print(f"## G3: SEAM / S<g> against max(1.03, S<g>b / S<g>), {pct} intervals"
           + ("" if sps is not None else " (no scipy: BCa n/a, gate on Hodges-Lehmann)") + "\n")
     print("| suite | case | layout | staging MB | g | pairs | SEAM/S median | BCa | HL [exact] | S_b/S median | BCa | HL [exact] "
