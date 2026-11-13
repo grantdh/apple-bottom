@@ -21,17 +21,19 @@ calls' CPU and GPU parts. Their ratios are the rates the two engines reached whi
 gf_gpu / gpu_s. The share at which both parts of a call would end together is f_bal = r_gpu /
 (r_cpu + r_gpu). The next share moves the fraction D (default 0.7) of the way from the current one
 to f_bal, rounded to 0.01; below F (default 0.08) the row goes to Accelerate (0), and a row at 0 stays
-there. A row with fewer than N (default 20) split calls takes the pooled rates of the other non-square
-rows with its routine and axis; a row with none keeps its share, and so does a square row (ratio <=
-2, scripts/ingest_split.py's rule 4), whose share is fitted from bench_split's grid. This is
-.dev/active/split/design.md section 8's rule (a port of Espressivo's calibrate.py).
+there. A row with fewer than N (default 20) split calls takes the pooled rates of the non-square rows
+with its routine and axis, itself included (as calibrate.py pools them); a row with none keeps its
+share, and so does a square row (ratio <= 2, scripts/ingest_split.py's rule 4), whose share is fitted
+from bench_split's grid. This is .dev/active/split/design.md section 8's rule (a port of Espressivo's
+calibrate.py).
 
 The part sums include each process's first split call, whose GPU part carries the Metal start-up;
-the evidence leaves it out (scripts/ingest_split.py). The library prints the parts of each row's
-first split call in the process (first_cpu_ms, first_gpu_ms, first_gf_cpu, first_gf_gpu), and
---exclude-first (the default) leaves that call out of each rank line's rates and split count: for one
-row of each process it is the start-up, for the others an ordinary call. Reports without the parts
-(an older library) keep their first calls, with a note.
+the evidence leaves it out (scripts/ingest_split.py). The library prints the CPU part of each row's
+first split call in the process (first_cpu_ms, first_gf_cpu) and the GPU part of its first split
+call whose tail ran (first_gpu_ms, first_gf_gpu), and --exclude-first (the default) leaves those parts
+out of each rank line's rates, and one call out of its split count: for one row of each process that
+is the start-up, for the others an ordinary call. Reports without the parts (an older library) keep their
+first calls, with a note.
 
 Columns: dfirst is how far leaving the first calls out moved f_bal; first/gpu is the first calls' GPU
 parts (their wall times, for an older library) over the row's GPU-part time, so a row dominated by
@@ -39,10 +41,11 @@ them shows; wait g/c (every call) above 1 means the GPU part ended first more of
 for the CPU's head), which f_bal > f also says.
 
 Prints TABLE with the new shares on stdout (only changed rows rewritten; "# method:" and "# date:"
-set, citing the build and TABLE's sha256), and the estimates on stderr. --cut ROW=L,... adds the GPU
-part at the old and new shares for those axis lengths (src/split_slice.h's ab_split_cut, with the
-alignments read from that header and AB_MIN_GPU_DIM's default from src/dispatch.h), since a share
-that does not move the cut changes nothing. --self-test checks that cut against tests/test_dispatch.c.
+set, citing the build and TABLE's sha256, and how many reports had no digest to check it by), and
+the estimates on stderr. --cut ROW=L,... adds the GPU part at the old and new shares for those axis
+lengths (src/split_slice.h's ab_split_cut, with the alignments read from that header and
+AB_MIN_GPU_DIM's default from src/dispatch.h), since a share that does not move the cut changes
+nothing. --self-test checks that cut against tests/test_dispatch.c.
 Python 3.9, standard library only.
 """
 import argparse
@@ -209,7 +212,7 @@ def main():
     ap.add_argument("--min-dim", type=int, default=MIN_DIM, help=f"AB_MIN_GPU_DIM of the runs (default {MIN_DIM})")
     ap.add_argument("--cut", type=cut_arg, action="append", default=[], metavar="ROW=L[,L...]")
     ap.add_argument("--exclude-first", action=argparse.BooleanOptionalAction, default=True,
-                    help="leave each rank line's first split call per row out of the rates (default)")
+                    help="leave each rank line's first-call parts per row out of the rates (default)")
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("runs", nargs="*")
     a = ap.parse_args()
@@ -266,13 +269,12 @@ def main():
     if build in ("?", "unknown") or build.endswith("-dirty"):
         print(f"fit_shares: build {build} names no one library (a dirty tree, or no commit)", file=sys.stderr)
     if by_path:
-        print(f"fit_shares: {by_path} of them name the table by path alone (no digest in their headers): "
+        print(f"fit_shares: {by_path} of them name the table by path only (no digest in their headers): "
               f"an edit of {table} in place since they ran would go unseen", file=sys.stderr)
     view = less_first if a.exclude_first else Counter
     excluded = sum(c["n_first"] for c in tot.values()) if a.exclude_first else 0
     if excluded:
-        print(f"fit_shares: --exclude-first: {excluded} first split calls left out (one per row per rank line)",
-              file=sys.stderr)
+        print(f"fit_shares: --exclude-first: the first-call parts of {excluded} rank lines left out", file=sys.stderr)
     if absent and a.exclude_first:
         print(f"fit_shares: {absent} rank lines with split calls have no first-call parts (an older library): "
               f"their first calls stay in", file=sys.stderr)
@@ -308,8 +310,9 @@ def main():
         print(f"{i:3d} {r['axis']:>4} {f:5.2f} {t['calls']:7.0f} {t['split']:7.0f} {rc:7.1f} {rg:7.1f} {fb:6.3f} "
               f"{moved:+7.3f} {first:9.3f} {wait:8.2f} {src:>7} {nxt:5.2f}  {cs}", file=sys.stderr)
 
+    unchecked = f", unchecked for {by_path} of them, whose headers carry none" if by_path else ""
     keys = {"method": f"fit_shares.py from {used} reports of build {build} made with {os.path.basename(table)} "
-                      f"(sha256 {digest}); damp {a.damp:g}, floor {a.floor:g}, min-calls {a.min_calls}, "
+                      f"(sha256 {digest}{unchecked}); damp {a.damp:g}, floor {a.floor:g}, min-calls {a.min_calls}, "
                       f"first calls {'left out' if excluded else 'in'}",
             "date": datetime.date.today().isoformat()}
     for n, l in enumerate(lines):
