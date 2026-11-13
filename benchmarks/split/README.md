@@ -102,7 +102,9 @@ same call through its seam (`SEAM`, below), which `AB_SPLIT` uses inside `dgemm_
     (`fcpu_idle`, without this run's GPU driver work) and the GPU's busy fraction (`gpu_busy_idle`,
     someone else's GPU work). Over the whole round they give other processes' CPU too (`fcpu_round`,
     which includes this run's GPU driver work in `kernel_task`). `SUMMARY` has the largest of each
-    (`fcpu_max`, `gpu_idle_busy_max`, `fcpu_round_max`). The AB_SPLIT pilot flagged 1.5 cores (by `ps`,
+    (`fcpu_max`, `gpu_idle_busy_max`, `fcpu_round_max`), and the number of rounds whose outside load
+    was not measured (`load_unmeasured`: the stretch's CPU or GPU value missing; every round without
+    the arms). The AB_SPLIT pilot flagged 1.5 cores (by `ps`,
     without `kernel_task`) and saw outside GPU work as busy 0.34-0.36 against 0.07-0.20 without it.
   - Both are read without root through interfaces Apple does not document. Where they are unavailable,
     the power figures read `nan`.
@@ -218,7 +220,7 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 | `table.py <outdir>` | the results tables: medians [min–max] of the lockstep times, speedups, bits, errors, power state; with the arms, the seam and twin against the user split (paired medians), the slices alone and the seam's outcomes; sustained runs |
 | `classify_trace.py <dir>` | every traced GPU call as staged path, host path or fallback, by shape, with median stage times |
 | `power.py <dir>/<case>.np<N>.d<data> ...` | wall power by run of consecutive calls, trimming SMC's ~1 s lag. With the arms the trio alternates call by call and forms no runs, so only Accelerate, the GPU, `HEAD` and `TAIL` get figures; for the split's use `SPLIT_ARMS=0`, `power4x2` or the sustained runs |
-| `g3.py <dir> ... [--tsv FILE]` | G3 per case and layout: `SEAM` ÷ `S<g>` and `S<g>b` ÷ `S<g>` paired by (round, repeat) with BCa and Hodges-Lehmann intervals, G3's three readings (below), the outside load (flagged over 1.5 cores or a GPU busy fraction of 0.05, or not measured), and the seam's timeline beside the user split's parts. Verdicts go only to rows under G3's conditions and protocol; reports run.sh set aside or whose power fails run.sh's conditions are left out and listed. The docstring has the details; scipy is needed for BCa and readings (b) and (c) (`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3` on the M2 Max) |
+| `g3.py <dir> ... [--tsv FILE]` | G3 per case and layout: `SEAM` ÷ `S<g>` and `S<g>b` ÷ `S<g>` paired by (round, repeat) with BCa and Hodges-Lehmann intervals, G3's three readings (below), the outside load (flagged over 1.5 cores or a GPU busy fraction of 0.05, or with a round not measured, or from a report older than `load_unmeasured`), and the seam's timeline beside the user split's parts. Verdicts go only to rows under G3's conditions and protocol; reports run.sh set aside or whose power fails run.sh's conditions are left out and listed. The docstring has the details; scipy is needed for BCa and readings (b) and (c) (`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3` on the M2 Max) |
 
 ## G3's three readings
 

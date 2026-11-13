@@ -48,10 +48,11 @@ layout:
   rerun". So a loaded run, or one whose instrument is off, can neither pass nor fail G3.
 - Outside load, from the report's SUMMARY (the largest over the rounds, .rounds.tsv has each): other
   processes' CPU in cores over the GPU-idle stretches (over whole rounds without the arms) and the
-  GPU's busy fraction over those stretches; a row with either over --max-fcpu or --max-gpu-busy, or
-  with either not measured (SPLIT_SAMPLER=0 leaves the GPU's unmeasured), is flagged. The GPU limit,
-  0.05, is set on this measure: 0.000-0.005 per round in the quiet round-2 smoke runs, 0.12-0.17 with
-  another session's GPU work.
+  GPU's busy fraction over those stretches; a row with either over --max-fcpu or --max-gpu-busy, with
+  a round whose load was not measured (load_unmeasured > 0: SPLIT_SAMPLER=0 leaves the GPU's
+  unmeasured, and runs without the arms have no stretch), or from a report older than that count
+  (unknown, not 0), is flagged. The GPU limit, 0.05, is set on this measure: 0.000-0.005 per round in
+  the quiet round-2 smoke runs, 0.12-0.17 with another session's GPU work.
 - The seam's timeline per call, summarised over every process's SEAM calls, median [min-max] in ms:
   init (thread created - cut) and start (GPU part's start - thread created), beside the user split's
   GPU start (its GPU thread's start after the call's); the CPU part and the GPU part, each beside the
@@ -311,11 +312,14 @@ def main():
             fcpu = float(v.get("fcpu_round_max", "nan"))
         gk = "bca_hi" if sps is not None else "hl_hi"
         gbusy = float(v.get("gpu_idle_busy_max", "nan"))
+        # rounds whose outside load was not measured; None for a report older than the count: unknown
+        unmeasured = int(v["load_unmeasured"]) if "load_unmeasured" in v else None
         null95 = by_round(L, "SPLIT2", "SPLIT", 0.975)   # two-sided 95% over rounds: its t_lo and t_hi
-        # no verdict, in any reading, for a row that is not G3's, a loaded run (a value not measured
-        # counts as loaded) or a failed null (the two identical user splits differ)
+        # no verdict, in any reading, for a row that is not G3's, a loaded run (a value or a round not
+        # measured counts as loaded) or a failed null (the two identical user splits differ)
+        quiet = fcpu <= a.max_fcpu and gbusy <= a.max_gpu_busy and unmeasured == 0
         withhold = not_g3(v, txt, layout, staging) or \
-            ("flagged: rerun on a quiet machine" if not (fcpu <= a.max_fcpu and gbusy <= a.max_gpu_busy) else
+            ("flagged: rerun on a quiet machine" if not quiet else
              "null failed: rerun" if null95["t_lo"] > 1.0 or null95["t_hi"] < 1.0 else "")
         if not withhold:
             gate, check = designed(seam[gk], null[gk]), designed(seam["hl_hi"], null["hl_hi"])
@@ -326,18 +330,18 @@ def main():
             "suite": label, "case": v.get("case", os.path.basename(f).split(".")[0]),
             "layout": layout, "staging": staging, "copied": v.get("reg") == "0", "g": v.get("g", "?"), "seam": seam, "null": null,
             "gate": gate, "check": check, "proposed": prop, "recommended": rec, "seam_r": seam_r, "null_r": null_r,
-            "fcpu": fcpu, "gbusy": gbusy, "null95": null95, "out": v.get("seam_out", "?"),
+            "fcpu": fcpu, "gbusy": gbusy, "unmeasured": unmeasured, "quiet": quiet, "null95": null95, "out": v.get("seam_out", "?"),
             "bits": f"{v.get('seam_rep_diff', '?')}, {v.get('seam_vs_split', '?')}", "tl": timeline(recs),
         })
     if not rows:
         sys.exit("no raw.tsv with SEAM calls under " + " ".join(a.dirs))
     pct = f"{a.level:.0%}"
     vtext = lambda r, k, hi: f"{r[k][0]} ({r['seam'][hi]:.3f} vs {r[k][1]:.3f})" if r[k][0] in ("pass", "fix first") else r[k][0]
-    def load(r):   # a value not measured is unknown, not quiet: it flags too
-        bad = not (r["fcpu"] <= a.max_fcpu) or not (r["gbusy"] <= a.max_gpu_busy)
+    def load(r):   # a value or a round not measured is unknown, not quiet: it flags too
         cpu = "CPU not measured" if math.isnan(r["fcpu"]) else f"{r['fcpu']:.2f} cores"
         gpu = "GPU not measured" if math.isnan(r["gbusy"]) else f"GPU {r['gbusy']:.3f}"
-        return f"{'FLAG ' if bad else ''}{cpu}, {gpu}"
+        lu = "" if r["unmeasured"] == 0 else ", rounds not measured: " + ("unknown" if r["unmeasured"] is None else str(r["unmeasured"]))
+        return f"{'' if r['quiet'] else 'FLAG '}{cpu}, {gpu}{lu}"
     print(f"## G3: SEAM / S<g> against max(1.03, S<g>b / S<g>), {pct} intervals"
           + ("" if sps is not None else " (no scipy: BCa n/a, gate on Hodges-Lehmann)") + "\n")
     print("| suite | case | layout | staging MB | g | pairs | SEAM/S median | BCa | HL [exact] | S_b/S median | BCa | HL [exact] "
@@ -375,12 +379,12 @@ def main():
             cols = ["suite", "case", "layout", "staging", "copied", "g"]
             stat = ["n", "median", "bca_lo", "bca_hi", "hl", "hl_lo", "hl_hi", "hl_conf"]
             fh.write("\t".join(cols + [f"seam_{k}" for k in stat] + [f"null_{k}" for k in stat]
-                               + ["gate", "check", "rounds", "t_seam", "t_seam_lo", "t_null", "null95_lo", "null95_hi", "null_sd", "proposed", "recommended", "fcpu_max", "gpu_busy_max", "seam_out"]
+                               + ["gate", "check", "rounds", "t_seam", "t_seam_lo", "t_null", "null95_lo", "null95_hi", "null_sd", "proposed", "recommended", "fcpu_max", "gpu_busy_max", "load_unmeasured", "seam_out"]
                                + [f"tl_{n.replace(' ', '_')}_med" for n in names]) + "\n")
             for r in rows:
                 vals = [str(r[c]) for c in cols] + [f"{r['seam'][k]:.6g}" for k in stat] + [f"{r['null'][k]:.6g}" for k in stat]
                 vals += [r["gate"][0], r["check"][0], str(r["seam_r"]["n"]), f"{r['seam_r']['t_hi']:.6g}", f"{r['seam_r']['t_lo']:.6g}", f"{r['null_r']['t_hi']:.6g}", f"{r['null95']['t_lo']:.6g}", f"{r['null95']['t_hi']:.6g}",
-                         f"{r['null_r']['sd']:.6g}", r["proposed"], r["recommended"], f"{r['fcpu']:.6g}", f"{r['gbusy']:.6g}", r["out"]] + [f"{statistics.median(r['tl'][n]):.6g}" if r["tl"][n] else "nan" for n in names]
+                         f"{r['null_r']['sd']:.6g}", r["proposed"], r["recommended"], f"{r['fcpu']:.6g}", f"{r['gbusy']:.6g}", "nan" if r["unmeasured"] is None else str(r["unmeasured"]), r["out"]] + [f"{statistics.median(r['tl'][n]):.6g}" if r["tl"][n] else "nan" for n in names]
                 fh.write("\t".join(vals) + "\n")
 
 

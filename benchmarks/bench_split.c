@@ -1147,7 +1147,10 @@ static void report(const Case *c, int np, int data, bool smc, double idle_w) {
         }
     }
     for (int p = 0; p < np; p++) printf("   proc %d: setup %.1f s, total %.1f s\n", p, shm->tsetup[p], shm->ttotal[p]);
-    double fcpu_max = NAN, fround_max = NAN, bmax = NAN;   // fmax() skips a NAN
+    // the largest over the rounds (fmax() skips a NAN), and how many rounds' outside load was not
+    // measured (NAN; without the arms every round, which has no GPU-idle stretch)
+    double fcpu_max = NAN, fround_max = NAN, bmax = NAN;
+    int unmeasured = 0;
     if (shm->narm) {
         for (int r = 0; r < shm->rounds; r++) { fcpu_max = fmax(fcpu_max, shm->fcpu_idle[r]); bmax = fmax(bmax, shm->gpu_idle[r]); }
         printf("   outside load per round, over the idle gap and CPU-only configs: other processes' CPU, cores [");
@@ -1156,7 +1159,10 @@ static void report(const Case *c, int np, int data, bool smc, double idle_w) {
         for (int r = 0; r < shm->rounds; r++) printf("%s%.3f", r ? " " : "", shm->gpu_idle[r]);
         printf("]\n");
     }
-    for (int r = 0; r < shm->rounds; r++) fround_max = fmax(fround_max, shm->fcpu_round[r]);
+    for (int r = 0; r < shm->rounds; r++) {
+        fround_max = fmax(fround_max, shm->fcpu_round[r]);
+        unmeasured += isnan(shm->fcpu_idle[r]) || isnan(shm->gpu_idle[r]);
+    }
     printf("   other processes' CPU over each whole round, cores (with this run's GPU driver work) [");
     for (int r = 0; r < shm->rounds; r++) printf("%s%.2f", r ? " " : "", shm->fcpu_round[r]);
     printf("]\n");
@@ -1168,12 +1174,12 @@ static void report(const Case *c, int np, int data, bool smc, double idle_w) {
     bool bits = sd == 0 && od == 0 && hs;
     printf("SUMMARY case=%s np=%d data=%d acc_ms=%.3f gpu_ms=%.3f split_ms=%.3f g=%d f=%.3f sp_acc=%.3f sp_gpu=%.3f sp_best=%.3f acc_gfs=%.1f gpu_gfs=%.1f split_gfs=%.1f "
            "bits_repeat=%s split_reps=%d gpu_rep_diff=%d acc_rep_diff=%d err_u2=%.3f err_gpu_u2=%.3f err_acc_u2=%.4f notgpu=%d pdtr_acc=%.1f pdtr_gpu=%.1f pdtr_split=%.1f idle=%.1f n=%d/%d/%d "
-           "reg=%d sus_w=%.1f/%.1f/%.1f sus_j=%.3f/%.3f/%.3f h_split=%016llx h_gpu=%016llx h_acc=%016llx share=%s rounds=%d reps=%d/%d/%d arms=%d fcpu_max=%.2f gpu_idle_busy_max=%.3f fcpu_round_max=%.2f",
+           "reg=%d sus_w=%.1f/%.1f/%.1f sus_j=%.3f/%.3f/%.3f h_split=%016llx h_gpu=%016llx h_acc=%016llx share=%s rounds=%d reps=%d/%d/%d arms=%d fcpu_max=%.2f gpu_idle_busy_max=%.3f fcpu_round_max=%.2f load_unmeasured=%d",
            c->name, np, data, La * 1e3, Lg * 1e3, Ls * 1e3, shm->g[bk], fb, La / Ls, Lg / Ls, best1 / Ls, F / La / 1e9, F / Lg / 1e9, F / Ls / 1e9,
            bits ? "yes" : "NO", sr, gd, ad, emax / U2, shm->err_gpu / U2, shm->err_acc / U2, notgpu, pw[0], pw[1], pw[2], idle_w, na, ng, ns,
            shm->reg_ok[0], sw[0], sw[1], sw[2], sj[0], sj[1], sj[2],
            (unsigned long long)shm->hash_split[0], (unsigned long long)shm->hash_gpu[0], (unsigned long long)shm->hash_acc[0],
-           shm->fixed ? "fixed" : "sweep", shm->rounds, c->fx_acc, c->fx_gpu, c->fx_split, shm->narm, fcpu_max, bmax, fround_max);
+           shm->fixed ? "fixed" : "sweep", shm->rounds, c->fx_acc, c->fx_gpu, c->fx_split, shm->narm, fcpu_max, bmax, fround_max, unmeasured);
     if (shm->narm) {
         printf(" seam_ms=%.3f split2_ms=%.3f head_ms=%.3f tail_ms=%.3f seam_ratio=%.4f null_ratio=%.4f pairs=%d seam_out=", Lm * 1e3, Ls2 * 1e3, Lh * 1e3, Lt * 1e3, rseam, rnull, nseam);
         bool first = true;
