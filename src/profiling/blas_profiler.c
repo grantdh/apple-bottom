@@ -691,6 +691,8 @@ void ab_prof_report(FILE* out) {
     // The chip and the table auto routed by (dispatch.h), so a report from
     // another machine says what routed it.
     const ab_dispatch_config_t* dc = ab_dispatch_process_config();
+    // split_token() stays last: its path may hold spaces, and readers take it
+    // to the end of the line (benchmarks/split/fit_shares.py).
     line_add(&l, " chip=\"%s\" gpu_cores=%d table=%s%s", dc->chip[0] ? dc->chip : "unknown", dc->gpu_cores,
              dc->table, split_token());
     line_add(&l, "\n");

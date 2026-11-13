@@ -5,13 +5,15 @@ Each RUN is an err.txt file or a directory searched for them (set-aside .bad*/in
 tmp and *.save are skipped; a file found twice counts once): the stderr of programs run with
 AB_SPLIT=1 AB_SPLIT_TABLE=TABLE AB_REPORT=1, such as pw.x's every rank. Choose the runs to fit from
 your campaign's ledger (failed or flagged runs left out); this script checks only that they belong
-together. Its AB_REPORT headers name the table as split_table=file:PATH@DIGEST (the first 12 hex
-digits of the SHA-256 of the bytes the library read): a file counts only if DIGEST is TABLE's now. A
-header without a digest (an older library) is matched by PATH, read relative to the file's directory
-(where the run started), with a note. Other files are skipped, with a note if they name TABLE's path.
-The fit stops if a report's rows differ from TABLE's (count, routine, axis or share), or if the
-reports come from more than one build of the library; a row reported by fewer ranks than printed
-headers is noted.
+together. Each rank's AB_REPORT header names its table as split_table=file:PATH@DIGEST, the last
+field of the line (the first 12 hex digits of the SHA-256 of the bytes the library read): a rank's
+split_row lines count only if DIGEST is TABLE's now. A header without a digest (an older library) is
+matched by PATH, read relative to the file's directory (where the run started), with a note. Other
+ranks' lines are left out: noted if the file is used, and also if a header names TABLE's path at
+another digest. A file with no counting rank is skipped. The fit stops if a report's rows differ from
+TABLE's (count, routine, axis or share), or if the ranks come from more than one build (the id in the
+header's parentheses, "?" if none). A dirty or unknown build is noted, as it names no one library. A
+row reported by fewer ranks than the file has counting headers is noted.
 
 For each row, its split_row lines (every rank of every run) give the seconds and the GFLOP of the
 calls' CPU and GPU parts. Their ratios are the rates the two engines reached while running together
@@ -59,6 +61,8 @@ from ingest_split import KEY_RE, SQUARE_RATIO, parse_row, table_line  # noqa: E4
 from analyze import AB_HEADER, AB_SPLIT_ROW  # noqa: E402
 
 KV = re.compile(r"(\w+)=(\S+)")
+BUILD = re.compile(r"apple-bottom \S+ \(([^)]*)\)")
+LABEL = re.compile(r"split_table=file:(.*)$")   # the header's last field, spaces and all
 SUMS = ("calls", "split", "cpu_ms", "gpu_ms", "gf_cpu", "gf_gpu", "first_ms", "wait_cpu_ms", "wait_gpu_ms")
 PARTS = ("cpu_ms", "gpu_ms", "gf_cpu", "gf_gpu")   # first_<part>: those of the row's first split call
 SKIP_DIR = re.compile(r"(\.bad\d*|^incomplete-.*|^tmp|\.save)$")
@@ -105,6 +109,7 @@ def self_test():
         s = s.strip()
         return 2**31 - 1 - int(s.split("-", 1)[1] if "-" in s else 0) if s.startswith("INT_MAX") else int(s)
     labels = {"/a/t.txt@0123456789ab": ("/a/t.txt", "0123456789ab"), "/a@b/t.txt": ("/a@b/t.txt", None),
+              "/a b/t.txt@0123456789ab": ("/a b/t.txt", "0123456789ab"),
               "/a/t@x@0123456789ab": ("/a/t@x", "0123456789ab"), "t@0123456789abc": ("t@0123456789abc", None),
               "t@0123456789AB": ("t@0123456789AB", None), "t": ("t", None)}
 
@@ -134,32 +139,42 @@ def err_files(paths):
 
 
 def read_reports(path, table, digest):
-    """(build, split_row fields per row and rank, ranks, matched by digest) of one stderr file whose
-    headers name TABLE (module docstring); None if they name another table or none."""
+    """Of one stderr file, the ranks whose header names TABLE (module docstring): (their builds, their
+    split_row fields per row, their pids, whether one matched by path only); None if no line counts."""
     text = open(path, errors="replace").read()
     start = text.find("AB_REPORT[")
     if start < 0:
         return None
-    builds, ranks, rows, named = set(), set(), defaultdict(list), set()
+    ours, old, lines = {}, set(), []    # pid: (build, matched by path only); stale digests; (pid, row, fields)
     for line in text[text.rfind("\n", 0, start) + 1:].splitlines():
         if h := AB_HEADER.search(line):
-            ranks.add(h[1])
-            if m := re.search(r"apple-bottom \S+ \((\w+)\)", line):
-                builds.add(m[1])
-            if m := re.search(r"split_table=file:(\S+)", line):
-                named.add(m[1])
+            head = line[h.start():]     # not another rank's partial line before it
+            lab = LABEL.search(head)
+            p, d = table_label(lab[1]) if lab else (None, None)
+            same = p is not None and os.path.realpath(os.path.join(os.path.dirname(path), p)) == table
+            ours.pop(h[1], None)
+            if d == digest or (same and d is None):
+                b = BUILD.search(head)
+                ours[h[1]] = (b[1] if b else "?", d is None)
+            elif same and d:
+                old.add(d)
         elif m := AB_SPLIT_ROW.search(line):
-            rows[int(m[2])].append(dict(KV.findall(m[3])))
-    # (TABLE's path?, digest) per label the headers printed
-    labels = {(os.path.realpath(os.path.join(os.path.dirname(path), p)) == table, d)
-              for p, d in map(table_label, named)}
-    digests = {d for _, d in labels}
-    if digest in digests or (True, None) in labels:
-        return builds, rows, ranks, digest in digests
-    if old := sorted(d for same, d in labels if same and d):
-        print(f"fit_shares: {path}: made with {table} at sha256 {', '.join(old)}, not {digest}; skipped",
+            lines.append((m[1], int(m[2]), dict(KV.findall(m[3]))))
+    if old:
+        print(f"fit_shares: {path}: ranks made with {table} at sha256 {', '.join(sorted(old))}, not {digest}; "
+              f"left out", file=sys.stderr)
+    rows, dropped = defaultdict(list), 0
+    for pid, i, kv in lines:
+        if pid in ours:
+            rows[i].append(kv)
+        else:
+            dropped += 1
+    if not rows:
+        return None
+    if dropped:
+        print(f"fit_shares: {path}: {dropped} split_row lines of ranks that name another table or none left out",
               file=sys.stderr)
-    return None
+    return {b for b, _ in ours.values()}, rows, ours, any(po for _, po in ours.values())
 
 
 def less_first(c):
@@ -225,9 +240,9 @@ def main():
         if rep is None:
             skipped += 1
             continue
-        b, got, ranks, by_digest = rep
+        b, got, ranks, path_only = rep
         builds |= b
-        by_path += not by_digest
+        by_path += path_only
         have = [sorted({(kv["routine"], kv["axis"], kv["f"]) for kv in v}) for _, v in sorted(got.items())]
         if have != [[w] for w in want]:
             sys.exit(f"{path}: its split rows {have} are not {table}'s {want}")
@@ -248,6 +263,8 @@ def main():
         sys.exit(f"the reports come from {len(builds) or 'no'} builds ({', '.join(sorted(builds))}); fit one at a time")
     build = builds.pop()
     print(f"fit_shares: {used} reports used (build {build}), {skipped} skipped (another table or none)", file=sys.stderr)
+    if build in ("?", "unknown") or build.endswith("-dirty"):
+        print(f"fit_shares: build {build} names no one library (a dirty tree, or no commit)", file=sys.stderr)
     if by_path:
         print(f"fit_shares: {by_path} of them name the table by path alone (no digest in their headers): "
               f"an edit of {table} in place since they ran would go unseen", file=sys.stderr)
