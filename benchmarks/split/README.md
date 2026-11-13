@@ -217,12 +217,12 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 | `table.py <outdir>` | the results tables: medians [min–max] of the lockstep times, speedups, bits, errors, power state; with the arms, the seam and twin against the user split (paired medians), the slices alone and the seam's outcomes; sustained runs |
 | `classify_trace.py <dir>` | every traced GPU call as staged path, host path or fallback, by shape, with median stage times |
 | `power.py <dir>/<case>.np<N>.d<data> ...` | wall power by run of consecutive calls, trimming SMC's ~1 s lag. With the arms the trio alternates call by call and forms no runs, so only Accelerate, the GPU, `HEAD` and `TAIL` get figures; for the split's use `SPLIT_ARMS=0`, `power4x2` or the sustained runs |
-| `g3.py <dir> ... [--tsv FILE]` | G3 per case and layout: `SEAM` ÷ `S<g>` and `S<g>b` ÷ `S<g>` paired by (round, repeat), each as the median ratio, a BCa bootstrap interval and the Hodges-Lehmann estimate with its exact Wilcoxon interval; G3's two readings (below); the outside load from the report, flagged over 1.5 cores or a GPU busy fraction of 0.25 (`--max-fcpu`, `--max-gpu-busy`); and the seam's timeline per call (init and thread start beside the user split's GPU start, the CPU and GPU parts and the wait for the GPU each beside the user split's, submit, GPU execution, wake). Verdicts go only to rows under G3's conditions (copied operands, uniform data, 1×8 or 4×2, staging 2048 or 8192 MB; others read "not G3") and protocol (`AB_TRACE` and `AB_REPORT` off, a positive multiple of 6 rounds; others read "not G3 (protocol)"); cases run.sh set aside, and reports whose power does not meet run.sh's conditions (AC power from an adapter of 90 W or more on the start and end lines; at the start a battery of 95% or more, neither charging nor finishing its charge), are left out and listed. BCa and reading (b) need scipy (`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3` on the M2 Max). `g3.py --simulate` gives the readings' false-alarm rates |
+| `g3.py <dir> ... [--tsv FILE]` | G3 per case and layout: `SEAM` ÷ `S<g>` and `S<g>b` ÷ `S<g>` paired by (round, repeat), each as the median ratio, a BCa bootstrap interval and the Hodges-Lehmann estimate with its exact Wilcoxon interval; G3's three readings (below); the outside load from the report, flagged over 1.5 cores or a GPU busy fraction of 0.25 (`--max-fcpu`, `--max-gpu-busy`); and the seam's timeline per call (init and thread start beside the user split's GPU start, the CPU and GPU parts and the wait for the GPU each beside the user split's, submit, GPU execution, wake). Verdicts go only to rows under G3's conditions (copied operands, uniform data, 1×8 or 4×2, staging 2048 or 8192 MB; others read "not G3") and protocol (`AB_TRACE` and `AB_REPORT` off, a positive multiple of 6 rounds; others read "not G3 (protocol)"); cases run.sh set aside, and reports whose power does not meet run.sh's conditions (AC power from an adapter of 90 W or more on the start and end lines; at the start a battery of 95% or more, neither charging nor finishing its charge), are left out and listed. BCa and readings (b) and (c) need scipy (`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3` on the M2 Max). `g3.py --simulate` gives the readings' false-alarm rates |
 
-## G3's two readings
+## G3's three readings
 
 Design section 12's G3 line reads "upper bound over max(1.03, null spread): fix first", and does not
-define the null spread. `g3.py` prints two readings for every G3 row; choosing between them, or
+define the null spread. `g3.py` prints three readings for every G3 row; choosing among them, or
 another, is a gate-line decision for Grant.
 
 - **(a) As designed:** the upper bound of `SEAM` ÷ `S<g>` against max(1.03, the upper bound of
@@ -235,39 +235,46 @@ another, is a gate-line decision for Grant.
   upper bound on each mean. "pass" if the seam's bound is 1.03 or less; else "inconclusive: add
   rounds" if the null's own bound is above 1.03; else "fix first". Noise can still give "fix first"
   here, when the seam's bound passes 1.03 by chance and the null's does not, but less often than (a).
+  It never says "fix first" while the null's bound is above 1.03, however slow the seam.
+- **(c) Recommended, not decided:** the same per-round t bounds, the seam's alone, per row. "pass" if
+  the seam's upper bound is 1.03 or less; else "fix first" if its one-sided 95% lower bound is above
+  1.00 (the seam is slower than the user split); else "inconclusive: add rounds".
 
 Each row also gives the seam's one-sided lower bound and the null spread by round: the sd of the
 null's per-round mean log ratios and the range of its per-round ratios.
 
 `g3.py --simulate --sims 400 --resamples 999` estimates how often each reading says "fix first" for a
-seam exactly as fast as the user split (a false alarm) and for one 5% slower, at G3's 6 rounds of 2
-repeats. Each call's log time has noise of sd 1-5%, and each arm in each round an offset of sd 0-2% (a
-round by arm effect, as position and drift give). The last column is a variant of (b) that says "fix
-first" only when the seam's one-sided 95% lower bound is also above 1.00 (else "inconclusive"); g3.py
-prints that lower bound for each row but does not apply the variant. Rates over 400 simulated rows
-(run 2026-11-12):
+seam exactly as fast as the user split (a false alarm) and for one 5%, 10% and 20% slower, at G3's 6
+rounds of 2 repeats. Each call's log time has noise of sd 1-5%, and each arm in each round an offset of
+sd 0-2% (a round by arm effect, as position and drift give). Rates over 400 simulated rows per line
+(run 2026-11-13; the run has every combination, these lines span it):
 
-| true SEAM/S | call noise sd | round x arm sd | (a) BCa: fix first | (a) HL: fix first | (b): fix first | (b): inconclusive | variant: fix first |
-|---|---|---|---|---|---|---|---|
-| 1.00 | 0.01 | 0.00 | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
-| 1.00 | 0.01 | 0.02 | 20.5% | 16.2% | 16.5% | 16.5% | 1.0% |
-| 1.00 | 0.02 | 0.00 | 11.8% | 9.8% | 5.8% | 1.0% | 1.2% |
-| 1.00 | 0.02 | 0.02 | 29.0% | 30.5% | 19.0% | 26.5% | 1.0% |
-| 1.00 | 0.03 | 0.00 | 35.2% | 37.0% | 21.0% | 17.0% | 2.8% |
-| 1.00 | 0.03 | 0.02 | 38.2% | 37.8% | 18.5% | 37.5% | 1.0% |
-| 1.00 | 0.05 | 0.00 | 43.2% | 42.5% | 17.0% | 44.5% | 1.0% |
-| 1.00 | 0.05 | 0.02 | 49.8% | 47.5% | 16.2% | 56.2% | 0.8% |
-| 1.05 | 0.01 | 0.00 | 100.0% | 100.0% | 100.0% | 0.0% | 100.0% |
-| 1.05 | 0.02 | 0.02 | 99.8% | 100.0% | 60.0% | 39.8% | 52.0% |
-| 1.05 | 0.03 | 0.02 | 98.0% | 99.0% | 51.2% | 47.8% | 38.8% |
-| 1.05 | 0.05 | 0.02 | 93.2% | 97.0% | 29.2% | 69.8% | 12.2% |
+| true SEAM/S | call noise sd | round x arm sd | (a) BCa: fix first | (a) HL: fix first | (b): fix first | (b): inconclusive | (c): fix first | (c): inconclusive |
+|---|---|---|---|---|---|---|---|---|
+| 1.00 | 0.01 | 0.00 | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
+| 1.00 | 0.01 | 0.02 | 20.5% | 16.2% | 16.5% | 16.5% | 2.8% | 30.2% |
+| 1.00 | 0.02 | 0.00 | 11.8% | 9.8% | 5.8% | 1.0% | 1.8% | 5.0% |
+| 1.00 | 0.02 | 0.02 | 29.0% | 30.5% | 19.0% | 26.5% | 6.0% | 39.5% |
+| 1.00 | 0.03 | 0.00 | 35.2% | 37.0% | 21.0% | 17.0% | 4.5% | 33.5% |
+| 1.00 | 0.03 | 0.02 | 38.2% | 37.8% | 18.5% | 37.5% | 4.5% | 51.5% |
+| 1.00 | 0.05 | 0.00 | 43.2% | 42.5% | 17.0% | 44.5% | 4.0% | 57.5% |
+| 1.00 | 0.05 | 0.02 | 49.8% | 47.5% | 16.2% | 56.2% | 6.0% | 66.5% |
+| 1.05 | 0.01 | 0.00 | 100.0% | 100.0% | 100.0% | 0.0% | 100.0% | 0.0% |
+| 1.05 | 0.02 | 0.02 | 99.8% | 100.0% | 60.0% | 39.8% | 89.0% | 10.8% |
+| 1.05 | 0.03 | 0.02 | 98.0% | 99.0% | 51.2% | 47.8% | 82.0% | 17.0% |
+| 1.05 | 0.05 | 0.02 | 93.2% | 97.0% | 29.2% | 69.8% | 55.8% | 43.2% |
+| 1.10 | 0.03 | 0.02 | 100.0% | 100.0% | 41.0% | 59.0% | 100.0% | 0.0% |
+| 1.10 | 0.05 | 0.02 | 99.0% | 100.0% | 29.0% | 71.0% | 95.5% | 4.5% |
+| 1.20 | 0.03 | 0.02 | 100.0% | 100.0% | 45.2% | 54.8% | 100.0% | 0.0% |
+| 1.20 | 0.05 | 0.02 | 100.0% | 100.0% | 29.8% | 70.2% | 100.0% | 0.0% |
 
-(The run has every combination; these rows span it.) Above 1% call noise, (a) gives a false "fix
-first" for 10-50% of rows with a seam as fast as the user split, and (b) for 6-21%; the variant stays
-at 0.8-2.8%. (b) and the variant pay for that in "inconclusive" rows, which more rounds resolve: with
-a 5% slower seam and 3-5% noise they say "fix first" for 12-67% of rows and "inconclusive" for most of
-the rest. Across G3's 50 rows, any reading with a per-row false-alarm rate of a few percent expects at
-least one false "fix first"; whether G3 is judged per row or with a family rule is also Grant's call.
+At 2-5% call noise and a seam as fast as the user split, (a) says "fix first" for 10-50% of rows, (b)
+for 6-21% and (c) for 1.8-6.0% (its nominal 5% per row, give or take the simulation's 1-2%). For a
+slower seam (c) says "fix first" for 56-100% of rows at 5% slower, 95-100% at 10% and every row at
+20%; (b) for 29-100% however slow, since it never says "fix first" while the null's bound is above
+1.03. (c)'s cost is "inconclusive" rows at 1.00, up to two thirds at 5% noise, which more rounds
+resolve. Across G3's 50 rows, a per-row false-alarm rate of a few percent still expects at least one
+false "fix first"; whether G3 is judged per row or with a family rule is also Grant's call.
 
 The null spread in practice: in the round-2 smoke runs (2026-11-12 and -13, G3's settings, one case
 each) the user split against itself had a per-round sd of log ratios of 0.028-0.038 on a quiet
