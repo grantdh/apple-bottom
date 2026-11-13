@@ -28,12 +28,15 @@ verdict (copied operands, uniform data, 1x8 or 4x2, AB_STAGING_MB 2048 or 8192);
       repeats of log(SEAM / S<g>) and of log(S<g>b / S<g>); over the rounds, a one-sided --t-level t
       upper bound on each mean, exponentiated. "pass" if SEAM's bound is 1.03 or less; else
       "inconclusive: add rounds" if the null's own bound is above 1.03 (the user split against itself
-      is too noisy to tell); else "fix first". Noise alone never gives "fix first" here.
-  With each row, the null spread by round: the sd of the null's per-round mean log ratios and the
-  range of the per-round ratios.
+      is too noisy to tell); else "fix first". Noise can still give "fix first", when SEAM's bound
+      passes 1.03 by chance and the null's does not; less often than (a) (see --simulate).
+  With each row, SEAM / S<g>'s one-sided lower bound at the same level, and the null spread by round:
+  the sd of the null's per-round mean log ratios and the range of the per-round ratios.
 - --simulate estimates how often each reading says "fix first" when the seam is exactly as fast as
   the user split (and how often it does when the seam is 5% slower), for 6 rounds of 2 repeats, per-
-  call noise of 1-5% and per-round offsets of each arm of 0-2%.
+  call noise of 1-5% and per-round offsets of each arm of 0-2%; and for (b) also how often it would
+  say "fix first" if that required SEAM / S<g>'s lower bound above 1.00 as well (a variant, not a
+  reading g3.py applies).
 - Outside load, from the report's SUMMARY (the largest over the rounds, .rounds.tsv has each): other
   processes' CPU in cores over the GPU-idle stretches (over whole rounds without the arms) and the
   GPU's busy fraction over those stretches; a row with either over --max-fcpu or --max-gpu-busy is
@@ -125,20 +128,22 @@ NAN = float("nan")
 
 def by_round(L, a, b, q):
     """rounds as the unit: per round, the mean over its repeats of log(a / b), paired by (round, rep);
-    over the rounds their geometric mean, the exp of a one-sided q t upper bound on their mean (nan
-    with fewer than 2 rounds or without scipy), the sd of the log means and their range"""
+    over the rounds their geometric mean, the exp of one-sided q t upper and lower bounds on their
+    mean (nan with fewer than 2 rounds or without scipy), the sd of the log means and their range"""
     acc = defaultdict(list)
     for k in L.get(a, {}):
         if k in L.get(b, {}):
             acc[k[0]].append(math.log(L[a][k] / L[b][k]))
     m = [statistics.fmean(acc[r]) for r in sorted(acc)]
-    out = {"n": len(m), "mean": NAN, "t_hi": NAN, "sd": NAN, "lo": NAN, "hi": NAN}
+    out = {"n": len(m), "mean": NAN, "t_hi": NAN, "t_lo": NAN, "sd": NAN, "lo": NAN, "hi": NAN}
+    mu = statistics.fmean(m) if m else NAN
     if m:
-        out.update(mean=math.exp(statistics.fmean(m)), lo=math.exp(min(m)), hi=math.exp(max(m)))
+        out.update(mean=math.exp(mu), lo=math.exp(min(m)), hi=math.exp(max(m)))
     if len(m) > 1:
         out["sd"] = statistics.stdev(m)
         if sps is not None:
-            out["t_hi"] = math.exp(statistics.fmean(m) + float(sps.t.ppf(q, len(m) - 1)) * out["sd"] / math.sqrt(len(m)))
+            half = float(sps.t.ppf(q, len(m) - 1)) * out["sd"] / math.sqrt(len(m))
+            out["t_hi"], out["t_lo"] = math.exp(mu + half), math.exp(mu - half)
     return out
 
 
@@ -204,12 +209,13 @@ def simulate(sims, seed, level, tq, resamples):
     rnd = random.Random(seed)
     print(f"## Simulated G3 readings: {sims} rows per line, 6 rounds of 2 repeats; (a) at two-sided {level:.0%} "
           f"pair intervals (BCa with {resamples} resamples), (b) at a one-sided {tq:.0%} t bound over rounds\n")
-    print("| true SEAM/S | call noise sd | round x arm sd | (a) BCa: fix first | (a) HL: fix first | (b): fix first | (b): inconclusive |")
-    print("|---|---|---|---|---|---|---|")
+    print("| true SEAM/S | call noise sd | round x arm sd | (a) BCa: fix first | (a) HL: fix first | (b): fix first | (b): inconclusive "
+          "| (b), fix first only if SEAM/S's lower bound > 1.00 |")
+    print("|---|---|---|---|---|---|---|---|")
     for ratio in (1.00, 1.05):
         for sd in (0.01, 0.02, 0.03, 0.05):
             for o in (0.0, 0.01, 0.02):
-                n_a = n_h = n_b = n_i = 0
+                n_a = n_h = n_b = n_i = n_v = 0
                 for _ in range(sims):
                     L = {"SPLIT": {}, "SEAM": {}, "SPLIT2": {}}
                     for r in range(6):
@@ -220,10 +226,11 @@ def simulate(sims, seed, level, tq, resamples):
                     ps, pn = paired(L, "SEAM", "SPLIT", level, resamples, rnd.randrange(1 << 30)), paired(L, "SPLIT2", "SPLIT", level, resamples, rnd.randrange(1 << 30))
                     n_a += designed(ps["bca_hi"], pn["bca_hi"])[0] == "fix first"
                     n_h += designed(ps["hl_hi"], pn["hl_hi"])[0] == "fix first"
-                    vb = proposed(by_round(L, "SEAM", "SPLIT", tq)["t_hi"], by_round(L, "SPLIT2", "SPLIT", tq)["t_hi"])
-                    n_b += vb == "fix first"; n_i += vb == "inconclusive: add rounds"
+                    sr = by_round(L, "SEAM", "SPLIT", tq)
+                    vb = proposed(sr["t_hi"], by_round(L, "SPLIT2", "SPLIT", tq)["t_hi"])
+                    n_b += vb == "fix first"; n_i += vb == "inconclusive: add rounds"; n_v += vb == "fix first" and sr["t_lo"] > 1.0
                 bca = f"{n_a / sims:.1%}" if sps is not None else "n/a"
-                print(f"| {ratio:.2f} | {sd:.2f} | {o:.2f} | {bca} | {n_h / sims:.1%} | {n_b / sims:.1%} | {n_i / sims:.1%} |")
+                print(f"| {ratio:.2f} | {sd:.2f} | {o:.2f} | {bca} | {n_h / sims:.1%} | {n_b / sims:.1%} | {n_i / sims:.1%} | {n_v / sims:.1%} |")
 
 
 def main():
@@ -306,12 +313,12 @@ def main():
     print(f"\n## G3 reading (b), proposed, needs Grant: rounds as the unit, a one-sided {a.t_level:.0%} t bound on per-round mean "
           f"log ratios; pass at 1.03, inconclusive when the null's own bound is above 1.03 ((a), as designed, is in the table above)"
           + ("" if sps is not None else " (no scipy: n/a)") + "\n")
-    print("| suite | case | layout | staging MB | rounds | SEAM/S by round [t bound] | S_b/S by round [t bound] "
+    print("| suite | case | layout | staging MB | rounds | SEAM/S by round [lower, upper t bound] | S_b/S by round [upper t bound] "
           "| null spread by round: sd of log, range | (b) proposed, needs Grant |")
     print("|---|---|---|---|---|---|---|---|---|")
     for r in rows:
         sr, nr = r["seam_r"], r["null_r"]
-        print(f"| {r['suite']} | {r['case']} | {r['layout']} | {r['staging']} | {sr['n']} | {sr['mean']:.3f} [{sr['t_hi']:.3f}] | "
+        print(f"| {r['suite']} | {r['case']} | {r['layout']} | {r['staging']} | {sr['n']} | {sr['mean']:.3f} [{sr['t_lo']:.3f}, {sr['t_hi']:.3f}] | "
               f"{nr['mean']:.3f} [{nr['t_hi']:.3f}] | {nr['sd']:.4f}, {nr['lo']:.3f}-{nr['hi']:.3f} | {r['proposed']} |")
     if skipped:
         print("\nLeft out:\n" + "\n".join(f"- {f}: {why}" for f, why in skipped))
@@ -320,11 +327,11 @@ def main():
             cols = ["suite", "case", "layout", "staging", "copied", "g"]
             stat = ["n", "median", "bca_lo", "bca_hi", "hl", "hl_lo", "hl_hi", "hl_conf"]
             fh.write("\t".join(cols + [f"seam_{k}" for k in stat] + [f"null_{k}" for k in stat]
-                               + ["gate", "check", "rounds", "t_seam", "t_null", "null_sd", "proposed", "fcpu_max", "gpu_busy_max", "seam_out"]
+                               + ["gate", "check", "rounds", "t_seam", "t_seam_lo", "t_null", "null_sd", "proposed", "fcpu_max", "gpu_busy_max", "seam_out"]
                                + [f"tl_{n.replace(' ', '_')}_med" for n in names]) + "\n")
             for r in rows:
                 vals = [str(r[c]) for c in cols] + [f"{r['seam'][k]:.6g}" for k in stat] + [f"{r['null'][k]:.6g}" for k in stat]
-                vals += [r["gate"][0], r["check"][0], str(r["seam_r"]["n"]), f"{r['seam_r']['t_hi']:.6g}", f"{r['null_r']['t_hi']:.6g}",
+                vals += [r["gate"][0], r["check"][0], str(r["seam_r"]["n"]), f"{r['seam_r']['t_hi']:.6g}", f"{r['seam_r']['t_lo']:.6g}", f"{r['null_r']['t_hi']:.6g}",
                          f"{r['null_r']['sd']:.6g}", r["proposed"], f"{r['fcpu']:.6g}", f"{r['gbusy']:.6g}", r["out"]] + [f"{statistics.median(r['tl'][n]):.6g}" if r["tl"][n] else "nan" for n in names]
                 fh.write("\t".join(vals) + "\n")
 

@@ -225,8 +225,45 @@ another, is a gate-line decision for Grant.
 - **(b) Proposed, needs Grant:** rounds as the unit, as Grant chose for G5. Per round, the mean over
   its repeats of log(`SEAM` ÷ `S<g>`) and of log(`S<g>b` ÷ `S<g>`); over the rounds a one-sided 95% t
   upper bound on each mean. "pass" if the seam's bound is 1.03 or less; else "inconclusive: add
-  rounds" if the null's own bound is above 1.03; else "fix first". Noise alone never gives "fix
-  first".
+  rounds" if the null's own bound is above 1.03; else "fix first". Noise can still give "fix first"
+  here, when the seam's bound passes 1.03 by chance and the null's does not, but less often than (a).
 
-Each row also gives the null spread by round: the sd of the null's per-round mean log ratios and the
-range of its per-round ratios.
+Each row also gives the seam's one-sided lower bound and the null spread by round: the sd of the
+null's per-round mean log ratios and the range of its per-round ratios.
+
+`g3.py --simulate --sims 400 --resamples 999` estimates how often each reading says "fix first" for a
+seam exactly as fast as the user split (a false alarm) and for one 5% slower, at G3's 6 rounds of 2
+repeats. Each call's log time has noise of sd 1-5%, and each arm in each round an offset of sd 0-2% (a
+round by arm effect, as position and drift give). The last column is a variant of (b) that says "fix
+first" only when the seam's one-sided 95% lower bound is also above 1.00 (else "inconclusive"); g3.py
+prints that lower bound for each row but does not apply the variant. Rates over 400 simulated rows
+(run 2026-11-12):
+
+| true SEAM/S | call noise sd | round x arm sd | (a) BCa: fix first | (a) HL: fix first | (b): fix first | (b): inconclusive | variant: fix first |
+|---|---|---|---|---|---|---|---|
+| 1.00 | 0.01 | 0.00 | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
+| 1.00 | 0.01 | 0.02 | 20.5% | 16.2% | 16.5% | 16.5% | 1.0% |
+| 1.00 | 0.02 | 0.00 | 11.8% | 9.8% | 5.8% | 1.0% | 1.2% |
+| 1.00 | 0.02 | 0.02 | 29.0% | 30.5% | 19.0% | 26.5% | 1.0% |
+| 1.00 | 0.03 | 0.00 | 35.2% | 37.0% | 21.0% | 17.0% | 2.8% |
+| 1.00 | 0.03 | 0.02 | 38.2% | 37.8% | 18.5% | 37.5% | 1.0% |
+| 1.00 | 0.05 | 0.00 | 43.2% | 42.5% | 17.0% | 44.5% | 1.0% |
+| 1.00 | 0.05 | 0.02 | 49.8% | 47.5% | 16.2% | 56.2% | 0.8% |
+| 1.05 | 0.01 | 0.00 | 100.0% | 100.0% | 100.0% | 0.0% | 100.0% |
+| 1.05 | 0.02 | 0.02 | 99.8% | 100.0% | 60.0% | 39.8% | 52.0% |
+| 1.05 | 0.03 | 0.02 | 98.0% | 99.0% | 51.2% | 47.8% | 38.8% |
+| 1.05 | 0.05 | 0.02 | 93.2% | 97.0% | 29.2% | 69.8% | 12.2% |
+
+(The run has every combination; these rows span it.) Above 1% call noise, (a) gives a false "fix
+first" for 10-50% of rows with a seam as fast as the user split, and (b) for 6-21%; the variant stays
+at 0.8-2.8%. (b) and the variant pay for that in "inconclusive" rows, which more rounds resolve: with
+a 5% slower seam and 3-5% noise they say "fix first" for 12-67% of rows and "inconclusive" for most of
+the rest. Across G3's 50 rows, any reading with a per-row false-alarm rate of a few percent expects at
+least one false "fix first"; whether G3 is judged per row or with a family rule is also Grant's call.
+
+The null spread in practice: in the round-2 smoke runs (2026-11-12 and -13, G3's settings, one case
+each) the user split against itself had a per-round sd of log ratios of 0.028-0.038 on a quiet
+machine (UM160 1×8, Z4096 4×2, RK160 4×2), and 0.043-0.131 while other sessions loaded it (2-7 cores
+and a GPU busy fraction of 0.13-0.17, which `g3.py` flags). At 0.03 and 6 rounds the null's one-sided
+bound sits about 2.5% above its mean (t = 2.015 over 6 rounds), so a null mean of 1.005 already puts it
+past 1.03: that is why (b) so often says "inconclusive" at that noise.
