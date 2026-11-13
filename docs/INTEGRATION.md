@@ -99,7 +99,8 @@ in-range data unchanged:
     [Exponent range](vv/LIMITATIONS.md#exponent-range)) or whose alpha or
     beta is NaN or Inf or has |Re| + |Im| beyond FP64's range. `AB_REPORT`
     counts such calls as `range` fallbacks. That bound is from above only:
-    an epilogue underflowing before alpha is not refused.
+    an epilogue underflowing before alpha is not refused, and its absolute
+    error term grows with alpha, up to (|Re alpha| + |Im alpha| + 2)·2⁻¹⁰⁷⁴.
 - **Native `ABMatrix` API.**
   - `ab_matrix_upload` gives each matrix one power-of-two scale, and
     `ab_matrix_download` removes it; the GPU operations carry it through.

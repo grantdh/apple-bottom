@@ -663,7 +663,9 @@ All notable changes to this project will be documented in this file.
     in [2⁻³⁹, 2⁴⁰) multiplies the stored values (L4);
   - no API limits K, and the closed-form bounds are stated for K ≤ 2²⁰ (L6,
     [Framing](docs/vv/LIMITATIONS.md#framing));
-  - the BLAS-ABI ZGEMM epilogue can underflow before alpha; BLAS-2 rounds its
+  - the BLAS-ABI ZGEMM epilogue can underflow before alpha, so its absolute
+    error term grows with alpha, up to (|Re alpha| + |Im alpha| + 2)·2⁻¹⁰⁷⁴;
+    BLAS-2 rounds its
     sum to FP64 before alpha, so a sum of about 2¹⁰²⁴ or more gives Inf or
     NaN even when |alpha| < 1 or beta·y would cancel alpha times the sum;
     and the FFT has FP32's exponent range (L9).

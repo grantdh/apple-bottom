@@ -384,7 +384,9 @@ const char* ab_status_string(ABStatus status);
 // is not the default (rounding, flush to zero, default NaN), on which the
 // host conversion's bits depend. ab_zgemm_blas's FP64 epilogue bound is from
 // above only: a part of the product scaled back below 2^-1022 loses bits
-// before alpha multiplies it (docs/vv/LIMITATIONS.md, Exponent range).
+// before alpha multiplies it, so the result's absolute error term grows with
+// alpha, up to (|Re alpha| + |Im alpha| + 2) 2^-1074 (docs/vv/LIMITATIONS.md,
+// Exponent range).
 void ab_dgemm_blas(char transA, char transB, int M, int N, int K,
                    double alpha, const double* A, int ldA,
                    const double* B, int ldB,
