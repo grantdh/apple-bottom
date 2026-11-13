@@ -114,7 +114,12 @@ static double median(const double *v, int n) {
 }
 static double envd(const char *name, double d) { const char *v = getenv(name); return v ? atof(v) : d; }
 static void sleep_s(double s) { usleep((useconds_t)(s * 1e6)); }
-static const char *on_off(const char *name) { const char *v = getenv(name); return v && *v && *v != '0' ? "on" : "off"; }   // as the library reads it
+// a profiler variable as the library reads it: AB_TRACE is on for any non-empty value (a trace path,
+// "0" included), the flags (AB_REPORT) for a non-empty value not starting with '0'
+static const char *on_off(const char *name) {
+    const char *v = getenv(name);
+    return v && *v && (!strcmp(name, "AB_TRACE") || *v != '0') ? "on" : "off";
+}
 static bool noreg(void) { return envd("SPLIT_NOREG", 0) != 0; }   // SPLIT_NOREG=1: the operands are not registered
 static void sh_line(const char *cmd, char *out, size_t n) {
     FILE *f = popen(cmd, "r"); out[0] = 0;
