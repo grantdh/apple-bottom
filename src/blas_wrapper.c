@@ -8,26 +8,34 @@
 #include <limits.h>
 #include <math.h>
 #include <dispatch/dispatch.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
 #include <sys/param.h>
 #include <Accelerate/Accelerate.h>
 #include <stdio.h>
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 #include "ab_internal.h"
 #include "blas_trans.h"
 #include "dispatch.h"
 #include "gpu_stage.h"
 #include "profiling/blas_profiler.h"
+#include "split_slice.h"
 
 // Thread-local record of the path the last BLAS-ABI call on this thread
 // actually took, for bench harnesses and the profiler (prof_end). Only the
-// two places that produce C write it: "cpu" in ab_internal_*gemm_cpu, "gpu"
-// once the GPU result is in C (H-P1-2). Routing (dispatch.c) never touches
+// places that produce the result write it: "cpu" in ab_internal_*gemm_cpu,
+// "gpu" once the GPU result is in C (H-P1-2), and the BLAS-2 entry points
+// through ab_internal_set_last_path(). Routing (dispatch.c) never touches
 // it. Zero runtime cost.
 static __thread const char *_ab_last_path = "none";
 const char* ab_get_last_dispatch_path(void) { return _ab_last_path; }
+
+void ab_internal_set_last_path(bool gpu) { _ab_last_path = gpu ? "gpu" : "cpu"; }
 
 // =============================================================================
 // Host-side helpers shared by the BLAS-ABI entry points
@@ -48,7 +56,9 @@ const char* ab_get_last_dispatch_path(void) { return _ab_last_path; }
 // sum of C_ij alike, so wherever no intermediate leaves FP32's normal range
 // either way, the bits are those of the unscaled computation; data whose
 // lines all lie inside the window runs exactly as before.
-#define AB_RANGE_WHY "values beyond double-float's exponent range, or NaN/Inf"
+#define AB_RANGE_WHY \
+    "values beyond double-float's exponent range, a ZGEMM epilogue that could overflow FP64, " \
+    "or NaN/Inf"
 
 bool ab_line_stats_init(ab_line_stats_t* s, int n, bool complex_parts) {
     s->n = n;
@@ -90,20 +100,25 @@ const int* ab_line_scales(ab_line_stats_t* s) {
     return any ? s->e : NULL;
 }
 
-// The exponent of nonzero line i's smallest scaled |x|.
+// The exponent of nonzero line i's smallest scaled |x| (a lower bound:
+// ab_hiword_min_ilogb).
 static inline int line_min_exp(const ab_line_stats_t* s, int i) {
-    return ab_hiword_ilogb(s->min[i]) - s->e[i];
+    return ab_hiword_min_ilogb(s->min[i]) - s->e[i];
+}
+
+// The exponent of nonzero line i's largest scaled |x|.
+static inline int line_max_exp(const ab_line_stats_t* s, int i) {
+    return ab_hiword_ilogb(s->max[i]) - s->e[i];
 }
 
 // Adds a complex element to a line's statistics: its parts' high words to
-// their maxima (rmx, imx), and the larger of them to the smallest (mn), as
-// AB_RANGE_ADD adds a real element's. The line's max follows from rmx and imx
-// (pack_op_complex_stats).
-#define LINE_ADD_COMPLEX(re, im, rmx, imx, mn) do {                \
-        uint32_t hr_ = ab_abs_hiword(re), hi_ = ab_abs_hiword(im); \
-        AB_HIWORD_MAX(hr_, rmx);                                   \
-        AB_HIWORD_MAX(hi_, imx);                                   \
-        AB_HIWORD_MIN(hr_ > hi_ ? hr_ : hi_, mn);                  \
+// their maxima (rmx, imx) and, each nonzero one, to the smallest (mn), as
+// AB_RANGE_ADD adds a real element's: the GPU multiplies the parts one by
+// one, so the guard's floors apply to each. The line's max follows from rmx
+// and imx (pack_op_complex_stats).
+#define LINE_ADD_COMPLEX(re, im, rmx, imx, mn) do { \
+        AB_RANGE_ADD(re, rmx, mn);                   \
+        AB_RANGE_ADD(im, imx, mn);                   \
     } while (0)
 
 // The range [*lo, *hi] of |Im x|/|Re x| over s's nonzero lines, each line's
@@ -153,9 +168,8 @@ static void pack_op_real_stats(enum CBLAS_TRANSPOSE t, const double* X, int ld,
                 const double* restrict x = X + j * l;
                 if (by_row && dst) {
                     for (size_t i = i0; i < i1; i++) {
-                        double v = x[i];
-                        dst[i * c + j] = v;
-                        AB_RANGE_ADD(v, mx[i], mn[i]);
+                        dst[i * c + j] = x[i];
+                        AB_RANGE_ADD(x[i], mx[i], mn[i]);
                     }
                 } else if (by_row) {
                     for (size_t i = i0; i < i1; i++) AB_RANGE_ADD(x[i], mx[i], mn[i]);
@@ -178,9 +192,8 @@ static void pack_op_real_stats(enum CBLAS_TRANSPOSE t, const double* X, int ld,
                 uint32_t lmx = mx[i], lmn = mn[i];
                 if (d) {
                     for (size_t j = 0; j < c; j++) {
-                        double v = x[j];
-                        d[j] = v;
-                        AB_RANGE_ADD(v, lmx, lmn);
+                        d[j] = x[j];
+                        AB_RANGE_ADD(x[j], lmx, lmn);
                     }
                 } else {
                     for (size_t j = 0; j < c; j++) AB_RANGE_ADD(x[j], lmx, lmn);
@@ -189,9 +202,8 @@ static void pack_op_real_stats(enum CBLAS_TRANSPOSE t, const double* X, int ld,
                 mn[i] = lmn;
             } else if (d) {
                 for (size_t j = 0; j < c; j++) {
-                    double v = x[j];
-                    d[j] = v;
-                    AB_RANGE_ADD(v, mx[j], mn[j]);
+                    d[j] = x[j];
+                    AB_RANGE_ADD(x[j], mx[j], mn[j]);
                 }
             } else {
                 for (size_t j = 0; j < c; j++) AB_RANGE_ADD(x[j], mx[j], mn[j]);
@@ -271,14 +283,15 @@ static void pack_op_complex_stats(enum CBLAS_TRANSPOSE t, const double complex* 
                 }
                 continue;
             }
+            // The statistics take the stored parts: the sign does not matter.
             double* restrict dr = re + i * c;
             double* restrict di = im + i * c;
             if (by_row) {
                 uint32_t lrx = rx[i], lix = ix[i], lmn = mn[i];
                 for (size_t j = 0; j < c; j++) {
-                    double vr = x[2 * j], vi = sign * x[2 * j + 1];
+                    double vr = x[2 * j], vi = x[2 * j + 1];
                     dr[j] = vr;
-                    di[j] = vi;
+                    di[j] = sign * vi;
                     LINE_ADD_COMPLEX(vr, vi, lrx, lix, lmn);
                 }
                 rx[i] = lrx;
@@ -286,9 +299,9 @@ static void pack_op_complex_stats(enum CBLAS_TRANSPOSE t, const double complex* 
                 mn[i] = lmn;
             } else {
                 for (size_t j = 0; j < c; j++) {
-                    double vr = x[2 * j], vi = sign * x[2 * j + 1];
+                    double vr = x[2 * j], vi = x[2 * j + 1];
                     dr[j] = vr;
-                    di[j] = vi;
+                    di[j] = sign * vi;
                     LINE_ADD_COMPLEX(vr, vi, rx[j], ix[j], mn[j]);
                 }
             }
@@ -306,15 +319,223 @@ void ab_line_stats_scan(const ab_op_view_t* v, bool by_row, ab_line_stats_t* s) 
         pack_op_real_stats(t, v->x, v->ld, v->rows, v->cols, NULL, by_row, s);
 }
 
+static inline size_t op_at(const ab_op_view_t* v, int i, int k) {
+    return v->trans ? (size_t)i * v->ld + k : (size_t)k * v->ld + i;
+}
+
+// |x[idx]|, or max(|Re|, |Im|) of the idx-th (re, im) pair if z.
+static inline double mag_at(const double* x, size_t idx, bool z) {
+    return z ? fmax(fabs(x[2 * idx]), fabs(x[2 * idx + 1])) : fabs(x[idx]);
+}
+
 // |op(X)_ik|, unscaled; max(|Re|, |Im|) for complex.
 static inline double op_mag(const ab_op_view_t* v, int i, int k) {
-    const size_t x = v->trans ? (size_t)i * v->ld + k : (size_t)k * v->ld + i;
-    if (!v->complex_pairs) return fabs(v->x[x]);
-    return fmax(fabs(v->x[2 * x]), fabs(v->x[2 * x + 1]));
+    return mag_at(v->x, op_at(v, i, k), v->complex_pairs);
+}
+
+// |Re op(X)_ik| and |Im op(X)_ik| (0 for real data), times 2^-e.
+static inline void op_parts(const ab_op_view_t* v, int i, int k, int e, double* re,
+                            double* im) {
+    const size_t x = op_at(v, i, k);
+    *re = ab_scale2(fabs(v->complex_pairs ? v->x[2 * x] : v->x[x]), -e);
+    *im = v->complex_pairs ? ab_scale2(fabs(v->x[2 * x + 1]), -e) : 0.0;
+}
+
+// The k of the first largest |op(X)_lk| (op_mag) along row l of op(X)
+// (by_row) or column l.
+static int line_argmax(const ab_op_view_t* v, int l, bool by_row) {
+    const int len = by_row ? v->cols : v->rows;
+    double best = -1.0;
+    int at = 0;
+    for (int k = 0; k < len; k++) {
+        double m = by_row ? op_mag(v, l, k) : op_mag(v, k, l);
+        if (m > best) { best = m; at = k; }
+    }
+    return at;
 }
 
 static inline int imax2(int a, int b) { return a > b ? a : b; }
 static inline int imin2(int a, int b) { return a < b ? a : b; }
+
+// -----------------------------------------------------------------------------
+// The guards' probe elements, fast
+// -----------------------------------------------------------------------------
+// Stage 2 of both guards looks through line_argmax's element of a line (its
+// probe element), held with its scaled parts in a line_probes_t. A line
+// stored contiguously is read in one pass (first_absmax); a line that runs
+// across the storage (a row of op(X) with trans false, a column with trans
+// true) is strided, so once at least 1/AB_SWEEP_SHARE of the lines are
+// wanted, one pass over the storage in order finds every line's
+// (sweep_argmax). Each picks the element line_argmax picks.
+#define AB_SWEEP_SHARE 8
+#define AB_ABSMAX_BLOCK 32      // doubles per block of first_absmax
+
+// The first t < n whose |x[t]| is the largest of x[0..n) (n > 0, no NaN):
+// one pass in blocks, keeping the first block whose largest beats every
+// block before it, then that block again for its first t. On (re, im)
+// pairs, t / 2 is the first element whose larger part is the largest: the
+// first largest op_mag. Comparisons and maxima treat |x| alike in every
+// floating-point mode, so this agrees with line_argmax under flush to zero
+// too.
+static size_t first_absmax(const double* x, size_t n) {
+    double best = -1.0;
+    size_t b0 = 0, b1 = 1, t = 0;
+#if defined(__aarch64__)
+    for (; t + AB_ABSMAX_BLOCK <= n; t += AB_ABSMAX_BLOCK) {
+        const double* p = x + t;
+        float64x2_t m0 = vabsq_f64(vld1q_f64(p)), m1 = vabsq_f64(vld1q_f64(p + 2));
+        float64x2_t m2 = vabsq_f64(vld1q_f64(p + 4)), m3 = vabsq_f64(vld1q_f64(p + 6));
+        for (int q = 8; q < AB_ABSMAX_BLOCK; q += 8) {
+            m0 = vmaxq_f64(m0, vabsq_f64(vld1q_f64(p + q)));
+            m1 = vmaxq_f64(m1, vabsq_f64(vld1q_f64(p + q + 2)));
+            m2 = vmaxq_f64(m2, vabsq_f64(vld1q_f64(p + q + 4)));
+            m3 = vmaxq_f64(m3, vabsq_f64(vld1q_f64(p + q + 6)));
+        }
+        double m = vmaxvq_f64(vmaxq_f64(vmaxq_f64(m0, m1), vmaxq_f64(m2, m3)));
+        if (m > best) { best = m; b0 = t; b1 = t + AB_ABSMAX_BLOCK; }
+    }
+#endif
+    for (; t < n; t++)
+        if (fabs(x[t]) > best) { best = fabs(x[t]); b0 = t; b1 = t + 1; }
+    for (t = b0; t + 1 < b1 && !(fabs(x[t]) == best); t++) {}
+    return t;
+}
+
+// line_argmax of a line stored contiguously: row l of op(X) if by_row (trans
+// true), else column l (trans false).
+static int contig_argmax(const ab_op_view_t* v, int l, bool by_row) {
+    const size_t w = v->complex_pairs ? 2 : 1;
+    const size_t len = (size_t)(by_row ? v->cols : v->rows);
+    return len ? (int)(first_absmax(v->x + w * (size_t)l * v->ld, w * len) / w) : 0;
+}
+
+#if defined(__aarch64__)
+// The magnitudes (mag_at) of the elements of lines j and j + 1 of a step,
+// p pointing at its first line's.
+static inline __attribute__((always_inline)) float64x2_t pair_mag(const double* p, int j, bool z) {
+    return z ? vpmaxq_f64(vabsq_f64(vld1q_f64(p + 2 * j)), vabsq_f64(vld1q_f64(p + 2 * j + 2)))
+             : vabsq_f64(vld1q_f64(p + j));
+}
+
+// One step of sweep_argmax: storage vectors k .. k + nq - 1 (nq <= 8; vector
+// q at v + q s) for lines l .. l + 7, whose largest so far and its k (a
+// double, exact) stay in registers across the vectors, taken in order of k
+// as the plain loop takes them. Four pairs of lines go side by side, so that
+// no step waits on another.
+static inline __attribute__((always_inline)) void sweep_step(const double* v, size_t s, int k,
+                                                            int nq, int l, bool z,
+                                                            double* restrict best,
+                                                            double* restrict at) {
+    const size_t w = z ? 2 : 1;
+    float64x2_t b0 = vld1q_f64(best + l), b1 = vld1q_f64(best + l + 2);
+    float64x2_t b2 = vld1q_f64(best + l + 4), b3 = vld1q_f64(best + l + 6);
+    float64x2_t a0 = vld1q_f64(at + l), a1 = vld1q_f64(at + l + 2);
+    float64x2_t a2 = vld1q_f64(at + l + 4), a3 = vld1q_f64(at + l + 6);
+    for (int q = 0; q < nq; q++) {
+        const double* p = v + q * s + w * (size_t)l;
+        const float64x2_t kq = vdupq_n_f64((double)(k + q));
+        const float64x2_t m0 = pair_mag(p, 0, z), m1 = pair_mag(p, 2, z);
+        const float64x2_t m2 = pair_mag(p, 4, z), m3 = pair_mag(p, 6, z);
+        const uint64x2_t g0 = vcgtq_f64(m0, b0), g1 = vcgtq_f64(m1, b1);
+        const uint64x2_t g2 = vcgtq_f64(m2, b2), g3 = vcgtq_f64(m3, b3);
+        b0 = vbslq_f64(g0, m0, b0); b1 = vbslq_f64(g1, m1, b1);
+        b2 = vbslq_f64(g2, m2, b2); b3 = vbslq_f64(g3, m3, b3);
+        a0 = vbslq_f64(g0, kq, a0); a1 = vbslq_f64(g1, kq, a1);
+        a2 = vbslq_f64(g2, kq, a2); a3 = vbslq_f64(g3, kq, a3);
+    }
+    vst1q_f64(best + l, b0); vst1q_f64(best + l + 2, b1);
+    vst1q_f64(best + l + 4, b2); vst1q_f64(best + l + 6, b3);
+    vst1q_f64(at + l, a0); vst1q_f64(at + l + 2, a1);
+    vst1q_f64(at + l + 4, a2); vst1q_f64(at + l + 6, a3);
+}
+#endif
+
+// arg[l] = line_argmax of every line l < L of an operand whose lines run
+// across its storage: element (l, k) at x[k ld + l] ((re, im) pairs if z),
+// k < len. One pass over the storage in order (8 vectors at a time), each
+// line keeping its first largest as line_argmax does. False if out of
+// memory.
+static bool sweep_argmax(const double* x, int ld, int L, int len, bool z, int* restrict arg) {
+    double* restrict best = malloc(2 * (size_t)L * sizeof *best);
+    if (!best) return false;
+    double* restrict at = best + L;
+    for (int l = 0; l < L; l++) { best[l] = -1.0; at[l] = 0.0; }
+    const size_t s = (z ? 2 : 1) * (size_t)ld;
+    for (int k = 0; k < len; k += 8) {
+        const int nq = imin2(8, len - k);       // storage vectors in this step
+        const double* v = x + (size_t)k * s;
+        int l = 0;
+#if defined(__aarch64__)
+        if (nq == 8 && z)
+            for (; l + 8 <= L; l += 8) sweep_step(v, s, k, 8, l, true, best, at);
+        else if (nq == 8)
+            for (; l + 8 <= L; l += 8) sweep_step(v, s, k, 8, l, false, best, at);
+        else if (z)
+            for (; l + 8 <= L; l += 8) sweep_step(v, s, k, nq, l, true, best, at);
+        else
+            for (; l + 8 <= L; l += 8) sweep_step(v, s, k, nq, l, false, best, at);
+#endif
+        for (; l < L; l++)
+            for (int q = 0; q < nq; q++) {
+                const double m = mag_at(v + q * s, (size_t)l, z);
+                if (m > best[l]) { best[l] = m; at[l] = k + q; }
+            }
+    }
+    for (int l = 0; l < L; l++) arg[l] = (int)at[l];
+    free(best);
+    return true;
+}
+
+// The probe elements of op(X)'s rows (by_row) or columns: each line's
+// line_argmax element and its parts scaled by the line's scale (op_parts),
+// found as they are asked for.
+typedef struct {
+    const ab_op_view_t* v;
+    const int* e;           // the lines' scale exponents
+    bool by_row, strided;
+    int n, len, asked;      // asked: lines asked for before their k was known
+    int* k;                 // line_argmax, -1 until found
+    double* part;           // its scaled (re, im); re -1 until worked out
+} line_probes_t;
+
+static bool probes_init(line_probes_t* p, const ab_op_view_t* v, const int* e, bool by_row) {
+    *p = (line_probes_t){.v = v, .e = e, .by_row = by_row, .strided = by_row != v->trans,
+                         .n = by_row ? v->rows : v->cols, .len = by_row ? v->cols : v->rows};
+    const size_t n1 = (size_t)imax2(p->n, 1);
+    p->k = malloc(n1 * sizeof *p->k);
+    p->part = malloc(2 * n1 * sizeof *p->part);
+    if (!p->k || !p->part) return false;
+    for (int l = 0; l < p->n; l++) { p->k[l] = -1; p->part[2 * l] = -1.0; }
+    return true;
+}
+
+static void probes_free(line_probes_t* p) { free(p->k); free(p->part); }
+
+// For strided lines, when `wanted` of them are or will be asked for: every
+// line's k by one sweep if that is at least 1/AB_SWEEP_SHARE of them.
+static void probes_expect(line_probes_t* p, int wanted) {
+    if (p->strided && (size_t)AB_SWEEP_SHARE * (size_t)wanted >= (size_t)p->n)
+        sweep_argmax(p->v->x, p->v->ld, p->n, p->len, p->v->complex_pairs, p->k);
+}
+
+// Line l's line_argmax.
+static int probe_k(line_probes_t* p, int l) {
+    if (p->k[l] < 0) probes_expect(p, ++p->asked);
+    if (p->k[l] < 0)
+        p->k[l] = p->strided ? line_argmax(p->v, l, p->by_row) : contig_argmax(p->v, l, p->by_row);
+    return p->k[l];
+}
+
+// The scaled parts (re, im) of line l's probe element.
+static const double* probe_parts(line_probes_t* p, int l) {
+    double* q = p->part + 2 * (size_t)l;
+    if (q[0] < 0.0) {
+        const int k = probe_k(p, l);
+        if (p->by_row) op_parts(p->v, l, k, p->e[l], &q[0], &q[1]);
+        else op_parts(p->v, k, l, p->e[l], &q[0], &q[1]);
+    }
+    return q;
+}
 
 // The exponents of the largest scaled |x| over s's lines (*hi; INT_MIN if all
 // are zero) and of the smallest nonzero one (*lo); false if a line has NaN or
@@ -325,7 +546,7 @@ static bool lines_extremes(const ab_line_stats_t* s, int* hi, int* lo) {
     for (int i = 0; i < s->n; i++) {
         if (s->max[i] >= AB_HIWORD_NONFINITE) return false;
         if (s->max[i] == 0) continue;
-        *hi = imax2(*hi, ab_hiword_ilogb(s->max[i]) - s->e[i]);
+        *hi = imax2(*hi, line_max_exp(s, i));
         *lo = imin2(*lo, line_min_exp(s, i));
     }
     return true;
@@ -339,14 +560,26 @@ static inline int stage1_floor(int alpha_exp) { return AB_PRODUCT_MIN_EXP - imin
 // FP32's range in every C_ij, times a scalar below 2^(alpha_exp + 1):
 //   - Overflow: the largest scaled magnitudes bound every product and sum.
 //   - Stage 1: every nonzero scaled product is at least 2^AB_PRODUCT_MIN_EXP,
-//     by the smallest nonzero magnitudes of the lines.
+//     by the smallest nonzero magnitudes of the lines, and every nonzero
+//     scaled entry at least 2^AB_ENTRY_MIN_EXP: below that an entry's FP32
+//     low part can be subnormal, which the GPU reads as zero.
 //   - Stage 2 (ab_range_guard), for the pairs of lines stage 1 cannot tell
 //     about (lines whose magnitudes span many binades): C_ij's scaled
 //     |op(A)||op(B)| sum is at least |A'_ik| |B'_kj| for k = the column of
 //     row i's largest |A'| and for k = the row of column j's largest |B'|;
 //     one of the two must reach K * 2^AB_PRODUCT_MIN_EXP, so that the at most
 //     K flushed parts below 2^-126 (about 2^-48 of 2^AB_PRODUCT_MIN_EXP) stay
-//     at DD's rounding level.
+//     at DD's rounding level. A row with an entry below 2^AB_ENTRY_MIN_EXP
+//     loses less than 2^-126 |B'_kj| per term (the entry's low part, or the
+//     whole entry, read as zero), at most K 2^-126 max_k |B'_kj| in C_ij
+//     (twice that for complex parts); the same lower bound on C_ij's sum must
+//     cover 2^48 times that, for every column j. Columns likewise.
+// Complex data is held to all of this part by part, as the GPU multiplies
+// the parts: stage 1 by each line's smallest nonzero part, and stage 2 in
+// each part of C_ij that has products, through the same two elements, in
+// that part's own scale: |Ar||Br| + |Ai||Bi| for the real part, |Ar||Bi| +
+// |Ai||Br| for the imaginary part (by 4M, each part's error is bounded in its
+// own scale, and a small part's losses would hide in a larger one's).
 // Rows of op(A) and columns of op(B) that are zero, and C_ij with nonzero
 // lines whose terms all vanish, are exact. Pairs with disjoint supports that
 // stage 1 passes are not checked further (their C_ij is 0 either way).
@@ -360,111 +593,297 @@ ab_guard_t ab_range_guard_stage1(int K, const ab_line_stats_t* sa, const ab_line
     // magnitudes' product; alpha's scalar is below 2^(alpha_exp + 1).
     int headroom = (complex_products ? 2 : 0) + 2 + ilogb((double)K) + 1 + alpha_exp + 1;
     if (amax + bmax + headroom > AB_SUM_MAX_EXP) return AB_GUARD_REJECT;
-    return amin + bmin >= stage1_floor(alpha_exp) ? AB_GUARD_CERTIFIED : AB_GUARD_STAGE2;
+    return amin + bmin >= stage1_floor(alpha_exp) && amin >= AB_ENTRY_MIN_EXP &&
+           bmin >= AB_ENTRY_MIN_EXP ? AB_GUARD_CERTIFIED : AB_GUARD_STAGE2;
+}
+
+// The scales of C_ij's parts through one k, from the scaled parts of op(A)_ik
+// (ar, ai) and op(B)_kj (br, bi): |Ar||Br| + |Ai||Bi| (*re; for real data the
+// product's magnitude) and |Ar||Bi| + |Ai||Br| (*im). With -ffp-contract=on
+// clang may fuse one product of each sum. The per-pair comparisons have no
+// slack, so for complex data a decision near a tie, where the guard's threshold
+// (pair_need) lies between the fused and unfused roundings of *re or *im, can
+// depend on that fusion (docs/vv/LIMITATIONS.md, "Host FP64 code is
+// contracted"). For real data ai = bi = 0, and both forms agree.
+static inline void k_part_scales(double ar, double ai, double br, double bi, double* re,
+                                 double* im) {
+    *re = ar * br + ai * bi;
+    *im = ar * bi + ai * br;
+}
+
+// A line's parts with nonzero values: bit 0 real, bit 1 imaginary (real
+// data has only the real part). A part of C_ij has products unless every
+// part of row i and column j that it multiplies is zero (it is then exactly
+// zero): the real part where rp & cp (parts_meet_re), the imaginary part
+// where rp meets cp's parts swapped (parts_meet_im).
+static inline unsigned line_parts(const ab_line_stats_t* s, int i, bool z) {
+    return z ? (unsigned)(s->rmax[i] != 0) | (unsigned)(s->imax[i] != 0) << 1 : 1u;
+}
+static inline bool parts_meet_re(unsigned rp, unsigned cp) { return (rp & cp) != 0; }
+static inline bool parts_meet_im(unsigned rp, unsigned cp) {
+    return (rp & ((cp & 1u) << 1 | (cp & 2u) >> 1)) != 0;
+}
+
+// A row bound passes only with this much to spare: whatever rounding (or
+// contraction) the pairs' sums take, theirs then reach it too.
+#define AB_ROW_BOUND_SLACK (1.0 - 0x1p-40)
+
+// A line's entry term of the need: K' 2^-78 times its largest scaled entry
+// (K' = K, or 2K for complex parts), which each pair of it with a line of
+// the other operand below the entry floor must reach (ab_scale2 rounds as
+// ldexp does, inline).
+static inline double entry_term(const ab_line_stats_t* s, int i, double entry_k) {
+    return ab_scale2(entry_k, AB_ENTRY_MIN_EXP + line_max_exp(s, i) + 1);
+}
+
+// What C_ij's sum must reach, from row i's and column j's smallest scaled
+// exponents (rm, cm) and entry terms: the product floor where rm + cm < lo,
+// and where a line is below the entry floor, the other line's entry term; 0
+// if neither. It falls as cm grows and grows with cterm, so over a set of
+// columns it is largest at their smallest cm and largest cterm.
+static inline double pair_need(int rm, int cm, double rterm, double cterm, int lo,
+                               double floor_ij) {
+    double need = rm + cm < lo ? floor_ij : 0.0;
+    if (rm < AB_ENTRY_MIN_EXP) need = fmax(need, cterm);
+    if (cm < AB_ENTRY_MIN_EXP) need = fmax(need, rterm);
+    return need;
+}
+
+// A row of op(A) and a column of op(B) of stage 2: the line, its smallest
+// scaled exponent, its parts (line_parts) and its entry term; for a row,
+// also its largest need over the columns.
+typedef struct {
+    int i, m;
+    unsigned parts;
+    double term, nmax;
+} stage2_row_t;
+
+typedef struct {
+    int j, m;
+    unsigned parts;
+    double term;
+} stage2_col_t;
+
+// Stage 2 of ab_range_guard; identical in its decision to the plain loop it
+// replaces: every pair (i, j) of a row and a column with a need checks each
+// part with products against that need through row i's line_argmax element
+// k, and where that falls short through column j's. Faster in three ways:
+// the probe elements come from first_absmax and sweep_argmax (column j's
+// only when a pair asks for it); the need's terms of each line are worked
+// out once; and the rows go in groups by k, so that op(B)'s row k (its
+// scaled parts in the columns) is gathered once per group, and a row whose
+// probe element times the smallest parts of that row clears the row's
+// largest need, with AB_ROW_BOUND_SLACK to spare, passes all its pairs
+// without looking at them (sums of products of nonnegative numbers grow
+// with each factor).
+static bool range_guard_stage2(int K, const ab_line_stats_t* sa, const ab_line_stats_t* sb,
+                               int alpha_exp, const ab_op_view_t* a, const ab_op_view_t* b) {
+    const int M = sa->n, N = sb->n, lo = stage1_floor(alpha_exp), E = AB_ENTRY_MIN_EXP;
+    const bool z = a->complex_pairs;
+    int amax, amin, bmax, bmin;
+    lines_extremes(sa, &amax, &amin);
+    lines_extremes(sb, &bmax, &bmin);
+    const double floor_ij = fmax(ldexp((double)K, AB_PRODUCT_MIN_EXP),
+                                 ldexp(1.0, AB_PRODUCT_MIN_EXP - alpha_exp));
+    const double entry_k = (double)K * (z ? 2 : 1);
+    // Lines with an entry below the entry floor pair with every line of the
+    // other operand, so then every nonzero line is examined.
+    const bool entry_a = amin < E, entry_b = bmin < E;
+    const size_t m1 = (size_t)imax2(M, 1), n1 = (size_t)imax2(N, 1);
+    stage2_row_t* rows = malloc(m1 * sizeof *rows);
+    stage2_col_t* cols = malloc(n1 * sizeof *cols);
+    int* order = malloc(m1 * sizeof *order);
+    int* first = calloc((size_t)K + 2, sizeof *first);
+    double* tab = malloc(2 * n1 * sizeof *tab);
+    line_probes_t pa = {0}, pb = {0};
+    bool ok = rows && cols && order && first && tab && probes_init(&pa, a, sa->e, true) &&
+              probes_init(&pb, b, sb->e, false);
+    if (!ok) goto done;
+
+    // The columns; over them, the smallest exponent, the largest entry term
+    // and the parts present.
+    int nc = 0, cmin = INT_MAX;
+    double cterm = 0.0;
+    unsigned cparts = 0;
+    for (int j = 0; j < N; j++) {
+        if (sb->max[j] == 0) continue;
+        const int m = line_min_exp(sb, j);
+        if (!(entry_a || m + amin < lo || m < E)) continue;
+        cols[nc] = (stage2_col_t){.j = j, .m = m, .parts = line_parts(sb, j, z),
+                                  .term = entry_term(sb, j, entry_k)};
+        cmin = imin2(cmin, m);
+        cterm = fmax(cterm, cols[nc].term);
+        cparts |= cols[nc].parts;
+        nc++;
+    }
+    // The rows with a pair that has a need.
+    int nr = 0;
+    for (int i = 0; nc > 0 && i < M; i++) {
+        if (sa->max[i] == 0) continue;
+        const int m = line_min_exp(sa, i);
+        if (!(entry_b || m + bmin < lo || m < E)) continue;
+        const double term = entry_term(sa, i, entry_k);
+        const double nmax = pair_need(m, cmin, term, cterm, lo, floor_ij);
+        if (nmax > 0.0)
+            rows[nr++] = (stage2_row_t){.i = i, .m = m, .parts = line_parts(sa, i, z),
+                                        .term = term, .nmax = nmax};
+    }
+    // Each row's probe element, and the rows in groups by its k (a counting
+    // sort): first[k] .. first[k + 1] index group k's rows in order. Their
+    // parts are read in the groups, whose rows go in order of i: after a
+    // sweep, along the storage.
+    probes_expect(&pa, nr);
+    for (int r = 0; r < nr; r++) first[probe_k(&pa, rows[r].i) + 2]++;
+    for (int k = 0; k < K; k++) first[k + 2] += first[k + 1];
+    for (int r = 0; r < nr; r++) order[first[pa.k[rows[r].i] + 1]++] = r;
+
+    for (int k = 0; k < K; k++) {
+        if (first[k] == first[k + 1]) continue;
+        // op(B)'s row k in the columns, scaled, and its smallest parts
+        double tr = INFINITY, ti = INFINITY;
+        for (int c = 0; c < nc; c++) {
+            op_parts(b, k, cols[c].j, sb->e[cols[c].j], &tab[2 * c], &tab[2 * c + 1]);
+            tr = fmin(tr, tab[2 * c]);
+            ti = fmin(ti, tab[2 * c + 1]);
+        }
+        for (int q = first[k]; q < first[k + 1]; q++) {
+            const stage2_row_t* row = &rows[order[q]];
+            const double* ap = probe_parts(&pa, row->i);
+            double re, im;
+            k_part_scales(ap[0], ap[1], tr, ti, &re, &im);
+            if ((!parts_meet_re(row->parts, cparts) || re * AB_ROW_BOUND_SLACK >= row->nmax) &&
+                (!parts_meet_im(row->parts, cparts) || im * AB_ROW_BOUND_SLACK >= row->nmax))
+                continue;
+            for (int c = 0; c < nc; c++) {
+                const stage2_col_t* col = &cols[c];
+                const double need = pair_need(row->m, col->m, row->term, col->term, lo, floor_ij);
+                if (need == 0.0) continue;
+                // each part with products must reach it, through row i's
+                // largest element or, where that falls short, column j's
+                const double nre = parts_meet_re(row->parts, col->parts) ? need : 0.0;
+                const double nim = parts_meet_im(row->parts, col->parts) ? need : 0.0;
+                k_part_scales(ap[0], ap[1], tab[2 * c], tab[2 * c + 1], &re, &im);
+                if (re >= nre && im >= nim) continue;
+                const double* bp = probe_parts(&pb, col->j);
+                double ar, ai, re2, im2;
+                op_parts(a, row->i, pb.k[col->j], sa->e[row->i], &ar, &ai);
+                k_part_scales(ar, ai, bp[0], bp[1], &re2, &im2);
+                if (!(fmax(re, re2) >= nre && fmax(im, im2) >= nim)) {
+                    ok = false;
+                    goto done;
+                }
+            }
+        }
+    }
+done:
+    free(rows); free(cols); free(order); free(first); free(tab);
+    probes_free(&pa); probes_free(&pb);
+    return ok;
 }
 
 bool ab_range_guard(int K, const ab_line_stats_t* sa, const ab_line_stats_t* sb, int alpha_exp,
                     const ab_op_view_t* a, const ab_op_view_t* b) {
     ab_guard_t g = ab_range_guard_stage1(K, sa, sb, alpha_exp, a->complex_pairs);
     if (g != AB_GUARD_STAGE2) return g == AB_GUARD_CERTIFIED;
-
     // Stage 2, on the operands as scaled, for the rows and columns with a
-    // partner that stage 1 does not pass: the column of each such row's
-    // largest element, the row of each such column's, then the pairs.
-    const int M = sa->n, N = sb->n, lo = stage1_floor(alpha_exp);
-    int amax, amin, bmax, bmin;
-    lines_extremes(sa, &amax, &amin);
-    lines_extremes(sb, &bmax, &bmin);
-    const double floor_ij = fmax(ldexp((double)K, AB_PRODUCT_MIN_EXP),
-                                 ldexp(1.0, AB_PRODUCT_MIN_EXP - alpha_exp));
-    int *rows = malloc((size_t)M * sizeof *rows), *ka = malloc((size_t)M * sizeof *ka);
-    int *cols = malloc((size_t)N * sizeof *cols), *kb = malloc((size_t)N * sizeof *kb);
-    double *av = malloc((size_t)M * sizeof *av), *bv = malloc((size_t)N * sizeof *bv);
-    bool ok = rows && ka && cols && kb && av && bv;
-    int nr = 0, nc = 0;
-    for (int i = 0; ok && i < M; i++)
-        if (sa->max[i] != 0 && line_min_exp(sa, i) + bmin < lo) rows[nr++] = i;
-    for (int j = 0; ok && j < N; j++)
-        if (sb->max[j] != 0 && line_min_exp(sb, j) + amin < lo) cols[nc++] = j;
-    for (int r = 0; r < nr; r++) {
-        double best = -1.0;
-        for (int k = 0; k < K; k++) {
-            double m = op_mag(a, rows[r], k);
-            if (m > best) { best = m; ka[r] = k; }
-        }
-        av[r] = ldexp(best, -sa->e[rows[r]]);
-    }
-    for (int c = 0; c < nc; c++) {
-        double best = -1.0;
-        for (int k = 0; k < K; k++) {
-            double m = op_mag(b, k, cols[c]);
-            if (m > best) { best = m; kb[c] = k; }
-        }
-        bv[c] = ldexp(best, -sb->e[cols[c]]);
-    }
-    for (int r = 0; ok && r < nr; r++) {
-        const int i = rows[r];
-        for (int c = 0; ok && c < nc; c++) {
-            const int j = cols[c];
-            if (line_min_exp(sa, i) + line_min_exp(sb, j) >= lo) continue;
-            ok = av[r] * ldexp(op_mag(b, ka[r], j), -sb->e[j]) >= floor_ij ||
-                 ldexp(op_mag(a, i, kb[c]), -sa->e[i]) * bv[c] >= floor_ij;
-        }
-    }
-    free(rows); free(ka); free(cols); free(kb); free(av); free(bv);
-    return ok;
+    // partner that stage 1 does not pass.
+    return range_guard_stage2(K, sa, sb, alpha_exp, a, b);
+}
+
+// Whether a nonzero C' of exponent c_exp, times a beta' of exponent
+// beta_exp, keeps its full DD precision: C' itself must reach the entry
+// floor (below it its FP32 low word can be subnormal, which the GPU reads as
+// zero) and beta' C' the product floor.
+static inline bool c_floors_hold(int c_exp, int beta_exp) {
+    return c_exp >= AB_ENTRY_MIN_EXP && c_exp + beta_exp >= AB_PRODUCT_MIN_EXP;
 }
 
 // The DGEMM's beta' C', with C' the C scaled as uploaded (r: the range of its
-// values) and |beta'| below 2^(beta_exp + 1), must stay in FP32's range and,
-// where the product part of C_ij is 0 for want of products (a zero row of
-// op(A) or column of op(B)), keep its full DD precision. Elsewhere a C' far
-// below the product part only rounds away, as it would in FP64.
-ab_guard_t ab_range_guard_c_stage1(const ab_line_stats_t* sa, const ab_line_stats_t* sb,
-                                   ab_range_t r, int beta_exp) {
+// values) and beta' the nonzero scalar the GPU multiplies it by, must stay in
+// FP32's range and keep its full DD precision wherever it is all of C_ij.
+// Stage 1 certifies C when every nonzero C' meets c_floors_hold; otherwise
+// stage 2 (ab_range_guard_c) checks the C'_ij below the floors.
+ab_guard_t ab_range_guard_c_stage1(ab_range_t r, double beta) {
     if (ab_range_nonfinite(r)) return AB_GUARD_REJECT;
     if (r.max == 0) return AB_GUARD_CERTIFIED;
+    const int beta_exp = ilogb(beta);
     // C' is stored in DD before beta' multiplies it, and beta' C' joins the sums.
     if (ab_hiword_ilogb(r.max) + imax2(beta_exp, 0) + 1 > AB_SUM_MAX_EXP) return AB_GUARD_REJECT;
-    if (ab_hiword_ilogb(r.min) + beta_exp >= AB_PRODUCT_MIN_EXP) return AB_GUARD_CERTIFIED;
-    for (int i = 0; i < sa->n; i++) if (sa->max[i] == 0) return AB_GUARD_STAGE2;
-    for (int j = 0; j < sb->n; j++) if (sb->max[j] == 0) return AB_GUARD_STAGE2;
-    return AB_GUARD_CERTIFIED;
+    return c_floors_hold(ab_hiword_min_ilogb(r.min), beta_exp) ? AB_GUARD_CERTIFIED
+                                                               : AB_GUARD_STAGE2;
 }
 
-// Whether beta' times C'_ij = C_ij 2^-e keeps full DD precision.
-static inline bool c_entry_ok(double c, int e, int beta_exp) {
-    double v = ldexp(fabs(c), -e);
-    return v == 0.0 || ilogb(v) + beta_exp >= AB_PRODUCT_MIN_EXP;
-}
-
+// Stage 2: a C'_ij below the floors loses less than (|beta'| + 4) 2^-126 (its
+// own low word or all of it, and the flushed parts of beta' C'), within u^2
+// of a product of its entry that alpha' brings to 2^AB_PRODUCT_MIN_EXP
+// max(1, |beta'|). As ab_range_guard's stage 2, it looks through the largest
+// element of row i and that of column j: alpha' A'_ik B'_kj at k = either
+// one's must reach that, which a zero row or column rules out, and so do a
+// row's and a column's supports that miss each other (beta' C'_ij is then all
+// of C_ij); else the call runs on Accelerate.
 bool ab_range_guard_c(const ab_line_stats_t* sa, const ab_line_stats_t* sb, ab_range_t r,
-                      int beta_exp, const double* C, int ldC, int shift) {
-    ab_guard_t g = ab_range_guard_c_stage1(sa, sb, r, beta_exp);
+                      double alpha, double beta, const double* C, int ldC, int shift,
+                      const ab_op_view_t* a, const ab_op_view_t* b) {
+    ab_guard_t g = ab_range_guard_c_stage1(r, beta);
     if (g != AB_GUARD_STAGE2) return g == AB_GUARD_CERTIFIED;
-    const int M = sa->n, N = sb->n;
-    for (int i = 0; i < M; i++)
-        if (sa->max[i] == 0)
-            for (int j = 0; j < N; j++)
-                if (!c_entry_ok(C[(size_t)j * ldC + i], sa->e[i] + sb->e[j] + shift, beta_exp))
-                    return false;
-    for (int j = 0; j < N; j++)
-        if (sb->max[j] == 0)
-            for (int i = 0; i < M; i++)
-                if (!c_entry_ok(C[(size_t)j * ldC + i], sa->e[i] + sb->e[j] + shift, beta_exp))
-                    return false;
-    return true;
+    const int M = sa->n, N = sb->n, beta_exp = ilogb(beta);
+    const double need = ldexp(fmax(1.0, fabs(beta)), AB_PRODUCT_MIN_EXP), al = fabs(alpha);
+    // The probe elements, found as needed (probe_k sweeps once a share of
+    // strided lines has been asked for). The data are real, so a probe's
+    // scaled magnitude is its scaled real part.
+    line_probes_t pa = {0}, pb = {0};
+    bool ok = probes_init(&pa, a, sa->e, true) && probes_init(&pb, b, sb->e, false);
+    for (int j = 0; ok && j < N; j++)
+        for (int i = 0; ok && i < M; i++) {
+            const double c = C[(size_t)j * ldC + i];
+            const int e = sa->e[i] + sb->e[j] + shift;   // C'_ij = c 2^-e
+            if (c == 0.0 || c_floors_hold(ab_hiword_ilogb(ab_abs_hiword(c)) - e, beta_exp))
+                continue;
+            if (sa->max[i] == 0 || sb->max[j] == 0) { ok = false; break; }
+            const double av = probe_parts(&pa, i)[0];
+            ok = al * av * ab_scale2(op_mag(b, pa.k[i], j), -sb->e[j]) >= need;
+            if (ok) continue;
+            const double bv = probe_parts(&pb, j)[0];
+            ok = al * ab_scale2(op_mag(a, i, pb.k[j]), -sa->e[i]) * bv >= need;
+        }
+    probes_free(&pa);
+    probes_free(&pb);
+    return ok;
+}
+
+bool ab_zgemm_product_fits(int K, uint32_t a_max, uint32_t b_max, double alpha_re,
+                           double alpha_im) {
+    const double al = fabs(alpha_re) + fabs(alpha_im);
+    if (!isfinite(al) || a_max >= AB_HIWORD_NONFINITE || b_max >= AB_HIWORD_NONFINITE) return false;
+    if (a_max == 0 || b_max == 0) return true;          // P is zero
+    const int e = ab_hiword_ilogb(a_max) + ab_hiword_ilogb(b_max) + ilogb((double)K) + 5;
+    return e <= AB_EPI_MAX_EXP + 1 && ldexp(al, e) <= ab_pow2(AB_EPI_MAX_EXP);
+}
+
+bool ab_zgemm_c_fits(double beta_re, double beta_im, uint32_t c_max) {
+    const double bl = fabs(beta_re) + fabs(beta_im);
+    if (bl == 0.0) return true;                         // C is not read
+    if (!isfinite(bl) || c_max >= AB_HIWORD_NONFINITE) return false;
+    return c_max == 0 || ldexp(bl, ab_hiword_ilogb(c_max) + 1) <= ab_pow2(AB_EPI_MAX_EXP);
 }
 
 // The gate of dgemm_blas and zgemm_blas (dispatch.h): Accelerate where the
 // routing says so, and for the BLAS quick return for alpha == 0 (A and B must
 // not be read) and invalid arguments.
-bool ab_internal_blas_routes_gpu(char routine, char transA, char transB, int M, int N, int K,
-                                 int ldA, int ldB, int ldC, bool alpha_nonzero) {
+// The same under a configuration the caller already holds (dgemm_blas and
+// zgemm_blas fetch it once per call).
+static bool blas_routes_gpu(const ab_dispatch_config_t *cfg, char routine, char transA, char transB,
+                            int M, int N, int K, int ldA, int ldB, int ldC, bool alpha_nonzero) {
     bool z = routine == 'z';
     return ab_blas_args_valid(ab_blas_trans(transA, z), ab_blas_trans(transB, z),
                               M, N, K, ldA, ldB, ldC) &&
-           alpha_nonzero && ab_dispatch_route_gpu(routine, transA, transB, M, N, K);
+           alpha_nonzero && ab_dispatch_gpu(cfg, routine, transA, transB, M, N, K);
+}
+
+bool ab_internal_blas_routes_gpu(char routine, char transA, char transB, int M, int N, int K,
+                                 int ldA, int ldB, int ldC, bool alpha_nonzero) {
+    return blas_routes_gpu(ab_dispatch_process_config(), routine, transA, transB, M, N, K, ldA, ldB,
+                           ldC, alpha_nonzero);
 }
 
 // Whole-call CPU paths (Accelerate cblas, column-major). Used for calls the
@@ -503,6 +922,7 @@ typedef struct {
     ab_prof_staged_t staged;                   // whether it kept the staged result, or why not
     bool trace;                                // AB_TRACE: write the call's trace line
     ab_trace_call_t call;                      // its arguments, hashes and kernel split
+    ab_prof_split_t split;                     // AB_SPLIT: the call's row and split (row -1: none)
 } CallProf;
 
 static CallProf *prof_begin(CallProf *p) {
@@ -510,6 +930,7 @@ static CallProf *prof_begin(CallProf *p) {
     memset(p, 0, sizeof *p);
     p->fallback = AB_PROF_FB_NONE;
     p->staged = AB_PROF_STAGED_NONE;
+    p->split.row = -1;
     p->trace = ab_trace_enabled();
     p->t0 = p->mark = ab_prof_now_ticks();
     (void)ab_internal_take_gpu_seconds(NULL); // drop GPU time of earlier native-API calls
@@ -517,10 +938,7 @@ static CallProf *prof_begin(CallProf *p) {
 }
 
 static void prof_stage(CallProf *p, ab_prof_stage_t s) {
-    if (!p) return;
-    uint64_t now = ab_prof_now_ticks();
-    p->stage_ns[s] += ab_prof_ticks_to_ns(now - p->mark);
-    p->mark = now;
+    if (p) ab_prof_stage_mark(p->stage_ns, &p->mark, s);
 }
 
 // The kernel stage (ab_prof_take_kernel_ns); the rest of the kernel call is
@@ -535,31 +953,25 @@ static void prof_kernel(CallProf *p) {
 }
 
 // Records the finished call; under AB_PROFILE also prints the stages of a GPU
-// call, under AB_TRACE writes its trace line.
+// call, under AB_TRACE writes its trace line. A call an AB_SPLIT row covered
+// is also recorded by its row; a split call whose GPU part stood is recorded
+// as a split call only, one whose GPU part was made again on Accelerate as a
+// CPU call with that fallback.
 static void prof_end(CallProf *p, const char *routine, int M, int N, int K) {
     if (!p) return;
-    uint64_t ns = ab_prof_ticks_to_ns(ab_prof_now_ticks() - p->t0);
+    uint64_t t1 = ab_prof_now_ticks(), ns = ab_prof_span_ns(p->t0, t1);   // its trace line's t1_ns - t0_ns
     bool gpu = !strcmp(_ab_last_path, "gpu");
-    ab_prof_record(routine, ns, M > 0 ? (size_t)M : 0, N > 0 ? (size_t)N : 0,
-                   K > 0 ? (size_t)K : 0, gpu, gpu ? p->stage_ns : NULL, p->fallback, p->staged);
-    if (p->trace)
-        ab_trace_record(&p->call, ab_prof_ticks_to_ns(p->t0), ns, gpu ? p->stage_ns : NULL,
-                        p->fallback, p->staged);
-    if (!gpu || !ab_prof_verbose()) return;
-    // One write per line, so lines from concurrent callers do not interleave.
-    char line[512];
-    size_t n = (size_t)snprintf(line, sizeof line, "AB_PROFILE %s M=%d N=%d K=%d ", routine, M, N, K);
-    uint64_t named = 0;
-    for (int s = 0; s < AB_PROF_STAGE_COUNT && n < sizeof line; s++) {
-        named += p->stage_ns[s];
-        n += (size_t)snprintf(line + n, sizeof line - n, " %s=%.3f", ab_prof_stage_names[s],
-                              p->stage_ns[s] / 1e6);
-    }
-    if (n < sizeof line)
-        snprintf(line + n, sizeof line - n, " other=%.3f  total=%.3f ms  staged=%s\n",
-                 (ns > named ? ns - named : 0) / 1e6, ns / 1e6,
-                 p->staged > AB_PROF_STAGED_NONE ? ab_prof_staged_names[p->staged] : "");
-    fputs(line, stderr);
+    const ab_prof_split_t *s = p->split.row >= 0 ? &p->split : NULL;
+    size_t m = M > 0 ? (size_t)M : 0, n = N > 0 ? (size_t)N : 0, k = K > 0 ? (size_t)K : 0;
+    if (!s || !s->kept)
+        ab_prof_record(routine, ns, m, n, k, gpu, gpu ? p->stage_ns : NULL, p->fallback, p->staged);
+    if (s) ab_prof_record_split(routine, ns, m, n, k, s);
+    if (p->trace && s)
+        ab_trace_record_split(&p->call, p->t0, t1, gpu ? p->stage_ns : NULL, p->fallback, p->staged, s);
+    else if (p->trace)
+        ab_trace_record(&p->call, p->t0, t1, gpu ? p->stage_ns : NULL, p->fallback, p->staged);
+    if (gpu) ab_prof_print_gpu_call(routine, M, N, K, ns, p->stage_ns, p->staged);
+    if (s && s->split) ab_prof_print_split_call(routine, M, N, K, ns, s);
 }
 
 // A GPU-routed call that has to run on cblas instead. The path record says
@@ -569,9 +981,7 @@ static void note_gpu_fallback(CallProf *p, const char *routine, int M, int N, in
                               ab_prof_fallback_t reason, const char *why) {
     if (!p) return;
     p->fallback = reason;
-    if (ab_prof_verbose())
-        fprintf(stderr, "AB_PROFILE %s M=%d N=%d K=%d  GPU fallback to cblas: %s\n",
-                routine, M, N, K, why);
+    ab_prof_print_fallback(routine, M, N, K, why);
 }
 
 // FNV-1a over the 64-bit words of the referenced elements of a stored
@@ -653,7 +1063,9 @@ static ab_prof_fallback_t fallback_reason(ABStatus st) {
 // Bit for bit (ab_internal.h): with the line scales re (rows of op(A)) and
 // ce (columns of op(B)), both NULL if none, each part of the product, as the
 // download made it FP64, times 2^(re[row] + ce[col]) in one rounding
-// (ab_scale2), then alpha and beta in FP64, in the order below.
+// (ab_scale2), then alpha and beta in FP64, in the order below. Every value
+// it forms stays finite: a call whose P, alpha P or beta C could overflow
+// went to Accelerate before it (ab_zgemm_product_fits, ab_zgemm_c_fits).
 static void zgemm_epilogue(int M, int N, double complex alpha, double complex beta,
                            const double *Cr_data, const double *Ci_data,
                            double complex *C, int ldC, const int *re, const int *ce) {
@@ -695,6 +1107,21 @@ static void zgemm_epilogue(int M, int N, double complex alpha, double complex be
     }
 }
 
+// Whether a ZGEMM with this beta reads, in C's M x N block, a NaN or Inf or a
+// value that beta could take beyond FP64's range (ab_zgemm_c_fits). Such a
+// call runs on Accelerate, as a DGEMM reading NaN or Inf does
+// (ab_range_guard_c_stage1): the epilogue's C[dst] = re + I * im, which the
+// GPU's follows bit for bit, turns (Inf, y) into (NaN, NaN).
+static bool zgemm_c_refused(double complex beta, const double complex *C, int ldC, int M, int N) {
+    if (beta == 0.0) return false;
+    uint32_t mx = 0;
+    for (size_t j = 0; j < (size_t)N; j++) {
+        const double *x = (const double *)(C + j * ldC);
+        for (size_t i = 0; i < 2 * (size_t)M; i++) AB_HIWORD_MAX(ab_abs_hiword(x[i]), mx);
+    }
+    return !ab_zgemm_c_fits(creal(beta), cimag(beta), mx);
+}
+
 // =============================================================================
 // Staged path (gpu_stage.h)
 // =============================================================================
@@ -718,8 +1145,9 @@ bool ab_internal_last_staged(int *in_place) {
 // CPU, so the bits agree only under the CPU's default floating-point
 // control: round to nearest, no flush to zero, no default NaN (FPCR RMode,
 // FZ, DN, and FIZ/AH where implemented, all clear). A caller that changed it
-// keeps the host path, as does AB_HOST_PACK=1.
-static bool staged_path(CallProf *p) {
+// keeps the host path, as does AB_HOST_PACK=1. AB_PROF_STAGED_NONE if this
+// thread may take the staged path, else why not.
+static ab_prof_staged_t staged_why(void) {
     ab_prof_staged_t why = ab_host_pack() ? AB_PROF_STAGED_HOST_PACK : AB_PROF_STAGED_NONE;
 #if defined(__aarch64__)
     uint64_t fpcr;
@@ -727,9 +1155,19 @@ static bool staged_path(CallProf *p) {
     if (why == AB_PROF_STAGED_NONE && (fpcr & ((3ULL << 22) | (1ULL << 24) | (1ULL << 25) | 3ULL)))
         why = AB_PROF_STAGED_FPCR;
 #endif
+    return why;
+}
+
+static bool staged_path(CallProf *p) {
+    ab_prof_staged_t why = staged_why();
     if (p) p->staged = why;
     return why == AB_PROF_STAGED_NONE;
 }
+
+// Whether this thread's last run_staged() stopped on a failed command buffer
+// (ab_internal_stage_run or _redo_4m), not on line scales unlike the host's:
+// both are AB_PROF_STAGED_GPU_FAILED, but only the first depends on timing.
+static __thread bool t_stage_cb_failed;
 
 static bool staged_kept(ab_prof_staged_t why) {
     return why == AB_PROF_STAGED_KEPT || why == AB_PROF_STAGED_KEPT_4M;
@@ -798,9 +1236,10 @@ static void copy_matrix(void *dst, int dst_ld, const void *src, int src_ld, size
 // lines' scales the host path would give them, which the GPU applied, the
 // product certified, and a DGEMM's C when it is read, stage 2 reading the
 // caller's operands as the host path does (the staged run wrote none of them
-// it reads). A call it does not certify runs on Accelerate, as the host
-// path's guard, from the same statistics, would send it. (A DGEMM's alpha
-// and beta were checked before the run: dgemm_staged.) Returns
+// it reads), and a ZGEMM's product bound (ab_zgemm_product_fits). A call it
+// does not certify runs on Accelerate, as the host path's guard, from the
+// same statistics, would send it. (A DGEMM's alpha and beta were checked
+// before the run: dgemm_staged; a ZGEMM's C, zgemm_stage_begin.) Returns
 // AB_PROF_STAGED_KEPT if it does, else why not. Also returns whether a
 // ZGEMM's parts call for 4M (ab_lines_method) and the lines' scales, *re for
 // op(A)'s rows and *ce for op(B)'s columns (NULL if none).
@@ -819,11 +1258,16 @@ static ab_prof_staged_t staged_refusal(ab_stage_t *s, const ab_stage_gemm_t *g, 
     bool scaled = ra || rb;
     *re = scaled ? sa.e : NULL;
     *ce = scaled ? sb.e : NULL;
+    // AB_TEST_FAIL_STAGE=scales (test-only): as if the GPU's scales differed.
     if (memcmp(sa.e, gpu, (size_t)g->M * sizeof *gpu) ||
-        memcmp(sb.e, gpu + g->M, (size_t)g->N * sizeof *gpu))
+        memcmp(sb.e, gpu + g->M, (size_t)g->N * sizeof *gpu) ||
+        ab_test_fail_stage() == AB_PROF_FAIL_SCALES)
         return AB_PROF_STAGED_GPU_FAILED;
     if (!ab_range_guard(g->K, &sa, &sb, z ? 0 : ilogb(g->alpha[0]), &va, &vb) ||
-        (!z && g->c_in && !ab_range_guard_c(&sa, &sb, c, ilogb(g->beta[0]), C->ptr, C->ld, 0)))
+        (z && !ab_zgemm_product_fits(g->K, ab_lines_max(&sa), ab_lines_max(&sb), g->alpha[0],
+                                     g->alpha[1])) ||
+        (!z && g->c_in && !ab_range_guard_c(&sa, &sb, c, g->alpha[0], g->beta[0], C->ptr, C->ld,
+                                            0, &va, &vb)))
         return AB_PROF_STAGED_RANGE;
     return AB_PROF_STAGED_KEPT;
 }
@@ -851,6 +1295,7 @@ static void stage_copy_in(ab_stage_t *s, const ab_stage_gemm_t *g, ab_stage_oper
 // holds the result, else why not, C as it was.
 static ab_prof_staged_t run_staged(CallProf *p, const ab_stage_gemm_t *g) {
     size_t elem = g->routine == 'z' ? sizeof(double complex) : sizeof(double);
+    t_stage_cb_failed = false;
     ab_stage_t *s = ab_internal_stage_acquire(g);
     prof_stage(p, AB_PROF_STAGE_ALLOC);
     if (!s) return AB_PROF_STAGED_ALLOC;
@@ -862,7 +1307,9 @@ static ab_prof_staged_t run_staged(CallProf *p, const ab_stage_gemm_t *g) {
 
     bool four_m = false;
     const int *re = NULL, *ce = NULL;
-    ab_prof_staged_t why = stage_result_why(ab_internal_stage_run(s, g));
+    ab_stage_result_t ran = ab_internal_stage_run(s, g);
+    t_stage_cb_failed = ran == AB_STAGE_FAILED;
+    ab_prof_staged_t why = stage_result_why(ran);
     prof_kernel(p);
     if (why == AB_PROF_STAGED_KEPT) why = staged_refusal(s, g, &four_m, &re, &ce);
     prof_stage(p, AB_PROF_STAGE_PACK);
@@ -875,7 +1322,9 @@ static ab_prof_staged_t run_staged(CallProf *p, const ab_stage_gemm_t *g) {
             in_ms += ms_since(t);
             prof_stage(p, AB_PROF_STAGE_UPLOAD);
         }
-        why = stage_result_why(ab_internal_stage_redo_4m(s, g));
+        ran = ab_internal_stage_redo_4m(s, g);
+        t_stage_cb_failed = ran == AB_STAGE_FAILED;
+        why = stage_result_why(ran);
         prof_kernel(p);
         if (why == AB_PROF_STAGED_KEPT) why = AB_PROF_STAGED_KEPT_4M;
     }
@@ -918,22 +1367,58 @@ static char op_char(enum CBLAS_TRANSPOSE t) {
     return t == CblasNoTrans ? 'N' : t == CblasConjTrans ? 'C' : 'T';
 }
 
+// A ZGEMM as the staged path runs it, into *g: AB_PROF_STAGED_NONE to run
+// it, or AB_PROF_STAGED_RANGE for one whose host epilogue would read in C a
+// NaN or Inf or a value beta could take out of range (zgemm_c_refused). The
+// GPU epilogue (beta = 1) flags such a C itself (ab_epi_z), and that call
+// comes back to the host path's check.
+static ab_prof_staged_t zgemm_stage_begin(ab_stage_gemm_t *g, enum CBLAS_TRANSPOSE ta,
+                                          enum CBLAS_TRANSPOSE tb, int M, int N, int K,
+                                          double complex alpha, const double complex *A, int ldA,
+                                          const double complex *B, int ldB, double complex beta,
+                                          double complex *C, int ldC) {
+    bool beta0 = creal(beta) == 0.0 && cimag(beta) == 0.0;
+    bool beta1 = creal(beta) == 1.0 && cimag(beta) == 0.0;
+    bool gpu_epi = creal(alpha) == 1.0 && cimag(alpha) == 0.0 && (beta0 || beta1);
+    *g = (ab_stage_gemm_t){
+        .routine = 'z', .ta = op_char(ta), .tb = op_char(tb), .M = M, .N = N, .K = K,
+        .x = {stored_matrix(A, ldA, ta, M, K), stored_matrix(B, ldB, tb, K, N), {C, ldC, M, N}},
+        .c_in = gpu_epi && beta1, .split = !gpu_epi,
+        .alpha = {creal(alpha), cimag(alpha)}, .beta = {creal(beta), cimag(beta)},
+    };
+    return !gpu_epi && zgemm_c_refused(beta, C, ldC, M, N) ? AB_PROF_STAGED_RANGE
+                                                           : AB_PROF_STAGED_NONE;
+}
+
+// A DGEMM as the staged path runs it, into *g: AB_PROF_STAGED_NONE to run it,
+// or AB_PROF_STAGED_SCALAR for an alpha or beta the host path would fold into
+// C's scale, or one it rejects: those are its own to handle.
+static ab_prof_staged_t dgemm_stage_begin(ab_stage_gemm_t *g, enum CBLAS_TRANSPOSE ta,
+                                          enum CBLAS_TRANSPOSE tb, int M, int N, int K,
+                                          double alpha, const double *A, int ldA, const double *B,
+                                          int ldB, double beta, double *C, int ldC) {
+    if (!isfinite(alpha) || !isfinite(beta) || ab_scalar_exp(alpha, AB_SCALAR_WINDOW) ||
+        ab_scalar_exp(beta, AB_SCALAR_WINDOW))
+        return AB_PROF_STAGED_SCALAR;
+    *g = (ab_stage_gemm_t){
+        .routine = 'd', .ta = op_char(ta), .tb = op_char(tb), .M = M, .N = N, .K = K,
+        .x = {stored_matrix(A, ldA, ta, M, K), stored_matrix(B, ldB, tb, K, N), {C, ldC, M, N}},
+        .c_in = beta != 0.0, .alpha = {alpha, 0.0}, .beta = {beta, 0.0},
+    };
+    return AB_PROF_STAGED_NONE;
+}
+
 // The staged path's try at a GPU-routed call: true if it is done (staged_done),
 // false for the host path to make it.
 static bool zgemm_staged(CallProf *p, enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
                          int M, int N, int K, double complex alpha,
                          const double complex *A, int ldA, const double complex *B, int ldB,
                          double complex beta, double complex *C, int ldC) {
-    bool beta0 = creal(beta) == 0.0 && cimag(beta) == 0.0;
-    bool beta1 = creal(beta) == 1.0 && cimag(beta) == 0.0;
-    bool gpu_epi = creal(alpha) == 1.0 && cimag(alpha) == 0.0 && (beta0 || beta1);
-    ab_stage_gemm_t g = {
-        .routine = 'z', .ta = op_char(ta), .tb = op_char(tb), .M = M, .N = N, .K = K,
-        .x = {stored_matrix(A, ldA, ta, M, K), stored_matrix(B, ldB, tb, K, N), {C, ldC, M, N}},
-        .c_in = gpu_epi && beta1, .split = !gpu_epi,
-        .alpha = {creal(alpha), cimag(alpha)}, .beta = {creal(beta), cimag(beta)},
-    };
-    ab_prof_staged_t why = run_staged(p, &g);
+    ab_stage_gemm_t g;
+    ab_prof_staged_t why = zgemm_stage_begin(&g, ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C,
+                                             ldC);
+    prof_stage(p, AB_PROF_STAGE_PACK);
+    if (why == AB_PROF_STAGED_NONE) why = run_staged(p, &g);
     // The guard's verdict on the same statistics is the host path's too.
     if (why == AB_PROF_STAGED_RANGE) {
         note_gpu_fallback(p, "zgemm", M, N, K, AB_PROF_FB_RANGE, AB_RANGE_WHY);
@@ -945,22 +1430,446 @@ static bool zgemm_staged(CallProf *p, enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSP
 static bool dgemm_staged(CallProf *p, enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSPOSE tb,
                          int M, int N, int K, double alpha, const double *A, int ldA,
                          const double *B, int ldB, double beta, double *C, int ldC) {
-    // An alpha or beta the host path would fold into C's scale, or one it
-    // rejects, is its own to handle.
-    if (!isfinite(alpha) || !isfinite(beta) || ab_scalar_exp(alpha, AB_SCALAR_WINDOW) ||
-        ab_scalar_exp(beta, AB_SCALAR_WINDOW))
-        return staged_done(p, AB_PROF_STAGED_SCALAR);
-    ab_stage_gemm_t g = {
-        .routine = 'd', .ta = op_char(ta), .tb = op_char(tb), .M = M, .N = N, .K = K,
-        .x = {stored_matrix(A, ldA, ta, M, K), stored_matrix(B, ldB, tb, K, N), {C, ldC, M, N}},
-        .c_in = beta != 0.0, .alpha = {alpha, 0.0}, .beta = {beta, 0.0},
-    };
-    ab_prof_staged_t why = run_staged(p, &g);
+    ab_stage_gemm_t g;
+    ab_prof_staged_t why = dgemm_stage_begin(&g, ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C,
+                                             ldC);
+    if (why != AB_PROF_STAGED_NONE) return staged_done(p, why);
+    why = run_staged(p, &g);
     if (why == AB_PROF_STAGED_RANGE) {      // as for ZGEMM
         note_gpu_fallback(p, "dgemm", M, N, K, AB_PROF_FB_RANGE, AB_RANGE_WHY);
         ab_internal_dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
     }
     return staged_done(p, why);
+}
+
+// =============================================================================
+// AB_SPLIT: one call cut between Accelerate and the GPU (split_slice.h)
+// =============================================================================
+// The calling thread runs the head on Accelerate while a thread made for the
+// call, and joined before it returns, runs the tail on the staged path. A
+// tail the staged path does not keep is made again on Accelerate here, after
+// the join, so that the two Accelerate calls of one split never overlap
+// (Accelerate's bits depend on its thread count). The tail takes classical
+// products: Strassen's bound is normwise only. Nothing outlives the call.
+
+// One part of a call, as cblas takes it.
+typedef struct {
+    char routine;
+    enum CBLAS_TRANSPOSE ta, tb;
+    int M, N, K;
+    double complex alpha, beta;     // a DGEMM's in the real parts
+    const void *A, *B;
+    void *C;
+    int ldA, ldB, ldC;
+} gemm_part_t;
+
+// The part on Accelerate; nothing for an empty one.
+static void part_cblas(const gemm_part_t *q) {
+    if (q->M == 0 || q->N == 0) return;
+    if (q->routine == 'z')
+        ab_internal_zgemm_cpu(q->ta, q->tb, q->M, q->N, q->K, q->alpha, q->A, q->ldA, q->B, q->ldB,
+                              q->beta, q->C, q->ldC);
+    else
+        ab_internal_dgemm_cpu(q->ta, q->tb, q->M, q->N, q->K, creal(q->alpha), q->A, q->ldA, q->B,
+                              q->ldB, creal(q->beta), q->C, q->ldC);
+}
+
+// The part as the staged path takes it (zgemm_stage_begin, dgemm_stage_begin).
+static ab_prof_staged_t part_stage_begin(ab_stage_gemm_t *g, const gemm_part_t *q) {
+    if (q->routine == 'z')
+        return zgemm_stage_begin(g, q->ta, q->tb, q->M, q->N, q->K, q->alpha, q->A, q->ldA, q->B,
+                                 q->ldB, q->beta, q->C, q->ldC);
+    return dgemm_stage_begin(g, q->ta, q->tb, q->M, q->N, q->K, creal(q->alpha), q->A, q->ldA, q->B,
+                             q->ldB, creal(q->beta), q->C, q->ldC);
+}
+
+// Whether a staged call reads data the host path refuses: a NaN or Inf in
+// op(A), op(B), or C when its epilogue (GPU or host) reads C, or, for a
+// ZGEMM, a product or C its epilogue could take out of range
+// (ab_zgemm_product_fits, ab_zgemm_c_fits; the GPU epilogue flags the
+// overflow, and a C beside beta = 1). A run ends NONFINITE either on such
+// data, which the host path sends to Accelerate as out of range, or on a value
+// the GPU made; only the first is a data condition.
+static bool stage_reads_refused(const ab_stage_gemm_t *g) {
+    const bool z = g->routine == 'z';
+    const size_t w = z ? 2 : 1;
+    const bool c_read = g->c_in || (g->split && (g->beta[0] != 0.0 || g->beta[1] != 0.0));
+    uint32_t mx[3] = {0, 0, 0};
+    for (int i = 0; i < 2 + c_read; i++) {
+        const ab_stage_matrix_t *x = &g->x[i];
+        for (size_t j = 0; j < (size_t)x->cols; j++) {
+            const double *col = (const double *)x->ptr + w * j * (size_t)x->ld;
+            for (size_t k = 0; k < w * (size_t)x->rows; k++) AB_HIWORD_MAX(ab_abs_hiword(col[k]), mx[i]);
+        }
+    }
+    if (z)      // NaN and Inf in op(A), op(B) or C fail these too
+        return !ab_zgemm_product_fits(g->K, mx[0], mx[1], g->alpha[0], g->alpha[1]) ||
+               !ab_zgemm_c_fits(g->beta[0], g->beta[1], mx[2]);
+    return mx[0] >= AB_HIWORD_NONFINITE || mx[1] >= AB_HIWORD_NONFINITE ||
+           mx[2] >= AB_HIWORD_NONFINITE;
+}
+
+// The tail and what became of it, on the caller's stack.
+typedef struct {
+    gemm_part_t tail;
+    ab_stage_gemm_t g;                  // the tail on the staged path (engine 0)
+    int engine, order;                  // as ab_split_forced_t
+    dispatch_semaphore_t head_done;     // order 1: the tail starts once the head is done
+    ab_prof_staged_t why;               // the staged path's outcome, or why it did not run
+    int retries;                        // runs repeated after a failed command buffer
+    bool retry_kept;                    // ... and the repeat stood
+    bool scales;                        // line scales unlike the host's
+    int in_place;                       // operands the staged run used in place
+    uint64_t t0, t1;                    // ticks: the tail's start and end
+    bool prof_on;                       // the call is profiled: so is the tail's staged run
+    CallProf prof;                      // ... its stages, on this thread's GPU time
+    ab_prof_kernel_split_t kernel;      // the tail's command buffers (the timeline), profiled or not
+} split_job_t;
+
+// AB_TEST_FAIL_STAGE=split_fpcr (test-only): this thread flushes subnormals
+// to zero (FPCR.FZ), as a caller's setting would if the thread inherited it.
+static void split_test_fpcr(void) {
+#if defined(__aarch64__)
+    if (ab_test_fail_stage() != AB_PROF_FAIL_SPLIT_FPCR) return;
+    uint64_t fpcr;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+    fpcr |= 1ULL << 24;
+    __asm__ volatile("msr fpcr, %0" : : "r"(fpcr));
+#endif
+}
+
+// The tail on the staged path, again once if a command buffer failed (a
+// second attempt usually works; the line scales' verdict does not change).
+static void split_run_gpu(split_job_t *j) {
+    split_test_fpcr();
+    j->why = staged_why();              // this thread's own floating-point control
+    if (j->why != AB_PROF_STAGED_NONE) return;
+    CallProf *p = j->prof_on ? prof_begin(&j->prof) : NULL;
+    if (p) p->trace = false;            // the caller writes the call's one line
+    t_last_stage.in_place = 0;
+    j->why = run_staged(p, &j->g);
+    if (j->why == AB_PROF_STAGED_GPU_FAILED && t_stage_cb_failed) {
+        j->retries = 1;
+        j->why = run_staged(p, &j->g);
+        j->retry_kept = staged_kept(j->why);
+    }
+    j->scales = j->why == AB_PROF_STAGED_GPU_FAILED && !t_stage_cb_failed;
+    j->in_place = t_last_stage.in_place;
+    // The kernel steps took a profiled run's command buffers into its record;
+    // an unprofiled run's are this new thread's only ones.
+    if (p) j->kernel = p->call.split;
+    else (void)ab_internal_take_gpu_seconds(&j->kernel);
+}
+
+static void *split_worker(void *arg) {
+    split_job_t *j = arg;
+    if (j->head_done) dispatch_semaphore_wait(j->head_done, DISPATCH_TIME_FOREVER);
+    j->t0 = ab_prof_now_ticks();
+    if (j->engine == 1) part_cblas(&j->tail);
+    else split_run_gpu(j);
+    j->t1 = ab_prof_now_ticks();
+    return NULL;
+}
+
+static __thread ab_split_record_t t_last_split;
+static __thread bool t_last_split_valid;
+
+bool ab_internal_last_split(ab_split_record_t *out) {
+    if (t_last_split_valid && out) *out = t_last_split;
+    return t_last_split_valid;
+}
+
+static ab_split_outcome_t split_declined(ab_split_record_t *rec, ab_prof_split_decline_t why) {
+    rec->declined = why;
+    return rec->outcome = AB_SPLIT_DECLINED;
+}
+
+// One clock read: for a profiled call, the time since its last mark into its
+// split stage `field`; for every call, the time in ns into the timeline's `at`.
+#define SPLIT_AT(p, field, at) do {                                   \
+        uint64_t now_ = ab_prof_now_ticks();                          \
+        if (p) {                                                      \
+            (p)->split.field += ab_prof_ticks_to_ns(now_ - (p)->mark); \
+            (p)->mark = now_;                                         \
+        }                                                             \
+        (at) = ab_prof_ticks_to_ns(now_);                             \
+    } while (0)
+
+static inline uint64_t now_ns(void) { return ab_prof_ticks_to_ns(ab_prof_now_ticks()); }
+
+static double part_gflop(const gemm_part_t *q) {
+    return (q->routine == 'z' ? 8.0 : 2.0) * q->M * (double)q->N * q->K / 1e9;
+}
+
+// The call w cut at g (0 < g <= L) on axis: the head on Accelerate here, the
+// tail on a thread of its own by the staged path (engine 0) or by cblas
+// (engine 1), in the order asked for (split_slice.h). A declined call is not
+// touched. Fills *rec, and for a profiled call (p) the stages of p->split.
+static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis, int g, int order,
+                                    int engine, ab_split_record_t *rec) {
+    *rec = (ab_split_record_t){.outcome = AB_SPLIT_DECLINED, .declined = AB_PROF_SPLIT_DECLINE_NONE,
+                               .staged = AB_PROF_STAGED_NONE, .row = rec->row, .axis = axis, .g = g,
+                               .L = axis == 'N' ? w->N : axis == 'M' ? w->M : w->K,
+                               .times = {.cut_ns = now_ns()}};
+    ab_split_times_t *tm = &rec->times;
+    const size_t e = w->routine == 'z' ? sizeof(double complex) : sizeof(double);
+    ab_split_part_t hc, tc;
+    ab_split_parts(axis, g, op_char(w->ta), op_char(w->tb), w->M, w->N, w->K, w->ldA, w->ldB,
+                   w->ldC, &hc, &tc);
+    gemm_part_t head = *w;
+    head.M = hc.M;
+    head.N = hc.N;
+    head.K = hc.K;
+    split_job_t j = {.tail = *w, .engine = engine, .order = order, .why = AB_PROF_STAGED_NONE,
+                     .prof_on = p != NULL};
+    gemm_part_t *tail = &j.tail;
+    tail->M = tc.M;
+    tail->N = tc.N;
+    tail->K = tc.K;
+    tail->A = (const char *)w->A + tc.a * e;
+    tail->B = (const char *)w->B + tc.b * e;
+    tail->C = (char *)w->C + tc.c * e;
+    // The K axis's tail writes its product into P (M x N, ld M, beta 0), which
+    // is made below once the staged path takes the tail; it reads no C.
+    if (tc.into_p) {
+        tail->C = NULL;
+        tail->ldC = w->M;
+        tail->beta = 0.0;
+    }
+
+    // The staged path takes the tail, or the whole call takes its own route.
+    bool run_tail = true;
+    if (engine == 0) {
+        ABStatus st = gpu_ready(w->M, w->N, w->K);
+        if (st != AB_OK)
+            return split_declined(rec, st == AB_ERROR_TOO_LARGE ? AB_PROF_SPLIT_DECLINE_TOO_LARGE
+                                                                : AB_PROF_SPLIT_DECLINE_NO_DEVICE);
+        ab_prof_staged_t why = staged_why();
+        if (why != AB_PROF_STAGED_NONE)
+            return split_declined(rec, why == AB_PROF_STAGED_HOST_PACK ? AB_PROF_SPLIT_DECLINE_HOST_PACK
+                                                                       : AB_PROF_SPLIT_DECLINE_FPCR);
+        why = part_stage_begin(&j.g, tail);
+        if (why == AB_PROF_STAGED_SCALAR) return split_declined(rec, AB_PROF_SPLIT_DECLINE_SCALAR);
+        j.g.classical = true;
+        j.g.c_staged = axis == 'M';
+        // A ZGEMM tail whose host epilogue would read in C a NaN, an Inf or a
+        // value beta could take out of range goes to Accelerate without a run.
+        if (why == AB_PROF_STAGED_RANGE) {
+            j.why = why;
+            run_tail = false;
+        }
+    }
+    void *P = NULL;
+    if (tc.into_p) {
+        // AB_TEST_FAIL_STAGE=split_scratch (test-only): as if malloc failed.
+        P = ab_test_fail_stage() == AB_PROF_FAIL_SPLIT_SCRATCH ? NULL : malloc((size_t)w->M * w->N * e);
+        if (!P) return split_declined(rec, AB_PROF_SPLIT_DECLINE_SCRATCH);
+        // AB_TEST_FAIL_STAGE=split_poison (test-only): a P that must never reach C.
+        if (ab_test_fail_stage() == AB_PROF_FAIL_SPLIT_POISON)
+            for (size_t i = 0; i < (size_t)w->M * w->N * (e / sizeof(double)); i++) ((double *)P)[i] = 1.0;
+        tail->C = P;
+        j.g.x[AB_STAGE_C].ptr = P;
+    }
+    pthread_t worker = NULL;
+    j.head_done = run_tail && order == 1 ? dispatch_semaphore_create(0) : NULL;
+    // The worker uses this frame until the join: no cancellation of the caller
+    // (pthread_join is a cancellation point) may unwind it before then.
+    int cancel_state = 0;
+    if (run_tail) pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancel_state);
+    if (run_tail) tm->create_ns = now_ns();
+    // AB_TEST_FAIL_STAGE=split_thread (test-only): as if pthread_create failed.
+    if (run_tail && (ab_test_fail_stage() == AB_PROF_FAIL_SPLIT_THREAD ||
+                     pthread_create(&worker, NULL, split_worker, &j) != 0)) {
+        pthread_setcancelstate(cancel_state, NULL);
+        if (j.head_done) dispatch_release(j.head_done);
+        free(P);
+        return split_declined(rec, AB_PROF_SPLIT_DECLINE_THREAD);
+    }
+
+    SPLIT_AT(p, init_ns, tm->cpu0_ns);   // the head starts here unless it waits for the tail
+
+    // The head, before or after the tail as asked; the join.
+    bool joined = !run_tail;
+    if (order == 2 && !joined) {
+        pthread_join(worker, NULL);
+        joined = true;
+        SPLIT_AT(p, join_ns, tm->join_ns);
+        tm->cpu0_ns = tm->join_ns;
+    }
+    part_cblas(&head);
+    SPLIT_AT(p, cpu_part_ns, tm->cpu1_ns);
+    if (j.head_done) dispatch_semaphore_signal(j.head_done);
+    if (!joined) {
+        pthread_join(worker, NULL);
+        uint64_t before = p ? p->split.join_ns : 0;
+        SPLIT_AT(p, join_ns, tm->join_ns);
+        if (p) p->split.wait_cpu_ns = p->split.join_ns - before;
+    }
+    if (run_tail) pthread_setcancelstate(cancel_state, NULL);
+    if (j.head_done) dispatch_release(j.head_done);
+    // A tail the GPU epilogue stopped on its data (NaN or Inf read, or for a
+    // ZGEMM a product or C its epilogue could take out of range) is a data
+    // condition, as the host path's guard reports it without AB_SPLIT: range.
+    // The scan's time is the join's (join_ns), not the redo's.
+    if (j.why == AB_PROF_STAGED_NONFINITE && stage_reads_refused(&j.g)) j.why = AB_PROF_STAGED_RANGE;
+    SPLIT_AT(p, join_ns, tm->end_ns);   // the end unless a redo or the K axis's sum follows
+    if (run_tail) {
+        tm->gpu0_ns = ab_prof_ticks_to_ns(j.t0);
+        tm->gpu1_ns = ab_prof_ticks_to_ns(j.t1);
+        tm->gpu = j.kernel;
+    }
+    if (p && run_tail) {
+        p->split.gpu_wall_ns = ab_prof_span_ns(j.t0, j.t1);   // at_gpu1_ns - at_gpu0_ns
+        p->split.wait_gpu_ns = tm->cpu1_ns > tm->gpu1_ns ? tm->cpu1_ns - tm->gpu1_ns : 0;
+        if (j.prof.t0) memcpy(p->split.gpu_stage_ns, j.prof.stage_ns, sizeof j.prof.stage_ns);
+    }
+    if (p) {   // a tail refused before it ran (run_tail false) did no GPU work
+        p->split.gf_cpu = part_gflop(&head);
+        p->split.gf_gpu = run_tail ? part_gflop(tail) : 0.0;
+    }
+
+    // A tail not kept is made again here, on Accelerate: on the K axis into C
+    // with beta 1, P ignored. A kept one on the K axis is added to C in FP64.
+    bool kept = engine == 1 || staged_kept(j.why);
+    if (!kept && P) {
+        tail->C = w->C;
+        tail->ldC = w->ldC;
+        tail->beta = 1.0;
+    }
+    if (!kept) {
+        part_cblas(tail);
+        SPLIT_AT(p, redo_ns, tm->end_ns);
+    } else if (P && w->routine == 'z') {
+        const double complex *pz = P;
+        double complex *c = w->C;
+        for (size_t col = 0; col < (size_t)w->N; col++)
+            for (size_t i = 0; i < (size_t)w->M; i++) c[col * w->ldC + i] += pz[col * w->M + i];
+        SPLIT_AT(p, sum_ns, tm->end_ns);
+    } else if (P) {
+        const double *pd = P;
+        double *c = w->C;
+        for (size_t col = 0; col < (size_t)w->N; col++)
+            for (size_t i = 0; i < (size_t)w->M; i++) c[col * w->ldC + i] += pd[col * w->M + i];
+        SPLIT_AT(p, sum_ns, tm->end_ns);
+    }
+    if (p) p->split.times = *tm;
+    free(P);
+    rec->staged = engine == 0 ? j.why : AB_PROF_STAGED_NONE;
+    rec->retries = j.retries;
+    rec->retry_kept = j.retry_kept;
+    rec->scales = j.scales;
+    rec->in_place = kept ? j.in_place : 0;
+    rec->outcome = engine == 1                         ? AB_SPLIT_CPU
+                 : j.why == AB_PROF_STAGED_KEPT        ? AB_SPLIT_KEPT
+                 : j.why == AB_PROF_STAGED_KEPT_4M     ? AB_SPLIT_KEPT_4M
+                 : j.why == AB_PROF_STAGED_RANGE       ? AB_SPLIT_RANGE
+                                                       : AB_SPLIT_GPU_FAILED;
+    return rec->outcome;
+}
+
+// Where the call's result came from, for ab_get_last_dispatch_path() and
+// ab_internal_last_staged(): "split" if the GPU's part stood, else "cpu".
+static void split_note_path(const ab_split_record_t *rec) {
+    bool gpu = rec->outcome == AB_SPLIT_KEPT || rec->outcome == AB_SPLIT_KEPT_4M;
+    _ab_last_path = gpu ? "split" : "cpu";
+    t_last_stage.staged = gpu;
+    t_last_stage.in_place = gpu ? rec->in_place : 0;
+}
+
+// The seam: the call cut as f says.
+static int split_seam(const ab_split_forced_t *f, const gemm_part_t *w) {
+    t_last_split_valid = false;
+    t_last_stage.staged = false;
+    if (!f || f->order < 0 || f->order > 2 || f->engine < 0 || f->engine > 1 ||
+        !ab_blas_args_valid(w->ta, w->tb, w->M, w->N, w->K, w->ldA, w->ldB, w->ldC) ||
+        w->alpha == 0.0)
+        return AB_SPLIT_INVALID;
+    if (f->axis != 'N' && f->axis != 'M' && f->axis != 'K') return AB_SPLIT_INVALID;
+    int L = f->axis == 'N' ? w->N : f->axis == 'M' ? w->M : w->K;
+    if (f->g < 0 || f->g > L) return AB_SPLIT_INVALID;
+    ab_split_record_t *rec = &t_last_split;
+    rec->row = -1;
+    if (f->g == 0 || w->M == 0 || w->N == 0 || w->K == 0) {
+        *rec = (ab_split_record_t){.outcome = AB_SPLIT_CPU, .declined = AB_PROF_SPLIT_DECLINE_NONE,
+                                   .staged = AB_PROF_STAGED_NONE, .row = -1, .axis = f->axis, .L = L};
+        part_cblas(w);
+    } else if (split_run(NULL, w, f->axis, f->g, f->order, f->engine, rec) == AB_SPLIT_DECLINED) {
+        part_cblas(w);
+    }
+    t_last_split_valid = true;
+    split_note_path(rec);
+    return rec->outcome;
+}
+
+// AB_SPLIT's step in dgemm_blas and zgemm_blas (dispatch.h): the call cut as
+// the split table's row says. True if it is done; false for its own route,
+// with AB_SPLIT unset's bits: no row, a row that does not cut it (attributed
+// to the row), or a declined call.
+static bool gemm_split(CallProf *p, const ab_dispatch_config_t *cfg, char transA, char transB,
+                       const gemm_part_t *w) {
+    t_last_split_valid = false;
+    if (!ab_blas_args_valid(w->ta, w->tb, w->M, w->N, w->K, w->ldA, w->ldB, w->ldC) ||
+        w->alpha == 0.0)
+        return false;
+    double ar = creal(w->alpha), ai = cimag(w->alpha), br = creal(w->beta), bi = cimag(w->beta);
+    ab_split_plan_t plan;
+    if (!ab_dispatch_split_plan(cfg, w->routine, transA, transB, w->M, w->N,
+                                w->K, ar == 1.0 && ai == 0.0, br == 0.0 && bi == 0.0,
+                                br == 1.0 && bi == 0.0,
+                                isfinite(ar) && isfinite(ai) && isfinite(br) && isfinite(bi), &plan))
+        return false;
+    ab_split_record_t *rec = &t_last_split;
+    t_last_split_valid = true;
+    if (p) {   // the reports attribute the call to its row whatever becomes of it
+        p->split.row = plan.row;
+        p->split.axis = plan.axis;
+        p->split.L = plan.L;
+        p->split.g = plan.g;
+        p->split.declined = AB_PROF_SPLIT_DECLINE_NONE;
+        p->split.staged = AB_PROF_STAGED_NONE;
+    }
+    if (plan.g == 0) {
+        *rec = (ab_split_record_t){.outcome = AB_SPLIT_NOT_CUT, .declined = AB_PROF_SPLIT_DECLINE_NONE,
+                                   .staged = AB_PROF_STAGED_NONE, .row = plan.row, .axis = plan.axis,
+                                   .L = plan.L};
+        return false;
+    }
+    rec->row = plan.row;
+    ab_split_outcome_t o = split_run(p, w, plan.axis, plan.g, 0, 0, rec);
+    if (o == AB_SPLIT_DECLINED) {
+        if (p) p->split.declined = rec->declined;
+        return false;
+    }
+    if (p) {
+        p->split.split = true;
+        p->split.kept = o == AB_SPLIT_KEPT || o == AB_SPLIT_KEPT_4M;
+        p->split.staged = rec->staged;
+        p->split.scales = rec->scales;
+        p->split.retries = rec->retries;
+        p->split.retry_kept = rec->retry_kept;
+        // A tail made again on Accelerate: a CPU call, with its reason.
+        if (!p->split.kept)
+            p->fallback = o == AB_SPLIT_RANGE ? AB_PROF_FB_RANGE : AB_PROF_FB_GPU_FAILED;
+    }
+    split_note_path(rec);
+    return true;
+}
+
+int ab_internal_dgemm_split(const ab_split_forced_t *f, char ta, char tb, int M, int N, int K,
+                            double alpha, const double *A, int ldA, const double *B, int ldB,
+                            double beta, double *C, int ldC) {
+    gemm_part_t w = {'d', ab_blas_trans(ta, false), ab_blas_trans(tb, false), M, N, K, alpha, beta,
+                     A, B, C, ldA, ldB, ldC};
+    return split_seam(f, &w);
+}
+
+int ab_internal_zgemm_split(const ab_split_forced_t *f, char ta, char tb, int M, int N, int K,
+                            double complex alpha, const double complex *A, int ldA,
+                            const double complex *B, int ldB, double complex beta,
+                            double complex *C, int ldC) {
+    gemm_part_t w = {'z', ab_blas_trans(ta, true), ab_blas_trans(tb, true), M, N, K, alpha, beta,
+                     A, B, C, ldA, ldB, ldC};
+    return split_seam(f, &w);
 }
 
 // =============================================================================
@@ -981,7 +1890,14 @@ static void zgemm_blas(
     enum CBLAS_TRANSPOSE tb = ab_blas_trans(transB, true);
     t_last_stage.staged = false;
 
-    if (!ab_internal_blas_routes_gpu('z', transA, transB, M, N, K, ldA, ldB, ldC, alpha != 0.0)) {
+    // AB_SPLIT (opt-in) comes before the routing table (dispatch.h).
+    const ab_dispatch_config_t *cfg = ab_dispatch_process_config();   // once per call
+    if (cfg->split_on &&
+        gemm_split(p, cfg, transA, transB, &(gemm_part_t){'z', ta, tb, M, N, K, alpha, beta, A, B, C,
+                                                          ldA, ldB, ldC}))
+        return;
+
+    if (!blas_routes_gpu(cfg, 'z', transA, transB, M, N, K, ldA, ldB, ldC, alpha != 0.0)) {
         ab_internal_zgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }
@@ -1049,7 +1965,8 @@ static void zgemm_blas(
 
     const ab_op_view_t va = {(const double*)A, ldA, M, K, ta != CblasNoTrans, true};
     const ab_op_view_t vb = {(const double*)B, ldB, K, N, tb != CblasNoTrans, true};
-    if (!ab_range_guard(K, &sa, &sb, 0, &va, &vb)) {
+    if (!ab_range_guard(K, &sa, &sb, 0, &va, &vb) || zgemm_c_refused(beta, C, ldC, M, N) ||
+        !ab_zgemm_product_fits(K, ab_lines_max(&sa), ab_lines_max(&sb), creal(alpha), cimag(alpha))) {
         fallback = AB_PROF_FB_RANGE;
         goto cleanup;
     }
@@ -1057,9 +1974,10 @@ static void zgemm_blas(
 
     // Compute C = op(A) * op(B), by 4M where some row of op(A) and column of
     // op(B) are imbalanced enough to cost Gauss-3M's imaginary part its
-    // accuracy (ab_internal.h).
+    // accuracy, by classical products where a line has a scale of its own
+    // (ab_internal.h).
     if (ab_internal_zgemm(AB_NO_TRANS, AB_NO_TRANS, mAr, mAi, mBr, mBi, mCr, mCi,
-                          ab_lines_method(&sa, &sb)) != AB_OK)
+                          ab_lines_method(&sa, &sb), ab_lines_products(ra, cb)) != AB_OK)
         goto cleanup;
     prof_kernel(p);
 
@@ -1117,7 +2035,14 @@ static void dgemm_blas(
     enum CBLAS_TRANSPOSE tb = ab_blas_trans(transB, false);
     t_last_stage.staged = false;
 
-    if (!ab_internal_blas_routes_gpu('d', transA, transB, M, N, K, ldA, ldB, ldC, alpha != 0.0)) {
+    // AB_SPLIT (opt-in) comes before the routing table (dispatch.h).
+    const ab_dispatch_config_t *cfg = ab_dispatch_process_config();   // once per call
+    if (cfg->split_on &&
+        gemm_split(p, cfg, transA, transB, &(gemm_part_t){'d', ta, tb, M, N, K, alpha, beta, A, B, C,
+                                                          ldA, ldB, ldC}))
+        return;
+
+    if (!blas_routes_gpu(cfg, 'd', transA, transB, M, N, K, ldA, ldB, ldC, alpha != 0.0)) {
         ab_internal_dgemm_cpu(ta, tb, M, N, K, alpha, A, ldA, B, ldB, beta, C, ldC);
         return;
     }
@@ -1173,10 +2098,10 @@ static void dgemm_blas(
     // 2^(ra[i] + cb[j] + ea), so C goes up as C * 2^-(ra[i] + cb[j] + ea - eb).
     int ea = ab_scalar_exp(alpha, AB_SCALAR_WINDOW), eb = ab_scalar_exp(beta, AB_SCALAR_WINDOW);
     double alpha_s = ab_scale2(alpha, -ea), beta_s = ab_scale2(beta, -eb);
+    const ab_op_view_t va = {A, ldA, M, K, ta != CblasNoTrans, false};
+    const ab_op_view_t vb = {B, ldB, K, N, tb != CblasNoTrans, false};
     if (!isfinite(alpha) || !isfinite(beta) ||
-        !ab_range_guard(K, &sa, &sb, ilogb(alpha_s),
-                        &(ab_op_view_t){A, ldA, M, K, ta != CblasNoTrans, false},
-                        &(ab_op_view_t){B, ldB, K, N, tb != CblasNoTrans, false})) {
+        !ab_range_guard(K, &sa, &sb, ilogb(alpha_s), &va, &vb)) {
         fallback = AB_PROF_FB_RANGE;
         goto cleanup;
     }
@@ -1196,15 +2121,17 @@ static void dgemm_blas(
         if (ab_internal_upload_scaled(mC, C_row, ra, cb, ea - eb, scaled_c ? &cr : NULL) != AB_OK)
             goto cleanup;
         prof_stage(p, AB_PROF_STAGE_UPLOAD);
-        if (!ab_range_guard_c(&sa, &sb, cr, ilogb(beta_s), C, ldC, ea - eb)) {
+        if (!ab_range_guard_c(&sa, &sb, cr, alpha_s, beta_s, C, ldC, ea - eb, &va, &vb)) {
             fallback = AB_PROF_FB_RANGE;
             goto cleanup;
         }
         prof_stage(p, AB_PROF_STAGE_PACK);
     }
 
-    // Compute C = alpha*A*B + beta*C on GPU
-    if (ab_dgemm_scaled(alpha_s, mA, mB, beta_s, mC) != AB_OK) goto cleanup;
+    // Compute C = alpha*A*B + beta*C on GPU, by classical products where a
+    // line has a scale of its own (ab_internal.h)
+    if (ab_internal_dgemm_scaled(alpha_s, mA, mB, beta_s, mC, ab_lines_products(ra, cb)) != AB_OK)
+        goto cleanup;
     prof_kernel(p);
 
     // Download result (row-major to column-major); bit for bit

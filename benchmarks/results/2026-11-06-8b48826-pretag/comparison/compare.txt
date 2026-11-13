@@ -1,0 +1,281 @@
+===== old-auto vs new-auto: 6675 comparable cases, 0 with a symbol absent, only-old-auto 0, only-new-auto 39
+  ab     dgemm  same  1081
+  ab     zgemm  same  1621
+  blas2  dgemv  DIFF  24
+  blas2  dgemv  same  360
+  blas2  zgemv  DIFF  234
+  blas2  zgemv  same  294
+  blas2  zhemv  DIFF  167
+  blas2  zhemv  same  185
+  core   dgemm  same  220
+  core   zgemm  same  225
+  data   dgemm  same  456
+  data   zgemm  same  748
+  dev    devd   same  320
+  dev    devz   same  600
+  gaps   dgemm  same  7
+  gaps   zgemm  same  13
+  route  dgemm  same  36
+  route  dgemv  DIFF  5
+  route  dgemv  same  13
+  route  zgemm  same  36
+  route  zgemv  DIFF  12
+  route  zgemv  same  6
+  route  zhemv  DIFF  12
+  TOTAL same 6221  DIFF 454
+  paths (a,b): {('cpu', 'cpu'): 4431, ('none', 'cpu'): 1174, ('none', 'gpu'): 90, ('gpu', 'gpu'): 31, ('none', 'none'): 920, ('gpu', 'cpu'): 29}
+  DIFF by routine, TRANS, class, paths:
+    14 ('zhemv', 'U-', 'nanA', 'none', 'cpu', 'outputs')
+    14 ('zhemv', 'L-', 'nanA', 'none', 'cpu', 'outputs')
+    13 ('zgemv', 'N-', 'nanA', 'none', 'cpu', 'outputs')
+    13 ('zgemv', 'T-', 'unif', 'none', 'cpu', 'outputs')
+    13 ('zgemv', 'T-', 'mix16', 'none', 'cpu', 'outputs')
+    13 ('zgemv', 'T-', 'spread', 'none', 'cpu', 'outputs')
+    13 ('zgemv', 'T-', 'nanA', 'none', 'cpu', 'outputs')
+    12 ('zgemv', 'C-', 'unif', 'none', 'cpu', 'outputs')
+    12 ('zgemv', 'C-', 'mix16', 'none', 'cpu', 'outputs')
+    12 ('zgemv', 'C-', 'spread', 'none', 'cpu', 'outputs')
+    12 ('zgemv', 'C-', 'nanA', 'none', 'cpu', 'outputs')
+    8 ('dgemv', 'N-', 'unif', 'none', 'gpu', 'outputs')
+    8 ('dgemv', 'N-', 'spread', 'none', 'gpu', 'outputs')
+    8 ('dgemv', 'N-', 'mix16', 'none', 'gpu', 'outputs')
+    8 ('zhemv', 'U-', 'unif', 'none', 'gpu', 'outputs')
+    8 ('zhemv', 'U-', 'spread', 'none', 'gpu', 'outputs')
+    8 ('zhemv', 'U-', 'mix16', 'none', 'gpu', 'outputs')
+    8 ('zhemv', 'L-', 'unif', 'none', 'gpu', 'outputs')
+    8 ('zhemv', 'L-', 'spread', 'none', 'gpu', 'outputs')
+    8 ('zhemv', 'L-', 'mix16', 'none', 'gpu', 'outputs')
+    7 ('zgemv', 'N-', 'unif', 'none', 'cpu', 'outputs')
+    7 ('zgemv', 'N-', 'mix16', 'none', 'cpu', 'outputs')
+    7 ('zgemv', 'N-', 'spread', 'none', 'cpu', 'outputs')
+    6 ('zgemv', 'N-', 'infA', 'none', 'cpu', 'outputs')
+    6 ('zgemv', 'N-', 'tiny1042', 'none', 'cpu', 'outputs')
+    6 ('zgemv', 'N-', 'zeros', 'none', 'cpu', 'outputs')
+    6 ('zgemv', 'N-', 'timag100', 'none', 'cpu', 'outputs')
+    6 ('zgemv', 'N-', 'unif', 'none', 'gpu', 'outputs')
+    6 ('zgemv', 'N-', 'spread', 'none', 'gpu', 'outputs')
+    6 ('zgemv', 'N-', 'mix16', 'none', 'gpu', 'outputs')
+    6 ('zgemv', 'T-', 'infA', 'none', 'cpu', 'outputs')
+    6 ('zgemv', 'T-', 'sub', 'none', 'cpu', 'outputs')
+    6 ('zgemv', 'T-', 'zeros', 'none', 'cpu', 'outputs')
+    6 ('zgemv', 'T-', 'timag100', 'none', 'cpu', 'outputs')
+    6 ('zgemv', 'C-', 'infA', 'none', 'cpu', 'outputs')
+    6 ('zgemv', 'C-', 'sub', 'none', 'cpu', 'outputs')
+    6 ('zgemv', 'C-', 'zeros', 'none', 'cpu', 'outputs')
+    6 ('zgemv', 'C-', 'timag100', 'none', 'cpu', 'outputs')
+    6 ('zhemv', 'U-', 'unif', 'none', 'cpu', 'outputs')
+    6 ('zhemv', 'U-', 'mix16', 'none', 'cpu', 'outputs')
+  first diffs:
+    blas2/dgemv/N-/2048x2048x0/a1,0_b0,0/p0/i1/unif none gpu 
+    blas2/dgemv/N-/2048x2048x0/a1,0_b0,0/p0/i1/spread none gpu 
+    blas2/dgemv/N-/2048x2048x0/a1,0_b0,0/p0/i1/mix16 none gpu 
+    blas2/dgemv/N-/2048x2048x0/a0.75,0_b-2,0/p0/i1/unif none gpu 
+    blas2/dgemv/N-/2048x2048x0/a0.75,0_b-2,0/p0/i1/spread none gpu 
+    blas2/dgemv/N-/2048x2048x0/a0.75,0_b-2,0/p0/i1/mix16 none gpu 
+    blas2/dgemv/N-/3072x3072x0/a1,0_b0,0/p0/i1/unif none gpu 
+    blas2/dgemv/N-/3072x3072x0/a1,0_b0,0/p0/i1/spread none gpu 
+    blas2/dgemv/N-/3072x3072x0/a1,0_b0,0/p0/i1/mix16 none gpu 
+    blas2/dgemv/N-/3072x3072x0/a0.75,0_b-2,0/p0/i1/unif none gpu 
+    blas2/dgemv/N-/3072x3072x0/a0.75,0_b-2,0/p0/i1/spread none gpu 
+    blas2/dgemv/N-/3072x3072x0/a0.75,0_b-2,0/p0/i1/mix16 none gpu 
+===== old-gpu vs new-gpu: 6675 comparable cases, 0 with a symbol absent, only-old-gpu 0, only-new-gpu 39
+  ab     dgemm  same  1081
+  ab     zgemm  same  1621
+  blas2  dgemv  DIFF  188
+  blas2  dgemv  same  196
+  blas2  zgemv  DIFF  355
+  blas2  zgemv  same  173
+  blas2  zhemv  DIFF  239
+  blas2  zhemv  same  113
+  core   dgemm  same  220
+  core   zgemm  same  225
+  data   dgemm  same  456
+  data   zgemm  DIFF  68
+  data   zgemm  same  680
+  dev    devd   same  320
+  dev    devz   same  600
+  gaps   dgemm  same  7
+  gaps   zgemm  same  13
+  route  dgemm  same  36
+  route  dgemv  DIFF  18
+  route  zgemm  same  36
+  route  zgemv  DIFF  18
+  route  zhemv  DIFF  12
+  TOTAL same 5777  DIFF 898
+  paths (a,b): {('cpu', 'cpu'): 756, ('gpu', 'gpu'): 3667, ('none', 'gpu'): 672, ('none', 'cpu'): 592, ('gpu', 'cpu'): 68, ('none', 'none'): 920}
+  DIFF by routine, TRANS, class, paths:
+    20 ('zgemv', 'N-', 'unif', 'none', 'gpu', 'outputs')
+    20 ('zgemv', 'N-', 'mix16', 'none', 'gpu', 'outputs')
+    20 ('zgemv', 'N-', 'spread', 'none', 'gpu', 'outputs')
+    20 ('zgemv', 'T-', 'unif', 'none', 'gpu', 'outputs')
+    20 ('zgemv', 'T-', 'mix16', 'none', 'gpu', 'outputs')
+    20 ('zgemv', 'T-', 'spread', 'none', 'gpu', 'outputs')
+    20 ('zgemv', 'C-', 'unif', 'none', 'gpu', 'outputs')
+    20 ('zgemv', 'C-', 'mix16', 'none', 'gpu', 'outputs')
+    20 ('zhemv', 'U-', 'unif', 'none', 'gpu', 'outputs')
+    20 ('zhemv', 'U-', 'mix16', 'none', 'gpu', 'outputs')
+    20 ('zhemv', 'U-', 'spread', 'none', 'gpu', 'outputs')
+    20 ('zhemv', 'L-', 'unif', 'none', 'gpu', 'outputs')
+    20 ('zhemv', 'L-', 'mix16', 'none', 'gpu', 'outputs')
+    20 ('zhemv', 'L-', 'spread', 'none', 'gpu', 'outputs')
+    19 ('zgemv', 'C-', 'spread', 'none', 'gpu', 'outputs')
+    16 ('dgemv', 'N-', 'unif', 'none', 'gpu', 'outputs')
+    16 ('dgemv', 'N-', 'mix16', 'none', 'gpu', 'outputs')
+    16 ('dgemv', 'T-', 'unif', 'none', 'gpu', 'outputs')
+    16 ('dgemv', 'T-', 'mix16', 'none', 'gpu', 'outputs')
+    16 ('dgemv', 'C-', 'unif', 'none', 'gpu', 'outputs')
+    16 ('dgemv', 'C-', 'mix16', 'none', 'gpu', 'outputs')
+    15 ('dgemv', 'N-', 'spread', 'none', 'gpu', 'outputs')
+    15 ('dgemv', 'C-', 'spread', 'none', 'gpu', 'outputs')
+    14 ('dgemv', 'T-', 'spread', 'none', 'gpu', 'outputs')
+    14 ('zhemv', 'U-', 'nanA', 'none', 'cpu', 'outputs')
+    14 ('zhemv', 'L-', 'nanA', 'none', 'cpu', 'outputs')
+    13 ('zgemv', 'N-', 'nanA', 'none', 'cpu', 'outputs')
+    13 ('zgemv', 'T-', 'nanA', 'none', 'cpu', 'outputs')
+    12 ('zgemv', 'N-', 'sub', 'none', 'gpu', 'outputs')
+    12 ('zgemv', 'N-', 'zeros', 'none', 'gpu', 'outputs')
+    12 ('zgemv', 'N-', 'timag100', 'none', 'gpu', 'outputs')
+    12 ('zgemv', 'T-', 'sub', 'none', 'gpu', 'outputs')
+    12 ('zgemv', 'T-', 'zeros', 'none', 'gpu', 'outputs')
+    12 ('zgemv', 'T-', 'timag100', 'none', 'gpu', 'outputs')
+    12 ('zgemv', 'C-', 'sub', 'none', 'gpu', 'outputs')
+    12 ('zgemv', 'C-', 'zeros', 'none', 'gpu', 'outputs')
+    12 ('zgemv', 'C-', 'timag100', 'none', 'gpu', 'outputs')
+    12 ('zgemv', 'C-', 'nanA', 'none', 'cpu', 'outputs')
+    12 ('zhemv', 'U-', 'sub', 'none', 'gpu', 'outputs')
+    12 ('zhemv', 'U-', 'zeros', 'none', 'gpu', 'outputs')
+  first diffs:
+    blas2/dgemv/N-/9x7x0/a1,0_b0,0/p0/i1/unif none gpu 
+    blas2/dgemv/N-/9x7x0/a1,0_b0,0/p5/i2/unif none gpu 
+    blas2/dgemv/N-/9x7x0/a1,0_b0,0/p0/i1/mix16 none gpu 
+    blas2/dgemv/N-/9x7x0/a1,0_b0,0/p5/i2/mix16 none gpu 
+    blas2/dgemv/N-/9x7x0/a1,0_b0,0/p0/i1/spread none gpu 
+    blas2/dgemv/N-/9x7x0/a1,0_b0,0/p5/i2/spread none gpu 
+    blas2/dgemv/N-/9x7x0/a1,0_b0,0/p0/i1/sub none gpu 
+    blas2/dgemv/N-/9x7x0/a1,0_b0,0/p5/i2/sub none gpu 
+    blas2/dgemv/N-/9x7x0/a1,0_b0,0/p0/i1/zeros none gpu 
+    blas2/dgemv/N-/9x7x0/a1,0_b0,0/p5/i2/zeros none gpu 
+    blas2/dgemv/N-/9x7x0/a0.75,0_b-2,0/p0/i1/unif none gpu 
+    blas2/dgemv/N-/9x7x0/a0.75,0_b-2,0/p5/i2/unif none gpu 
+===== old-cpu vs new-cpu: 1669 comparable cases, 0 with a symbol absent, only-old-cpu 0, only-new-cpu 1264
+  core   dgemm  same  220
+  core   zgemm  same  225
+  data   dgemm  same  456
+  data   zgemm  same  748
+  gaps   dgemm  same  7
+  gaps   zgemm  same  13
+  TOTAL same 1669  DIFF 0
+  paths (a,b): {('cpu', 'cpu'): 1669}
+===== new-gpu vs new-gpu2: 3853 comparable cases, 0 with a symbol absent, only-new-gpu 2861, only-new-gpu2 0
+  blas2  dgemv  same  384
+  blas2  zgemv  same  528
+  blas2  zhemv  same  352
+  core   dgemm  same  220
+  core   zgemm  same  225
+  data   dgemm  same  456
+  data   zgemm  same  748
+  dev    devd   same  320
+  dev    devz   same  600
+  gaps   dgemm  same  7
+  gaps   zgemm  same  13
+  TOTAL same 3853  DIFF 0
+  paths (a,b): {('gpu', 'gpu'): 2003, ('cpu', 'cpu'): 930, ('none', 'none'): 920}
+===== old-gpu-big vs new-gpu-big: 72 comparable cases, 0 with a symbol absent, only-old-gpu-big 0, only-new-gpu-big 0
+  big    dgemm  same  24
+  big    zgemm  same  48
+  TOTAL same 72  DIFF 0
+  paths (a,b): {('gpu', 'gpu'): 72}
+===== new-auto vs new-cpu: 2933 comparable cases, 0 with a symbol absent, only-new-auto 3781, only-new-cpu 0
+  blas2  dgemv  DIFF  24
+  blas2  dgemv  same  360
+  blas2  zgemv  DIFF  18
+  blas2  zgemv  same  510
+  blas2  zhemv  DIFF  48
+  blas2  zhemv  same  304
+  core   dgemm  same  220
+  core   zgemm  DIFF  4
+  core   zgemm  same  221
+  data   dgemm  same  456
+  data   zgemm  same  748
+  gaps   dgemm  same  7
+  gaps   zgemm  same  13
+  TOTAL same 2839  DIFF 94
+  paths (a,b): {('cpu', 'cpu'): 2839, ('gpu', 'cpu'): 94}
+  DIFF by routine, TRANS, class, paths:
+    8 ('dgemv', 'N-', 'unif', 'gpu', 'cpu', 'outputs')
+    8 ('dgemv', 'N-', 'spread', 'gpu', 'cpu', 'outputs')
+    8 ('dgemv', 'N-', 'mix16', 'gpu', 'cpu', 'outputs')
+    8 ('zhemv', 'U-', 'unif', 'gpu', 'cpu', 'outputs')
+    8 ('zhemv', 'U-', 'spread', 'gpu', 'cpu', 'outputs')
+    8 ('zhemv', 'U-', 'mix16', 'gpu', 'cpu', 'outputs')
+    8 ('zhemv', 'L-', 'unif', 'gpu', 'cpu', 'outputs')
+    8 ('zhemv', 'L-', 'spread', 'gpu', 'cpu', 'outputs')
+    8 ('zhemv', 'L-', 'mix16', 'gpu', 'cpu', 'outputs')
+    6 ('zgemv', 'N-', 'unif', 'gpu', 'cpu', 'outputs')
+    6 ('zgemv', 'N-', 'spread', 'gpu', 'cpu', 'outputs')
+    6 ('zgemv', 'N-', 'mix16', 'gpu', 'cpu', 'outputs')
+    1 ('zgemm', 'TT', 'unif', 'gpu', 'cpu', 'outputs')
+    1 ('zgemm', 'CC', 'unif', 'gpu', 'cpu', 'outputs')
+    1 ('zgemm', 'TC', 'unif', 'gpu', 'cpu', 'outputs')
+    1 ('zgemm', 'CT', 'unif', 'gpu', 'cpu', 'outputs')
+  first diffs:
+    blas2/dgemv/N-/2048x2048x0/a1,0_b0,0/p0/i1/unif gpu cpu 
+    blas2/dgemv/N-/2048x2048x0/a1,0_b0,0/p0/i1/spread gpu cpu 
+    blas2/dgemv/N-/2048x2048x0/a1,0_b0,0/p0/i1/mix16 gpu cpu 
+    blas2/dgemv/N-/2048x2048x0/a0.75,0_b-2,0/p0/i1/unif gpu cpu 
+    blas2/dgemv/N-/2048x2048x0/a0.75,0_b-2,0/p0/i1/spread gpu cpu 
+    blas2/dgemv/N-/2048x2048x0/a0.75,0_b-2,0/p0/i1/mix16 gpu cpu 
+    blas2/dgemv/N-/3072x3072x0/a1,0_b0,0/p0/i1/unif gpu cpu 
+    blas2/dgemv/N-/3072x3072x0/a1,0_b0,0/p0/i1/spread gpu cpu 
+    blas2/dgemv/N-/3072x3072x0/a1,0_b0,0/p0/i1/mix16 gpu cpu 
+    blas2/dgemv/N-/3072x3072x0/a0.75,0_b-2,0/p0/i1/unif gpu cpu 
+    blas2/dgemv/N-/3072x3072x0/a0.75,0_b-2,0/p0/i1/spread gpu cpu 
+    blas2/dgemv/N-/3072x3072x0/a0.75,0_b-2,0/p0/i1/mix16 gpu cpu 
+===== new-auto vs new-chip: 1384 comparable cases, 0 with a symbol absent, only-new-auto 5330, only-new-chip 0
+  blas2  dgemv  DIFF  24
+  blas2  dgemv  same  360
+  blas2  zgemv  DIFF  18
+  blas2  zgemv  same  510
+  blas2  zhemv  DIFF  48
+  blas2  zhemv  same  304
+  route  dgemm  same  36
+  route  dgemv  DIFF  5
+  route  dgemv  same  13
+  route  zgemm  DIFF  8
+  route  zgemm  same  28
+  route  zgemv  DIFF  4
+  route  zgemv  same  14
+  route  zhemv  DIFF  10
+  route  zhemv  same  2
+  TOTAL same 1267  DIFF 117
+  paths (a,b): {('cpu', 'cpu'): 1267, ('gpu', 'cpu'): 117}
+  DIFF by routine, TRANS, class, paths:
+    13 ('dgemv', 'N-', 'unif', 'gpu', 'cpu', 'outputs')
+    13 ('zhemv', 'U-', 'unif', 'gpu', 'cpu', 'outputs')
+    13 ('zhemv', 'L-', 'unif', 'gpu', 'cpu', 'outputs')
+    10 ('zgemv', 'N-', 'unif', 'gpu', 'cpu', 'outputs')
+    8 ('dgemv', 'N-', 'spread', 'gpu', 'cpu', 'outputs')
+    8 ('dgemv', 'N-', 'mix16', 'gpu', 'cpu', 'outputs')
+    8 ('zhemv', 'U-', 'spread', 'gpu', 'cpu', 'outputs')
+    8 ('zhemv', 'U-', 'mix16', 'gpu', 'cpu', 'outputs')
+    8 ('zhemv', 'L-', 'spread', 'gpu', 'cpu', 'outputs')
+    8 ('zhemv', 'L-', 'mix16', 'gpu', 'cpu', 'outputs')
+    6 ('zgemv', 'N-', 'spread', 'gpu', 'cpu', 'outputs')
+    6 ('zgemv', 'N-', 'mix16', 'gpu', 'cpu', 'outputs')
+    2 ('zgemm', 'TT', 'unif', 'gpu', 'cpu', 'outputs')
+    2 ('zgemm', 'TC', 'unif', 'gpu', 'cpu', 'outputs')
+    2 ('zgemm', 'CT', 'unif', 'gpu', 'cpu', 'outputs')
+    2 ('zgemm', 'CC', 'unif', 'gpu', 'cpu', 'outputs')
+  first diffs:
+    blas2/dgemv/N-/2048x2048x0/a1,0_b0,0/p0/i1/unif gpu cpu 
+    blas2/dgemv/N-/2048x2048x0/a1,0_b0,0/p0/i1/spread gpu cpu 
+    blas2/dgemv/N-/2048x2048x0/a1,0_b0,0/p0/i1/mix16 gpu cpu 
+    blas2/dgemv/N-/2048x2048x0/a0.75,0_b-2,0/p0/i1/unif gpu cpu 
+    blas2/dgemv/N-/2048x2048x0/a0.75,0_b-2,0/p0/i1/spread gpu cpu 
+    blas2/dgemv/N-/2048x2048x0/a0.75,0_b-2,0/p0/i1/mix16 gpu cpu 
+    blas2/dgemv/N-/3072x3072x0/a1,0_b0,0/p0/i1/unif gpu cpu 
+    blas2/dgemv/N-/3072x3072x0/a1,0_b0,0/p0/i1/spread gpu cpu 
+    blas2/dgemv/N-/3072x3072x0/a1,0_b0,0/p0/i1/mix16 gpu cpu 
+    blas2/dgemv/N-/3072x3072x0/a0.75,0_b-2,0/p0/i1/unif gpu cpu 
+    blas2/dgemv/N-/3072x3072x0/a0.75,0_b-2,0/p0/i1/spread gpu cpu 
+    blas2/dgemv/N-/3072x3072x0/a0.75,0_b-2,0/p0/i1/mix16 gpu cpu 

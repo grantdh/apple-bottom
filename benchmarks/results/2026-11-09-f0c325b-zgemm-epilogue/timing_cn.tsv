@@ -1,0 +1,26 @@
+# 2026-11-09 22:43:17 adapter 140W battery 99% load1 3.06; base 366876ac76be (56216ee), fix 1064751262e6 (f0c325b); probe_zgemm_epilogue time, W 3, R 15
+22:43:17	1	56216ee	C N 512 512 9139 1 0 0 0	33.6133	min_ms 29.2698 path gpu staged 1 hash b870d98d282fac3f
+22:43:18	1	f0c325b	C N 512 512 9139 1 0 0 0	31.1420	min_ms 28.4193 path gpu staged 1 hash b870d98d282fac3f
+22:43:19	2	f0c325b	C N 512 512 9139 1 0 0 0	33.0037	min_ms 28.3530 path gpu staged 1 hash b870d98d282fac3f
+22:43:19	2	56216ee	C N 512 512 9139 1 0 0 0	32.6578	min_ms 28.8653 path gpu staged 1 hash b870d98d282fac3f
+22:43:20	3	56216ee	C N 512 512 9139 1 0 0 0	32.5361	min_ms 29.5595 path gpu staged 1 hash b870d98d282fac3f
+22:43:21	3	f0c325b	C N 512 512 9139 1 0 0 0	30.6399	min_ms 28.7830 path gpu staged 1 hash b870d98d282fac3f
+22:43:22	4	f0c325b	C N 512 512 9139 1 0 0 0	31.4979	min_ms 28.7314 path gpu staged 1 hash b870d98d282fac3f
+22:43:22	4	56216ee	C N 512 512 9139 1 0 0 0	32.2729	min_ms 29.0493 path gpu staged 1 hash b870d98d282fac3f
+22:43:23	5	56216ee	C N 512 512 9139 1 0 0 0	33.2628	min_ms 28.9571 path gpu staged 1 hash b870d98d282fac3f
+22:43:24	5	f0c325b	C N 512 512 9139 1 0 0 0	31.2985	min_ms 29.2016 path gpu staged 1 hash b870d98d282fac3f
+22:43:24	6	f0c325b	C N 512 512 9139 1 0 0 0	33.3186	min_ms 28.2805 path gpu staged 1 hash b870d98d282fac3f
+22:43:25	6	56216ee	C N 512 512 9139 1 0 0 0	31.8545	min_ms 28.3411 path gpu staged 1 hash b870d98d282fac3f
+22:43:26	7	56216ee	C N 512 512 9139 1 0 0 0	31.3728	min_ms 28.8159 path gpu staged 1 hash b870d98d282fac3f
+22:43:27	7	f0c325b	C N 512 512 9139 1 0 0 0	33.2112	min_ms 28.9086 path gpu staged 1 hash b870d98d282fac3f
+22:43:27	8	f0c325b	C N 512 512 9139 1 0 0 0	30.6316	min_ms 28.9402 path gpu staged 1 hash b870d98d282fac3f
+22:43:28	8	56216ee	C N 512 512 9139 1 0 0 0	31.9684	min_ms 29.0336 path gpu staged 1 hash b870d98d282fac3f
+22:43:29	9	56216ee	C N 512 512 9139 1 0 0 0	32.1224	min_ms 28.6168 path gpu staged 1 hash b870d98d282fac3f
+22:43:29	9	f0c325b	C N 512 512 9139 1 0 0 0	33.6382	min_ms 28.9497 path gpu staged 1 hash b870d98d282fac3f
+22:43:30	10	f0c325b	C N 512 512 9139 1 0 0 0	32.5212	min_ms 29.4981 path gpu staged 1 hash b870d98d282fac3f
+22:43:31	10	56216ee	C N 512 512 9139 1 0 0 0	31.9487	min_ms 29.3595 path gpu staged 1 hash b870d98d282fac3f
+22:43:32	11	56216ee	C N 512 512 9139 1 0 0 0	32.7319	min_ms 28.1730 path gpu staged 1 hash b870d98d282fac3f
+22:43:32	11	f0c325b	C N 512 512 9139 1 0 0 0	32.9496	min_ms 28.7306 path gpu staged 1 hash b870d98d282fac3f
+22:43:33	12	f0c325b	C N 512 512 9139 1 0 0 0	31.6003	min_ms 29.1071 path gpu staged 1 hash b870d98d282fac3f
+22:43:34	12	56216ee	C N 512 512 9139 1 0 0 0	30.9726	min_ms 28.9252 path gpu staged 1 hash b870d98d282fac3f
+# done 2026-11-09 22:43:34 load1 3.34

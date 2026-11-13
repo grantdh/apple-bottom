@@ -1,0 +1,14 @@
+# AB_SPLIT starting table for trying a chip: the shapes of the split's rows,
+# each at f = 0.50. Not measured on any chip; it names none, so no note says
+# it was measured elsewhere. Use it with
+#   AB_SPLIT=1 AB_SPLIT_TABLE=benchmarks/split/start_table.txt
+# and fit the shares from there (the M2 Max's starting values are in
+# benchmarks/split/start_M2-Max-38c.txt). Format: src/dispatch.h.
+# library: none
+# date: provisional
+# method: shapes only, every share 0.50
+zgemm N N N m=2048: n=2048: k=2048: ratio=2 gf=0.5 scalars=z f=0.50   # squares
+dgemm N N N m=2048: n=2048: k=2048: ratio=2 gf=0.5 scalars=z f=0.50   # squares
+zgemm N N N m=8192: n=256:  k=33:           gf=0.5 scalars=u f=0.50   # updates
+zgemm N N M m=8192: n=33:255 k=33:          gf=0.5 scalars=u f=0.50   # narrow updates
+zgemm C N K m=33:   n=33:   k=8192:         gf=0.5 scalars=z f=0.50   # reductions

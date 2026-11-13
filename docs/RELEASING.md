@@ -23,7 +23,7 @@ make ci-local
 ```
 
 This will:
-- Run every test (precision, correctness, chaos, device-API, routing, BLAS-ABI, trace, staged path; `tests/README.md`, Coverage status, gives the counts and the counting rule) plus the golden-bits, ghost-detection, symbol and Fortran checks
+- Run every test (precision, correctness, chaos, device-API, routing, range guard, BLAS-ABI, trace, staged path; `tests/README.md`, Coverage status, gives the counts and the counting rule) plus the golden-bits, ghost-detection, symbol and Fortran checks
 - Run convergence study (V-2)
 - Generate `build/CI_REPORT.txt` with test results and convergence data hash
 
@@ -34,6 +34,7 @@ This will:
 ✓ test_chaos: PASS
 ✓ test_device_api: PASS
 ✓ test_dispatch: PASS
+✓ test_range_guard: PASS
 ✓ test_blas_abi: PASS
 ✓ test_trace: PASS
 ✓ test_qe_golden: PASS
@@ -64,6 +65,13 @@ STATUS: PASS
       `make ci-local`
 - [ ] Convergence study generated 7 data points (N ∈ {64, 128, 256, 512, 1024, 2048, 4096})
 - [ ] Review `build/convergence_data.csv` for expected error ranges (Frobenius ~10⁻¹⁴ to 5×10⁻¹⁴)
+- [ ] `make test-ubsan` passed, with no runtime error
+- [ ] `make test-asan` passed, or stopped at its start-up check because
+      AddressSanitizer's runtime does not start on this host (`tests/README.md`,
+      sanitizer row) and the waiver is recorded below
+- Waivers: 1.6.0, no AddressSanitizer run (the maintainer's decision of
+  2026-11-08: its runtime does not start on the release machine); `make test-ubsan`
+  must pass.
 
 ### 3. GitHub Actions Validation
 
@@ -73,7 +81,7 @@ Check that CI passed on the latest commit:
 
 **Check at:** `https://github.com/grantdh/apple-bottom/actions`
 
-**Note:** GitHub-hosted runners don't give jobs a usable Metal GPU, so CI runs only the checks that need none: `make version-check`, `make build-check`, `make lib`, `make test-symbols` and the routing unit tests (`build/test_dispatch`). The GPU suites and the convergence study run locally via `make ci-local` (step 2 above).
+**Note:** GitHub-hosted runners don't give jobs a usable Metal GPU, so CI runs only the checks that need none: `make version-check`, `make build-check`, `make lib`, `make test-symbols`, the routing unit tests (`build/test_dispatch`), `make dispatch-table-check`, `make split-table-check` and the range guard's stage-2 tests (`build/test_range_guard`). The GPU suites and the convergence study run locally via `make ci-local` (step 2 above).
 
 ### 4. Documentation Review
 
@@ -82,9 +90,23 @@ Check that CI passed on the latest commit:
 - [ ] `docs/vv/VV_REPORT.md` references current validated baseline (if V&V changed)
 - [ ] `docs/vv/PRECISION_ENVELOPE.md` validated range is accurate
 - [ ] If the BLAS-ABI GPU path or the kernels changed since the last
-      calibration: `make calibrate` on an idle machine, and commit the
-      regenerated `src/dispatch_table.h` with its
-      `benchmarks/results/<date>-<sha>-calibrate/` directory
+      calibration: `make calibrate` on an idle machine, which files this
+      chip's table under `benchmarks/calibration/<chip>/` and regenerates
+      `src/dispatch_table.h`; commit both with the
+      `benchmarks/results/<date>-<sha>-calibrate/` directory. Other chips'
+      tables stay as they are until someone recalibrates them
+      (`make dispatch-table-check` confirms the header matches the filed
+      tables)
+- [ ] For every filed split table with rows (`benchmarks/split/tables/<chip>/`;
+      `make split-table-check` skips a table without rows, the only kind that
+      may give `# library: none`), on a full clone that has its `# library:` commit:
+      `git diff --quiet <library> HEAD -- src ':!src/split_table.h'`. If it
+      exits 1, `src/` changed since the table's shares were measured:
+      re-measure its rows on that chip and re-file them
+      (`scripts/ingest_split.py --force <dir>`, which also regenerates
+      `src/split_table.h`), or record in the release notes why the change
+      does not affect the shares. `make split-table-check` prints the same
+      comparison as a warning, not a failure
 
 ### 5. Version Update
 

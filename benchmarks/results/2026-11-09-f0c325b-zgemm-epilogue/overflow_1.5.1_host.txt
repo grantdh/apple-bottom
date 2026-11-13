@@ -1,0 +1,20 @@
+z repro alpha=2^-200 beta=0          path=gpu staged=0 gemms=1 nonfinite_parts=2048 same_as_accelerate=0 C[0]=nannani Accelerate=infnani
+z alpha=1 beta=0 P=2^1105            path=gpu staged=0 gemms=1 nonfinite_parts=1024 same_as_accelerate=1 C[0]=inf+0x0p+0i Accelerate=inf+0x0p+0i
+z alpha=1 beta=1 P=2^1105            path=gpu staged=0 gemms=1 nonfinite_parts=1024 same_as_accelerate=1 C[0]=inf+0x0p+0i Accelerate=inf+0x0p+0i
+z alpha=1 beta=1 Cin=2^1023          path=gpu staged=0 gemms=1 nonfinite_parts=0 same_as_accelerate=1 C[0]=0x1p+1023+0x0p+0i Accelerate=0x1p+1023+0x0p+0i
+z alpha=1 beta=1 P=2^1023 Cin=2^1023 path=gpu staged=0 gemms=1 nonfinite_parts=1024 same_as_accelerate=1 C[0]=inf+0x0p+0i Accelerate=inf+0x0p+0i
+z alpha=1 beta=2 Cin=2^1023          path=gpu staged=0 gemms=1 nonfinite_parts=1024 same_as_accelerate=1 C[0]=inf+0x0p+0i Accelerate=inf+0x0p+0i
+z alpha=2^8 P=2^1020                 path=gpu staged=0 gemms=1 nonfinite_parts=1024 same_as_accelerate=1 C[0]=inf+0x0p+0i Accelerate=inf+0x0p+0i
+z alpha=1+i complex P                path=gpu staged=0 gemms=1 nonfinite_parts=0 same_as_accelerate=1 C[0]=-0x1p+1016+0x1p+1016i Accelerate=-0x1p+1016+0x1p+1016i
+z alpha=Inf ordinary                 path=gpu staged=0 gemms=1 nonfinite_parts=2048 same_as_accelerate=0 C[0]=nannani Accelerate=infnani
+z alpha=NaN ordinary                 path=gpu staged=0 gemms=1 nonfinite_parts=2048 same_as_accelerate=1 C[0]=nannani Accelerate=nannani
+z beta=Inf ordinary                  path=gpu staged=0 gemms=1 nonfinite_parts=2048 same_as_accelerate=0 C[0]=nannani Accelerate=infnani
+z ordinary alpha=0.5-0.25i beta=0.5  path=gpu staged=0 gemms=1 nonfinite_parts=0 same_as_accelerate=1 C[0]=0x1.38p+4+0x1p-1i Accelerate=0x1.38p+4+0x1p-1i
+d repro alpha=2^-200 beta=0          path=gpu staged=0 gemms=1 nonfinite_parts=0 same_as_accelerate=0 C[0]=0x1p+905 Accelerate=inf
+d alpha=1 beta=0 P=2^1105            path=gpu staged=0 gemms=1 nonfinite_parts=1024 same_as_accelerate=1 C[0]=inf Accelerate=inf
+d alpha=1 beta=1 P=2^1023 Cin=2^1023 path=gpu staged=0 gemms=1 nonfinite_parts=1024 same_as_accelerate=1 C[0]=inf Accelerate=inf
+d alpha=2^8 P=2^1020                 path=gpu staged=0 gemms=1 nonfinite_parts=1024 same_as_accelerate=1 C[0]=inf Accelerate=inf
+d alpha=1 beta=2 Cin=2^1023          path=cpu staged=0 gemms=0 nonfinite_parts=1024 same_as_accelerate=1 C[0]=inf Accelerate=inf
+d alpha=0.5 P=2^1023 (finite)        path=gpu staged=0 gemms=1 nonfinite_parts=0 same_as_accelerate=1 C[0]=0x1p+1022 Accelerate=0x1p+1022
+ab_dev_zgemm A=2^600 B=2^500 alpha=0x1p-200  status=OK nonfinite_parts=2048 C[0]=nannani
+ab_dev_zgemm A=2^600 B=2^500 alpha=0x1p+0  status=OK nonfinite_parts=1024 C[0]=inf+0x0p+0i

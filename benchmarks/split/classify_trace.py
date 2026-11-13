@@ -7,6 +7,8 @@ usage: classify_trace.py <dir> [prefix]   reads <dir>/<case>.np<N>.d<D>.trace.<p
   host      path=gpu, epilogue_ns > 0  (host pack/conversion/epilogue: the staged result did not
             stand, or the call went straight to the host path)
   fallback  path=fallback:<reason>     (C computed by cblas on the GPU slice's thread)
+  split     path=split                 (the library's own AB_SPLIT; bench_split refuses to run under it,
+            so these come only from other programs' traces)
 The rule holds for bench_split's calls, all with alpha = 1 and beta 0 or 1: a staged ZGEMM with other
 scalars applies them on the host and records an epilogue, so it would count as host here.
 Calls are grouped by shape: the full call (GPU alone) and each slice width (split).
@@ -38,7 +40,8 @@ for run, calls in runs.items():
         n = defaultdict(int)
         for c in cs:
             p = c["path"]
-            cls = p if p.startswith("fallback") else ("staged" if int(c.get("epilogue_ns", 0)) == 0 else "host")
+            cls = (p if p.startswith("fallback") or p == "split"
+                   else ("staged" if int(c.get("epilogue_ns", 0)) == 0 else "host"))
             n[cls] += 1
             tot[cls] += 1
         st = {}

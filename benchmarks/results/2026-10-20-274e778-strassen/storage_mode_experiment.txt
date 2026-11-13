@@ -1,0 +1,14 @@
+# Workspace in MTLResourceStorageModeShared instead of Private: a one-off build
+# of 274e778 with only that option changed (not committed), 2026-10-20, AC
+# power, `bench_strassen speed --reps 3`. Compare submit_med_ms with the
+# Private runs in big_205933.csv (8192: 11.730) and zgemm_210017.csv
+# (6144: 26.407): the commit-to-GPU-start delay is the same.
+mode,routine,M,K,N,method,reps,wall_med_ms,wall_min_ms,gpu_med_ms,temps_med_ms,submit_med_ms,wake_med_ms,gflops
+speed,dgemm,8192,8192,8192,strassen-first,1,1547.264,1547.264,1449.579,0.296,97.079,0.124,710.6
+speed,dgemm,8192,8192,8192,classical,3,1640.911,1637.758,1640.604,0.000,0.106,0.143,670.1
+speed,dgemm,8192,8192,8192,strassen,3,1453.125,1449.436,1441.122,0.002,11.851,0.124,756.7
+speed,dgemm,8192,8192,8192,accelerate,3,1781.665,1780.388,0.000,0.000,0.000,0.000,617.1
+speed,zgemm,6144,6144,6144,strassen-first,1,1952.152,1952.152,1846.453,0.338,104.982,0.168,950.5
+speed,zgemm,6144,6144,6144,classical,3,2293.118,2189.094,2251.803,0.153,41.897,0.270,809.1
+speed,zgemm,6144,6144,6144,strassen,3,1984.405,1970.301,1984.104,0.001,28.056,0.122,935.0
+speed,zgemm,6144,6144,6144,accelerate,3,2931.935,2919.401,0.000,0.000,0.000,0.000,632.8

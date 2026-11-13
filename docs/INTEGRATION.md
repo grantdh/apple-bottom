@@ -34,8 +34,11 @@ Complete guide for integrating apple-bottom into scientific computing codes.
   1.5.0's staged path does it on the GPU but has not been calibrated yet,
   and Quantum ESPRESSO forced onto it is still not faster than Accelerate
   ([what to expect](#quantum-espresso-integration)). `AB_MODE=auto` keeps
-  such calls on Accelerate, so linking apple-bottom costs little but gains
-  nothing there yet.
+  `dgemm_` and `zgemm_` calls on Accelerate, apart from the M2 Max table's one
+  row (ZGEMM with both operands transposed or conjugated, from 4096 up; see
+  [Routing](#routing-ab_modeauto)), so linking apple-bottom costs little but
+  gains nothing on the others yet. The device-buffer API does not read
+  `AB_MODE`: its GEMMs run on the GPU, with no fallback to Accelerate.
 - You need IEEE FP64 results bit for bit, or code that runs off Apple
   Silicon.
 
@@ -46,7 +49,7 @@ Complete guide for integrating apple-bottom into scientific computing codes.
 ### Building your program
 
 With the library built in place (`make`), the shared library carries its
-Metal, Foundation and C++ dependencies:
+Metal, Foundation, IOKit and C++ dependencies:
 
 ```bash
 clang -I/path/to/apple-bottom/include my_prog.c -o my_prog \
@@ -58,7 +61,7 @@ Linking the static archive instead needs those dependencies spelled out:
 ```bash
 clang -I/path/to/apple-bottom/include my_prog.c -o my_prog \
       /path/to/apple-bottom/build/libapplebottom.a \
-      -lc++ -framework Metal -framework Foundation -framework Accelerate
+      -lc++ -framework Metal -framework Foundation -framework Accelerate -framework IOKit
 ```
 
 After `make install PREFIX=$HOME/.local` (default `/usr/local`), pkg-config
@@ -78,7 +81,7 @@ use the BLAS ABI for column-major data.
 ### Values far from 1
 
 Double-float values are pairs of FP32 numbers, so on their own they have
-FP32's exponent range: products below about 2⁻⁷⁸ lose their low part,
+FP32's exponent range: products below about 2⁻⁸⁰ lose their low part,
 values below 2⁻¹²⁶ flush to zero on the GPU, and sums overflow at 2¹²⁸.
 The library bridges that with exact powers of two, which leave the bits of
 in-range data unchanged:
@@ -89,21 +92,56 @@ in-range data unchanged:
     that entry to about 2³⁰, and C back.
   - A DGEMM alpha or beta outside 2^±20 joins C's scale.
   - A call the scaled data still cannot keep in range runs on Accelerate.
-    So does a call with NaN or Inf in A or B (or in C, for DGEMM with
-    beta ≠ 0), which then gets IEEE results. `AB_REPORT` counts such calls
-    as `range` fallbacks.
+    So does a call with NaN or Inf in A or B, or in C with beta ≠ 0,
+    which then gets IEEE results, and a ZGEMM whose FP64 epilogue could
+    overflow (its product, alpha times it, or beta times C beyond FP64's
+    range, judged from their largest entries; see
+    [Exponent range](vv/LIMITATIONS.md#exponent-range)) or whose alpha or
+    beta is NaN or Inf or has |Re| + |Im| beyond FP64's range. `AB_REPORT`
+    counts such calls as `range` fallbacks. That bound is from above only:
+    an epilogue underflowing before alpha is not refused, and its absolute
+    error term grows with alpha, up to (|Re alpha| + |Im alpha| + 2)·2⁻¹⁰⁷⁴.
 - **Native `ABMatrix` API.**
   - `ab_matrix_upload` gives each matrix one power-of-two scale, and
     `ab_matrix_download` removes it; the GPU operations carry it through.
   - Data such as 1e-25 × uniform or 1e25 × uniform therefore multiplies
-    correctly.
+    correctly, in one product.
   - A single matrix whose nonzero entries span more than about 2⁷⁸ (10²³)
     keeps FP32's range relative to its scale, and has no fallback.
+  - Results are not re-centred: a result's scale comes from its operands'
+    scales, never from its values. A chain of products whose magnitudes
+    shrink or grow, such as an unnormalized transfer-matrix chain (Pattern 1
+    below), drifts away from its scale and returns degraded results, zeros
+    or Inf with `AB_OK`. Keep chained magnitudes near 1 by normalizing often
+    with factors in [2⁻³⁹, 2⁴⁰), which `ab_matrix_scale` applies to the
+    stored values; re-centre an intermediate with `ab_matrix_download` and
+    `ab_matrix_upload` (one FP64 rounding; `ab_matrix_copy` does not
+    re-centre); or use the BLAS ABI.
+  - An alpha of `ab_dgemm_scaled` (on data in the window, with beta 0 or
+    also in that range) or of `ab_matrix_scale` with |alpha| in [2⁻³⁹, 2⁴⁰)
+    multiplies the stored values, so small alpha on small data, or repeated
+    scaling, loses precision the same way.
+  - `ab_dgemm_scaled` (and its batch and Strassen forms) gives C the larger
+    of the scales of alpha·op(A)op(B) and beta·C, so in an element where the
+    larger term is 0 and the scales are far apart, the smaller term loses
+    precision or becomes 0. `ab_matrix_add` and `ab_matrix_sub` align their
+    operands to the larger scale the same way. Native ZGEMM brings its real
+    and imaginary parts (3M) or its paired products (4M) to the larger scale
+    too; under 3M a part far below the other loses precision in every
+    product.
 - **Device-buffer API** (`ab_dev_dgemm`, `ab_dev_zgemm`): converts through
-  `ABMatrix` handles, so it behaves as the native API does.
+  `ABMatrix` handles, measured on every call (`ab_dev_dgemm` gives C the
+  larger scale as `ab_dgemm_scaled` does, and `ab_dev_zgemm` aligns its
+  parts or products as native ZGEMM does), with no range guard and no
+  fallback: some data the BLAS ABI would scale or refuse returns `AB_OK`
+  with degraded or non-finite results
+  ([the cases](vv/LIMITATIONS.md#exponent-range)). Use the BLAS ABI for
+  such data.
 
 The thresholds and their measurements are in
-[LIMITATIONS.md](vv/LIMITATIONS.md#exponent-range).
+[LIMITATIONS.md](vv/LIMITATIONS.md#exponent-range), and the data 1.5.x was
+measured to let through the guard with a degraded result, and what 1.6.0 does
+with it, in [What the guard misses](vv/LIMITATIONS.md#what-the-guard-misses).
 
 ### Complex data with imbalanced parts
 
@@ -113,7 +151,10 @@ nearly imaginary data). Such calls run as four real products instead, at
 1.00–1.10× the time through `zgemm_`. The BLAS ABI and the device API decide
 per row of op(A) and column of op(B); the native API decides per matrix, from
 the magnitudes `ab_matrix_upload` measured, and keeps the three-product form
-for matrices computed on the GPU. Details: [LIMITATIONS.md](vv/LIMITATIONS.md#complex-products).
+for matrices computed on the GPU. In the native and device APIs, parts (or
+4M's paired products) on scales far apart can still lose precision under
+either form ([Values far from 1](#values-far-from-1)); the BLAS ABI's guard
+refuses such data. Details: [LIMITATIONS.md](vv/LIMITATIONS.md#complex-products).
 
 ### Where the GPU pays off
 
@@ -142,10 +183,14 @@ well-scaled operands it ran large squares faster than Accelerate (median
 ms, GPU alone against Accelerate alone: DGEMM 4096² 195.6 against 222.6,
 ZGEMM 4096² 581.7 against 878.9;
 [split benchmark](../benchmarks/results/2026-10-28-415cb5d-hybrid-split/)),
-while Quantum ESPRESSO forced onto it takes 1.01–1.06× its time on
-Accelerate ([below](#quantum-espresso-integration)).
+while Quantum ESPRESSO forced onto it is not faster than Accelerate
+([below](#quantum-espresso-integration)).
 
 ### Pattern 1: a chain of large products
+
+The loop assumes each M[i] has norm near 1. Results are not re-centred, so
+otherwise normalize between products
+([Values far from 1](#values-far-from-1)).
 
 ```c
 // P = M[0] · M[1] · … · M[k-1], all N × N, row-major; P stays on the GPU.
@@ -266,6 +311,17 @@ machine, and `AB_DISPATCH_TABLE=<file>` uses it without a rebuild
 **Precision issues**
 - Double-float gives ~10⁻¹⁵ precision, not 10⁻¹⁶
 - For ~10⁻¹⁶, use IEEE FP64 on the CPU (Accelerate)
+- Zeros, Inf or degraded results with `AB_OK` from the native or device API
+  ([Values far from 1](#values-far-from-1)):
+  - a matrix whose nonzero entries span more than about 2⁷⁸;
+  - a chain of results that drifted from its scale;
+  - an alpha with |alpha| in [2⁻³⁹, 2⁴⁰) on small data;
+  - alpha·op(A)op(B) and beta·C on scales far apart (`ab_dgemm_scaled` and
+    its batch and Strassen forms, `ab_dev_dgemm`);
+  - operands on scales far apart (`ab_matrix_add`, `ab_matrix_sub`);
+  - real and imaginary parts, or their products, on scales far apart (native
+    ZGEMM, `ab_dev_zgemm`);
+  - an `ab_dev_zgemm` epilogue outside FP64's range.
 
 ---
 
@@ -304,23 +360,27 @@ the same matrices take part in several large products. Details:
 
 ### Overview
 
-libapplebottom exports the Fortran BLAS symbols `dgemm_` and `zgemm_`, and
-`ab_dgemm_` / `ab_zgemm_` with the same arguments. Link it ahead of your
-other BLAS library and the program's existing `CALL DGEMM` and `CALL ZGEMM`
-reach apple-bottom without a source change; every other BLAS and LAPACK
-routine still comes from that other library. Each call is then routed to
-the GPU or to Accelerate ([Automatic Routing](#automatic-routing)).
+libapplebottom exports the Fortran BLAS symbols `dgemm_`, `zgemm_`,
+`dgemv_`, `zgemv_` and `zhemv_`, and `ab_dgemm_` / `ab_zgemm_` with the
+same arguments as the first two. Link it ahead of your other BLAS library
+and the program's existing `CALL DGEMM`, `CALL ZGEMM`, `CALL DGEMV`,
+`CALL ZGEMV` and `CALL ZHEMV` reach apple-bottom without a source change;
+every other BLAS and LAPACK routine still comes from that other library.
+Each call is then routed to the GPU or to Accelerate
+([Automatic Routing](#automatic-routing)).
 
 | Fortran call | Provided by apple-bottom |
 |--------------|--------------------------|
 | `CALL DGEMM(...)` | yes (`dgemm_`; also `CALL ab_dgemm(...)`) |
 | `CALL ZGEMM(...)` | yes (`zgemm_`; also `CALL ab_zgemm(...)`) |
+| `CALL DGEMV(...)`, `CALL ZGEMV(...)`, `CALL ZHEMV(...)` | yes (`dgemv_`, `zgemv_`, `zhemv_`) |
 | any other BLAS or LAPACK routine | no: your BLAS/LAPACK library |
 
-The arguments are those of reference BLAS, and so is the behaviour: TRANS
-is case-insensitive (`'N'`, `'T'`, `'C'`; `'C'` means `'T'` for DGEMM), an
-illegal argument is reported through `xerbla` and stops the program, and
-`alpha = 0` returns `C = beta*C` without reading A or B.
+The arguments are those of reference BLAS, and so is a legal call's
+behaviour: TRANS is case-insensitive (`'N'`, `'T'`, `'C'`; `'C'` means `'T'`
+for DGEMM), and `alpha = 0` returns `C = beta*C` without reading A or B. An
+illegal argument ends the process with status 255: Accelerate's cblas names
+the argument and exits, and the program's XERBLA is not called.
 
 To send only some call sites to apple-bottom, call `ab_zgemm` / `ab_dgemm`
 there, declared `EXTERNAL` (not through a module, so array sections pass by
@@ -347,14 +407,16 @@ Static archive:
 
 ```makefile
 LIBS = /path/to/apple-bottom/build/libapplebottom.a \
-       -lc++ -framework Metal -framework Foundation -framework Accelerate
+       -lc++ -framework Metal -framework Foundation -framework Accelerate -framework IOKit
 ```
 
 Keep apple-bottom first. The linker binds `dgemm_`/`zgemm_` to the first
 library on the command line that exports them, and in a flat namespace
 (`-Wl,-flat_namespace`, which Homebrew's Open MPI wrappers add) the first
 loaded library wins at run time. Without `-lc++`, a static link fails with
-an undefined `___gxx_personality_v0`.
+an undefined `___gxx_personality_v0`; without `-framework IOKit`, with an
+undefined `_IOServiceGetMatchingServices` (the routing reads the GPU core
+count from the IORegistry).
 
 ### Check that the calls arrive
 
@@ -372,13 +434,36 @@ apple-bottom first.
 ### Automatic Routing
 
 `dgemm_`, `zgemm_`, `ab_dgemm_` and `ab_zgemm_` forward each call to
-`ab_dgemm_blas` / `ab_zgemm_blas`, which route it. By default
+`ab_dgemm_blas` / `ab_zgemm_blas`, which route it; `dgemv_`, `zgemv_` and
+`zhemv_` forward to `ab_dgemv_blas`, `ab_zgemv_blas` and `ab_zhemv_blas`.
+By default
 (`AB_MODE=auto`) a call goes to the GPU only for shapes where the GPU was
 measured at least 1.10× faster than Accelerate end to end (on 1.4.0's host
 path; the staged path has not been calibrated yet); everything else runs on
 Accelerate. `AB_MODE=gpu` sends every call with all dimensions above
-`AB_MIN_GPU_DIM` to the GPU, `AB_MODE=cpu` none. See
+`AB_MIN_GPU_DIM` to the GPU (BLAS-2 calls also need M and N at least
+`AB_BLAS2_MIN_DIM`), `AB_MODE=cpu` none. See
 [Routing](#routing-ab_modeauto).
+
+A matrix-vector product reads its matrix once, so a one-shot GPU call
+spends most of its time making the matrix visible to the GPU. A solver
+that multiplies by the same matrix many times (Lanczos, Haydock, other
+Krylov methods) should keep it in a device buffer, registering the
+Fortran array once without a copy, and call the device-buffer routines:
+
+```fortran
+! interface: TYPE(C_PTR) FUNCTION ab_dev_register(ptr, nbytes) BIND(C), and
+! INTEGER(C_INT) FUNCTION ab_dev_zgemv(trans, m, n, alpha, A, a_off, lda, x, incx, beta, y, incy) BIND(C)
+hA = ab_dev_register(C_LOC(H), INT(SIZE(H), C_SIZE_T) * 16_C_SIZE_T)
+DO it = 1, niter
+   st = ab_dev_zgemv(0, n, n, one, hA, 0_C_SIZE_T, n, v, 1, zero, w, 1)   ! w = H v on the GPU
+   ...
+END DO
+CALL ab_dev_free(hA)   ! before H is deallocated
+```
+
+(`apple_bottom_device.h` has the C prototypes; trans is an `ABTranspose`,
+0 for `'N'`, scalars are `(re, im)` pairs passed by reference.)
 
 ---
 
@@ -410,6 +495,15 @@ measured after it):
   8 ranks), against 1.17–1.20× for the release check's build before the
   fix and 1.06–1.43× for 1.4.0 on the same QE build.
 
+**On 1.6.0** the same link also moves QE's `dgemv_` and `zgemv_` from the
+configured BLAS to apple-bottom, and `AB_MODE=auto` still keeps QE's GEMMs on
+Accelerate. QE makes few of these BLAS-2 calls: on an M2 Max `AB_MODE=auto` sends
+half of si64 input B's ZGEMVs to the GPU and none of input A's. Against 1.5.1 the
+energies, bands and forces of A and B at 8 ranks are identical at printed
+precision, and wall time is unchanged within measurement. `AB_MODE=gpu` takes
+1.04–1.09× the `cpu` time
+([data](../benchmarks/results/2026-11-06-8b48826-pretag/README.md#quantum-espresso)).
+
 [VAL-1](../tests/validation/VAL001_QE_Si64.md) has the earlier runs, with
 QE develop (7.5) compiled `-O0`. On this hardware, linking apple-bottom into
 QE gives you the `AB_REPORT` accounting and a routing that follows
@@ -438,7 +532,8 @@ grep AB_REPORT si64.err
 Each rank prints its own report at exit (calls, time on the GPU and on
 Accelerate, the GPU calls' stage costs, fallbacks); see
 [Reading a run report](#reading-a-run-report). With `AB_MODE=auto` on an M2
-Max, expect `gpu_calls=0` for every routine.
+Max, expect `gpu_calls=0` for `zgemm` and `dgemm`. A `zgemv` line can show GPU
+calls (see **On 1.6.0** above).
 
 ### Troubleshooting
 
@@ -459,16 +554,25 @@ grep -E '/_[dz]gemm_>'` shows where each one went.
 ## Environment Variables and Run Reports
 
 The BLAS-ABI entry points (`dgemm_`, `zgemm_`, `ab_dgemm_`, `ab_zgemm_`,
-`ab_dgemm_blas`, `ab_zgemm_blas`) read these once per process, at their first
-call. The native `ABMatrix` and device APIs do not use them, except
-`AB_PREFETCH`, which the library reads when it initializes and which applies
-to every API.
+`ab_dgemm_blas`, `ab_zgemm_blas`, and the BLAS-2 `dgemv_`, `zgemv_`,
+`zhemv_`, `ab_*gemv_blas`, `ab_zhemv_blas`) read these once per process, at
+their first call. The native `ABMatrix` and device APIs do not use them,
+except `AB_PREFETCH` and `AB_PRECISION`, which the library reads when it
+initializes and which apply to every API, and `AB_STRASSEN` and
+`AB_STRASSEN_MIN`, read at the first GEMM that could use them, which apply
+to the native, BLAS-ABI and device-API GEMMs (below). `AB_DISPATCH_TABLE`, the FLOP thresholds and
+`AB_TRACE` concern GEMM only; BLAS-2 calls are counted in `AB_REPORT` and
+`AB_PROFILE` as `dgemv`, `zgemv` and `zhemv`.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `AB_MODE` | `auto` | `cpu`: every call on Accelerate. `gpu`: on the GPU unless a dimension is ≤ `AB_MIN_GPU_DIM`. `auto` (or any other value): by the calibrated dispatch table, or by a FLOP threshold if one is set (see [Routing](#routing-ab_modeauto)). |
+| `AB_MODE` | `auto` | `cpu`: every call on Accelerate. `gpu`: on the GPU unless a dimension is ≤ `AB_MIN_GPU_DIM` (BLAS-2: or below `AB_BLAS2_MIN_DIM`). `auto` (or any other value): by the calibrated dispatch table, or by a FLOP threshold if one is set (see [Routing](#routing-ab_modeauto)). |
 | `AB_MIN_GPU_DIM` | `32` | Calls with M, N or K ≤ this run on Accelerate in every mode. |
-| `AB_DISPATCH_TABLE` | unset | `auto`: read the dispatch table from this file (the `dispatch_table.txt` that `make calibrate` writes) instead of using the built-in one. A file that cannot be read or parsed is reported on stderr and the built-in table is used. |
+| `AB_BLAS2_MIN_DIM` | `256` | `dgemv_`, `zgemv_` and `zhemv_` calls with M or N below this run on Accelerate in every mode, even with `AB_MIN_GPU_DIM=0`: forced onto the GPU they run at 0.01–0.09× Accelerate's speed at 256² and fail the test ratio of Netlib's and LAPACK's small-size tests. |
+| `AB_PRECISION` | unset | `fast`: every GPU GEMM kernel accumulates lazily, Dot2-style (each product's high part goes into a running sum through TwoSum and every rounding error into a separate sum, renormalized once per 16 terms of K). On an M2 Max, 1.05–1.08× faster for DGEMM and ZGEMM of N = 2048 and 4096 ([data](../benchmarks/results/2026-11-06-8b48826-pretag/README.md#ab_precisionfast)). About 1 bit less accurate: on `tests/test_precision.c` the normwise error is 1.8-1.9× and the componentwise error 1.4-2.8× the default's (up to 2.2 √K·2⁻⁴⁸ of \|A\|\|B\|, default 1.0). The proven error bounds (`docs/vv/PRECISION_ENVELOPE.md` §1.2) cover the default kernels only; none is proven for this mode. Results differ from the default in the last bits; `ab_precision_mode()` returns the mode and the report and trace headers show `AB_PRECISION=fast`. Any other value: the default kernels, with the bits of 1.4.0. |
+| `AB_DISPATCH_TABLE` | unset | `auto`: read the dispatch table from this file (the `dispatch_table.txt` that `make calibrate` writes) instead of the built-in table for this chip. A file that cannot be read or parsed is reported on stderr and the built-in table for this chip is kept (none on an uncalibrated chip); a file calibrated on another chip or core count (its `# chip:` and `# gpu_cores:` header keys) is used with a note on stderr. |
+| `AB_CHIP` | unset | `auto`: the chip whose built-in table to use, in place of this machine's `machdep.cpu.brand_string` (e.g. `Apple M2 Max`). For tests, and to borrow another chip's table deliberately (with `AB_GPU_CORES` matching that table's count when it has one). |
+| `AB_GPU_CORES` | unset | `auto`: the GPU core count that picks among a chip's tables, in place of the IORegistry's `gpu-core-count`; also how a sibling borrows another variant's table on purpose (`AB_GPU_CORES=38` on a 30-core M2 Max). |
 | `AB_CROSSOVER_FLOPS` | unset | `auto`: replaces the table by a FLOP threshold. Calls with at least this many FLOPs (2·M·N·K real, 8·M·N·K complex) go to the GPU: ZGEMM, and DGEMM unless `AB_CROSSOVER_FLOPS_REAL` is set. |
 | `AB_CROSSOVER_FLOPS_REAL` | unset | `auto`: the same for DGEMM only. |
 | `AB_PREFETCH` | unset | Which GPU GEMM kernels load the next K-tile into registers while they compute the current one (register prefetch). Unset or any other value: where the GPU holds few threadgroups, by `use_prefetch` in `src/apple_bottom.m` (on an M2 Max up to 1.47× faster there in kernel GPU time; [measurements](../benchmarks/results/2026-10-24-15ef7b9-prefetch/)). `0`: never. `1`: on every grid. The results are bitwise the same in all three; `0` and `1` are for timing comparisons. |
@@ -478,27 +582,40 @@ to every API.
 | `AB_PROFILE_THRESHOLD_NS` | `0` | Count only calls that took at least this many ns, in both reports. |
 | `AB_TRACE` | unset | A path: each process appends one line per call to `<path>.<pid>` (see [Per-call trace](#per-call-trace-ab_trace)). Unset or empty: no trace. |
 | `AB_TRACE_HASH` | off | With `AB_TRACE`, `1`: also hash the operands each call reads. |
+| `AB_STRASSEN` | off | `1`: GPU GEMMs with M, N and K ≥ `AB_STRASSEN_MIN` take each real product by one level of Strassen-Winograd (7 half-size products instead of 8; normwise error bound only): the native `ab_dgemm`, `ab_dgemm_scaled`, `ab_zgemm` and `ab_zgemm_ex`, the BLAS ABI on its staged and host paths, and the device API, but not the batched, asynchronous or `ab_batch_*` GEMMs, the library's own uses of its GEMMs (ZHERK, DTRSM, `ab_dgesv_mpir`), or BLAS-ABI calls with a row of op(A) or column of op(B) outside 2^±20, which the guard scales line by line. The GEMM keeps its scales and its choice of Gauss-3M or 4M. See [Strassen-Winograd](STRASSEN.md). |
+| `AB_STRASSEN_MIN` | `4096` | With `AB_STRASSEN=1`: the smallest M, N and K that use it. |
 | `AB_HOST_PACK` | off | `1`: every GPU call takes the host path (host pack, FP64 → DD and epilogue) instead of the staged path. The results are the same bits either way. |
-| `AB_STAGING_MB` | `2048` | The GPU buffers kept between calls by the staged path and by the native ZGEMMs (their Gauss-3M or 4M temporaries), at most this many MB per process; `0`: none kept, each call makes its own (and pays for fresh buffers). |
-| `AB_TEST_FAIL_STAGE` | unset | Test-only. `alloc`: every GPU buffer allocation (`ab_matrix_create()`, and the buffer pool's) fails; `kernel`: the command buffer of every `ab_dgemm_scaled()`, `ab_zgemm()` and staged call, the GEMMs of the GPU path, reports an error. A GPU-routed call then fails as it would on a real failure there and runs on Accelerate instead (a `gpu_failed` fallback). Never set it in production. |
+| `AB_STAGING_MB` | `2048` | The GPU buffers kept between calls by the staged path, by the native ZGEMMs (their Gauss-3M or 4M temporaries) and by the device-buffer API (its operands in double-float), at most this many MB per process; `0`: none kept, each call makes its own (and pays for fresh buffers). |
+| `AB_TEST_FAIL_STAGE` | unset | Test-only. `alloc`: every GPU buffer allocation (`ab_matrix_create()`, and the buffer pool's) fails; `kernel`: the command buffer of every staged call, BLAS-2 call and synchronous native call other than `ab_fft_execute` reports an error. A GPU-routed call then fails as it would on a real failure there and runs on Accelerate instead (a `gpu_failed` fallback), and a native call returns `AB_ERROR_KERNEL_FAILED` (`ab_dtrsm` and `ab_dgesv_mpir` redo the failed step on Accelerate). Never set it in production. |
+| `AB_TEST_FAIL_ONLY` | unset | Test-only. `n`: with `AB_TEST_FAIL_STAGE=kernel`, only the process's n-th of those command buffers reports an error, as when macOS stops one. Never set it in production. |
+
+The FFT (`apple_bottom_fft.h`) reads one variable, when a plan is created:
+`AB_FFT_WORK_MB` (default 256) caps the double-float work buffer of a plan
+with more than one GPU pass; larger batches run in groups that fit it.
 
 ### Routing (AB_MODE=auto)
 
-One function (`src/dispatch.c`) decides where each BLAS-ABI call runs, in
-this order:
+`src/dispatch.c` decides where each GEMM BLAS-ABI call runs, in this order
+(BLAS-2 calls share steps 1-4, with a floor of their own at step 3, below):
 
 1. Invalid arguments and `alpha == 0`: Accelerate (reference BLAS checks and
    quick return), in every mode.
 2. `AB_MODE=cpu`: Accelerate.
-3. M, N or K ≤ `AB_MIN_GPU_DIM`: Accelerate, in every mode.
+3. M, N or K ≤ `AB_MIN_GPU_DIM`: Accelerate, in every mode. BLAS-2 calls also
+   stay there with M or N below `AB_BLAS2_MIN_DIM` (256), whatever
+   `AB_MIN_GPU_DIM` says.
 4. `AB_MODE=gpu`: the GPU.
 5. `auto` with `AB_CROSSOVER_FLOPS_REAL` (DGEMM) or `AB_CROSSOVER_FLOPS`
    (ZGEMM, and DGEMM without `AB_CROSSOVER_FLOPS_REAL`) set: the GPU if the
    call has at least that many FLOPs.
 6. `auto`: the dispatch table, from the file `AB_DISPATCH_TABLE` names or
-   else the built-in `src/dispatch_table.h`. The GPU if a row of the call's
-   routine and TRANS class has min_M ≤ M, min_N ≤ N and min_K ≤ K, else
-   Accelerate.
+   else the built-in table for this machine's chip (`src/dispatch_table.h`,
+   one table per calibrated chip, keyed by the chip's brand string and GPU
+   core count). The GPU if a row of the call's routine and TRANS class has
+   min_M ≤ M, min_N ≤ N and min_K ≤ K, else Accelerate. A chip without a
+   built-in table, or a sibling with another core count (an M2 Max with 30
+   cores instead of 38), has no rows: every `auto` call runs on Accelerate
+   until that chip is calibrated.
 
 The table comes from measurements, not a model. `make calibrate` (about 15
 minutes) times each shape of a grid end to end, through `ab_*gemm_blas`
@@ -516,19 +633,40 @@ without rows keeps every `auto` call on Accelerate:
 zgemm T T 4096 4096 4096
 ```
 
-The built-in table was measured on an M2 Max (38-core GPU, macOS 27.0.1;
-data in `benchmarks/results/2026-10-14-52f1880-calibrate/`) at 52f1880,
-on 1.4.0's host path, which packed and converted on the CPU. The GPU path
-was at least 1.10× faster only for ZGEMM with both operands transposed or
-conjugated, from 4096 up (1.11× at 4096, 1.20× at 6144): that is the
-table's one row. Every QE si64 shape (0.09–0.76× Accelerate's speed) and
-every DGEMM (at most 0.84×) was slower on the GPU, and the other ZGEMMs
-reached at most 1.02× (6144, one operand transposed). So `auto` keeps QE's
-calls on Accelerate. The table has not been measured again on 1.5.0's
-staged path; `make calibrate` on 1.5.0 measures that path. To
-calibrate another machine, run `make calibrate` and set
-`AB_DISPATCH_TABLE` to the `dispatch_table.txt` it writes, or rebuild:
-it also rewrites `src/dispatch_table.h`.
+The built-in tables live in `benchmarks/calibration/<chip>/`, one directory
+per calibrated chip (`M2-Max-38c`: the chip without "Apple ", then the GPU
+core count), each holding the `dispatch_table.txt` and `calibrate_summary.csv`
+of its calibration; `src/dispatch_table.h` is generated from them. The M2 Max
+table (38-core GPU, macOS 27.0.1; measured in
+`benchmarks/results/2026-10-14-52f1880-calibrate/`) is so far the only one.
+It was measured at 52f1880, on 1.4.0's host path, which packed and
+converted on the CPU. There the GPU path was at least 1.10× faster only for ZGEMM with both
+operands transposed or conjugated, from 4096 up (1.11× at 4096, 1.20× at
+6144): that is the table's one row. Every QE si64 shape (0.09–0.76×
+Accelerate's speed) and every DGEMM (at most 0.84×) was slower on the GPU,
+and the other ZGEMMs reached at most 1.02× (6144, one operand transposed).
+So `auto` keeps QE's GEMMs on Accelerate on an M2 Max, and on every other
+chip, which has no table yet. The M2 Max table has not been measured again
+on 1.5.0's staged path; `make calibrate` measures that path.
+
+To calibrate another machine, run `make calibrate` there (about 15 minutes,
+idle, on AC power): it writes the results under `benchmarks/results/`, files
+them as that chip's table under `benchmarks/calibration/` through
+`scripts/ingest_calibration.py`, and regenerates `src/dispatch_table.h`;
+rebuild to compile the table in, and commit the header with the directory
+(`make dispatch-table-check`, part of `ci-local` and CI, verifies they
+agree). A calibration made elsewhere, a directory with its
+`dispatch_table.txt` and `calibrate_summary.csv`, is filed the same way with
+`python3 scripts/ingest_calibration.py <dir>`. The script checks the table
+against its measurements (every row a ≥ 1.10× win, no measured loss covered)
+and refuses a table from part of the grid (`--only`), which still works through
+`AB_DISPATCH_TABLE`. The table file's header carries the chip, the GPU core
+count and the matrix unit Accelerate ran on (`# chip:`, `# gpu_cores:`,
+`# cpu_matrix: AMX` or `SME`): the Accelerate side of the comparison is AMX on
+the M1 to M3 and SME from the M4, so a table is only ever applied to the chip it
+was measured on. The `AB_REPORT` and `AB_TRACE` headers name the table a run
+used (`table=builtin:M2-Max-38c`, `file:<path>`, `none:uncalibrated-chip`, or
+`none:unknown-chip` when the chip's brand string cannot be read).
 
 ### Zero-copy operands
 
@@ -557,12 +695,29 @@ and the results are wrong without an error. Up to
 `ab_shutdown()` drops them all. The results are the same bits as without
 registration.
 
+BLAS-2 calls (`dgemv_`, `zgemv_`, `zhemv_`) follow steps 1-4 (with alpha
+or beta NaN or Inf also on Accelerate), then in `auto` a built-in rule in
+`src/blas2_abi.c` from the same kind of measurement on the M2 Max (38-core
+GPU), which applies on that chip only, matched as the GEMM tables are; on
+any other chip `auto` keeps BLAS-2 calls on Accelerate. It was taken twice
+(`benchmarks/bench_gemv.c --sweep` and `--rect`; data in
+`benchmarks/results/2026-10-19-ba345df-gemv/` and, for ZHEMV,
+`2026-10-19-1bc503a-zhemv/`, which `tests/test_blas2.c` checks the rule
+against): the GPU for DGEMV `'N'` with 2048² ≤ M·N ≤ 16384²
+and min(M, N) ≥ 256, ZGEMV `'N'` with 3072² ≤ M·N ≤ 12288² and min(M, N) ≥
+512, and ZHEMV with 2048 ≤ N ≤ 16384. DGEMV `'T'` and `'C'` were 0.94–1.40×
+as fast on the GPU from 4096², too close to 1.10× to route, and ZGEMV `'T'`
+and `'C'` slower at every size (at most 0.82×). Calls larger than those
+measured stay on Accelerate, because mapping the matrix for one call costs
+more per gigabyte as it grows. The measurement ran one process; MPI ranks
+sharing the GPU each map their own matrices, so expect less there.
+
 ### Reading a run report
 
 `AB_REPORT=1` prints, when the process exits:
 
 ```
-AB_REPORT[<pid>] apple-bottom <version> (<commit>[-dirty]) AB_MODE=<mode|unset>
+AB_REPORT[<pid>] apple-bottom <version> (<commit>[-dirty]) AB_MODE=<mode|unset> chip="<chip>" gpu_cores=<n> table=<table>
 AB_REPORT[<pid>] <routine> calls=… gpu_calls=… cpu_calls=… gpu_calls%=… total_ms=… gpu_ms=… cpu_ms=… gpu_time%=… fallbacks=…
 AB_REPORT[<pid>] <routine> gpu_stages_ms init=… alloc=… pack=… upload=… kernel=… download=… epilogue=… other=…
 AB_REPORT[<pid>] <routine> fallbacks no_device=… too_large=… gpu_failed=… other=… range=…
@@ -573,7 +728,11 @@ AB_REPORT[<pid>] <routine> staged kept=… kept_4m=… host_pack=… fpcr=… sc
   the version and the git commit it was built from, `-dirty` if tracked
   files differed from that commit, `unknown` if it was built outside a git
   checkout. Keep it with any timing you quote. The `AB_PROFILE` table starts
-  with the same string.
+  with the same string. The line goes on with this machine's chip and GPU
+  core count and the routing table `auto` used: `table=builtin:M2-Max-38c`,
+  `file:<path>` for an `AB_DISPATCH_TABLE`, `none:unknown-chip` when the brand
+  string could not be read (the line then says `chip="unknown"`), or `none:uncalibrated-chip` when
+  the chip has no built-in table (every `auto` call then ran on Accelerate).
 - **`gpu_calls%` is a share of calls, `gpu_time%` a share of time**: the
   routine's BLAS wall time spent in calls that ran on the GPU. They can
   differ widely, e.g. many small calls on Accelerate and a few large ones on
@@ -596,13 +755,21 @@ AB_REPORT[<pid>] <routine> staged kept=… kept_4m=… host_pack=… fpcr=… sc
   forms 4M's imaginary part), `download` is the copy of the result into C,
   and `epilogue` only ZGEMM's host alpha and beta when they are not 1 and 0
   or 1. A call the staged path gives back to the host path (see the staged
-  line below) adds both paths' stages.
+  line below) adds both paths' stages. For `dgemv`,
+  `zgemv` and `zhemv` the stages are those of the host path: `pack` is
+  staging x, `upload` mapping A for the GPU (usually the largest),
+  `download` the range guard's check of the results and `epilogue` writing
+  y with alpha and beta.
 - **Fallbacks** are calls the routing sent to the GPU that ran on Accelerate
   instead: `no_device` (no Metal context: no GPU, or a `fork()`ed child),
   `too_large` (an operand beyond the size limits), `gpu_failed` (an
-  allocation, upload or kernel failed before C was written), `range` (NaN
-  or Inf, or values that power-of-two scaling cannot keep in double-float's
-  exponent range; see [Values far from 1](#values-far-from-1)). They count
+  allocation, upload or kernel failed before C was written), `other` (BLAS-2:
+  A could not be mapped for the GPU), `range` (NaN or Inf, or values that
+  power-of-two scaling cannot keep in double-float's exponent range, see
+  [Values far from 1](#values-far-from-1); a ZGEMM whose FP64 epilogue could
+  overflow, or whose alpha or beta is NaN or Inf or has |Re| + |Im| beyond
+  FP64's range; BLAS-2, which scales only x: data outside
+  [its guard's limits](vv/LIMITATIONS.md#exponent-range)). They count
   as CPU calls, and their `cpu_ms` includes the failed GPU attempt.
 - **The staged line** counts the GPU-routed calls that reached the staged
   path: `kept` its result, `kept_4m` (a ZGEMM whose real and imaginary
@@ -615,7 +782,10 @@ AB_REPORT[<pid>] <routine> staged kept=… kept_4m=… host_pack=… fpcr=… sc
   2^±20, or not finite), `alloc` (no GPU buffers), `gpu_failed` (its
   command buffer failed, or the GPU's power-of-two scales of the lines
   differ from the host path's: a defect, never expected), `nonfinite` (Inf
-  or NaN in the GPU epilogue) and `range` (the guard does not certify the
+  or NaN in the GPU epilogue, or a ZGEMM's C of 2¹⁰²² or more beside alpha =
+  beta = 1, which the host path then sends to Accelerate as a `range`
+  fallback; `AB_SPLIT` counts such a tail as range) and `range` (the guard,
+  with a ZGEMM's epilogue bounds, does not certify the
   call, which goes straight to Accelerate as a `range` fallback). Each call
   counts once, whether it then ran on the host path or on Accelerate.
 - **Each process reports once**, tagged with its pid, so MPI ranks sharing
@@ -629,8 +799,16 @@ AB_REPORT[<pid>] <routine> staged kept=… kept_4m=… host_pack=… fpcr=… sc
 tables of the GPU stages, the fallbacks and the staged path's outcomes, and
 the dimension histogram of the routine with the most time. During the run it
 prints an `AB_PROFILE <routine> M=… N=… K=…` line with the stages of each GPU
-call and its staged outcome (`staged=kept`, or the first reason it took the
-host path), and one for each fallback, with its reason.
+call and, for a call that reached the staged path, its outcome
+(`staged=kept`, or the first reason it took the host path), and one for each
+fallback, with its reason. The native solvers
+`ab_dtrsm` and `ab_dgesv_mpir` print the same fallback line (`AB_PROFILE
+ab_dtrsm M=… N=… K=…  GPU fallback to cblas: GPU step failed`) for each
+panel update or residual whose GPU step failed and that ran on Accelerate
+instead; they are not in the tables. `ab_dgesv_mpir` also prints
+`AB_PROFILE ab_dgesv_mpir N=… NRHS=…  FP64 LU fallback: <why>` for a solve
+it did in FP64 instead (refinement that did not converge, a singular FP32
+factorization, A or B outside FP32's range; `include/apple_bottom.h`).
 
 ### Per-call trace (AB_TRACE)
 
@@ -639,7 +817,10 @@ in every `AB_MODE`, so that a run can be replayed or its timeline lined up
 with other processes'. Each process appends to its own file,
 `<path>.<pid>`: a `fork()`ed child, or an MPI rank, gets a file of its own.
 A file starts with `#` lines naming the build (`ab_build_info()`), the pid,
-`AB_MODE`, `AB_MIN_GPU_DIM` as the routing resolved it, the MPI rank and size
+`AB_MODE`, `AB_MIN_GPU_DIM` as the routing resolved it, the chip and the
+routing table the run used (`table=builtin:<chip slug>`, `file:<path>`,
+`none:uncalibrated-chip` or `none:unknown-chip`; a replay routes by its own
+machine's table), the MPI rank and size
 the launcher exported (`OMPI_COMM_WORLD_RANK`/`_SIZE`, else
 `PMI_RANK`/`PMI_SIZE`; `mpi_rank=-1 mpi_size=-1` outside MPI) and the field
 legend. Each call then adds one line of `key=value` fields when it returns,

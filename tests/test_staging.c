@@ -88,6 +88,13 @@ typedef enum {
     D_HUGE_C,       // C on entry near 2^140: beyond FP32, so DGEMM's DD copy of C overflows
     D_STAGE2,       // rows of op(A) from 1 down to 2^-90: the guard certifies them in stage 2
     D_IMBAL,        // A, B with imaginary parts 2^-6 of the real: the host path runs 4M
+    D_SUBNORMAL,    // magnitudes below 2^-1042 (FP64 high word 0) in rows of op(A) (all of
+                    // a row, one entry, imaginary parts) and columns of op(B) (all of one)
+    D_SUBNORMAL_C,  // row 0 of op(A) zero; columns of op(B) x 2^1000, C there x 2^970, but
+                    // in row 0 x 2^-100 (op(A) = A) or 2^-200: C' below 2^-1042, or 0
+    D_EPI_P,        // A x 2^600, B x 2^500 (ZGEMM): the product overflows FP64 when the
+                    // epilogue scales it back, whatever alpha does after
+    D_EPI_C,        // C on entry x 2^1023 (ZGEMM, C read): beta C could overflow FP64
     D_COUNT
 } DataKind;
 
@@ -95,7 +102,8 @@ static const char *const DATA_TAG[D_COUNT] = {
     [D_UNIFORM] = "uniform", [D_MIXED] = "mixed", [D_WIDE] = "wide", [D_BITS] = "bits",
     [D_SIGNED_ZERO] = "signedzero", [D_TINY_C] = "tinyC", [D_CANCEL] = "cancel",
     [D_NAN_A] = "nanA", [D_NAN_C] = "nanC", [D_HUGE] = "huge", [D_HUGE_C] = "hugeC",
-    [D_STAGE2] = "stage2", [D_IMBAL] = "imbal",
+    [D_STAGE2] = "stage2", [D_IMBAL] = "imbal", [D_SUBNORMAL] = "subnormal",
+    [D_SUBNORMAL_C] = "subnormalC", [D_EPI_P] = "epiP", [D_EPI_C] = "epiC",
 };
 
 // What each kind of data is for: the staged result must stand in at least
@@ -106,6 +114,7 @@ static const bool STAGES[D_COUNT] = {
     [D_UNIFORM] = true, [D_MIXED] = true, [D_WIDE] = true, [D_BITS] = true,
     [D_SIGNED_ZERO] = true, [D_TINY_C] = true, [D_CANCEL] = true, [D_NAN_C] = true,
     [D_HUGE] = true, [D_HUGE_C] = true, [D_STAGE2] = true, [D_IMBAL] = true,
+    [D_SUBNORMAL] = true, [D_SUBNORMAL_C] = true,
 };
 
 typedef struct {
@@ -174,6 +183,28 @@ static void make_cases(void) {
         add(rt, 'N', 'N', 75, 53, 47, 3, S_AXB0, D_NAN_C);
         add(rt, 'N', 'T', 300, 200, 1, 0, S_AXBX, D_BITS);
     }
+    // Values below 2^-1042: host and GPU statistics must count them alike.
+    // Subnormal lines are scaled and stand (a DGEMM's C' then overflows:
+    // Accelerate); C' below 2^-1042 or 0 in a zero row goes to Accelerate.
+    for (int r = 0; r < 2; r++) {
+        char rt = r ? 'z' : 'd';
+        add(rt, 'N', 'N', 96, 80, 72, 3, S_A1B0, D_SUBNORMAL);
+        add(rt, 'C', 'T', 96, 80, 72, 3, S_A1B1, D_SUBNORMAL);
+    }
+    add('d', 'N', 'T', 96, 80, 72, 3, S_A1B0, D_SUBNORMAL_C);
+    add('d', 'N', 'N', 96, 80, 72, 3, S_A1B1, D_SUBNORMAL_C);
+    add('d', 'T', 'N', 96, 80, 72, 3, S_A1B1, D_SUBNORMAL_C);
+    // A ZGEMM whose FP64 epilogue could overflow goes to Accelerate in every
+    // child: by its product, decided after the staged run (the GPU epilogue's
+    // overflow too) and before the host path's; by its C, decided before
+    // either runs, or flagged by the GPU epilogue beside alpha = beta = 1.
+    add('z', 'N', 'N', 96, 80, 72, 3, S_A1B0, D_EPI_P);
+    add('z', 'C', 'N', 96, 80, 72, 3, S_A1B1, D_EPI_P);
+    add('z', 'N', 'T', 96, 80, 72, 3, S_AXB0, D_EPI_P);
+    add('z', 'T', 'C', 75, 53, 47, 3, S_AXBX, D_EPI_P);
+    add('z', 'N', 'N', 96, 80, 72, 3, S_A1B1, D_EPI_C);
+    add('z', 'C', 'N', 75, 53, 47, 3, S_A1BX, D_EPI_C);
+    add('z', 'N', 'C', 75, 53, 47, 3, S_AXBX, D_EPI_C);
     // Complex parts imbalanced enough for 4M
     add('z', 'T', 'N', 96, 80, 72, 3, S_A1B0, D_IMBAL);
     add('z', 'N', 'C', 96, 80, 72, 3, S_A1B1, D_IMBAL);
@@ -233,7 +264,7 @@ static double random_bits(int lo, int hi) {
 }
 
 typedef enum { V_UNIFORM, V_MIXED, V_WIDE, V_BITS_A, V_BITS_C, V_ONE, V_SIGNED_ZERO, V_TINY,
-               V_NAN_INF, V_HUGE, V_HUGE_C } ValueKind;
+               V_NAN_INF, V_HUGE, V_HUGE_C, V_EPI_A, V_EPI_B, V_EPI_C } ValueKind;
 
 static double value(ValueKind v, size_t idx) {
     static const double NAN_INF[] = {NAN, INFINITY, -INFINITY};
@@ -254,6 +285,9 @@ static double value(ValueKind v, size_t idx) {
     case V_NAN_INF:     return NAN_INF[idx % 3];
     case V_HUGE:        return ldexp(1.0 + uniform() / 4, 100);
     case V_HUGE_C:      return ldexp(uniform(), 140);
+    case V_EPI_A:       return ldexp(uniform(), 600);
+    case V_EPI_B:       return ldexp(uniform(), 500);
+    case V_EPI_C:       return ldexp(uniform(), 1023);
     default:            return uniform();
     }
 }
@@ -308,6 +342,8 @@ static void make_problem(Problem *P, const Case *c, const char *name, int shift)
     case D_NAN_C:       vc = V_NAN_INF; break;
     case D_HUGE:        va = vb = V_HUGE; break;
     case D_HUGE_C:      vc = V_HUGE_C; break;
+    case D_EPI_P:       va = V_EPI_A; vb = V_EPI_B; break;
+    case D_EPI_C:       vc = V_EPI_C; break;
     default: break;
     }
     fill(P->A, P->la, w, va);
@@ -336,6 +372,28 @@ static void make_problem(Problem *P, const Case *c, const char *name, int shift)
     if (c->data == D_STAGE2)                // a tiny element in every eighth row
         for (int i = 0; i < M; i += 8)
             for (int p = 0; p < w; p++) P->A[op_at(c->ta, P->la, w, i, K / 2) + p] = 0x1p-90;
+    if (c->data == D_SUBNORMAL) {           // magnitudes below 2^-1042: FP64 high word 0
+        for (int i = 0; i < M; i++)
+            for (int k = 0; k < K; k++)
+                for (int p = 0; p < w; p++)
+                    if (i % 8 == 1 || (i % 8 == 5 && k == K / 2) || (i % 8 == 2 && p == 1))
+                        P->A[op_at(c->ta, P->la, w, i, k) + p] *= 0x1p-1050;
+        for (int k = 0; k < K; k++)
+            for (int j = 3; j < N; j += 8)
+                for (int p = 0; p < w; p++) P->B[op_at(c->tb, P->lb, w, k, j) + p] *= 0x1p-1045;
+    }
+    if (c->data == D_SUBNORMAL_C) {         // C' below 2^-1042 (or 0) where row 0 of op(A) is zero
+        for (int k = 0; k < K; k++)
+            for (int p = 0; p < w; p++) P->A[op_at(c->ta, P->la, w, 0, k) + p] = 0.0;
+        for (int j = 6; j < N; j += 8) {
+            for (int k = 0; k < K; k++)
+                for (int p = 0; p < w; p++) P->B[op_at(c->tb, P->lb, w, k, j) + p] *= 0x1p1000;
+            for (int i = 0; i < M; i++)
+                for (int p = 0; p < w; p++)
+                    P->C0[((size_t)j * P->lc.ld + i) * w + p] *=
+                        i ? 0x1p970 : c->ta == 'N' ? 0x1p-100 : 0x1p-200;
+        }
+    }
     if (c->data == D_IMBAL) {               // |Im| ~ 2^-6 |Re|: Gauss-3M's rho ~ 32
         for (size_t i = 1; i < P->na; i += 2) P->A[i] *= 0x1p-6;
         for (size_t i = 1; i < P->nb; i += 2) P->B[i] *= 0x1p-6;
@@ -393,9 +451,11 @@ static void call_gemm(Problem *P) {
 // a DGEMM only with alpha and beta in their window. There the
 // exponent-range guard (ab_internal.h) certifies the product of the lines
 // as scaled (and a DGEMM's C, when read, as uploaded: scaled by its row's
-// and column's scales). Then no Inf or NaN may reach the GPU epilogue: a
-// ZGEMM's C with beta = 1 must be finite. The host path makes every other
-// call: on the GPU with such scalars or C's Inf or NaN, or on Accelerate.
+// and column's scales). Then no Inf or NaN may reach an epilogue, nor come out
+// of a ZGEMM's: its product and its C with beta != 0 must meet the epilogue's
+// bounds (ab_zgemm_product_fits, ab_zgemm_c_fits; such a C is finite). The
+// host path makes every other call: on the GPU with such scalars, or on
+// Accelerate.
 static bool expected_staged(const Problem *P) {
     const Case *c = P->c;
     bool z = c->routine == 'z';
@@ -412,18 +472,22 @@ static bool expected_staged(const Problem *P) {
         ab_line_stats_scan(&vb, false, &sb);
         ab_line_scales(&sa);
         ab_line_scales(&sb);
-        ok = ab_range_guard(c->K, &sa, &sb, z ? 0 : ilogb(creal(al)), &va, &vb);
+        ok = ab_range_guard(c->K, &sa, &sb, z ? 0 : ilogb(creal(al)), &va, &vb) &&
+             (!z || ab_zgemm_product_fits(c->K, ab_lines_max(&sa), ab_lines_max(&sb), creal(al),
+                                          cimag(al)));
     }
     ab_range_t r = AB_RANGE_EMPTY;
     for (int j = 0; j < c->N; j++)
         for (int i = 0; i < c->M; i++)
             for (int p = 0; p < w; p++) {
                 double v = P->C0[((size_t)j * P->lc.ld + i) * w + p];
-                AB_RANGE_ADD(ok && !z ? ab_scale2(v, -(sa.e[i] + sb.e[j])) : v, r.max, r.min);
+                double cs = ok && !z ? ab_scale2(v, -(sa.e[i] + sb.e[j])) : v;
+                AB_HIWORD_ADD(ab_stat_hiword_scaled(cs, v), r.max, r.min);
             }
-    if (ok && case_c_in(c))
-        ok = z ? !ab_range_nonfinite(r)
-               : ab_range_guard_c(&sa, &sb, r, ilogb(creal(be)), P->C0, P->lc.ld, 0);
+    if (ok && be != 0.0)
+        ok = z ? ab_zgemm_c_fits(creal(be), cimag(be), r.max)
+               : ab_range_guard_c(&sa, &sb, r, creal(al), creal(be), P->C0, P->lc.ld, 0,
+                                  &va, &vb);
     ab_line_stats_free(&sa);
     ab_line_stats_free(&sb);
     return ok;
@@ -574,7 +638,7 @@ static uint64_t native_hash(const NativeShape *sh, NativeVia via) {
         ab_batch_destroy(b);
     } else {
         st = ab_internal_zgemm(AB_NO_TRANS, AB_NO_TRANS, m[0], m[1], m[2], m[3], m[4], m[5],
-                               via == VIA_4M ? AB_ZGEMM_4M : AB_ZGEMM_3M);
+                               via == VIA_4M ? AB_ZGEMM_4M : AB_ZGEMM_3M, AB_PRODUCTS_CLASSICAL);
     }
     return native_result(sh, m, st == AB_OK);
 }

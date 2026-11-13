@@ -10,7 +10,7 @@ are as of October 2026, from their repositories.
 |---|---|---|---|---|
 | **Accelerate** (Apple) | CPU (matrix coprocessor) | IEEE FP64 | 53 bits | Full BLAS and LAPACK |
 | **OpenBLAS** and other CPU BLAS | CPU cores | IEEE FP64 | 53 bits | Full BLAS (LAPACK alongside) |
-| **apple-bottom** | GPU (Metal) | double-float: a pair of FP32 values per FP64 | ~48 bits | DGEMM, ZGEMM, DSYRK and helpers; `dgemm_`/`zgemm_` through the BLAS ABI |
+| **apple-bottom** | GPU (Metal) | double-float: a pair of FP32 values per FP64 | ~48 bits | DGEMM, ZGEMM, DSYRK, DGEMV, ZGEMV, ZHEMV and helpers; complex FFTs; `dgemm_`, `zgemm_`, `dgemv_`, `zgemv_`, `zhemv_` through the BLAS ABI |
 | [**metal-float64**](https://github.com/philipturner/metal-float64) (Turner) | GPU (Metal) | IEEE FP64 emulated in software | 53 bits (goal) | Scalar arithmetic library; the README describes it as unfinished. Archived. |
 | [**MLX**](https://github.com/ml-explore/mlx) (Apple) | CPU for FP64; GPU for FP32/FP16/BF16 | IEEE FP64 on the CPU | 53 bits | An array framework for machine learning, not a BLAS |
 
@@ -32,31 +32,39 @@ apple-bottom keeps each value as an unevaluated sum of two FP32 numbers and
 runs error-free transformations on the GPU's FP32 units, compiled without
 fast math. That gives about 10⁻¹⁵ relative error per element instead of
 FP64's 10⁻¹⁶, with FP32's exponent range bridged by power-of-two scaling
-(and Accelerate for BLAS-ABI calls no scaling keeps in range). Where it helps:
+(and Accelerate for BLAS-ABI calls its range guard refuses).
+Where it helps:
 
 - Large GEMMs on matrices kept on the GPU between calls (the native
   `ABMatrix` API), where it overtakes Accelerate on an M2 Max from about
   N = 1,500 (DGEMM) and N = 1,000 (ZGEMM).
+- Matrix-vector products (DGEMV, ZGEMV, ZHEMV) on a matrix kept on the GPU
+  (`ab_dev_register`, then `ab_dev_dgemv`, `ab_dev_zgemv`, `ab_dev_zhemv`). One-shot
+  `dgemv_`, `zgemv_` and `zhemv_` calls map the matrix each time, and
+  `AB_MODE=auto` sends only the large shapes that still win to the GPU
+  ([BLAS-2](../README.md#blas-2-matrix-vector-products)).
 - Codes that want measured routing between GPU and CPU behind the standard
   `dgemm_`/`zgemm_` interface, with `AB_REPORT` accounting.
 
 Where it does not:
 
-- Bit-for-bit IEEE FP64 results, or native-API matrices whose entries span
-  more than about 10²³.
+- Bit-for-bit IEEE FP64 results.
+- Native-API or device-GEMM data outside the windows the BLAS ABI guards:
+  they have no fallback ([Exponent range](vv/LIMITATIONS.md#exponent-range)).
 - GEMMs issued one call at a time from host memory through the BLAS ABI.
   On an M2 Max, 1.4.0's host path, which packed and converted on the CPU,
   was no more than 1.02× faster than Accelerate for any measured shape
   except ZGEMM with both operands transposed at N ≥ 4096 (1.11–1.20×).
   1.5.0's staged path converts on the GPU and has not been calibrated yet.
-  Quantum ESPRESSO forced onto it takes 1.01–1.06× its time on Accelerate,
-  against 1.06–1.43× for 1.4.0 on the same QE build
-  ([release check](../benchmarks/results/2026-10-28-415cb5d-qe-si64-release-check/),
-  [staged-path fix](../benchmarks/results/2026-10-29-351d56c-staged-refusals/)).
-  The device-buffer API converts on the CPU on every call, as 1.4.0's BLAS
-  ABI did (it has not been benchmarked separately).
-- Anything beyond the GEMM family: the rest of BLAS and LAPACK comes from
-  your BLAS library.
+  Quantum ESPRESSO forced onto it takes 1.04–1.09× its time on Accelerate
+  ([data](../benchmarks/results/2026-11-06-8b48826-pretag/README.md#quantum-espresso)).
+  The device-buffer GEMMs (`ab_dev_dgemm`, `ab_dev_zgemm`) convert on the CPU
+  on every call, as 1.4.0's BLAS ABI did, in the caller's buffers and across
+  cores since 1.6.0. They have been timed against earlier builds (1.6.0's
+  entry in the [CHANGELOG](../CHANGELOG.md)), not against Accelerate.
+- Anything other than the GEMM family, the matrix-vector products DGEMV, ZGEMV
+  and ZHEMV, and complex FFTs: the rest of BLAS and LAPACK comes from your
+  BLAS library.
 
 ## metal-float64
 
@@ -80,5 +88,6 @@ codes.
 |---|---|
 | Exact IEEE FP64, all of BLAS/LAPACK | Accelerate (or another CPU BLAS) |
 | FP64-class GEMMs on the GPU, matrices kept resident | apple-bottom, native `ABMatrix` API |
+| FP64-class matrix-vector products on the GPU, matrix kept resident | apple-bottom, `ab_dev_dgemv`, `ab_dev_zgemv`, `ab_dev_zhemv` |
 | An unchanged Fortran code calling `DGEMM`/`ZGEMM` | Accelerate today on an M2 Max; apple-bottom routes there by default and reports what it did |
 | Machine learning | MLX |

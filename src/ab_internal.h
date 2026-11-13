@@ -5,7 +5,8 @@
 // apple_bottom.m owns the ABMatrix layout and the FP64 <-> double-float (DD)
 // conversion; blas_wrapper.c's BLAS-ABI path uses these to scale operands by
 // powers of two on the way in (the exponent-range guard, blas_wrapper.c), and
-// device_api.m's ZGEMM to choose between Gauss-3M and 4M as that path does.
+// device_api.m to convert its column-major operands where they lie and, for
+// ZGEMM, to choose between Gauss-3M and 4M as that path does.
 // =============================================================================
 #ifndef AB_INTERNAL_H
 #define AB_INTERNAL_H
@@ -29,6 +30,9 @@ extern "C" {
 // and sums overflow at 2^128 (measured on an M2 Max; docs/vv/LIMITATIONS.md,
 // "Exponent range"). The power-of-two scaling of both APIs keeps data inside.
 #define AB_PRODUCT_MIN_EXP (-78)    // products from 2^-78 up keep full DD precision
+// An entry's FP32 low part below 2^-126 is read as zero on the GPU; from 2^-78
+// up that loses at most 2^-48 of the entry, DD's rounding level.
+#define AB_ENTRY_MIN_EXP (-78)
 #define AB_SUM_MAX_EXP 122          // sums up to 2^122 stay clear of FP32's 2^128
 // A native matrix whose nonzero magnitudes all lie in 2^±AB_NATIVE_WINDOW
 // gives products of at least 2^AB_PRODUCT_MIN_EXP with any other such matrix.
@@ -59,7 +63,7 @@ static inline int ab_scalar_exp(double x, int window) {
 // =============================================================================
 // Host loops across cores
 // =============================================================================
-// apple_bottom.m's FP64 <-> DD conversions and device_api.m's staging copies
+// apple_bottom.m's FP64 <-> DD conversions and device-API ZGEMM epilogue
 // split large arrays into chunks across cores.
 #define AB_CONVERT_PARALLEL_MIN ((size_t)1 << 20)  // elements; serial below this
 #define AB_CONVERT_CHUNKS 8
@@ -89,10 +93,47 @@ static inline uint32_t ab_abs_hiword(double x) {
 
 #define AB_HIWORD_NONFINITE 0x7FF00000u     // high words from here up: Inf or NaN
 
-// ilogb(|x|) for a finite |x| with high word h != 0; -1075 for h == 0 (|x| < 2^-1042).
+// A nonzero |x| below 2^-1042 has high word 0, as a zero has. The
+// exponent-range guard's statistics (and the native API's measure) count it
+// as AB_HIWORD_TINY, the smallest nonzero high word (that of [2^-1042,
+// 2^-1041)), so that a line or a C with such values is not read as zero, or
+// as without them.
+#define AB_HIWORD_TINY 1u
+
+// The high word the guard's statistics take for v, which is x or x times a
+// power of two: |v|'s, or AB_HIWORD_TINY where that is 0 and x is not (|v|
+// below 2^-1042, also where the scale took x to 0). It tests x on its 32-bit
+// words (low first: Apple silicon is little-endian), which vectorize better
+// than a 64-bit test and need no floating-point compare, which flush-to-zero
+// would change; as h >= 1 wherever h != 0, max(h, t) is the rule.
+static inline uint32_t ab_stat_hiword_scaled(double v, double x) {
+    uint32_t w[2];
+    memcpy(w, &x, sizeof w);
+    const uint32_t h = ab_abs_hiword(v), t = (w[0] | (w[1] & 0x7FFFFFFFu)) != 0;
+    return h > t ? h : t;
+}
+
+// The same for x itself, read where it is stored, so that a loop loads its
+// 32-bit halves.
+static inline uint32_t ab_stat_hiword(const double* x) {
+    uint32_t w[2];
+    memcpy(w, x, sizeof w);
+    const uint32_t h = w[1] & 0x7FFFFFFFu, t = w[0] != 0;
+    return h > t ? h : t;
+}
+
+// ilogb(|x|) for a finite |x| with high word h != 0; -1075 for h == 0 (|x| <
+// 2^-1042). For a statistic's AB_HIWORD_TINY it is -1042, the largest ilogb
+// that word stands for: what a largest |x| needs (scales, overflow).
 static inline int ab_hiword_ilogb(uint32_t h) {
     if (h >= 0x00100000u) return (int)(h >> 20) - 1023;
     return h ? (31 - __builtin_clz(h)) - 1042 : -1075;
+}
+
+// The same for a smallest |x|, whose floors need a lower bound: -1074 for
+// AB_HIWORD_TINY, which stands for every |x| below 2^-1041.
+static inline int ab_hiword_min_ilogb(uint32_t h) {
+    return h == AB_HIWORD_TINY ? -1074 : ab_hiword_ilogb(h);
 }
 
 // |x| truncated to its high word, as a double (within 2^-20 of |x|).
@@ -103,9 +144,10 @@ static inline double ab_hiword_value(uint32_t h) {
     return d;
 }
 
-// The magnitudes of some FP64 values, as high words: of the largest |x| (0 if
-// all are zero; AB_HIWORD_NONFINITE or more if any is NaN or Inf) and of the
-// smallest |x| with a nonzero high word (UINT32_MAX if none).
+// The magnitudes of some FP64 values, as high words (the guard's: AB_RANGE_ADD;
+// the native ab_matrix_upload's: MEASURE_NATIVE in apple_bottom.m): of the
+// largest |x| (0 if all are zero; AB_HIWORD_NONFINITE or more if any is NaN
+// or Inf) and of the smallest nonzero one (UINT32_MAX if none).
 typedef struct {
     uint32_t max, min;
 } ab_range_t;
@@ -113,6 +155,12 @@ typedef struct {
 #define AB_RANGE_EMPTY ((ab_range_t){0u, UINT32_MAX})
 
 static inline bool ab_range_nonfinite(ab_range_t r) { return r.max >= AB_HIWORD_NONFINITE; }
+
+// The range of the values of a and b together.
+static inline ab_range_t ab_range_merge(ab_range_t a, ab_range_t b) {
+    ab_range_t r = {a.max > b.max ? a.max : b.max, a.min < b.min ? a.min : b.min};
+    return r;
+}
 
 // Adds high word h to a maximum mx, or to a minimum mn as in ab_range_t
 // (ignoring 0), or to both, in selects that vectorize.
@@ -130,7 +178,8 @@ static inline bool ab_range_nonfinite(ab_range_t r) { return r.max >= AB_HIWORD_
         AB_HIWORD_MAX(hw_, mx);                            \
         AB_HIWORD_MIN(hw_, mn);                            \
     } while (0)
-#define AB_RANGE_ADD(x, mx, mn) AB_HIWORD_ADD(ab_abs_hiword(x), mx, mn)
+// Adds |x|, x a stored FP64 value, to a range as the guard counts it.
+#define AB_RANGE_ADD(x, mx, mn) AB_HIWORD_ADD(ab_stat_hiword(&(x)), mx, mn)
 
 // =============================================================================
 // The BLAS ABI's exponent-range guard (blas_wrapper.c)
@@ -138,7 +187,9 @@ static inline bool ab_range_nonfinite(ab_range_t r) { return r.max >= AB_HIWORD_
 // For C = alpha op(A) op(B) + beta C, op(A) M x K and op(B) K x N, from the
 // caller's column-major operands:
 //   1. Statistics of each row of op(A) and column of op(B) (ab_line_stats_scan,
-//      or the pack that gathers the same).
+//      or the pack that gathers the same), as AB_RANGE_ADD counts them: a
+//      nonzero |x| below 2^-1042, or a C' scaled there or to 0, counts as
+//      AB_HIWORD_TINY (ab_stat_hiword_scaled; minima: ab_hiword_min_ilogb).
 //   2. Scales (ab_line_scales): a line whose largest |x| lies outside
 //      [2^-AB_SCALE_WINDOW, 2^AB_SCALE_WINDOW) is multiplied by 2^-e on its way
 //      to DD, e = ilogb(largest |x|) - AB_SCALE_TARGET; any other line by 1. A
@@ -148,14 +199,26 @@ static inline bool ab_range_nonfinite(ab_range_t r) { return r.max >= AB_HIWORD_
 //      Accelerate (the "range" fallback) if a line has NaN or Inf, or if the
 //      scaled sums could reach 2^AB_SUM_MAX_EXP. It is certified if every
 //      nonzero scaled product, times alpha's scale when that is below 1, is at
-//      least 2^AB_PRODUCT_MIN_EXP (stage 1). Otherwise stage 2 checks, for each
-//      C_ij of a row and column that stage 1 leaves open, the products through
-//      the largest elements of that row and that column, on the operands.
+//      least 2^AB_PRODUCT_MIN_EXP and every nonzero scaled entry at least
+//      2^AB_ENTRY_MIN_EXP (stage 1; for complex data, every part). Otherwise
+//      stage 2 checks, for each C_ij of a row and column that stage 1 leaves
+//      open, the products through the largest elements of that row and that
+//      column, on the operands (for complex data, in each part of C_ij).
 //   4. A DGEMM with beta != 0 checks C as it uploads, C' = C_ij 2^-(ra[i] +
 //      cb[j] + ea - eb), in the same way (ab_range_guard_c): NaN or Inf, or a
-//      C' or beta' C' that could reach 2^AB_SUM_MAX_EXP, go to Accelerate;
-//      where a row of op(A) or a column of op(B) is zero, beta' C' must be at
-//      least 2^AB_PRODUCT_MIN_EXP.
+//      C' or beta' C' that could reach 2^AB_SUM_MAX_EXP, go to Accelerate. It
+//      is certified if every nonzero C' is at least 2^AB_ENTRY_MIN_EXP and
+//      beta' C' at least 2^AB_PRODUCT_MIN_EXP (stage 1). Otherwise every C'_ij
+//      below those floors needs a product in its own entry, through the
+//      largest element of row i or of column j, that alpha' brings to
+//      2^AB_PRODUCT_MIN_EXP max(1, |beta'|) (stage 2): in a zero line, or
+//      where row i's and column j's supports miss each other, beta' C'_ij is
+//      all of C_ij. Without such a product the call goes to Accelerate. A ZGEMM
+//      with beta != 0 and NaN or Inf in C goes to Accelerate too
+//      (zgemm_c_refused).
+//   5. A ZGEMM's FP64 epilogue must stay in FP64's range (ab_zgemm_product_fits,
+//      ab_zgemm_c_fits, below): a call whose alpha P or beta C could reach
+//      2^AB_EPI_MAX_EXP goes to Accelerate.
 // The unscale, bit for bit (dgemm_blas, zgemm_blas): each GPU result C'_ij
 // becomes FP64 as (double)hi + (double)lo, then is multiplied by
 // 2^(ra[i] + cb[j] + ea) (ea = 0 for ZGEMM) with ab_scale2, one rounding. A
@@ -176,10 +239,11 @@ typedef struct {
 } ab_op_view_t;
 
 // Statistics of the lines of op(X), its rows (op(A)) or columns (op(B)): per
-// line, the high words of its largest |x| (0 for a zero line;
+// line, the high words (ab_stat_hiword) of its largest |x| (0 for a zero line;
 // AB_HIWORD_NONFINITE or more if it has NaN or Inf) and of its smallest
-// nonzero |x| (UINT32_MAX for a zero line), with |x| = max(|Re x|, |Im x|)
-// for complex; and the exponent of its scale (ab_line_scales). Complex
+// nonzero |x| (UINT32_MAX for a zero line), for complex data the largest
+// max(|Re x|, |Im x|) and the smallest nonzero part (|Re x| or |Im x|); and
+// the exponent of its scale (ab_line_scales). Complex
 // statistics also hold the high words of each line's largest |Re x| and
 // largest |Im x| (rmax, imax), from which ab_lines_rho chooses between
 // Gauss-3M and 4M. The arrays are plain pointers a caller may set (a GPU
@@ -226,15 +290,54 @@ bool ab_range_guard(int K, const ab_line_stats_t* sa, const ab_line_stats_t* sb,
                     const ab_op_view_t* a, const ab_op_view_t* b);
 
 // Step 4 without its entrywise part: r is the range of C as uploaded
-// (C itself when nothing is scaled and ea == eb), beta_exp ilogb of the
-// scalar the GPU multiplies it by (beta 2^-eb).
-ab_guard_t ab_range_guard_c_stage1(const ab_line_stats_t* sa, const ab_line_stats_t* sb,
-                                   ab_range_t r, int beta_exp);
+// (C itself when nothing is scaled and ea == eb), beta the nonzero scalar the
+// GPU multiplies it by (beta 2^-eb).
+ab_guard_t ab_range_guard_c_stage1(ab_range_t r, double beta);
 
 // Step 4: true if the GPU may take C. C is the caller's M x N C (leading
-// dimension ldC), uploaded as C_ij 2^-(ra[i] + cb[j] + shift), shift = ea - eb.
+// dimension ldC), uploaded as C_ij 2^-(ra[i] + cb[j] + shift), shift = ea - eb;
+// alpha is the scalar the GPU multiplies the product by (alpha 2^-ea), and a
+// and b are the operands sa and sb describe.
 bool ab_range_guard_c(const ab_line_stats_t* sa, const ab_line_stats_t* sb, ab_range_t r,
-                      int beta_exp, const double* C, int ldC, int shift);
+                      double alpha, double beta, const double* C, int ldC, int shift,
+                      const ab_op_view_t* a, const ab_op_view_t* b);
+
+// Step 5. A ZGEMM's epilogue (zgemm_blas's, and the GPU's ab_epi_z, which
+// follows it) forms C = alpha P + beta C in FP64 after scaling each part of
+// the product P back by 2^(ra[i] + cb[j]), so a P, alpha P or beta C beyond
+// FP64's range turns into Inf or NaN there even where C itself is finite. The
+// call goes to Accelerate where, from bounds the guard already has, that
+// could happen:
+//   - P: with a and b the largest |Re x| or |Im x| of op(A) and op(B) (the
+//     largest of their lines' max, unscaled), each part of P_ij is a sum of 2K
+//     products below 2^(ilogb a + 1) 2^(ilogb b + 1), so below 2^E, E =
+//     ilogb a + ilogb b + ilogb K + 5, with a factor 2 for DD's rounding. The
+//     call needs E <= AB_EPI_MAX_EXP + 1 and (|Re alpha| + |Im alpha|) 2^E <=
+//     2^AB_EPI_MAX_EXP.
+//   - beta C, read where beta != 0: with c the largest |Re C| or |Im C|,
+//     (|Re beta| + |Im beta|) 2^(ilogb c + 1) <= 2^AB_EPI_MAX_EXP.
+// Each part of alpha P and of beta C is then at most 2^AB_EPI_MAX_EXP
+// (1 + 2^-52) (the sum |Re| + |Im| is rounded), and every value the
+// epilogue forms below 2^1023 (1 + 2^-50), clear of FP64's overflow. A NaN or
+// Inf line or C fails, and so does a scalar whose |Re| + |Im| is not finite.
+#define AB_EPI_MAX_EXP 1022
+
+// The P part: true if the call may keep its GPU product. a_max and b_max are
+// the high words of a and b (ab_abs_hiword; ab_lines_max of the statistics).
+bool ab_zgemm_product_fits(int K, uint32_t a_max, uint32_t b_max, double alpha_re,
+                           double alpha_im);
+
+// The beta C part: c_max is the high word of the largest |Re C| or |Im C| of
+// C's block (ab_abs_hiword), read only where beta != 0.
+bool ab_zgemm_c_fits(double beta_re, double beta_im, uint32_t c_max);
+
+// The high word of the largest |x| over s's lines as scanned (unscaled; a
+// complex x's larger part).
+static inline uint32_t ab_lines_max(const ab_line_stats_t* s) {
+    uint32_t mx = 0;
+    for (int i = 0; i < s->n; i++) AB_HIWORD_MAX(s->max[i], mx);
+    return mx;
+}
 
 // =============================================================================
 // Complex products: Gauss-3M or 4M
@@ -246,9 +349,12 @@ bool ab_range_guard_c(const ab_line_stats_t* sa, const ab_line_stats_t* sb, ab_r
 //     rho(p, q) = (1 + p)(1 + q) / (p + q),  p = |Ai|/|Ar|, q = |Bi|/|Br|:
 // 2 for balanced parts, about 1/(2p) when p = q << 1 (or p = q >> 1). A ZGEMM
 // whose parts give rho above AB_GAUSS3M_MAX_RHO runs as 4M (docs/vv/
-// LIMITATIONS.md, "Complex products"): measured on M2 Max, 3M's imaginary
-// part stays within 8 u^2 of its componentwise scale up to rho = 4 (6.9 u^2
-// at K = 2048) and grows as about 2.3 rho u^2 above; 4M's stays near 1 u^2.
+// LIMITATIONS.md, "Complex products"): measured on M2 Max at M = N = 96 with
+// p = q, 3M's imaginary part stays within 8 u^2 of its componentwise scale up
+// to rho = 4 (6.9 u^2 at K = 2048) and grows as about 2.3 rho u^2 above; 4M's
+// stays near 1 u^2. The rule reads the largest parts of a line (of a matrix on
+// the native API), not of each element, so data spread within a line stays on
+// 3M and goes further (same section).
 #define AB_GAUSS3M_MAX_RHO 4.0
 
 static inline double ab_gauss3m_rho(double p, double q) {
@@ -279,19 +385,72 @@ static inline ab_zgemm_method_t ab_lines_method(const ab_line_stats_t* sa,
 // Entry points of apple_bottom.m
 // =============================================================================
 
+// How a GEMM forms its real products (src/strassen.h): as AB_STRASSEN says,
+// always by Strassen-Winograd (ab_dgemm_strassen, ab_zgemm_strassen), or
+// always classically. Classical: the library's own uses of its GEMMs (ZHERK,
+// DTRSM, iterative refinement, one-element batches), and BLAS-ABI calls whose
+// rows of op(A) or columns of op(B) carry scales of their own, which
+// Strassen-Winograd's block sums would add across scales.
+typedef enum {
+    AB_PRODUCTS_ROUTED,
+    AB_PRODUCTS_STRASSEN,
+    AB_PRODUCTS_CLASSICAL,
+} ab_products_t;
+
+// The products of a BLAS-ABI GEMM on the host path, from its lines' scales
+// (ab_line_scales: ra for op(A)'s rows, cb for op(B)'s columns, NULL if none
+// is scaled). The staged path makes the same choice on the GPU's scales.
+static inline ab_products_t ab_lines_products(const int* ra, const int* cb) {
+    return ra || cb ? AB_PRODUCTS_CLASSICAL : AB_PRODUCTS_ROUTED;
+}
+
+// C = alpha*A*B + beta*C as ab_dgemm_scaled computes it, its products as
+// products says.
+ABStatus ab_internal_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C,
+                                  ab_products_t products);
+
 // C = op(A) op(B) for split-complex A (Ar, Ai) and B (Br, Bi), as ab_zgemm_ex
-// computes it, by the given method.
+// computes it, by the given method, its products as products says.
 ABStatus ab_internal_zgemm(ABTranspose transA, ABTranspose transB, ABMatrix Ar, ABMatrix Ai,
                            ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci,
-                           ab_zgemm_method_t method);
+                           ab_zgemm_method_t method, ab_products_t products);
 
 // Uploads row-major rows x cols data (the matrix's own shape) as
 // x * 2^-(row_exp[i] + col_exp[j] + shift) into m, whose power-of-two scale
 // becomes 0; NULL row_exp or col_exp counts as all zeros. Each scaled value is
 // rounded once, as ldexp rounds. If range is not NULL it receives the range of
-// the scaled values.
+// the scaled values, as the guard counts them (ab_stat_hiword_scaled).
 ABStatus ab_internal_upload_scaled(ABMatrix m, const double* data, const int* row_exp,
                                    const int* col_exp, int shift, ab_range_t* range);
+
+// device_api.m's column-major operands, converted where they lie (no staging
+// copy) in chunks across cores: each matrix gets the values, scale and
+// largest magnitude ab_matrix_upload gives an array of its elements, and
+// downloads as ab_matrix_download writes one.
+//
+// Row i of re is x[i * ld + j], j < its cols. With im, x holds complex pairs
+// and ld counts pairs: rows i of re and im are the real and imaginary parts
+// of the pairs x[2 * (i * ld + j)], x[2 * (i * ld + j) + 1]; and if lines is
+// not NULL (complex only), the high words of the largest |Re| and |Im| of
+// each row (by_row) or column are added to lines->rmax and lines->imax.
+ABStatus ab_internal_upload_rows(ABMatrix re, ABMatrix im, const double* x, size_t ld,
+                                 ab_line_stats_t* lines, bool by_row);
+// Element (i, j) of m is x[j * ld + i]: a column-major matrix, not transposed.
+ABStatus ab_internal_upload_cols(ABMatrix m, const double* x, size_t ld);
+// re (and im) into the rows ab_internal_upload_rows reads.
+ABStatus ab_internal_download_rows(ABMatrix re, ABMatrix im, double* x, size_t ld);
+// C = alpha T + beta C, C the complex rows ab_internal_upload_rows reads (not
+// read if beta is 0) and T = (tr, ti) as a GEMM left it: device_api.m's ZGEMM
+// with alpha != 1 or beta != 0. Each value is the one C took through handles:
+// C's parts uploaded and downloaded, T downloaded, then
+//     (ar*tr - ai*ti) + (br*cr - bi*ci),  (ar*ti + ai*tr) + (br*ci + bi*cr)
+// in FP64 (cr = ci = 0 if beta is 0), and the result's parts uploaded and
+// downloaded, each round trip at the scale an upload gives the part.
+ABStatus ab_internal_zgemm_epilogue(ABMatrix tr, ABMatrix ti, double* x, size_t ld,
+                                    const double alpha[2], const double beta[2]);
+
+// m's power-of-two scale: element = DD value * 2^scale (tests).
+int ab_internal_matrix_scale(ABMatrix m);
 
 #ifdef __cplusplus
 }

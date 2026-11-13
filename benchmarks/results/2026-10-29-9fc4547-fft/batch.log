@@ -1,0 +1,29 @@
+## batch start 2026-10-29 10:09:22
+Now drawing from 'AC Power'
+ -InternalBattery-0 (id=39649379)	67%; charging; 9:03 remaining present: true
+  Note: No thermal warning level has been recorded
+  Note: No performance warning level has been recorded
+  Note: No CPU power status has been recorded
+2026-10-29 10:09:22 accuracy p1 start | AC Power; 67%; charging; 9:03 remaining | load 3.59 6.42 7.76
+2026-10-29 10:09:26 accuracy p1 end rc=0 | AC Power; 67%; charging; 9:03 remaining | load 3.59 6.42 7.76
+2026-10-29 10:09:26 accuracy p2 start | AC Power; 67%; charging; 9:03 remaining | load 3.59 6.42 7.76
+2026-10-29 10:09:30 accuracy p2 end rc=0 | AC Power; 67%; charging; 9:03 remaining | load 3.46 6.35 7.72
+2026-10-29 10:09:30 accuracy p3 start | AC Power; 67%; charging; 9:03 remaining | load 3.46 6.35 7.72
+2026-10-29 10:09:33 accuracy p3 end rc=0 | AC Power; 67%; charging; 9:03 remaining | load 4.23 6.46 7.76
+2026-10-29 10:09:33 speed run 1 start | AC Power; 67%; charging; 9:03 remaining | load 4.23 6.46 7.76
+2026-10-29 10:16:55 speed run 1 end rc=0 after 442 s | AC Power; 68%; charging; 7:53 remaining | load 3.64 3.97 5.89
+2026-10-29 10:16:55 speed run 2 start | AC Power; 68%; charging; 7:53 remaining | load 3.64 3.97 5.89
+2026-10-29 10:24:16 speed run 2 end rc=0 after 441 s | AC Power; 71%; charging; 7:13 remaining | load 2.29 2.75 4.48
+2026-10-29 10:24:16 speed run 3 start | AC Power; 71%; charging; 7:13 remaining | load 2.29 2.75 4.48
+2026-10-29 10:31:37 speed run 3 end rc=0 after 441 s | AC Power; 73%; charging; 6:03 remaining | load 3.83 3.16 3.93
+2026-10-29 10:31:37 speed run 4 start | AC Power; 73%; charging; 6:03 remaining | load 3.83 3.16 3.93
+2026-10-29 10:38:57 speed run 4 end rc=0 after 440 s | AC Power; 75%; charging; 5:23 remaining | load 3.31 3.13 3.58
+2026-10-29 10:38:57 speed run 5 start | AC Power; 75%; charging; 5:23 remaining | load 3.31 3.13 3.58
+2026-10-29 10:46:18 speed run 5 end rc=0 after 441 s | AC Power; 77%; charging; 4:13 remaining | load 2.34 2.71 3.20
+## batch end 2026-10-29 10:46:18
+Now drawing from 'AC Power'
+ -InternalBattery-0 (id=39649379)	77%; charging; 4:13 remaining present: true
+  Note: No thermal warning level has been recorded
+  Note: No performance warning level has been recorded
+  Note: No CPU power status has been recorded
+2026-10-29 10:46:18 batch complete after 2216 s | AC Power; 77%; charging; 4:13 remaining | load 2.34 2.71 3.20
