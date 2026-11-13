@@ -112,6 +112,12 @@ DEFECTS = [
                               '" init_ns=%llu cpu_part_ns=%llu redo_ns=%llu sum_ns=%llu other_ns=%llu",\n'
                               "             LLU(s->init_ns), LLU(s->cpu_part_ns), LLU(s->redo_ns), LLU(s->sum_ns),")],
      [SPLIT("test_split_reports")]),
+    ("table digest of the path, not the bytes",
+     [(DC, "sha256_update(&sha, line, (size_t)len);", "sha256_update(&sha, path, strlen(path));")], [DISPATCH]),
+    ("first split call's CPU part from the last", [(BP, "if (!r->split) {", "if (1) {")],
+     [SPLIT("test_split_reports")]),
+    ("first split call's GPU part from the call's wall time",
+     [(BP, "r->first_gpu_ns = s->gpu_wall_ns;", "r->first_gpu_ns = elapsed_ns;")], [SPLIT("test_split_reports")]),
 ]
 
 BUILD = ["make", "-j8", "lib", "build/test_dispatch", "build/test_split"]
