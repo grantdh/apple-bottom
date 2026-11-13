@@ -316,7 +316,7 @@ $(BUILD)/test_dispatch: tests/test_dispatch.c $(SRC)/dispatch.h $(SRC)/dispatch_
 # AB_SPLIT's executor on the GPU through its seam, and dgemm_/zgemm_ under
 # AB_SPLIT in child processes (tests/test_split.c); it checks that calibrate,
 # replay and bench_split refuse to run under AB_SPLIT.
-$(BUILD)/test_split: tests/test_split.c tests/test_blas_check.h tests/test_dot2.h tests/test_spawn.h tests/test_registry.h $(SRC)/gpu_stage.h $(SLICE_H) $(BUILD)/calibrate $(BUILD)/replay $(BUILD)/bench_split lib | $(BUILD)
+$(BUILD)/test_split: tests/test_split.c tests/test_blas_check.h tests/test_dot2.h tests/test_spawn.h tests/test_registry.h $(SRC)/gpu_stage.h $(SLICE_H) $(PROF_H) $(BUILD)/calibrate $(BUILD)/replay $(BUILD)/bench_split lib | $(BUILD)
 	$(CC) $(CFLAGS) -I$(INCLUDE) -I$(SRC) '-DAB_SOURCE_ROOT="$(CURDIR)"' '-DAB_BUILD_DIR="$(abspath $(BUILD))"' $< -o $@ -L$(BUILD) -lapplebottom $(LDFLAGS) $(EXE_RPATH) -lpthread
 	@echo "Built: $@"
 

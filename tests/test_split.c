@@ -32,6 +32,7 @@
 #include "apple_bottom.h"
 #include "apple_bottom_device.h"
 #include "gpu_stage.h"
+#include "profiling/blas_profiler.h"
 #include "split_slice.h"
 #include "test_blas_check.h"
 #include "test_dot2.h"
@@ -41,6 +42,7 @@
 #include <complex.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
+#include <mach/mach_time.h>
 #include <malloc/malloc.h>
 #include <math.h>
 #include <pthread.h>
@@ -815,6 +817,7 @@ static void test_split_caller_fpcr(void) {
 // =============================================================================
 
 static char self_path[PATH_MAX], g_dir[PATH_MAX], g_table[PATH_MAX + 32];
+static char g_label[PATH_MAX + 64];   // ab_split_source(): "file:<g_table>@<TABLE_SHA256>"
 
 // The split table the children run with, and the calls they make: row, axis
 // and cut as the plan gives them (-1: no row).
@@ -827,6 +830,9 @@ static const char TABLE[] =
     "dgemm N N N m=512: f=0.5\n"                       // 3
     "dgemm T N K k=4096: f=0.5\n"                      // 4
     "zgemm N T N m=200: f=0\n";                        // 5: attributed, never cut
+#define N_ROWS 6
+// The first 12 hex digits of `shasum -a 256` of TABLE: the reports name the file with them.
+#define TABLE_SHA256 "99da8cd29a2b"
 
 typedef struct {
     Call c;
@@ -1035,6 +1041,42 @@ static void child_memory(void) {
     printf("memory growth %lld\n", (long long)s1.size_in_use - (long long)s0.size_in_use);
 }
 
+// The ticks denom - 1 .. denom of the timebase n/d: the second converts to
+// exactly n, while the first's conversion plus the tick's falls 1 ns short of
+// it whenever d does not divide n (2 .. 3 at Apple silicon's 125/3: 83 + 41 is
+// 124). A trace line's t1_ns made of a start and a converted time is then 1
+// ns early.
+static void lossy_ticks(uint64_t *a, uint64_t *b) {
+    mach_timebase_info_data_t tb;
+    mach_timebase_info(&tb);
+    *a = tb.denom - 1;
+    *b = tb.denom;
+}
+
+// Child (AB_SPLIT_TABLE: one zgemm N N N row, scalars=a): a ZGEMM with beta
+// 0.75 and a NaN in its tail's C, which the staged path refuses before
+// running the tail, then the same call on a clean C, whose tail runs.
+static void child_range_first(void) {
+    Call c = {'z', 'N', 'N', 600, 300, 200, 0, ONE, {0.75, 0}};
+    Operands o = operands(&c);
+    double *C = malloc(o.nC * sizeof *C);
+    for (int clean = 0; clean < 2; clean++) {
+        memcpy(C, o.C0, o.nC * sizeof *C);
+        if (!clean) C[(size_t)o.w * o.ldC * (c.N - 1)] = NAN;   // C(0, N - 1), in the N axis's tail
+        abi_call(&c, &o, C);
+    }
+    free(C);
+    free_operands(&o);
+}
+
+// Child (AB_TRACE set): one trace line, for the call from tick a to tick b.
+static void child_trace_ticks(void) {
+    uint64_t a, b;
+    lossy_ticks(&a, &b);
+    ab_trace_call_t c = {.routine = "dgemm", .ta = 'N', .tb = 'N'};
+    if (ab_trace_enabled()) ab_trace_record(&c, a, b, NULL, AB_PROF_FB_NONE, AB_PROF_STAGED_NONE);
+}
+
 static int child_main(const char *scenario) {
     if (ab_init() != AB_OK) {
         printf("no Metal device\n");
@@ -1046,6 +1088,8 @@ static int child_main(const char *scenario) {
     else if (!strcmp(scenario, "other")) child_other();
     else if (!strcmp(scenario, "memory")) child_memory();
     else if (!strcmp(scenario, "k_refused")) child_k_refused();
+    else if (!strcmp(scenario, "trace_ticks")) child_trace_ticks();
+    else if (!strcmp(scenario, "range_first")) child_range_first();
     else printf("unknown scenario %s\n", scenario);
     fflush(stdout);
     return 0;
@@ -1196,9 +1240,7 @@ static void check_calls(const Scenario *s, const char *out, int status) {
     }
     if (!strcmp(s->name, "cpu")) check(gpu_gemms == 0, "AB_SPLIT=1 AB_MODE=cpu ran %llu GPU GEMMs",
                                        (unsigned long long)gpu_gemms);
-    char want_src[sizeof g_table + 8];
-    snprintf(want_src, sizeof want_src, "file:%s", g_table);
-    check(!strcmp(source, want_src), "scenario %s: ab_split_source() is %s", s->name, source);
+    check(!strcmp(source, g_label), "scenario %s: ab_split_source() is %s", s->name, source);
 }
 
 // The extra settings of a scenario with the split on.
@@ -1387,19 +1429,51 @@ static void test_split_fork(void) {
     finish();
 }
 
-// The integer after "key=" in line, or -1.
-static long long field(const char *line, const char *key) {
+// What follows " key=" in line, or NULL.
+static const char *after_key(const char *line, const char *key) {
     char k[64];
     snprintf(k, sizeof k, " %s=", key);
     const char *p = strstr(line, k);
-    return p ? atoll(p + strlen(k)) : -1;
+    return p ? p + strlen(k) : NULL;
+}
+
+// The integer after "key=" in line, or -1.
+static long long field(const char *line, const char *key) {
+    const char *p = after_key(line, key);
+    return p ? atoll(p) : -1;
+}
+
+// The number after "key=" in line, or NAN.
+static double fieldf(const char *line, const char *key) {
+    const char *p = after_key(line, key);
+    return p ? strtod(p, NULL) : NAN;
+}
+
+// The number after "key": in row i of the JSON dump's split_rows, or NAN.
+static double json_row_field(const char *js, int i, const char *key) {
+    char k[64];
+    snprintf(k, sizeof k, "{\"i\": %d,", i);
+    const char *row = js ? strstr(js, k) : NULL;
+    if (!row) return NAN;
+    snprintf(k, sizeof k, "\"%s\": ", key);
+    const char *p = strstr(row, k), *end = strchr(row, '}');
+    return p && end && p < end ? strtod(p + strlen(k), NULL) : NAN;
+}
+
+// The GFLOP of call t's head (gpu false) or tail (gpu true), cut as planned.
+static double part_gf(const TableCall *t, bool gpu) {
+    double d[3] = {t->c.M, t->c.N, t->c.K};
+    int a = t->axis == 'M' ? 0 : t->axis == 'N' ? 1 : 2;
+    d[a] = gpu ? t->g : d[a] - t->g;
+    return (t->c.r == 'z' ? 8.0 : 2.0) * d[0] * d[1] * d[2] / 1e9;
 }
 
 // T9: the reports with AB_SPLIT on.
 static void test_split_reports(void) {
     char table_env[PATH_MAX + 64], trace[PATH_MAX + 16], trace_env[PATH_MAX + 32], json[PATH_MAX + 16],
-         json_env[PATH_MAX + 32];
+         json_env[PATH_MAX + 32], ticks[PATH_MAX + 16];
     snprintf(trace, sizeof trace, "%s/on", g_dir);
+    snprintf(ticks, sizeof ticks, "%s/ticks", g_dir);
     snprintf(trace_env, sizeof trace_env, "AB_TRACE=%s", trace);
     snprintf(json, sizeof json, "%s/profile.json", g_dir);
     snprintf(json_env, sizeof json_env, "AB_PROFILE_JSON=%s", json);
@@ -1410,8 +1484,8 @@ static void test_split_reports(void) {
     char *out = run_child("calls", env, &status);
     check(status == 0 && out, "child status %d", status);
     if (!out) { finish(); return; }
-    char want[sizeof g_table + 64];
-    snprintf(want, sizeof want, " AB_SPLIT=1 split_table=file:%s", g_table);
+    char want[sizeof g_label + 32];
+    snprintf(want, sizeof want, " AB_SPLIT=1 split_table=%s\n", g_label);
     check(strstr(out, want) != NULL, "the report header lacks '%s'", want);
     // routine lines: calls = gpu_calls + cpu_calls + split_calls; split lines; row lines
     long long split_total = 0;
@@ -1444,11 +1518,19 @@ static void test_split_reports(void) {
             if (i == 5) check(field(l, "calls") == 2 && field(l, "split") == 0, "the f = 0 row: %s", l);
             if (i == 0) check(field(l, "calls") == 4 && field(l, "split") == 4 && field(l, "kept_4m") == 2,
                               "row 0: %s", l);
+            // the row's first split call: its parts, within the row's sums, and none without one
+            static const char *const FIRST[][2] = {{"first_cpu_ms", "cpu_ms"}, {"first_gpu_ms", "gpu_ms"},
+                                                   {"first_gf_cpu", "gf_cpu"}, {"first_gf_gpu", "gf_gpu"}};
+            for (int k = 0; k < 4; k++) {
+                double first = fieldf(l, FIRST[k][0]), all = fieldf(l, FIRST[k][1]);
+                check(first <= all && (first > 0) == (field(l, "split") > 0), "row %lld: %s %g, %s %g: %s", i,
+                      FIRST[k][0], first, FIRST[k][1], all, l);
+            }
         }
     }
     check(routines == 2, "%d routine lines with split_calls (want zgemm, dgemm)", routines);
-    check(split_total == 14 && rows_seen == 6, "split calls by axis %lld (want 14), %d row lines (want 6)",
-          split_total, rows_seen);
+    check(split_total == 14 && rows_seen == N_ROWS, "split calls by axis %lld (want 14), %d row lines (want %d)",
+          split_total, rows_seen, N_ROWS);
     check(strstr(out, "AB_PROFILE zgemm M=1200 N=128 K=64  split row=0 axis=N g=64") != NULL,
           "no AB_PROFILE line for a split call");
     check(strstr(out, "AB_SPLIT: calls whose GPU part stood") != NULL, "no AB_SPLIT section in AB_PROFILE");
@@ -1456,20 +1538,27 @@ static void test_split_reports(void) {
     // JSON
     FILE *f = fopen(json, "r");
     char *js = f ? slurp(f) : NULL;
-    check(js && strstr(js, "\"split_table\": \"file:") && strstr(js, "\"split_rows\"") &&
-          strstr(js, "\"split_calls\": "), "the JSON dump lacks the split fields");
-    free(js);
+    char want_js[sizeof g_label + 32];
+    snprintf(want_js, sizeof want_js, "\"split_table\": \"%s\"", g_label);
+    check(js && strstr(js, want_js) && strstr(js, "\"split_rows\"") && strstr(js, "\"split_calls\": "),
+          "the JSON dump lacks the split fields");
     // the trace: a split line's stages sum to t1 - t0, its GPU part's to gpu_wall_ns
     char cmd[PATH_MAX * 2];
     snprintf(cmd, sizeof cmd, "/bin/cat %s.*", trace);
     FILE *p = popen(cmd, "r");
     int split_lines = 0, row_lines = 0;
+    long long first_cpu[N_ROWS], first_gpu[N_ROWS];   // each row's first split call, and first that ran a tail
+    for (int r = 0; r < N_ROWS; r++) first_cpu[r] = first_gpu[r] = -1;
     char line[4096];
     bool header = false;
     while (p && fgets(line, sizeof line, p)) {
         if (line[0] == '#') { header = header || strstr(line, want + 1); continue; }
         if (strstr(line, " path=split") || (strstr(line, " retries=") && strstr(line, " path=fallback:"))) {
             split_lines++;
+            long long row = field(line, "row");
+            if (row >= 0 && row < N_ROWS && first_cpu[row] < 0) first_cpu[row] = field(line, "cpu_part_ns");
+            if (row >= 0 && row < N_ROWS && first_gpu[row] < 0 && field(line, "gpu_wall_ns") > 0)
+                first_gpu[row] = field(line, "gpu_wall_ns");
             long long t = field(line, "t1_ns") - field(line, "t0_ns");
             long long st = field(line, "init_ns") + field(line, "cpu_part_ns") + field(line, "join_ns") +
                            field(line, "redo_ns") + field(line, "sum_ns") + field(line, "other_ns");
@@ -1497,9 +1586,17 @@ static void test_split_reports(void) {
                             .dispatches = field(line, "gpu_dispatches"), .cmdbufs = field(line, "gpu_cmdbufs"),
                             .kinds = field(line, "gpu_kinds"), .mtl_error = field(line, "gpu_mtl_error")}};
                 const char *fault = times_fault(&tm, 0);
-                check(!fault && field(line, "t0_ns") <= (long long)tm.cut_ns &&
-                          (long long)tm.end_ns <= field(line, "t1_ns"),
-                      "trace timeline: %s, or outside t0_ns .. t1_ns: %.300s", fault ? fault : "steps", line);
+                long long t0 = field(line, "t0_ns"), t1 = field(line, "t1_ns");
+                const ab_prof_kernel_split_t *k = &tm.gpu;
+                check(!fault && t0 <= (long long)tm.cut_ns && (long long)tm.end_ns <= t1,
+                      "trace timeline: %s; row %lld M=%lld N=%lld K=%lld, ns after t0_ns %lld: cut %lld create %lld "
+                      "cpu0 %lld cpu1 %lld gpu0 %lld commit %lld gpu_start %lld gpu_end %lld done %lld gpu1 %lld "
+                      "join %lld end %lld t1 %lld", fault ? fault : "outside t0_ns .. t1_ns", field(line, "row"),
+                      field(line, "M"), field(line, "N"), field(line, "K"), t0, (long long)tm.cut_ns - t0,
+                      (long long)tm.create_ns - t0, (long long)tm.cpu0_ns - t0, (long long)tm.cpu1_ns - t0,
+                      (long long)tm.gpu0_ns - t0, (long long)k->commit_ns - t0, (long long)k->gpu_start_ns - t0,
+                      (long long)k->gpu_end_ns - t0, (long long)k->done_ns - t0, (long long)tm.gpu1_ns - t0,
+                      (long long)tm.join_ns - t0, (long long)tm.end_ns - t0, t1 - t0);
             }
         } else if (strstr(line, " row=5 axis=N g=0")) {
             row_lines++;
@@ -1508,7 +1605,58 @@ static void test_split_reports(void) {
     if (p) pclose(p);
     check(header && split_lines == 14 && row_lines == 2, "trace: header %d, %d split lines (want 14), %d f = 0 "
           "lines (want 2)", header, split_lines, row_lines);
-    snprintf(cmd, sizeof cmd, "/bin/rm -f %s.* %s", trace, json);
+    // A call's t0_ns and t1_ns are its ticks converted, as its steps' are, also from ticks whose difference
+    // converted loses a ns (lossy_ticks): an end made of the start plus the time would read before a last step.
+    snprintf(trace_env, sizeof trace_env, "AB_TRACE=%s", ticks);
+    const char *ticks_env[] = {trace_env, NULL};
+    free(run_child("trace_ticks", ticks_env, &status));
+    snprintf(cmd, sizeof cmd, "/bin/cat %s.*", ticks);
+    p = popen(cmd, "r");
+    long long t0 = -1, t1 = -1;
+    while (p && fgets(line, sizeof line, p))
+        if (line[0] != '#') t0 = field(line, "t0_ns"), t1 = field(line, "t1_ns");
+    if (p) pclose(p);
+    uint64_t a, b;
+    lossy_ticks(&a, &b);
+    check(status == 0 && t0 == (long long)ab_prof_ticks_to_ns(a) && t1 == (long long)ab_prof_ticks_to_ns(b),
+          "trace line of ticks %llu .. %llu: t0_ns %lld t1_ns %lld, want %llu %llu (the start's plus the "
+          "difference's conversion: %llu)", (unsigned long long)a, (unsigned long long)b, t0, t1,
+          (unsigned long long)ab_prof_ticks_to_ns(a), (unsigned long long)ab_prof_ticks_to_ns(b),
+          (unsigned long long)(ab_prof_ticks_to_ns(a) + ab_prof_ticks_to_ns(b - a)));
+    // A row whose first split call's tail was refused before it ran (range) and whose second's ran: the GPU's
+    // GFLOP and first-call parts are the second call's alone.
+    char range_table[PATH_MAX + 16], range_env[PATH_MAX + 32];
+    snprintf(range_table, sizeof range_table, "%s/range_table.txt", g_dir);
+    FILE *rt = fopen(range_table, "w");
+    if (rt) { fputs("zgemm N N N scalars=a f=0.5\n", rt); fclose(rt); }
+    snprintf(range_env, sizeof range_env, "AB_SPLIT_TABLE=%s", range_table);
+    const char *range_envs[] = {"AB_SPLIT=1", range_env, "AB_REPORT=1", NULL};
+    out = run_child("range_first", range_envs, &status);
+    const char *rl = out ? strstr(out, "] split_row i=0 ") : NULL;
+    check(status == 0 && rl && field(rl, "split") == 2 && field(rl, "range") == 1,
+          "a tail refused before it ran, then one that ran: status %d, %.300s", status, rl ? rl : out ? out : "");
+    check(rl && fieldf(rl, "gpu_ms") > 0 && fieldf(rl, "first_gpu_ms") == fieldf(rl, "gpu_ms") &&
+              fieldf(rl, "gf_gpu") > 0 && fieldf(rl, "first_gf_gpu") == fieldf(rl, "gf_gpu"),
+          "GPU parts not the second call's alone: %.400s", rl ? rl : "");
+    free(out);
+    unlink(range_table);
+    // The JSON's first-call parts per row are the trace's (here every tail ran: the GPU part's first call is
+    // the CPU part's), and their GFLOP the plan's for the row's first call.
+    bool seen[N_ROWS] = {false};
+    for (int i = 0; i < N_TCALLS; i++) {
+        const TableCall *t = &TCALLS[i];
+        int r = t->row;
+        if (!cut_call(i) || seen[r]) continue;
+        seen[r] = true;
+        double cpu = json_row_field(js, r, "first_cpu_ns"), gpu = json_row_field(js, r, "first_gpu_ns"),
+               gf_cpu = json_row_field(js, r, "first_gf_cpu"), gf_gpu = json_row_field(js, r, "first_gf_gpu");
+        check(cpu == first_cpu[r] && gpu == first_gpu[r] && fabs(gf_cpu - part_gf(t, false)) <= 1e-6 &&
+                  fabs(gf_gpu - part_gf(t, true)) <= 1e-6,
+              "row %d's first split call: cpu %.0f gpu %.0f ns (trace %lld, %lld), GFLOP %g + %g (plan %g + %g)", r,
+              cpu, gpu, first_cpu[r], first_gpu[r], gf_cpu, gf_gpu, part_gf(t, false), part_gf(t, true));
+    }
+    free(js);
+    snprintf(cmd, sizeof cmd, "/bin/rm -f %s.* %s.* %s", trace, ticks, json);
     if (system(cmd)) {}
     finish();
 }
@@ -1634,6 +1782,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "test_split: cannot write %s\n", g_table);
         return 1;
     }
+    snprintf(g_label, sizeof g_label, "file:%s@" TABLE_SHA256, g_table);
     clear_ab_env();   // AB_SPLIT and the rest only where a test sets them
     if (ab_init() != AB_OK) {
         fprintf(stderr, "test_split: no Metal device\n");

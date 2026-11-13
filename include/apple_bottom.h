@@ -424,9 +424,10 @@ const char* ab_get_last_dispatch_path(void);
 
 // Where AB_SPLIT's rows come from in this process (read once, with the other
 // routing settings): "off" (AB_SPLIT unset, empty or 0), "builtin:<chip>@<commit>"
-// (the built-in table for this chip, measured on that commit), "file:<path>"
-// (AB_SPLIT_TABLE), "none:uncalibrated-chip" or "none:unknown-chip" (on, but
-// no table: nothing is split).
+// (the built-in table for this chip, measured on that commit),
+// "file:<path>@<digest>" (AB_SPLIT_TABLE, with the first 12 hex digits of the
+// SHA-256 of the bytes read), "none:uncalibrated-chip" or "none:unknown-chip"
+// (on, but no table: nothing is split).
 const char* ab_split_source(void);
 
 // Zero-copy operands for the BLAS-ABI entry points. A GPU-routed call copies

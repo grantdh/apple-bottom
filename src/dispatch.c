@@ -18,6 +18,7 @@
 #include <sys/sysctl.h>
 #include <xlocale.h>
 
+#include <CommonCrypto/CommonDigest.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 
@@ -473,6 +474,14 @@ static const char *split_line_why(const char *line, size_t n) {
     return NULL;
 }
 
+// CC_SHA256_Update for n bytes of any count (it takes 32-bit counts).
+static void sha256_update(CC_SHA256_CTX *sha, const char *p, size_t n) {
+    for (size_t k; n; p += k, n -= k) {
+        k = n < UINT32_MAX ? n : UINT32_MAX;
+        CC_SHA256_Update(sha, p, (CC_LONG)k);
+    }
+}
+
 bool ab_split_load_table(ab_dispatch_config_t *c, const char *path, char *err, size_t err_len) {
     FILE *f = fopen(path, "r");
     if (!f) {
@@ -486,8 +495,11 @@ bool ab_split_load_table(ab_dispatch_config_t *c, const char *path, char *err, s
     ssize_t len;
     int nrows = 0, lineno = 0, cores = 0;
     const char *why = NULL;
+    CC_SHA256_CTX sha;
+    CC_SHA256_Init(&sha);
     while (!why && (len = getline(&line, &cap, f)) >= 0) {   // lines of any length
         lineno++;
+        sha256_update(&sha, line, (size_t)len);
         if ((why = split_line_why(line, (size_t)len))) break;
         if (ab_dispatch_parse_header(line, key, sizeof key, value, sizeof value)) {
             if (!strcmp(key, "chip")) snprintf(chip, sizeof chip, "%s", value);
@@ -511,10 +523,14 @@ bool ab_split_load_table(ab_dispatch_config_t *c, const char *path, char *err, s
         snprintf(err, err_len, "line %d: %s", lineno, why);
         return false;
     }
+    unsigned char md[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256_Final(md, &sha);
     memcpy(c->split_rows, rows, (size_t)nrows * sizeof rows[0]);
     c->split_nrows = nrows;
     snprintf(c->split_table_chip, sizeof c->split_table_chip, "%s", chip);
     c->split_table_gpu_cores = cores;
+    for (int i = 0; i < AB_SPLIT_DIGEST_HEX / 2; i++)
+        snprintf(c->split_table_digest + 2 * i, 3, "%02x", md[i]);
     return true;
 }
 
@@ -585,7 +601,7 @@ static void split_config_from_env(ab_dispatch_config_t *c) {
     } else if (named && !ab_split_load_table(c, table, err, sizeof err)) {
         fprintf(stderr, "apple-bottom: AB_SPLIT_TABLE=%s: %s; keeping %s\n", table, err, c->split_table);
     } else if (named) {
-        snprintf(c->split_table, sizeof c->split_table, "file:%s", table);
+        snprintf(c->split_table, sizeof c->split_table, "file:%s@%s", table, c->split_table_digest);
         bool other_chip = c->split_table_chip[0] && c->chip[0] && strcasecmp(c->split_table_chip, c->chip);
         bool other_cores = c->split_table_gpu_cores && c->gpu_cores &&
                            c->split_table_gpu_cores != c->gpu_cores;

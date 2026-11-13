@@ -201,7 +201,7 @@ static void blas_call(const ab_b2_call_t *c, const void *A, int lda) {
 
     const char *name = kRoutineName[c->routine];
     int m = c->m > 0 ? c->m : 0, n = c->n > 0 ? c->n : 0;
-    uint64_t ns = ab_prof_ticks_to_ns(ab_prof_now_ticks() - t0);
+    uint64_t ns = ab_prof_span_ns(t0, ab_prof_now_ticks());
     ab_prof_record(name, ns, (size_t)m, (size_t)n, 1, gpu, gpu ? stage_ns : NULL,
                    tried && !gpu ? fallback_of(result) : AB_PROF_FB_NONE, AB_PROF_STAGED_NONE);
     if (gpu) ab_prof_print_gpu_call(name, m, n, 1, ns, stage_ns, AB_PROF_STAGED_NONE);

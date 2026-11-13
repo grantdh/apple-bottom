@@ -80,11 +80,17 @@ const char* const ab_prof_split_decline_names[AB_PROF_SPLIT_DECLINE_COUNT] = {
 };
 
 // AB_SPLIT: per row of the split table, the calls it covered (also those it
-// did not cut) and what became of them (AB_REPORT's split_row lines).
+// did not cut) and what became of them (AB_REPORT's split_row lines). first_ns
+// is the wall time of the first call the row covered; first_cpu_ns and
+// first_gf_cpu are the CPU part of its first split call, first_gpu_ns and
+// first_gf_gpu the GPU part of its first split call whose tail ran, which
+// carries Metal's start-up when it is the process's first, so that a fit of
+// the shares can leave that call out.
 typedef struct {
     uint64_t calls, split, kept, kept_4m, range, gpu_failed;
     uint64_t wall_ns, first_ns, cpu_ns, gpu_ns, wait_cpu_ns, wait_gpu_ns, redo_ns, sum_ns;
-    double gf, gf_cpu, gf_gpu;
+    uint64_t first_cpu_ns, first_gpu_ns;
+    double gf, gf_cpu, gf_gpu, first_gf_cpu, first_gf_gpu;
 } split_row_stats_t;
 
 static split_row_stats_t g_split_rows[AB_SPLIT_MAX_ROWS];   // under g_lock
@@ -223,6 +229,10 @@ uint64_t ab_prof_ticks_to_ns(uint64_t ticks) {
     return ticks * g_timebase.numer / g_timebase.denom;
 }
 
+uint64_t ab_prof_span_ns(uint64_t t0, uint64_t t1) {
+    return ab_prof_ticks_to_ns(t1) - ab_prof_ticks_to_ns(t0);
+}
+
 // =============================================================================
 // Record
 // =============================================================================
@@ -327,6 +337,14 @@ void ab_prof_record_split(const char* routine, uint64_t elapsed_ns, size_t m, si
         x->declined[s->declined]++;
     if (s->split) {
         bool k4 = s->staged == AB_PROF_STAGED_KEPT_4M, range = s->staged == AB_PROF_STAGED_RANGE;
+        if (!r->split) {
+            r->first_cpu_ns = s->cpu_part_ns;
+            r->first_gf_cpu = s->gf_cpu;
+        }
+        if (s->gpu_wall_ns && !r->first_gpu_ns) {   // a tail refused before it ran has no wall time
+            r->first_gpu_ns = s->gpu_wall_ns;
+            r->first_gf_gpu = s->gf_gpu;
+        }
         r->split++;
         r->kept += s->kept && !k4;
         r->kept_4m += s->kept && k4;
@@ -375,7 +393,7 @@ void ab_prof_record_split(const char* routine, uint64_t elapsed_ns, size_t m, si
 // " AB_SPLIT=1 split_table=<source>" for the report headers when AB_SPLIT is
 // on, else nothing, so that default reports read as before.
 static const char* split_token(void) {
-    static char token[AB_DISPATCH_LABEL_LEN + 32];
+    static char token[sizeof " AB_SPLIT=1 split_table=" + sizeof ((ab_dispatch_config_t*)0)->split_table];
     const ab_dispatch_config_t* dc = ab_dispatch_process_config();
     if (!dc->split_on) return "";
     snprintf(token, sizeof token, " AB_SPLIT=1 split_table=%s", dc->split_table);
@@ -646,11 +664,13 @@ static void report_split_rows(report_line_t* l, FILE* out, const char* prefix) {
         const ab_split_row_t* row = &dc->split_rows[i];
         const split_row_stats_t* r = &g_split_rows[i];
         line_add(l, "%ssplit_row i=%d routine=%cgemm axis=%c f=%g calls=%llu split=%llu wall_ms=%.3f "
-                    "first_ms=%.3f cpu_ms=%.3f gpu_ms=%.3f wait_cpu_ms=%.3f wait_gpu_ms=%.3f "
+                    "first_ms=%.3f first_cpu_ms=%.3f first_gpu_ms=%.3f first_gf_cpu=%.3f first_gf_gpu=%.3f "
+                    "cpu_ms=%.3f gpu_ms=%.3f wait_cpu_ms=%.3f wait_gpu_ms=%.3f "
                     "redo_ms=%.3f sum_ms=%.3f gf=%.3f gf_cpu=%.3f gf_gpu=%.3f kept=%llu kept_4m=%llu "
                     "range=%llu gpu_failed=%llu\n",
                  prefix, i, row->routine, row->axis, row->share, LLU(r->calls), LLU(r->split),
-                 r->wall_ns / 1e6, r->first_ns / 1e6, r->cpu_ns / 1e6, r->gpu_ns / 1e6,
+                 r->wall_ns / 1e6, r->first_ns / 1e6, r->first_cpu_ns / 1e6, r->first_gpu_ns / 1e6,
+                 r->first_gf_cpu, r->first_gf_gpu, r->cpu_ns / 1e6, r->gpu_ns / 1e6,
                  r->wait_cpu_ns / 1e6, r->wait_gpu_ns / 1e6, r->redo_ns / 1e6, r->sum_ns / 1e6, r->gf,
                  r->gf_cpu, r->gf_gpu, LLU(r->kept), LLU(r->kept_4m), LLU(r->range), LLU(r->gpu_failed));
         line_emit(l, out);
@@ -671,6 +691,8 @@ void ab_prof_report(FILE* out) {
     // The chip and the table auto routed by (dispatch.h), so a report from
     // another machine says what routed it.
     const ab_dispatch_config_t* dc = ab_dispatch_process_config();
+    // split_token() stays last: its path may hold spaces, and readers take it
+    // to the end of the line (benchmarks/split/fit_shares.py).
     line_add(&l, " chip=\"%s\" gpu_cores=%d table=%s%s", dc->chip[0] ? dc->chip : "unknown", dc->gpu_cores,
              dc->table, split_token());
     line_add(&l, "\n");
@@ -964,17 +986,18 @@ static void trace_split_fields(report_line_t* l, uint64_t elapsed_ns, const ab_p
 // remainder), and split other_ns so that the parts sum to it exactly:
 // rest_ns is what the kernel step's split leaves, and may be a few ns below
 // zero from rounding between the host and GPU clocks.
-static void trace_line(const ab_trace_call_t* c, uint64_t t0_ns, uint64_t elapsed_ns,
+static void trace_line(const ab_trace_call_t* c, uint64_t t0, uint64_t t1,
                        const uint64_t* stage_ns, ab_prof_fallback_t fallback,
                        ab_prof_staged_t staged, const ab_prof_split_t* split) {
     static const char* const hash_keys[3] = {"hash_a", "hash_b", "hash_c"};
+    uint64_t t0_ns = ab_prof_ticks_to_ns(t0), t1_ns = ab_prof_ticks_to_ns(t1), elapsed_ns = t1_ns - t0_ns;
     bool z = c->routine[0] == 'z';
     char ta[8], tb[8];
     report_line_t l = { .n = 0 };
     l.buf[0] = '\0';
     line_add(&l, "t0_ns=%llu t1_ns=%llu routine=%s ta=%s tb=%s M=%d N=%d K=%d "
                  "lda=%d ldb=%d ldc=%d alpha=%a",
-             (unsigned long long)t0_ns, (unsigned long long)(t0_ns + elapsed_ns), c->routine,
+             (unsigned long long)t0_ns, (unsigned long long)t1_ns, c->routine,
              trans_text(c->ta, ta), trans_text(c->tb, tb), c->m, c->n, c->k,
              c->lda, c->ldb, c->ldc, c->alpha[0]);
     if (z) line_add(&l, ",%a", c->alpha[1]);
@@ -1016,16 +1039,16 @@ static void trace_line(const ab_trace_call_t* c, uint64_t t0_ns, uint64_t elapse
     trace_write(&l);
 }
 
-void ab_trace_record(const ab_trace_call_t* c, uint64_t t0_ns, uint64_t elapsed_ns,
+void ab_trace_record(const ab_trace_call_t* c, uint64_t t0, uint64_t t1,
                      const uint64_t* stage_ns, ab_prof_fallback_t fallback,
                      ab_prof_staged_t staged) {
-    trace_line(c, t0_ns, elapsed_ns, stage_ns, fallback, staged, NULL);
+    trace_line(c, t0, t1, stage_ns, fallback, staged, NULL);
 }
 
-void ab_trace_record_split(const ab_trace_call_t* c, uint64_t t0_ns, uint64_t elapsed_ns,
+void ab_trace_record_split(const ab_trace_call_t* c, uint64_t t0, uint64_t t1,
                            const uint64_t* stage_ns, ab_prof_fallback_t fallback,
                            ab_prof_staged_t staged, const ab_prof_split_t* s) {
-    trace_line(c, t0_ns, elapsed_ns, stage_ns, fallback, staged, s);
+    trace_line(c, t0, t1, stage_ns, fallback, staged, s);
 }
 
 // =============================================================================
@@ -1150,12 +1173,15 @@ void ab_prof_dump_json(const char* path) {
             const split_row_stats_t* r = &g_split_rows[i];
             fprintf(f, "%s\n    {\"i\": %d, \"routine\": \"%cgemm\", \"axis\": \"%c\", \"f\": %g, "
                        "\"calls\": %llu, \"split\": %llu, \"wall_ns\": %llu, \"first_ns\": %llu, "
+                       "\"first_cpu_ns\": %llu, \"first_gpu_ns\": %llu, "
+                       "\"first_gf_cpu\": %.6f, \"first_gf_gpu\": %.6f, "
                        "\"cpu_ns\": %llu, \"gpu_ns\": %llu, \"wait_cpu_ns\": %llu, \"wait_gpu_ns\": %llu, "
                        "\"redo_ns\": %llu, \"sum_ns\": %llu, \"gf\": %.6f, \"gf_cpu\": %.6f, "
                        "\"gf_gpu\": %.6f, \"kept\": %llu, \"kept_4m\": %llu, \"range\": %llu, "
                        "\"gpu_failed\": %llu}",
                     i ? "," : "", i, row->routine, row->axis, row->share, LLU(r->calls), LLU(r->split),
-                    LLU(r->wall_ns), LLU(r->first_ns), LLU(r->cpu_ns), LLU(r->gpu_ns), LLU(r->wait_cpu_ns),
+                    LLU(r->wall_ns), LLU(r->first_ns), LLU(r->first_cpu_ns), LLU(r->first_gpu_ns),
+                    r->first_gf_cpu, r->first_gf_gpu, LLU(r->cpu_ns), LLU(r->gpu_ns), LLU(r->wait_cpu_ns),
                     LLU(r->wait_gpu_ns), LLU(r->redo_ns), LLU(r->sum_ns), r->gf, r->gf_cpu, r->gf_gpu,
                     LLU(r->kept), LLU(r->kept_4m), LLU(r->range), LLU(r->gpu_failed));
         }

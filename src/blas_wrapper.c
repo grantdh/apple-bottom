@@ -959,7 +959,7 @@ static void prof_kernel(CallProf *p) {
 // CPU call with that fallback.
 static void prof_end(CallProf *p, const char *routine, int M, int N, int K) {
     if (!p) return;
-    uint64_t ns = ab_prof_ticks_to_ns(ab_prof_now_ticks() - p->t0);
+    uint64_t t1 = ab_prof_now_ticks(), ns = ab_prof_span_ns(p->t0, t1);   // its trace line's t1_ns - t0_ns
     bool gpu = !strcmp(_ab_last_path, "gpu");
     const ab_prof_split_t *s = p->split.row >= 0 ? &p->split : NULL;
     size_t m = M > 0 ? (size_t)M : 0, n = N > 0 ? (size_t)N : 0, k = K > 0 ? (size_t)K : 0;
@@ -967,11 +967,9 @@ static void prof_end(CallProf *p, const char *routine, int M, int N, int K) {
         ab_prof_record(routine, ns, m, n, k, gpu, gpu ? p->stage_ns : NULL, p->fallback, p->staged);
     if (s) ab_prof_record_split(routine, ns, m, n, k, s);
     if (p->trace && s)
-        ab_trace_record_split(&p->call, ab_prof_ticks_to_ns(p->t0), ns, gpu ? p->stage_ns : NULL,
-                              p->fallback, p->staged, s);
+        ab_trace_record_split(&p->call, p->t0, t1, gpu ? p->stage_ns : NULL, p->fallback, p->staged, s);
     else if (p->trace)
-        ab_trace_record(&p->call, ab_prof_ticks_to_ns(p->t0), ns, gpu ? p->stage_ns : NULL,
-                        p->fallback, p->staged);
+        ab_trace_record(&p->call, p->t0, t1, gpu ? p->stage_ns : NULL, p->fallback, p->staged);
     if (gpu) ab_prof_print_gpu_call(routine, M, N, K, ns, p->stage_ns, p->staged);
     if (s && s->split) ab_prof_print_split_call(routine, M, N, K, ns, s);
 }
@@ -1721,13 +1719,13 @@ static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis
         tm->gpu = j.kernel;
     }
     if (p && run_tail) {
-        p->split.gpu_wall_ns = ab_prof_ticks_to_ns(j.t1 - j.t0);
+        p->split.gpu_wall_ns = ab_prof_span_ns(j.t0, j.t1);   // at_gpu1_ns - at_gpu0_ns
         p->split.wait_gpu_ns = tm->cpu1_ns > tm->gpu1_ns ? tm->cpu1_ns - tm->gpu1_ns : 0;
         if (j.prof.t0) memcpy(p->split.gpu_stage_ns, j.prof.stage_ns, sizeof j.prof.stage_ns);
     }
-    if (p) {
+    if (p) {   // a tail refused before it ran (run_tail false) did no GPU work
         p->split.gf_cpu = part_gflop(&head);
-        p->split.gf_gpu = part_gflop(tail);
+        p->split.gf_gpu = run_tail ? part_gflop(tail) : 0.0;
     }
 
     // A tail not kept is made again here, on Accelerate: on the K axis into C
