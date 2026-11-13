@@ -157,10 +157,12 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 - **Machine:** run on an otherwise idle Mac on AC power, from an adapter of at least 90 W
   (`SPLIT_MIN_W`), with the battery at 95% or more (`SPLIT_MIN_BATT`) and neither charging nor finishing
   its charge, as the AB_SPLIT pilot required. The script checks all three at the start and before each
-  case, waiting up to 900 s (`SPLIT_BATT_WAIT_S`) for the battery, and stops with exit status 75 if a
-  check fails. `bench_split` prints the adapter's watts on its `start:` and `end:` lines (and its
-  sustained mode checks them before every run); a case whose report does not start and end on AC power
-  from such an adapter is moved aside, and running the script again resumes where it stopped.
+  case, waiting up to 900 s (`SPLIT_BATT_WAIT_S`) for the battery and then checking AC and the adapter
+  again, and stops with exit status 75 if a check fails. `bench_split` prints the adapter's watts on its
+  `start:` and `end:` lines (and its sustained mode checks them before every run). A case that fails is
+  moved aside, and running the script again resumes where it stopped; the script exits 75 if the
+  case's report does not start and end on AC power from such an adapter (a power problem a driver can
+  wait out), and 1 if the case itself failed.
   `SPLIT_DRY=1` makes the checks, without waiting, and prints each case's command without running it.
   `power.log` has the power source, the battery's charge and state, the adapter's watts and the load
   averages before and after every case, and `raw.tsv` the load average after every call (`load1`).

@@ -23,9 +23,11 @@
 # Run on an otherwise idle Mac on AC power from an adapter of at least SPLIT_MIN_W watts (default 90).
 # Before every case the script also wants the battery at SPLIT_MIN_BATT percent or more (default 95)
 # and neither charging nor finishing its charge: it waits up to SPLIT_BATT_WAIT_S seconds (default
-# 900) for that. It stops with exit status 75 when a check fails (after the wait, for the battery). A
-# case already complete in <outdir> is skipped, and one whose report does not start and end on AC power
-# from an adapter of SPLIT_MIN_W watts or more is moved aside, so running the script again resumes.
+# 900) for that, and checks AC and the adapter again after waiting. It stops with exit status 75 when a
+# check fails (after the wait, for the battery). A case already complete in <outdir> is skipped. A case
+# that fails is moved aside, so running the script again resumes: with exit status 75 if its report
+# does not start and end on AC power from an adapter of SPLIT_MIN_W watts or more (or the power is not
+# right now), else 1.
 # SPLIT_DRY=1 makes the same checks (without waiting) and prints each case's command instead.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
@@ -56,13 +58,15 @@ ac_ok() {   # ac_ok <what>: on AC power from an adapter of at least min_w watts,
     adapter_ok || { echo "adapter $(adapter_w) W, under $min_w W, stopping $1: exit 75" >&2; return 1; }
 }
 power_ok() {   # power_ok <what>: ac_ok and the battery as batt_ok wants (waiting up to batt_wait s for it,
-               # except in a dry run), else say so on stderr
+               # except in a dry run), else say so on stderr; ac_ok again after a wait, which unplugging
+               # the adapter can end (the battery then reads discharging)
     ac_ok "$1" || return 1
     local t=0
     while ! batt_ok; do
         [ -z "$dry" ] && [ $t -lt "$batt_wait" ] || { echo "battery [$(batt_line)], stopping $1: exit 75" >&2; return 1; }
         sleep 30; t=$((t + 30))
     done
+    [ $t -eq 0 ] || ac_ok "$1"
 }
 report_power_ok() {   # report_power_ok <file>: its start and end lines say AC power from an adapter of min_w W or more
     local w
@@ -81,16 +85,20 @@ go() {
     grep -q "^$mark" "$d/$pre.out" 2>/dev/null && return 0
     if [ -n "$dry" ]; then power_ok "before $label" || exit 75; echo "$label: $*"; return 0; fi
     mkdir -p "$d"
-    note "$d" "before $label"
     power_ok "before $label" || { note "$d" "power check failed, stopping before $label"; exit 75; }
+    note "$d" "before $label"
     "$@" > "$d/$pre.out" 2>&1
     rc=$?
     note "$d" "after $label rc=$rc"
-    if [ $rc -ne 0 ] || ! grep -q "^$mark" "$d/$pre.out" || ! report_power_ok "$d/$pre.out"; then
+    local power=ok
+    report_power_ok "$d/$pre.out" || power=bad
+    if [ $rc -ne 0 ] || ! grep -q "^$mark" "$d/$pre.out" || [ $power = bad ]; then
         local aside="$d/incomplete-$(date +%Y%m%d-%H%M%S)"
         mkdir -p "$aside" && mv "$d/$pre".* "$aside/" 2>/dev/null
         note "$d" "moved $pre.* to $aside"
-        ac_ok "after $label" || exit 75
+        # 75: a power problem (the report's start or end line, or now), so a driver can wait and rerun;
+        # 1: the case itself failed
+        { [ $power = ok ] && ac_ok "after $label"; } || exit 75
         exit 1
     fi
 }
