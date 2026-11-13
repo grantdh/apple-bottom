@@ -1640,7 +1640,8 @@ static void test_split_reports(void) {
           "GPU parts not the second call's alone: %.400s", rl ? rl : "");
     free(out);
     unlink(range_table);
-    // The JSON's first split call per row is the trace's, and its GFLOP the plan's for the row's first call.
+    // The JSON's first-call parts per row are the trace's (here every tail ran: the GPU part's first call is
+    // the CPU part's), and their GFLOP the plan's for the row's first call.
     bool seen[N_ROWS] = {false};
     for (int i = 0; i < N_TCALLS; i++) {
         const TableCall *t = &TCALLS[i];

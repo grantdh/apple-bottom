@@ -106,4 +106,4 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 | `table.py <outdir>` | the results tables: medians [min–max] of the lockstep times, speedups, bits, errors, power state, sustained runs |
 | `classify_trace.py <dir>` | every traced GPU call as staged path, host path or fallback, by shape, with median stage times |
 | `power.py <dir>/<case>.np<N>.d<data> ...` | wall power by run of consecutive calls, trimming SMC's ~1 s lag |
-| `fit_shares.py --table T <run> ...` | the next share of each row of the split table `T`, from the `AB_REPORT` lines of runs made with it (those whose headers carry `T`'s digest), each row's first split call per process left out (design section 8's rule; `--cut` shows whether a share moves the cut; details in its docstring) |
+| `fit_shares.py --table T <run> ...` | the next share of each row of the split table `T`, from the `AB_REPORT` lines of runs made with it (those whose headers carry `T`'s digest), each row's first split call per process left out (its GPU part from the first whose tail ran) (design section 8's rule; `--cut` shows whether a share moves the cut; details in its docstring) |

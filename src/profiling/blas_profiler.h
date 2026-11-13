@@ -129,7 +129,7 @@ typedef struct {
     uint64_t wait_cpu_ns, wait_gpu_ns;  // the head done, waiting for the tail; and the reverse
     uint64_t redo_ns, sum_ns;           // tails made again on Accelerate; the K axis's sums
     uint64_t wasted_gpu_ns;             // the threads of tails that did not stand
-    double gf_cpu, gf_gpu;              // GFLOP of the heads and of the tails
+    double gf_cpu, gf_gpu;              // GFLOP of the heads and of the tails that ran
 } ab_prof_split_stats_t;
 
 // One BLAS-ABI call a row of the split table covered, as the executor
@@ -139,7 +139,8 @@ typedef struct {
     char axis;
     int L, g;                           // g = 0: the row did not cut the call
     bool split;                         // the executor cut the call and made both parts (a tail
-                                        // refused before it ran on Accelerate: gpu_wall_ns 0)
+                                        // refused before it ran on Accelerate: gpu_wall_ns and
+                                        // gf_gpu 0)
     bool kept;                          // ... and the GPU's stood: the call counts as split
     ab_prof_split_decline_t declined;   // why a cut call was not split
     ab_prof_staged_t staged;            // the GPU part's staged-path outcome

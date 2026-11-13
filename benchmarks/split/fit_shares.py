@@ -67,7 +67,7 @@ KV = re.compile(r"(\w+)=(\S+)")
 BUILD = re.compile(r"apple-bottom \S+ \(([^)]*)\)")
 LABEL = re.compile(r"split_table=file:(.*)$")   # the header's last field, spaces and all
 SUMS = ("calls", "split", "cpu_ms", "gpu_ms", "gf_cpu", "gf_gpu", "first_ms", "wait_cpu_ms", "wait_gpu_ms")
-PARTS = ("cpu_ms", "gpu_ms", "gf_cpu", "gf_gpu")   # first_<part>: those of the row's first split call
+PARTS = ("cpu_ms", "gpu_ms", "gf_cpu", "gf_gpu")   # first_<part>: the first-call parts (module docstring)
 SKIP_DIR = re.compile(r"(\.bad\d*|^incomplete-.*|^tmp|\.save)$")
 
 
@@ -181,7 +181,7 @@ def read_reports(path, table, digest):
 
 
 def less_first(c):
-    """Sums c without the n_first first split calls summed into its first_<part> keys."""
+    """c with each first_<part> taken off its part (PARTS) and n_first off split."""
     d = Counter(c)
     for k in PARTS:
         d[k] -= c["first_" + k]

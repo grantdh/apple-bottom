@@ -143,9 +143,10 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     unset); `AB_STRASSEN`, `AB_STAGING_MB=0` and `AB_MIN_GPU_DIM=0` keeping
     the bits; `VECLIB_MAXIMUM_THREADS` 1, 2 and 8 repeating; `fork()` with
     `_exit` and `exit`; the reports (the table's path and digest in the
-    headers, counts that add up, a line per row, each row's first split
-    call the trace's first for that row, a ZGEMM tail refused before it ran
-    adding no GPU time or GFLOP, a trace line's `t0_ns` and `t1_ns` its
+    headers, counts that add up, a line per row, each row's first-call CPU
+    part the trace's first split call for that row and its GPU part the
+    first whose tail ran, a ZGEMM tail refused before it ran adding no GPU
+    time or GFLOP (the row's first-call GPU part then the next call's), a trace line's `t0_ns` and `t1_ns` its
     ticks converted, also from ticks whose difference converted loses a ns,
     trace stages that sum exactly, every split line's timeline whole and in
     order, the JSON fields; which stage a piece of
