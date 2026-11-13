@@ -195,7 +195,8 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 
 - **Per-call power:** `SUMMARY`'s `pdtr_*` fields average the SMC samples inside each timed call, with no
   lag trimming. SMC's PDTR lags the load by about a second, so they mean little for calls shorter than
-  that. For wall power, use the `power4x2` suite (6 s runs), the sustained runs, or `power.py`.
+  that. For wall power, use the `power4x2` suite (6 s runs), the sustained runs, or `power.py` (which,
+  with the arms, cannot give the split's).
 - **GPU clock:** IOReport gives the time spent in each DVFS state. `GPU_MHZ` in `bench_split.c` maps the
   states to MHz with the M2 Max's table, so the MHz values are valid on an M2 Max only. Other chips need
   their own table (`ioreg`'s `voltage-states9`).
@@ -215,7 +216,7 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 |---|---|
 | `table.py <outdir>` | the results tables: medians [min–max] of the lockstep times, speedups, bits, errors, power state; with the arms, the seam and twin against the user split (paired medians), the slices alone and the seam's outcomes; sustained runs |
 | `classify_trace.py <dir>` | every traced GPU call as staged path, host path or fallback, by shape, with median stage times |
-| `power.py <dir>/<case>.np<N>.d<data> ...` | wall power by run of consecutive calls, trimming SMC's ~1 s lag |
+| `power.py <dir>/<case>.np<N>.d<data> ...` | wall power by run of consecutive calls, trimming SMC's ~1 s lag. With the arms the trio alternates call by call and forms no runs, so only Accelerate, the GPU, `HEAD` and `TAIL` get figures; for the split's use `SPLIT_ARMS=0`, `power4x2` or the sustained runs |
 | `g3.py <dir> ... [--tsv FILE]` | G3 per case and layout: `SEAM` ÷ `S<g>` and `S<g>b` ÷ `S<g>` paired by (round, repeat), each as the median ratio, a BCa bootstrap interval and the Hodges-Lehmann estimate with its exact Wilcoxon interval; G3's two readings (below); the outside load from the report, flagged over 1.5 cores or a GPU busy fraction of 0.25 (`--max-fcpu`, `--max-gpu-busy`); and the seam's timeline per call (init and thread start beside the user split's GPU start, the CPU and GPU parts and the wait for the GPU each beside the user split's, submit, GPU execution, wake). Verdicts go only to rows under G3's conditions (copied operands, uniform data, 1×8 or 4×2, staging 2048 or 8192 MB; others read "not G3"); cases run.sh set aside and reports that did not start and end on AC power are left out and listed. BCa and reading (b) need scipy (`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3` on the M2 Max). `g3.py --simulate` gives the readings' false-alarm rates |
 
 ## G3's two readings
