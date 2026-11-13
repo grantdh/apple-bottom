@@ -276,9 +276,12 @@ def main():
         return simulate(a.sims, a.seed, a.level, a.t_level, a.resamples)
     if not a.dirs:
         ap.error("give run.sh's <outdir> or suite directories")
-    files = sorted({f for d in a.dirs for f in glob.glob(os.path.join(d, "**", "*.raw.tsv"), recursive=True)})
+    # each file with its label: the given directory's name and the path below it, so that rows of two
+    # outdirs (two days, say) stay apart
+    files = sorted({(f, os.path.normpath(os.path.join(os.path.basename(os.path.normpath(d)), os.path.relpath(os.path.dirname(f), d))))
+                    for d in a.dirs for f in glob.glob(os.path.join(d, "**", "*.raw.tsv"), recursive=True)})
     rows, skipped = [], []
-    for f in files:
+    for f, label in files:
         if any(part.startswith("incomplete-") for part in f.split(os.sep)):
             skipped.append((f, "set aside by run.sh"))
             continue
@@ -308,7 +311,7 @@ def main():
         else:
             gate = check = (notg3, NAN); prop = rec = notg3
         rows.append({
-            "suite": os.path.basename(os.path.dirname(f)), "case": v.get("case", os.path.basename(f).split(".")[0]),
+            "suite": label, "case": v.get("case", os.path.basename(f).split(".")[0]),
             "layout": layout, "staging": staging, "copied": v.get("reg") == "0", "g": v.get("g", "?"), "seam": seam, "null": null,
             "gate": gate, "check": check, "proposed": prop, "recommended": rec, "seam_r": seam_r, "null_r": null_r,
             "fcpu": fcpu, "gbusy": float(v.get("gpu_idle_busy_max", "nan")), "out": v.get("seam_out", "?"),
