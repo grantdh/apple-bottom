@@ -7,10 +7,13 @@ usage: g3.py [--level 0.95] [--t-level 0.95] [--resamples 9999] [--seed 1] [--ma
 
 Reads every <case>.np<N>.d<data>.raw.tsv below the directories (run.sh's <outdir> or its suites)
 whose fixed block has the SEAM arm, with the .out report beside it. Left out, and listed at the end:
-cases that run.sh set aside (a path with an incomplete- component) and reports without a SUMMARY
-line or whose start and end lines are not both on AC power. Only rows under G3's conditions get a
-verdict (copied operands, uniform data, 1x8 or 4x2, AB_STAGING_MB 2048 or 8192); the others read
-"not G3". For each case and layout:
+cases that run.sh set aside (a path with an incomplete- component), reports without a SUMMARY line,
+and reports whose power does not meet run.sh's conditions (AC power from an adapter of 90 W or more on
+the start and end lines, and at the start a battery of 95% or more, neither charging nor finishing
+its charge, when printed). Only rows under G3's conditions get a verdict: copied operands, uniform
+data, 1x8 or 4x2, AB_STAGING_MB 2048 or 8192 (else "not G3"), and G3's protocol, AB_TRACE and
+AB_REPORT off and a positive multiple of 6 rounds (else "not G3 (protocol)"). For each case and
+layout:
 
 - Pairs by (round, rep) of the fixed block's lockstep times (the slowest process per repeat):
   SEAM with the user split S<g>, and the twin S<g>b with S<g> (the null run: the user split against
@@ -56,7 +59,7 @@ import argparse, glob, math, os, re, statistics, sys
 from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # rawtsv.py, also under python3 -I
-from rawtsv import env, fixed_pairs, on_ac, parse, read  # noqa: E402
+from rawtsv import env, fixed_pairs, parse, power_problem, read  # noqa: E402
 
 try:
     import numpy as np
@@ -192,9 +195,17 @@ def timeline(recs):
     return out
 
 
-def g3_conditions(v, layout, staging):
-    """G3's conditions (design section 12): copied operands, uniform data, 1x8 or 4x2, staging 2048 or 8192 MB"""
-    return v.get("reg") == "0" and v.get("data") == "0" and layout in ("1x8", "4x2") and staging in ("2048", "8192")
+def not_g3(v, txt, layout, staging):
+    """why the row is not a G3 row, or "" if it is: G3's conditions (design section 12: copied operands,
+    uniform data, 1x8 or 4x2, staging 2048 or 8192 MB), then the G3 suites' protocol (AB_TRACE and
+    AB_REPORT off, which would profile only the user split; a positive multiple of 6 rounds, over which
+    the trio's order is balanced)"""
+    if not (v.get("reg") == "0" and v.get("data") == "0" and layout in ("1x8", "4x2") and staging in ("2048", "8192")):
+        return "not G3"
+    rounds = int(v.get("rounds", "0"))
+    if env(txt, "AB_TRACE") != "off" or env(txt, "AB_REPORT") != "off" or rounds <= 0 or rounds % 6:
+        return "not G3 (protocol)"
+    return ""
 
 
 def mr(v):
@@ -261,8 +272,9 @@ def main():
             continue
         txt = open(f[:-8] + ".out").read() if os.path.exists(f[:-8] + ".out") else ""
         v = parse(txt, "SUMMARY")
-        if not v or not on_ac(txt):
-            skipped.append((f, "no SUMMARY line" if not v else "did not start and end on AC power"))
+        why = "no SUMMARY line" if not v else power_problem(txt)
+        if why:
+            skipped.append((f, why))
             continue
         vl, st = env(txt, "VECLIB_MAXIMUM_THREADS"), env(txt, "AB_STAGING_MB")
         layout, staging = f"{v.get('np', '?')}x{vl or '?'}", st or "?"
@@ -274,11 +286,12 @@ def main():
         if math.isnan(fcpu):   # runs without the arms have no GPU-idle stretch
             fcpu = float(v.get("fcpu_round_max", "nan"))
         gk = "bca_hi" if sps is not None else "hl_hi"
-        if g3_conditions(v, layout, staging):
+        notg3 = not_g3(v, txt, layout, staging)
+        if not notg3:
             gate, check = designed(seam[gk], null[gk]), designed(seam["hl_hi"], null["hl_hi"])
             prop = proposed(seam_r["t_hi"], null_r["t_hi"])
         else:
-            gate = check = ("not G3", NAN); prop = "not G3"
+            gate = check = (notg3, NAN); prop = notg3
         rows.append({
             "suite": os.path.basename(os.path.dirname(f)), "case": v.get("case", os.path.basename(f).split(".")[0]),
             "layout": layout, "staging": staging, "copied": v.get("reg") == "0", "g": v.get("g", "?"), "seam": seam, "null": null,
@@ -289,7 +302,7 @@ def main():
     if not rows:
         sys.exit("no raw.tsv with SEAM calls under " + " ".join(a.dirs))
     pct = f"{a.level:.0%}"
-    vtext = lambda r, k, hi: r[k][0] if r[k][0] in ("not G3", "n/a") else f"{r[k][0]} ({r['seam'][hi]:.3f} vs {r[k][1]:.3f})"
+    vtext = lambda r, k, hi: r[k][0] if r[k][0].startswith("not G3") or r[k][0] == "n/a" else f"{r[k][0]} ({r['seam'][hi]:.3f} vs {r[k][1]:.3f})"
     load = lambda r: "-" if math.isnan(r["fcpu"]) and math.isnan(r["gbusy"]) else \
         f"{'FLAG ' if r['fcpu'] > a.max_fcpu or r['gbusy'] > a.max_gpu_busy else ''}{r['fcpu']:.2f} cores, GPU {r['gbusy']:.2f}"
     print(f"## G3: SEAM / S<g> against max(1.03, S<g>b / S<g>), {pct} intervals"

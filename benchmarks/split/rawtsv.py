@@ -51,3 +51,19 @@ def env(txt, name):
 def on_ac(txt):
     """the report's start and end lines both say AC power"""
     return all(re.search(rf"^{w}: Now drawing from 'AC Power'", txt, re.M) for w in ("start", "end"))
+
+
+def power_problem(txt, min_w=90, min_batt=95):
+    """why the report's power does not meet run.sh's conditions, or None: AC power on its start and end
+    lines, an adapter of min_w W or more on both (bench_split prints '| adapter N W'), and at the start a
+    battery of min_batt percent or more, neither charging nor finishing its charge (when printed)"""
+    if not on_ac(txt):
+        return "did not start and end on AC power"
+    for w in ("start", "end"):
+        m = re.search(rf"^{w}: .*\| adapter (\d+) W", txt, re.M)
+        if not m or int(m.group(1)) < min_w:
+            return f"adapter under {min_w} W or not reported"
+    m = re.search(r"^start: .*?(\d+)%; ([^;]+);", txt, re.M)
+    if m and (int(m.group(1)) < min_batt or m.group(2).strip() in ("charging", "finishing charge")):
+        return f"battery at the start {m.group(1)}%, {m.group(2).strip()}"
+    return None
