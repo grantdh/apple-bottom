@@ -244,6 +244,11 @@ another, is a gate-line decision for Grant.
 Each row also gives the seam's one-sided lower bound and the null spread by round: the sd of the
 null's per-round mean log ratios and the range of its per-round ratios.
 
+No reading gives a verdict on a row flagged for outside load ("flagged: rerun on a quiet machine"),
+or on one whose null failed: the null's two-sided 95% t interval over rounds excludes 1.00, so two
+identical user splits measured differently ("null failed: rerun"). A loaded run, or one whose
+instrument is off, can neither pass nor fail G3.
+
 `g3.py --simulate --sims 400 --resamples 999` estimates how often each reading says "fix first" for a
 seam exactly as fast as the user split (a false alarm) and for one 5%, 10% and 20% slower, at G3's 6
 rounds of 2 repeats. Each call's log time has noise of sd 1-5%, and each arm in each round an offset of
