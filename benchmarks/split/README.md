@@ -139,8 +139,9 @@ make build/bench_split
 benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 ```
 
-- **Suites:** `run.sh` with no suite runs all of them but `smoke` and the G3 suites, about 50 minutes.
-  Its header lists them.
+- **Suites:** `run.sh` with no suite runs all of them but `smoke` and the G3 suites, in about 60
+  minutes (27 of them the sustained runs), estimated from the 2026-10-28 timings with the arms, their
+  openers, the gaps and the warm-up added. Its header lists them.
 - **Environment:** every case runs with `AB_MODE=gpu AB_MIN_GPU_DIM=0 AB_STAGING_MB=8192 AB_REPORT=1`
   and an `AB_TRACE` file per process.
 - **G3 suites** (`g3-1x8-s8192`, `g3-1x8-s2048`, `g3-4x2-s8192`, `g3-4x2-s2048`, or `g3` for all four;

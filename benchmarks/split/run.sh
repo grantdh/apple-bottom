@@ -18,7 +18,8 @@
 #                  operands (SPLIT_NOREG=1) at 1x8 and 4x2, AB_STAGING_MB 8192 or 2048; no Z8192 at 4x2;
 #                  6 rounds of 2 repeats, so the arms' order is balanced and intervals can be by round;
 #                  no AB_TRACE or AB_REPORT, which profile the user split's GPU slices but not the seam
-# Default: every suite but smoke and the G3 suites, in that order (about 50 min).
+# Default: every suite but smoke and the G3 suites, in that order (about 60 min, 27 of them the sustained
+# runs; from the 2026-10-28 timings with the arms, openers, gaps and warm-up added).
 #
 # Run on an otherwise idle Mac on AC power from an adapter of at least SPLIT_MIN_W watts (default 90).
 # Before every case the script also wants the battery at SPLIT_MIN_BATT percent or more (default 95)
