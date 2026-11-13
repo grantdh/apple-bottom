@@ -614,6 +614,13 @@ All notable changes to this project will be documented in this file.
   uniform data at those calls
   ([Complex products](docs/vv/LIMITATIONS.md#complex-products)). Parts that leave
   FP32's range are lost under either form.
+- **The FP64 GEMM bound `(3K + 13)u²|A||B| + 2⁻⁵³|Ĉ|`
+  ([precision envelope](docs/vv/PRECISION_ENVELOPE.md) §1.2, 1.5.1).**
+  Incomplete. The scale-back to FP64 is exact unless the result is subnormal in
+  FP64, so the bound needs `+ 2⁻¹⁰⁷⁴` for such results (the ULP Fiction
+  paper's Corollary 1). It is a DGEMM's with alpha = 1 and beta = 0; with a
+  general alpha and beta the paper's Corollary 3 takes its place, and a
+  ZGEMM's bound is its Corollary 2.
 - **"A split inside the library is planned for 1.6.0" (README, roadmap, split
   benchmark docs).** 1.6.0 has no such split: `dgemm_` and `zgemm_` make each
   call on one engine, and the split stays in user code
