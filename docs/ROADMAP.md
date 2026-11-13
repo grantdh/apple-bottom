@@ -113,6 +113,18 @@ Candidates, each aimed at a measured stage:
   yours under `benchmarks/calibration/`, and a pull request with that
   directory and the regenerated `src/dispatch_table.h` adds it for everyone.
 - Homebrew formula.
+- Re-centre native results: measure each GPU result's range and rescale it
+  by a power of two, so that chains of products keep DD accuracy. Then
+  alpha's exponent can go into the scale, which removes the loss from an
+  alpha with |alpha| in [2⁻³⁹, 2⁴⁰)
+  ([Exponent range](vv/LIMITATIONS.md#exponent-range); 1.6.0 documents both
+  limits).
+- A range guard for the device GEMMs (`ab_dev_dgemm`, `ab_dev_zgemm`), with
+  Accelerate as the fallback, as the BLAS ABI has
+  ([Exponent range](vv/LIMITATIONS.md#exponent-range)).
+- Fold alpha's exponent into the scale-back of the ZGEMM and BLAS-2
+  epilogues, as DGEMM does, so that neither underflows nor overflows before
+  alpha is applied ([Exponent range](vv/LIMITATIONS.md#exponent-range)).
 
 ## Later
 

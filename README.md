@@ -457,7 +457,7 @@ without it the kernels give the bits of 1.4.0.
 - **Not IEEE FP64.** About 48 significant bits instead of 53, and no
   bit-for-bit agreement with CPU BLAS.
 - **FP32's exponent range, worked around.** DD values are FP32 pairs.
-  Products below about 2⁻⁷⁸ lose their low part, values below 2⁻¹²⁶ flush to
+  Products below about 2⁻⁸⁰ lose their low part, values below 2⁻¹²⁶ flush to
   zero on the GPU (an entry's own low part from about 2⁻¹⁰² down), and sums
   overflow at 2¹²⁸.
   - The BLAS ABI scales each row of op(A) and column of op(B) whose largest
@@ -466,8 +466,13 @@ without it the kernels give the bits of 1.4.0.
     with NaN or Inf in A or B, or in C with beta ≠ 0.
   - The native `ABMatrix` API keeps one power-of-two scale per matrix, so a
     matrix whose nonzero entries span more than about 2⁷⁸ (10²³) can still
-    lose precision in its products there.
-  - Data inside those windows computes exactly as before.
+    lose precision in its products there. Its results are not re-centred, so
+    a chain of products whose magnitudes shrink or grow can leave the window
+    too. The device-buffer GEMMs (`ab_dev_dgemm`, `ab_dev_zgemm`) have no
+    range guard and no Accelerate fallback. In these cases results can be
+    degraded or non-finite with `AB_OK`
+    ([Exponent range](docs/vv/LIMITATIONS.md#exponent-range)).
+  - Each call on data inside those windows computes exactly as before.
   - The data 1.5.x was measured to let through the guard with a degraded
     result (among it imaginary parts far below the real parts, values below
     2⁻¹⁰⁴², and a small C with beta ≠ 0 that has no products to carry it)

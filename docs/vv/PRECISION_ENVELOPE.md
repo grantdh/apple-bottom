@@ -129,7 +129,7 @@ This is a different rounding sequence, so the theorem does not cover it. The opt
    - Let `μ = min(ulp(p), ulp(ch))`. Then `μ > 2⁻²⁵M`, and `p`, `ch`, `p + ch` and `s` are all multiples of `μ`.
    - But `ulp(w) ≤ 2u|w| < 2⁻⁴⁴M < μ`. So `s` is a multiple of `ulp(w)` with `|s|/ulp(w) < |w|/ulp(w) < 2²⁴`, and the condition holds with `es = ew`.
 
-**GEMM.** Every kernel accumulates each output as `ŝ₀ = 0`, `ŝₖ = dd_fma(aₖ, bₖ, ŝₖ₋₁)`. Its interleaved renormalizations are `Fast2Sum`s of normalized pairs, so they are exact. By induction, `|ŝ_K − s_K| ≤ (α + β(K−1))(1 + βu²)^(K−1)·u²·Σ|aₖ||bₖ|`, which is at most `(3K + 11)u²(|A||B|)ᵢⱼ` for `K ≤ 2²⁰`. Through the FP64 interface the input conversion `hi = fl₃₂(x)`, `lo = fl₃₂(x − hi)` perturbs each element by at most `u²|x|`, and the result is rounded to FP64 once. The bound then becomes `|Ĉ − C| ≤ (3K + 13)u²|A||B| + 2⁻⁵³|Ĉ|`.
+**GEMM.** Every kernel accumulates each output as `ŝ₀ = 0`, `ŝₖ = dd_fma(aₖ, bₖ, ŝₖ₋₁)`. Its interleaved renormalizations are `Fast2Sum`s of normalized pairs, so they are exact. By induction, `|ŝ_K − s_K| ≤ (α + β(K−1))(1 + βu²)^(K−1)·u²·Σ|aₖ||bₖ|`, which is at most `(3K + 11)u²(|A||B|)ᵢⱼ` for `K ≤ 2²⁰`. The library does not limit K. Above 2²⁰ the expression itself still holds, under the same no-underflow premise (the guard's stage-1 certification of that premise is proved for K ≤ 2²⁰ only): with α = 13 + 43u and β = 3 + 5u its constant first exceeds 3K + 11 at K = 2,619,338 (2,992,959 with the exact constants of the ULP Fiction paper), and from there the FP64 bound's 3K + 13 no longer follows from it. At K = 2³⁰ the constant is below 3K + 37,195 (3K + 37,131 with the exact constants), about 1.2×10⁻⁵ above 3K + 11 in relative terms. Through the FP64 interface the input conversion `hi = fl₃₂(x)`, `lo = fl₃₂(x − hi)` perturbs each element by at most `u²|x|`, and the result is rounded to FP64 once. The bound then becomes `|Ĉ − C| ≤ (3K + 13)u²|A||B| + 2⁻⁵³|Ĉ|`.
 
 **What the tests show.** `make test-dd-bound` cuts the shader primitives out of `src/apple_bottom.m`, compiles them on the CPU without contraction, and compares 5×10⁶ triples with MPFR at 400 bits. Half are adversarial and half are cancelling. Over 5×10⁷ triples:
 - `Fast2Sum` was exact in every case.
@@ -282,11 +282,20 @@ Frobenius-class error is appropriate.
 | Condition | Validated Range | Behavior Outside Range |
 |-----------|----------------|------------------------|
 | Exponent range, BLAS ABI | Any finite FP64, except the data under `LIMITATIONS.md#what-the-guard-misses` | Rows of op(A) and columns of op(B) outside `[2⁻²⁰, 2²⁰)` are scaled by powers of two; calls the guard refuses run on Accelerate; calls that pass it through a gap lose accuracy with no fallback |
-| Exponent range, native API | Nonzero entries of a matrix spanning at most `2⁷⁸` | One power-of-two scale per matrix; a wider span keeps FP32's range relative to it |
+| Exponent range, native and device API | Nonzero entries of a matrix spanning at most `2⁷⁸`, results kept near the scale they were stored at | One power-of-two scale per matrix and no fallback; the cases where data keep FP32's range relative to the scale are listed below (`LIMITATIONS.md#exponent-range`) |
 | Condition number | `κ < 10¹²` | Higher κ: error grows as `κ · N · ε` |
-| NaN/Inf | Documented | BLAS ABI: the call runs on Accelerate; native API: propagates (DD's `∞ − ∞` gives NaN) |
+| NaN/Inf | Documented | BLAS ABI: the call runs on Accelerate; native API and device GEMMs: propagates (DD's `∞ − ∞` gives NaN) |
 
-**Subnormal handling**: the GPU flushes FP32 subnormals (below 2⁻¹²⁶) to zero, as inputs and as results, and a DD product keeps its full precision only above about 2⁻⁸⁰. The power-of-two scaling keeps data out of that region where it can, and the BLAS ABI's guard sends to Accelerate the calls it finds it cannot. Data can stay in the region and lose accuracy on the GPU in two cases: a native or device-API matrix spanning more than 2⁷⁸, and the BLAS-ABI data under `LIMITATIONS.md#what-the-guard-misses`. See `LIMITATIONS.md#exponent-range` for the measurements and the guard's thresholds.
+**Subnormal handling**: the GPU flushes FP32 subnormals (below 2⁻¹²⁶) to zero, as inputs and as results, and a DD product keeps its full precision only above about 2⁻⁸⁰. The power-of-two scaling keeps data out of that region where it can, and the BLAS ABI's guard sends to Accelerate the calls it finds it cannot. Data can stay in the region and lose accuracy on the GPU in these cases:
+- native or device API: a matrix spanning more than 2⁷⁸;
+- native API: a result drifting from its scale (results are not re-centred);
+- native API and `ab_dev_dgemm`: an alpha with |alpha| in [2⁻³⁹, 2⁴⁰) that makes the result small;
+- alpha·op(A)op(B) and beta·C on scales far apart (`ab_dgemm_scaled` and its batch and Strassen forms, `ab_dev_dgemm`);
+- operands on scales far apart (`ab_matrix_add`, `ab_matrix_sub`);
+- real and imaginary parts, or their products, on scales far apart (native and device ZGEMM);
+- BLAS ABI: the data under `LIMITATIONS.md#what-the-guard-misses`.
+
+See `LIMITATIONS.md#exponent-range` for the measurements and the guard's thresholds.
 
 ### 3.3 Precision Scaling by Operation
 
@@ -320,6 +329,12 @@ The following conditions are **outside the validated envelope**. Results are und
   not: `LIMITATIONS.md#what-the-guard-misses`)
   - DD uses FP32 components; products far below the result lose their low
     parts, and values beyond FP32's range overflow or flush
+- **Native and device data that leave the window**: results that drift from
+  their scale (not re-centred), small results of an alpha in [2⁻³⁹, 2⁴⁰),
+  terms on far-apart scales (`ab_dgemm_scaled`, `ab_matrix_add`,
+  `ab_matrix_sub`, `ab_dev_dgemm`, and the parts or products of native and
+  device ZGEMM), and the device GEMMs, which have no guard
+  (`LIMITATIONS.md#exponent-range`)
 - **Condition numbers `κ > 10¹²`**: Error bound becomes `κ · N · 2⁻⁴⁸ > 10⁻³`
   - **Workaround**: Use IEEE FP64 (`cblas_dgemm`) for ill-conditioned problems
 
@@ -328,8 +343,8 @@ The following conditions are **outside the validated envelope**. Results are und
 | Input | Behavior | Tested |
 |-------|----------|--------|
 | FP32 subnormals (`< 2⁻¹²⁶` after scaling) | Flushed to zero by the GPU | ✓ exponent-range suite (`test_blas_abi`) |
-| `±Infinity` | BLAS ABI: Accelerate (IEEE result); native: propagates (NaN if `∞ - ∞`) | ✓ BLAS ABI (`range-inf` cases); native ⚠ V-4 (planned) |
-| `NaN` | BLAS ABI: Accelerate; native: propagates | ⚠ V-4 (planned) |
+| `±Infinity` | BLAS ABI: Accelerate (IEEE result); native and device GEMMs: propagates (NaN if `∞ - ∞`) | ✓ BLAS ABI (`range-inf` cases); native ⚠ V-4 (planned) |
+| `NaN` | BLAS ABI: Accelerate; native and device GEMMs: propagates | ⚠ V-4 (planned) |
 
 ### 4.4 Concurrency
 

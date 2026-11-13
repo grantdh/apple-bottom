@@ -14,8 +14,24 @@ CC = clang
 CXX = clang++
 OBJC = clang
 
-CFLAGS = -Wall -Wextra -O3 -std=c11 -DACCELERATE_NEW_LAPACK
-OBJCFLAGS = -std=c++11 -Wall -Wextra -O3 -fobjc-arc -DACCELERATE_NEW_LAPACK
+# Host FP64 contraction: clang's default, stated so that a change of toolchain
+# default cannot change the mode (which products are fused stays the
+# compiler's choice). Fusing a multiply and an add into an FMA sets the bits,
+# not the error bounds, of the FP64 epilogues: zgemm_, ab_dev_zgemm,
+# ab_dev_scale_z and ab_dev_axpy_z with complex alpha or beta, and BLAS-2
+# (DGEMV's alpha t + beta y for real scalars too); it can also move the
+# guard's stage-2 decision on complex data near a tie, where the guard's
+# threshold lies between the fused and unfused roundings of |Ar||Br| +
+# |Ai||Bi| or |Ar||Bi| + |Ai||Br|, and ab_dgesv_mpir's stop near its
+# threshold. tests/test_qe_golden.c pins zgemm_'s bits. The Metal shaders,
+# compiled at run time with MTLMathModeSafe, are not affected.
+# Code that needs every rounding turns it off: #pragma STDC FP_CONTRACT OFF
+# (src/fft/fft_host.h, which covers fft.m; tests/test_dot2.h;
+# tests/test_precision.c) or -ffp-contract=off (FFT_EMU_FLAGS, test-dd-bound).
+# docs/vv/LIMITATIONS.md, "Host FP64 code is contracted".
+FP_CONTRACT = -ffp-contract=on
+CFLAGS = -Wall -Wextra -O3 $(FP_CONTRACT) -std=c11 -DACCELERATE_NEW_LAPACK
+OBJCFLAGS = -std=c++11 -Wall -Wextra -O3 $(FP_CONTRACT) -fobjc-arc -DACCELERATE_NEW_LAPACK
 LDFLAGS = -lc++ -framework Metal -framework Foundation -framework Accelerate -framework IOKit
 
 # DD multiplication algorithm selector (v1.3 A/C investigation).
@@ -129,7 +145,7 @@ $(BUILD)/blas2_abi.o: $(SRC)/blas2_abi.c $(SRC)/blas2.h $(SRC)/blas_trans.h $(SR
 # Double-float FFT (apple_bottom_fft.h). Its Metal source is embedded as one
 # NUL-terminated byte array; fft.m compiles it once per pass configuration,
 # behind a block of #defines.
-FFT_OBJCFLAGS = -std=gnu11 -Wall -Wextra -O3 -fobjc-arc
+FFT_OBJCFLAGS = -std=gnu11 -Wall -Wextra -O3 $(FP_CONTRACT) -fobjc-arc
 FFT_MSL = $(SRC)/fft/fft_types.h $(SRC)/fft/fft_device.h $(SRC)/fft/fft_kernel.metal
 
 $(BUILD)/fft_metal_src.h: $(FFT_MSL) | $(BUILD)

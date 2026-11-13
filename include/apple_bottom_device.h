@@ -152,6 +152,24 @@ ABStatus ab_dev_stream_sync(ab_dev_stream_t stream);
 //
 // The _offset variants exist so Fortran callers can express `A(1,j)` etc.
 // without having to reinterpret the opaque handle as a pointer.
+//
+// Exponent range: unlike the BLAS ABI, these GEMMs have no range guard and no
+// fallback to Accelerate. Each operand gets one power-of-two scale (as
+// ab_matrix_upload chooses it), so these return AB_OK with degraded or
+// non-finite results:
+//   - an operand whose nonzero entries span more than 2^78;
+//   - NaN or Inf (double-float rules: Inf - Inf is NaN);
+//   - ab_dev_dgemm: alpha op(A) op(B) and beta C on scales far apart, as for
+//     ab_dgemm_scaled (apple_bottom.h), or, for operands and C in the window,
+//     an alpha with |alpha| in [2^-39, 2^40) that takes the result below
+//     about 2^-80;
+//   - ab_dev_zgemm: real and imaginary parts (3M) or their products (4M) on
+//     scales far apart, as for ab_zgemm (apple_bottom.h);
+//   - ab_dev_zgemm: P = op(A) op(B), alpha P or beta C beyond FP64's range
+//     (Inf or NaN parts); a part of P below 2^-1022 also loses bits before
+//     alpha multiplies it.
+// Use the BLAS ABI (dgemm_, zgemm_) for such data (docs/vv/LIMITATIONS.md,
+// Exponent range).
 // -----------------------------------------------------------------------------
 
 // C := alpha * op(A) * op(B) + beta * C   (real double, column-major)
@@ -208,8 +226,14 @@ ABStatus ab_dev_zgemm_offset(ABTranspose transA, ABTranspose transB,
 // The GPU reads A as FP64 and accumulates in double-float: componentwise
 // error of order 1e-15 relative to |alpha| |op(A)| |x| + |beta| |y| (at
 // most 1e-14 in tests/test_blas2.c, dot products up to 65536 long), about
-// ten times an FP64 BLAS's. Each call checks, at no extra memory traffic,
-// that its data stay in double-float's range (docs/vv/LIMITATIONS.md, Exponent
+// ten times an FP64 BLAS's, plus an absolute term of order
+// (1 + |alpha|) 2^-1074, as in an FP64 BLAS. The sum op(A) x is rounded to
+// FP64 before alpha multiplies it. A sum of about 2^1024 or more therefore
+// overflows, and finite data give Inf or NaN even when the exact result is
+// finite: with |alpha| < 1, or when beta y cancels alpha times the sum, as
+// with alpha = 1, beta = -1, y = DBL_MAX (predicted from the code, not run).
+// Each call checks, at no extra memory traffic, that its data stay in
+// double-float's range (docs/vv/LIMITATIONS.md, Exponent
 // range), each part of a complex output against its own products. A call
 // that fails it, whose sum of products, x, alpha or beta is not finite, and
 // every call with m or n == 0 or alpha == 0, runs on Accelerate instead, on
@@ -242,8 +266,18 @@ ABStatus ab_dev_zhemv(ABUplo uplo, int n, const double alpha[2],
                       const double* x, int incx,
                       const double beta[2], double* y, int incy);
 
-// Element-wise utilities of the kind GPU-resident Fortran codes need
-// (conjugate, scale, axpy on device buffers).
+// Element-wise utilities of the kind GPU-resident Fortran codes need, run on
+// the CPU in FP64 on the buffer's shared memory:
+//   ab_dev_conjg_c: x := conj(x)
+//   ab_dev_scale_z: x := alpha * x
+//   ab_dev_axpy_z:  y := alpha * x + y
+// The buffers hold interleaved complex doubles. Offsets, n and increments
+// count complex elements. A vector starts `offset` elements into its buffer;
+// ab_dev_axpy_z's increments may be negative, which step backwards from the
+// far end as in BLAS, or zero (every step reads or updates the same element,
+// as in reference ZAXPY). Returns AB_OK (also for n == 0), or
+// AB_ERROR_INVALID_ARG with every buffer unchanged for a NULL buffer or alpha
+// or a vector reaching past the end of its buffer.
 ABStatus ab_dev_conjg_c(ab_dev_buffer_t buf, size_t offset, size_t n);
 ABStatus ab_dev_scale_z(ab_dev_buffer_t buf, size_t offset, size_t n,
                         const double alpha[2]);

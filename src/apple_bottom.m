@@ -3537,6 +3537,24 @@ ABStatus ab_matrix_scale(double alpha, ABMatrix A) {
 static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
                                   ABMatrix Cr, ABMatrix Ci, bool four_m, bool strassen);
 
+// A ZGEMM's six handles: AB_ERROR_INVALID_ARG if one is NULL, and
+// AB_ERROR_DIMENSION_MISMATCH unless each imaginary part has its real part's
+// shape, op(A)'s columns match op(B)'s rows, and C is rows(op(A)) x
+// cols(op(B)). Every native ZGEMM entry checks this before it encodes
+// anything: each product takes its sizes from its own operands, so a
+// mismatch would read or write past a buffer.
+static ABStatus zgemm_check(ABTranspose transA, ABTranspose transB, ABMatrix Ar, ABMatrix Ai,
+                            ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci) {
+    if (!Ar || !Ai || !Br || !Bi || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
+    const bool ta = transA != AB_NO_TRANS, tb = transB != AB_NO_TRANS;
+    const bool fit = Ai->rows == Ar->rows && Ai->cols == Ar->cols && Bi->rows == Br->rows &&
+                     Bi->cols == Br->cols && Ci->rows == Cr->rows && Ci->cols == Cr->cols &&
+                     (ta ? Ar->rows : Ar->cols) == (tb ? Br->cols : Br->rows) &&
+                     (ta ? Ar->cols : Ar->rows) == Cr->rows &&
+                     (tb ? Br->rows : Br->cols) == Cr->cols;
+    return fit ? AB_OK : AB_ERROR_DIMENSION_MISMATCH;
+}
+
 // Extended ZGEMM with transpose support (for QE compatibility), by the given
 // method, its real products as products says (ab_internal.h).
 static ABStatus zgemm_ex(
@@ -3548,20 +3566,14 @@ static ABStatus zgemm_ex(
     ab_products_t products
 ) {
     ABAutoreleaseScope pool;
-    if (!Ar || !Ai || !Br || !Bi || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
+    ABStatus checked = zgemm_check(transA, transB, Ar, Ai, Br, Bi, Cr, Ci);
+    if (checked != AB_OK) return checked;
 
     ABContextImpl* ctx = [ABContextImpl shared];
     if (!ctx) return AB_ERROR_NO_DEVICE;
 
-    // Determine dimensions after transpose
-    int M = (transA == AB_NO_TRANS) ? Ar->rows : Ar->cols;
-    int K_A = (transA == AB_NO_TRANS) ? Ar->cols : Ar->rows;
-    int K_B = (transB == AB_NO_TRANS) ? Br->rows : Br->cols;
-    int N = (transB == AB_NO_TRANS) ? Br->cols : Br->rows;
-
-    // Validate dimensions
-    if (K_A != K_B) return AB_ERROR_DIMENSION_MISMATCH;
-    if (M != Cr->rows || N != Cr->cols) return AB_ERROR_DIMENSION_MISMATCH;
+    // Dimensions after transpose (zgemm_check: op(A) is M x K, op(B) K x N)
+    const int M = Cr->rows, N = Cr->cols, K = transA == AB_NO_TRANS ? Ar->cols : Ar->rows;
 
     // 3M or 4M, from the operands as given: a transpose keeps their magnitudes
     const bool four_m = zgemm_uses_4m(method, Ar, Ai, Br, Bi);
@@ -3575,8 +3587,8 @@ static ABStatus zgemm_ex(
 
     // Transpose A if needed
     if (transA != AB_NO_TRANS) {
-        A_work_r = ab_matrix_create(M, K_A);
-        A_work_i = ab_matrix_create(M, K_A);
+        A_work_r = ab_matrix_create(M, K);
+        A_work_i = ab_matrix_create(M, K);
         if (!A_work_r || !A_work_i) {
             status = AB_ERROR_ALLOC_FAILED;
             goto cleanup;
@@ -3637,8 +3649,8 @@ static ABStatus zgemm_ex(
 
     // Transpose B if needed
     if (transB != AB_NO_TRANS) {
-        B_work_r = ab_matrix_create(K_B, N);
-        B_work_i = ab_matrix_create(K_B, N);
+        B_work_r = ab_matrix_create(K, N);
+        B_work_i = ab_matrix_create(K, N);
         if (!B_work_r || !B_work_i) {
             status = AB_ERROR_ALLOC_FAILED;
             goto cleanup;
@@ -3695,7 +3707,7 @@ static ABStatus zgemm_ex(
 
     // Call internal ZGEMM with (possibly transposed) matrices
     status = ab_zgemm_internal(A_work_r, A_work_i, B_work_r, B_work_i, Cr, Ci, four_m,
-                               takes_strassen(products, M, N, K_A));
+                               takes_strassen(products, M, N, K));
 
 cleanup:
     // Cleanup temporary transpose buffers
@@ -3777,7 +3789,8 @@ static ABStatus ab_zgemm_internal(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatri
 static ABStatus ab_zgemm_internal_async(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
                                          ABMatrix Cr, ABMatrix Ci,
                                          id<MTLCommandBuffer> __strong *outCmdBuf) {
-    if (!Ar || !Ai || !Br || !Bi || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
+    ABStatus checked = zgemm_check(AB_NO_TRANS, AB_NO_TRANS, Ar, Ai, Br, Bi, Cr, Ci);
+    if (checked != AB_OK) return checked;
 
     int M = Ar->rows, N = Br->cols, K = Ar->cols;
     ABContextImpl* ctx = [ABContextImpl shared];
@@ -3812,11 +3825,6 @@ ABStatus ab_zgemm(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix C
 
 ABStatus ab_zgemm_strassen(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr,
                            ABMatrix Ci) {
-    if (!Ar || !Ai || !Br || !Bi || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
-    int M = Ar->rows, K = Ar->cols, N = Br->cols;
-    if (Ai->rows != M || Ai->cols != K || Br->rows != K || Bi->rows != K || Bi->cols != N ||
-        Cr->rows != M || Cr->cols != N || Ci->rows != M || Ci->cols != N)
-        return AB_ERROR_DIMENSION_MISMATCH;
     return zgemm_ex(AB_NO_TRANS, AB_NO_TRANS, Ar, Ai, Br, Bi, Cr, Ci, AB_ZGEMM_AUTO,
                     AB_PRODUCTS_STRASSEN);
 }
@@ -4446,8 +4454,9 @@ ABStatus ab_zgemm_batched(
     if (!Ars || !Ais || !Brs || !Bis || !Crs || !Cis) return AB_ERROR_INVALID_ARG;
 
     for (int i = 0; i < batch_count; i++) {
-        if (!Ars[i] || !Ais[i] || !Brs[i] || !Bis[i] || !Crs[i] || !Cis[i])
-            return AB_ERROR_INVALID_ARG;
+        ABStatus checked = zgemm_check(AB_NO_TRANS, AB_NO_TRANS, Ars[i], Ais[i], Brs[i], Bis[i],
+                                       Crs[i], Cis[i]);
+        if (checked != AB_OK) return checked;
     }
 
     // Fall back to sequential for single ZGEMM
@@ -4795,8 +4804,9 @@ ABStatus ab_batch_dgemm_scaled(ABBatch batch, double alpha, ABMatrix A, ABMatrix
 ABStatus ab_batch_zgemm(ABBatch batch, ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
                          ABMatrix Cr, ABMatrix Ci) {
     ABAutoreleaseScope pool;
-    if (!batch || !Ar || !Ai || !Br || !Bi || !Cr || !Ci) return AB_ERROR_INVALID_ARG;
-    if (batch->committed) return AB_ERROR_INVALID_ARG;
+    if (!batch || batch->committed) return AB_ERROR_INVALID_ARG;
+    ABStatus checked = zgemm_check(AB_NO_TRANS, AB_NO_TRANS, Ar, Ai, Br, Bi, Cr, Ci);
+    if (checked != AB_OK) return checked;
 
     int M = Ar->rows, N = Br->cols, K = Ar->cols;
     ABContextImpl* ctx = batch->ctx;

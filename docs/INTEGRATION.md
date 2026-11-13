@@ -81,7 +81,7 @@ use the BLAS ABI for column-major data.
 ### Values far from 1
 
 Double-float values are pairs of FP32 numbers, so on their own they have
-FP32's exponent range: products below about 2⁻⁷⁸ lose their low part,
+FP32's exponent range: products below about 2⁻⁸⁰ lose their low part,
 values below 2⁻¹²⁶ flush to zero on the GPU, and sums overflow at 2¹²⁸.
 The library bridges that with exact powers of two, which leave the bits of
 in-range data unchanged:
@@ -98,16 +98,44 @@ in-range data unchanged:
     range, judged from their largest entries; see
     [Exponent range](vv/LIMITATIONS.md#exponent-range)) or whose alpha or
     beta is NaN or Inf or has |Re| + |Im| beyond FP64's range. `AB_REPORT`
-    counts such calls as `range` fallbacks.
+    counts such calls as `range` fallbacks. That bound is from above only:
+    an epilogue underflowing before alpha is not refused.
 - **Native `ABMatrix` API.**
   - `ab_matrix_upload` gives each matrix one power-of-two scale, and
     `ab_matrix_download` removes it; the GPU operations carry it through.
   - Data such as 1e-25 × uniform or 1e25 × uniform therefore multiplies
-    correctly.
+    correctly, in one product.
   - A single matrix whose nonzero entries span more than about 2⁷⁸ (10²³)
     keeps FP32's range relative to its scale, and has no fallback.
+  - Results are not re-centred: a result's scale comes from its operands'
+    scales, never from its values. A chain of products whose magnitudes
+    shrink or grow, such as an unnormalized transfer-matrix chain (Pattern 1
+    below), drifts away from its scale and returns degraded results, zeros
+    or Inf with `AB_OK`. Keep chained magnitudes near 1 by normalizing often
+    with factors in [2⁻³⁹, 2⁴⁰), which `ab_matrix_scale` applies to the
+    stored values; re-centre an intermediate with `ab_matrix_download` and
+    `ab_matrix_upload` (one FP64 rounding; `ab_matrix_copy` does not
+    re-centre); or use the BLAS ABI.
+  - An alpha of `ab_dgemm_scaled` (on data in the window, with beta 0 or
+    also in that range) or of `ab_matrix_scale` with |alpha| in [2⁻³⁹, 2⁴⁰)
+    multiplies the stored values, so small alpha on small data, or repeated
+    scaling, loses precision the same way.
+  - `ab_dgemm_scaled` (and its batch and Strassen forms) gives C the larger
+    of the scales of alpha·op(A)op(B) and beta·C, so in an element where the
+    larger term is 0 and the scales are far apart, the smaller term loses
+    precision or becomes 0. `ab_matrix_add` and `ab_matrix_sub` align their
+    operands to the larger scale the same way. Native ZGEMM brings its real
+    and imaginary parts (3M) or its paired products (4M) to the larger scale
+    too; under 3M a part far below the other loses precision in every
+    product.
 - **Device-buffer API** (`ab_dev_dgemm`, `ab_dev_zgemm`): converts through
-  `ABMatrix` handles, so it behaves as the native API does.
+  `ABMatrix` handles, measured on every call (`ab_dev_dgemm` gives C the
+  larger scale as `ab_dgemm_scaled` does, and `ab_dev_zgemm` aligns its
+  parts or products as native ZGEMM does), with no range guard and no
+  fallback: some data the BLAS ABI would scale or refuse returns `AB_OK`
+  with degraded or non-finite results
+  ([the cases](vv/LIMITATIONS.md#exponent-range)). Use the BLAS ABI for
+  such data.
 
 The thresholds and their measurements are in
 [LIMITATIONS.md](vv/LIMITATIONS.md#exponent-range), and the data 1.5.x was
@@ -122,7 +150,10 @@ nearly imaginary data). Such calls run as four real products instead, at
 1.00–1.10× the time through `zgemm_`. The BLAS ABI and the device API decide
 per row of op(A) and column of op(B); the native API decides per matrix, from
 the magnitudes `ab_matrix_upload` measured, and keeps the three-product form
-for matrices computed on the GPU. Details: [LIMITATIONS.md](vv/LIMITATIONS.md#complex-products).
+for matrices computed on the GPU. In the native and device APIs, parts (or
+4M's paired products) on scales far apart can still lose precision under
+either form ([Values far from 1](#values-far-from-1)); the BLAS ABI's guard
+refuses such data. Details: [LIMITATIONS.md](vv/LIMITATIONS.md#complex-products).
 
 ### Where the GPU pays off
 
@@ -155,6 +186,10 @@ while Quantum ESPRESSO forced onto it is not faster than Accelerate
 ([below](#quantum-espresso-integration)).
 
 ### Pattern 1: a chain of large products
+
+The loop assumes each M[i] has norm near 1. Results are not re-centred, so
+otherwise normalize between products
+([Values far from 1](#values-far-from-1)).
 
 ```c
 // P = M[0] · M[1] · … · M[k-1], all N × N, row-major; P stays on the GPU.
@@ -275,6 +310,17 @@ machine, and `AB_DISPATCH_TABLE=<file>` uses it without a rebuild
 **Precision issues**
 - Double-float gives ~10⁻¹⁵ precision, not 10⁻¹⁶
 - For ~10⁻¹⁶, use IEEE FP64 on the CPU (Accelerate)
+- Zeros, Inf or degraded results with `AB_OK` from the native or device API
+  ([Values far from 1](#values-far-from-1)):
+  - a matrix whose nonzero entries span more than about 2⁷⁸;
+  - a chain of results that drifted from its scale;
+  - an alpha with |alpha| in [2⁻³⁹, 2⁴⁰) on small data;
+  - alpha·op(A)op(B) and beta·C on scales far apart (`ab_dgemm_scaled` and
+    its batch and Strassen forms, `ab_dev_dgemm`);
+  - operands on scales far apart (`ab_matrix_add`, `ab_matrix_sub`);
+  - real and imaginary parts, or their products, on scales far apart (native
+    ZGEMM, `ab_dev_zgemm`);
+  - an `ab_dev_zgemm` epilogue outside FP64's range.
 
 ---
 

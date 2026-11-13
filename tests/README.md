@@ -45,24 +45,35 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 246, every test but
-the chaos ones, and `make ci-local` all 264 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 252, every test but
+the chaos ones, and `make ci-local` all 270 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
 (its `TEST_QE_GOLDEN` line says `PASS`, or `SKIP` on another device).
 
 - **Registry-based (ghost-guarded):**
-  - `tests/test_correctness.c` — 81 tests; `test_prefetch_same_bits`
+  - `tests/test_correctness.c` — 85 tests; `test_prefetch_same_bits`
     runs every register-prefetch kernel (`AB_PREFETCH=1`) against the
     plain ones (`AB_PREFETCH=0`) and requires bitwise-equal results;
     `test_mpir_ill_conditioned` (κ = 10¹⁰) and `test_mpir_fp32_singular`
     (A singular only once rounded to FP32) give `ab_dgesv_mpir` systems
     that FP32 refinement cannot solve, which it must solve in FP64 and
     return `AB_OK` (an A singular in FP64 too: `AB_ERROR_KERNEL_FAILED`,
-    B unchanged)
+    B unchanged); the four `test_*zgemm*_shape_mismatch` tests give
+    `ab_zgemm`, `ab_zgemm_ex` (with transposes), `ab_zgemm_strassen`,
+    `ab_zgemm_async`, `ab_batch_zgemm` and `ab_zgemm_batched` an imaginary
+    part or C whose shape differs from its real part's; `ab_zgemm` (and
+    `ab_zgemm_ex` with op(A) = Aᵀ, op(B) = Bᴴ), `ab_zgemm_async`,
+    `ab_batch_zgemm` and `ab_zgemm_batched` also get one call per op() rule
+    (K, M and N) that breaks only that rule, with every imaginary part in its
+    real part's shape: each must return
+    `AB_ERROR_DIMENSION_MISMATCH` (async: in a completed future) and leave
+    C as it was. Built from `git archive` with any one op() rule deleted
+    from the library's check (2026-11-10), all four fail; the earlier tests
+    missed every such deletion
   - `tests/test_chaos.c` — 18 tests
-  - `tests/test_device_api.c` — 20 tests (209 `CHECK`s); the GEMM
+  - `tests/test_device_api.c` — 21 tests (219 `CHECK`s); the GEMM
     tests compare `ab_dev_dgemm` / `ab_dev_zgemm` with column-major
     cblas over all trans pairs, non-square and tall-skinny shapes,
     `ld > rows`, buffer offsets and a C of 2²⁰ elements, and check that
@@ -82,13 +93,18 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     and variants, through handles and device buffers, real and complex):
     within 2⁷⁸ it must be centred and C within ULP Fiction's bound for
     `ab_dgemm`, and a wider span (exponents 79 apart, or ordinary values
-    with one such value) must keep its earlier scale and bits
+    with one such value) must keep its earlier scale and bits;
+    `test_elementwise_bounds` holds `ab_dev_conjg_c`, `ab_dev_scale_z` and
+    `ab_dev_axpy_z` to their buffers (one element past the end, with either
+    sign of increment, is `AB_ERROR_INVALID_ARG` with the buffers and their
+    sentinels bitwise unchanged) and checks negative and zero increments
+    against element lists written out by hand in BLAS order
   - `tests/test_dispatch.c` — 23 tests of the BLAS-ABI routing and the
     `AB_SPLIT` plan, no GPU, see below
-  - `tests/test_range_guard.c` — 8 tests of the exponent-range guards'
-    stage 2 against the plain loops it replaced, and of a ZGEMM
-    epilogue's bounds, no GPU, see below
-  - `tests/test_blas_abi.c` — 33 suites (1114 cases), see below
+  - `tests/test_range_guard.c` — 9 tests of the exponent-range guards'
+    stage 2 against the plain loops it replaced, of a ZGEMM epilogue's
+    bounds, and of stage 1's floors at literal exponents, no GPU, see below
+  - `tests/test_blas_abi.c` — 33 suites (1118 cases), see below
   - `tests/test_trace.c` — 8 tests of `AB_TRACE`, `AB_TEST_FAIL_STAGE`
     and the solvers' `AB_PROFILE` fallback lines, see below
   - `tests/test_blas2.c` — 19 tests (995 cases) of DGEMV, ZGEMV and
@@ -593,6 +609,27 @@ itself is held to that edge by `test_blas_abi`'s `epi-c-at` and
 the edges, that every call both bounds pass keeps the epilogue's worst case
 (the largest parts they allow, every term of one sign) finite, below
 2¹⁰²³(1 + 2⁻⁵⁰).
+
+The oracle above reads the library's floor macros and calls its stage 1, so
+it cannot see a floor moved or stage 1's product term dropped.
+`test_guard_literal_floors` calls `ab_range_guard_stage1` and
+`ab_range_guard_c_stage1` on one-line statistics with literal exponents:
+entries and products of 2⁻⁷⁸ certified and of 2⁻⁷⁹ sent to stage 2, each
+floor on its own, alpha's scalar below 1 raising the product floor and above
+1 leaving it, the overflow test's headroom at K = 1, and NaN or Inf
+refused; a `_Static_assert` pins `AB_ENTRY_MIN_EXP`, `AB_PRODUCT_MIN_EXP`
+and `AB_SUM_MAX_EXP`, which stage 2 and its oracle read. On mutants built
+from `git archive` into fresh trees (2026-11-10), it fails with either
+floor at 2⁻⁷⁹ or 2⁻⁷⁷, stage 1's product term dropped, C's β′C′ term
+dropped, or the complex headroom at 5 binades instead of 6, and either macro
+at −79 stops the build; the earlier tests missed the entry floor at 2⁻⁷⁹,
+the dropped product term, the short headroom and both macros.
+`test_blas_abi`'s exponent-range suite has four DGEMMs with NaN or Inf alpha
+or beta, which must give Accelerate's results with no GPU GEMM. With the
+host path's check of the scalars removed, two of them (alpha Inf, beta NaN)
+fail; with only the staged path's check removed none does, since the staged
+run then flags the non-finite result and sends the call to Accelerate
+anyway.
 
 ## Fortran binding probe
 

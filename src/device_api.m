@@ -182,6 +182,27 @@ static inline bool range_in_bounds(size_t offset, size_t nbytes, size_t total) {
     return (total - offset) >= nbytes;
 }
 
+// |inc| as a size_t, INT_MIN included.
+static inline size_t vector_step(int inc) {
+    return inc < 0 ? (size_t)0 - (size_t)inc : (size_t)inc;
+}
+
+// True when n complex elements, `off` complex elements into `b` and `inc`
+// apart, lie inside it. Counted in complex elements, so nothing overflows.
+static bool dev_vector_fits(ab_dev_buffer_t b, size_t off, size_t n, int inc) {
+    const size_t total = b->nbytes / (2 * sizeof(double));
+    const size_t step = vector_step(inc);
+    if (n == 0) return true;
+    if (off >= total) return false;
+    return step == 0 || n - 1 <= (total - off - 1) / step;
+}
+
+// Where, in complex elements from the vector's start, a BLAS vector's first
+// element lies: at the far end for a negative increment.
+static inline size_t vector_first(size_t n, int inc) {
+    return inc < 0 ? (n - 1) * vector_step(inc) : 0;
+}
+
 ABStatus ab_dev_memcpy_h2d(ab_dev_buffer_t dst, size_t dst_offset,
                            const void* src, size_t nbytes) {
     if (!dst || !src) return AB_ERROR_INVALID_ARG;
@@ -560,6 +581,7 @@ zgemm_cleanup:
 ABStatus ab_dev_conjg_c(ab_dev_buffer_t buf, size_t offset, size_t n) {
     if (!buf) return AB_ERROR_INVALID_ARG;
     if (n == 0) return AB_OK;
+    if (!dev_vector_fits(buf, offset, n, 1)) return AB_ERROR_INVALID_ARG;
     // Negate imaginary parts in-place.  Data is interleaved [r0,i0,r1,i1,...].
     double* base = (double*)dev_data(buf) + offset * 2;
     for (size_t i = 0; i < n; i++)
@@ -571,6 +593,7 @@ ABStatus ab_dev_scale_z(ab_dev_buffer_t buf, size_t offset, size_t n,
                         const double alpha[2]) {
     if (!buf || !alpha) return AB_ERROR_INVALID_ARG;
     if (n == 0) return AB_OK;
+    if (!dev_vector_fits(buf, offset, n, 1)) return AB_ERROR_INVALID_ARG;
     double ar = alpha[0], ai = alpha[1];
     double* base = (double*)dev_data(buf) + offset * 2;
     for (size_t i = 0; i < n; i++) {
@@ -587,14 +610,19 @@ ABStatus ab_dev_axpy_z(size_t n,
                        ab_dev_buffer_t y, size_t y_offset, int incy) {
     if (!x || !y || !alpha) return AB_ERROR_INVALID_ARG;
     if (n == 0) return AB_OK;
+    if (!dev_vector_fits(x, x_offset, n, incx) || !dev_vector_fits(y, y_offset, n, incy))
+        return AB_ERROR_INVALID_ARG;
     double ar = alpha[0], ai = alpha[1];
-    const double* xp = (const double*)dev_data(x) + x_offset * 2;
-    double* yp = (double*)dev_data(y) + y_offset * 2;
+    // As reference ZAXPY: start at each vector's first element and step by
+    // its increment (the checks above keep every step inside the buffer).
+    const double* xp = (const double*)dev_data(x) + (x_offset + vector_first(n, incx)) * 2;
+    double* yp = (double*)dev_data(y) + (y_offset + vector_first(n, incy)) * 2;
     for (size_t i = 0; i < n; i++) {
-        double xr = xp[i * incx * 2],     xi = xp[i * incx * 2 + 1];
-        double yr = yp[i * incy * 2],     yi = yp[i * incy * 2 + 1];
-        yp[i * incy * 2]     = yr + (ar * xr - ai * xi);
-        yp[i * incy * 2 + 1] = yi + (ar * xi + ai * xr);
+        const ptrdiff_t ix = (ptrdiff_t)i * incx * 2, iy = (ptrdiff_t)i * incy * 2;
+        double xr = xp[ix], xi = xp[ix + 1];
+        double yr = yp[iy], yi = yp[iy + 1];
+        yp[iy]     = yr + (ar * xr - ai * xi);
+        yp[iy + 1] = yi + (ar * xi + ai * xr);
     }
     return AB_OK;
 }

@@ -169,6 +169,23 @@ All notable changes to this project will be documented in this file.
     before this port and on 1.4.0's kernels, it used about 10% less energy per
     product (`benchmarks/results/2026-10-20-274e778-strassen/`); that was not
     repeated.
+- **Tests that pin the range guard's floors.** `test_range_guard`'s oracle
+  reads the library's floor macros and calls its stage 1, so moving the entry
+  floor to 2⁻⁷⁹, moving a macro, or dropping stage 1's product term passed
+  every test (hostile audit 2026-11-10, L8). `test_guard_literal_floors`
+  calls `ab_range_guard_stage1` and `ab_range_guard_c_stage1` with literal
+  exponents. It checks that entries and products of 2⁻⁷⁸ are certified and
+  those of 2⁻⁷⁹ go to stage 2, alpha's effect on the product floor, and the
+  overflow headroom; a `_Static_assert` pins `AB_ENTRY_MIN_EXP`,
+  `AB_PRODUCT_MIN_EXP` and `AB_SUM_MAX_EXP`. `test_blas_abi` adds four DGEMMs
+  with NaN or Inf alpha or beta, which must give Accelerate's results with no
+  GPU GEMM. On mutants built from fresh trees (2026-11-10; the list is in
+  [tests/README.md](tests/README.md#range-guard-stage-2)), each moved floor,
+  dropped term or short headroom fails the new test, a moved macro stops the
+  build, and removing the host path's check of the scalars fails two of the
+  DGEMM cases. Removing only the staged path's check changes no result: the
+  staged run flags the non-finite result and sends the call to Accelerate
+  anyway.
 
 ### Changed
 - **Stage 2 of the exponent-range guard takes a fraction of the host time,
@@ -269,6 +286,16 @@ All notable changes to this project will be documented in this file.
   for `dgemm_` and `zgemm_`, and the program's XERBLA is not called. With
   apple-bottom linked first, the error-exit parts of Netlib's `dblat2` and
   `zblat2` stop there, as those of `dblat3` and `zblat3` already did.
+- **The Makefile states `-ffp-contract=on` for the host code.** It is clang's
+  default; the Makefile now names it in `CFLAGS`, `OBJCFLAGS` and
+  `FFT_OBJCFLAGS`, so a change of toolchain default cannot change the
+  contraction mode (which products are fused is still the compiler's
+  choice). With Apple clang 17.0.0 every object file,
+  `libapplebottom.dylib` and `libapplebottom.a` are byte-identical with and
+  without the flag (checked 2026-11-10). What contraction does to the host
+  epilogues' bits is in
+  [LIMITATIONS.md](docs/vv/LIMITATIONS.md#framing) (hostile audit
+  2026-11-10, L7).
 
 ### Fixed
 - **`ab_dtrsm` and `ab_dgesv_mpir` no longer ignore a failed GPU step.**
@@ -540,6 +567,35 @@ All notable changes to this project will be documented in this file.
   every synchronous native call but `ab_fft_execute`, and the new test-only
   `AB_TEST_FAIL_ONLY=n` fails only the n-th command buffer; `test_trace` adds
   `test_fail_native`.
+- **The device API's element-wise helpers check their buffers.**
+  `ab_dev_conjg_c`, `ab_dev_scale_z` and `ab_dev_axpy_z` checked only for
+  NULL and n == 0, so an offset, n or increment that ran past a buffer made
+  the call read and write outside it, returning `AB_OK` (hostile audit
+  2026-11-10, L1). They now return `AB_ERROR_INVALID_ARG`, with every buffer
+  unchanged, when a vector reaches past its buffer (the check counts complex
+  elements, so its own arithmetic cannot overflow). A negative increment of
+  `ab_dev_axpy_z` now starts at the far end, as in BLAS and as the header's
+  BLAS-2 text says; before, it walked backwards from the offset (no caller in
+  this repository or in Espressivo passes one). Positive and zero increments index the same elements with the
+  same arithmetic. The header now states the units, the increment rule and
+  the return codes. `test_device_api` adds `test_elementwise_bounds`, which
+  fails on c8be67d.
+- **Every native ZGEMM entry checks all six handles.** `ab_zgemm` and
+  `ab_zgemm_ex` compared only op(A)'s and op(B)'s K and Cr's shape, and
+  `ab_zgemm_async`, `ab_batch_zgemm` and `ab_zgemm_batched` with more than one
+  entry compared no dimension, so an imaginary part whose shape differed from
+  its real part's was read or written past its end with `AB_OK` (hostile audit
+  2026-11-10, L5). Each now checks, before any GPU work, that every imaginary
+  part has its real part's shape and that op(A) is M × K, op(B) K × N and C
+  M × N. Otherwise it returns `AB_ERROR_DIMENSION_MISMATCH`: `ab_zgemm_async`
+  as a completed future, `ab_zgemm_batched` before any entry runs. Valid
+  shapes take the same path as before. `test_correctness` adds four tests,
+  each failing on c8be67d: one shared by `ab_zgemm`, `ab_zgemm_ex` and
+  `ab_zgemm_strassen`, and one each for `ab_zgemm_async`, `ab_batch_zgemm` and
+  `ab_zgemm_batched`. Each test also makes one call per op() rule (K, M and N)
+  with every imaginary part in its real part's shape; with any one rule
+  deleted from the check, all four fail (mutants built from fresh trees,
+  2026-11-10).
 
 ### Corrected claims
 - **"No silent errors outside FP32's exponent range" and "every product keeps
@@ -589,6 +645,28 @@ All notable changes to this project will be documented in this file.
   with a correct result (the solvers redo the failed GEMM step with
   `cblas_dgemm`). Other native and device calls return `AB_ERROR_KERNEL_FAILED`:
   [the list](docs/vv/LIMITATIONS.md#command-buffers-stopped-by-macos).
+- **Limits documented, not fixed** (hostile audit 2026-11-10). Each is in
+  [Exponent range](docs/vv/LIMITATIONS.md#exponent-range) unless noted; the
+  failing inputs are predicted from the code, not run. A device-GEMM guard
+  (L2), re-centring native results (L3, L4) and folding alpha into the ZGEMM
+  and BLAS-2 scale-back (L9) are [planned](docs/ROADMAP.md#planned):
+  - the device GEMMs have no range guard and no Accelerate fallback (L2);
+  - `ab_dgemm_scaled` (with its batch and Strassen forms) and `ab_dev_dgemm`
+    give C the larger of the scales of alpha·op(A)op(B) and beta·C,
+    `ab_matrix_add` and `ab_matrix_sub` align their operands the same way,
+    and native and device ZGEMM align their parts (3M) or their products
+    (4M), as `ab_zherk` does its real part, so in an element where the larger
+    term is 0 the smaller can lose precision or become 0, and under 3M a part
+    far below the other loses precision in every product (L2);
+  - native results are not re-centred, so chains of products drift out of
+    the window and lose accuracy with `AB_OK` (L3), and an alpha with |alpha|
+    in [2⁻³⁹, 2⁴⁰) multiplies the stored values (L4);
+  - no API limits K, and the closed-form bounds are stated for K ≤ 2²⁰ (L6,
+    [Framing](docs/vv/LIMITATIONS.md#framing));
+  - the BLAS-ABI ZGEMM epilogue can underflow before alpha; BLAS-2 rounds its
+    sum to FP64 before alpha, so a sum of about 2¹⁰²⁴ or more gives Inf or
+    NaN even when |alpha| < 1 or beta·y would cancel alpha times the sum;
+    and the FFT has FP32's exponent range (L9).
 
 ## [1.5.1] - 2026-11-01
 
