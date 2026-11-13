@@ -32,6 +32,7 @@
 #include "apple_bottom.h"
 #include "apple_bottom_device.h"
 #include "gpu_stage.h"
+#include "profiling/blas_profiler.h"
 #include "split_slice.h"
 #include "test_blas_check.h"
 #include "test_dot2.h"
@@ -41,6 +42,7 @@
 #include <complex.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
+#include <mach/mach_time.h>
 #include <malloc/malloc.h>
 #include <math.h>
 #include <pthread.h>
@@ -1039,6 +1041,26 @@ static void child_memory(void) {
     printf("memory growth %lld\n", (long long)s1.size_in_use - (long long)s0.size_in_use);
 }
 
+// The ticks denom - 1 .. denom of the timebase n/d: the second converts to
+// exactly n, while the first's conversion plus the tick's falls 1 ns short of
+// it whenever d does not divide n (2 .. 3 at Apple silicon's 125/3: 83 + 41 is
+// 124). A trace line's t1_ns made of a start and a converted time is then 1
+// ns early.
+static void lossy_ticks(uint64_t *a, uint64_t *b) {
+    mach_timebase_info_data_t tb;
+    mach_timebase_info(&tb);
+    *a = tb.denom - 1;
+    *b = tb.denom;
+}
+
+// Child (AB_TRACE set): one trace line, for the call from tick a to tick b.
+static void child_trace_ticks(void) {
+    uint64_t a, b;
+    lossy_ticks(&a, &b);
+    ab_trace_call_t c = {.routine = "dgemm", .ta = 'N', .tb = 'N'};
+    if (ab_trace_enabled()) ab_trace_record(&c, a, b, NULL, AB_PROF_FB_NONE, AB_PROF_STAGED_NONE);
+}
+
 static int child_main(const char *scenario) {
     if (ab_init() != AB_OK) {
         printf("no Metal device\n");
@@ -1050,6 +1072,7 @@ static int child_main(const char *scenario) {
     else if (!strcmp(scenario, "other")) child_other();
     else if (!strcmp(scenario, "memory")) child_memory();
     else if (!strcmp(scenario, "k_refused")) child_k_refused();
+    else if (!strcmp(scenario, "trace_ticks")) child_trace_ticks();
     else printf("unknown scenario %s\n", scenario);
     fflush(stdout);
     return 0;
@@ -1431,8 +1454,9 @@ static double part_gf(const TableCall *t, bool gpu) {
 // T9: the reports with AB_SPLIT on.
 static void test_split_reports(void) {
     char table_env[PATH_MAX + 64], trace[PATH_MAX + 16], trace_env[PATH_MAX + 32], json[PATH_MAX + 16],
-         json_env[PATH_MAX + 32];
+         json_env[PATH_MAX + 32], ticks[PATH_MAX + 16];
     snprintf(trace, sizeof trace, "%s/on", g_dir);
+    snprintf(ticks, sizeof ticks, "%s/ticks", g_dir);
     snprintf(trace_env, sizeof trace_env, "AB_TRACE=%s", trace);
     snprintf(json, sizeof json, "%s/profile.json", g_dir);
     snprintf(json_env, sizeof json_env, "AB_PROFILE_JSON=%s", json);
@@ -1546,9 +1570,17 @@ static void test_split_reports(void) {
                             .dispatches = field(line, "gpu_dispatches"), .cmdbufs = field(line, "gpu_cmdbufs"),
                             .kinds = field(line, "gpu_kinds"), .mtl_error = field(line, "gpu_mtl_error")}};
                 const char *fault = times_fault(&tm, 0);
-                check(!fault && field(line, "t0_ns") <= (long long)tm.cut_ns &&
-                          (long long)tm.end_ns <= field(line, "t1_ns"),
-                      "trace timeline: %s, or outside t0_ns .. t1_ns: %.300s", fault ? fault : "steps", line);
+                long long t0 = field(line, "t0_ns"), t1 = field(line, "t1_ns");
+                const ab_prof_kernel_split_t *k = &tm.gpu;
+                check(!fault && t0 <= (long long)tm.cut_ns && (long long)tm.end_ns <= t1,
+                      "trace timeline: %s; row %lld M=%lld N=%lld K=%lld, ns after t0_ns %lld: cut %lld create %lld "
+                      "cpu0 %lld cpu1 %lld gpu0 %lld commit %lld gpu_start %lld gpu_end %lld done %lld gpu1 %lld "
+                      "join %lld end %lld t1 %lld", fault ? fault : "outside t0_ns .. t1_ns", field(line, "row"),
+                      field(line, "M"), field(line, "N"), field(line, "K"), t0, (long long)tm.cut_ns - t0,
+                      (long long)tm.create_ns - t0, (long long)tm.cpu0_ns - t0, (long long)tm.cpu1_ns - t0,
+                      (long long)tm.gpu0_ns - t0, (long long)k->commit_ns - t0, (long long)k->gpu_start_ns - t0,
+                      (long long)k->gpu_end_ns - t0, (long long)k->done_ns - t0, (long long)tm.gpu1_ns - t0,
+                      (long long)tm.join_ns - t0, (long long)tm.end_ns - t0, t1 - t0);
             }
         } else if (strstr(line, " row=5 axis=N g=0")) {
             row_lines++;
@@ -1557,6 +1589,24 @@ static void test_split_reports(void) {
     if (p) pclose(p);
     check(header && split_lines == 14 && row_lines == 2, "trace: header %d, %d split lines (want 14), %d f = 0 "
           "lines (want 2)", header, split_lines, row_lines);
+    // A call's t0_ns and t1_ns are its ticks converted, as its steps' are, also from ticks whose difference
+    // converted loses a ns (lossy_ticks): an end made of the start plus the time would read before a last step.
+    snprintf(trace_env, sizeof trace_env, "AB_TRACE=%s", ticks);
+    const char *ticks_env[] = {trace_env, NULL};
+    free(run_child("trace_ticks", ticks_env, &status));
+    snprintf(cmd, sizeof cmd, "/bin/cat %s.*", ticks);
+    p = popen(cmd, "r");
+    long long t0 = -1, t1 = -1;
+    while (p && fgets(line, sizeof line, p))
+        if (line[0] != '#') t0 = field(line, "t0_ns"), t1 = field(line, "t1_ns");
+    if (p) pclose(p);
+    uint64_t a, b;
+    lossy_ticks(&a, &b);
+    check(status == 0 && t0 == (long long)ab_prof_ticks_to_ns(a) && t1 == (long long)ab_prof_ticks_to_ns(b),
+          "trace line of ticks %llu .. %llu: t0_ns %lld t1_ns %lld, want %llu %llu (the start's plus the "
+          "difference's conversion: %llu)", (unsigned long long)a, (unsigned long long)b, t0, t1,
+          (unsigned long long)ab_prof_ticks_to_ns(a), (unsigned long long)ab_prof_ticks_to_ns(b),
+          (unsigned long long)(ab_prof_ticks_to_ns(a) + ab_prof_ticks_to_ns(b - a)));
     // The JSON's first split call per row is the trace's, and its GFLOP the plan's for the row's first call.
     bool seen[N_ROWS] = {false};
     for (int i = 0; i < N_TCALLS; i++) {
@@ -1572,7 +1622,7 @@ static void test_split_reports(void) {
               cpu, gpu, first_cpu[r], first_gpu[r], gf_cpu, gf_gpu, part_gf(t, false), part_gf(t, true));
     }
     free(js);
-    snprintf(cmd, sizeof cmd, "/bin/rm -f %s.* %s", trace, json);
+    snprintf(cmd, sizeof cmd, "/bin/rm -f %s.* %s.* %s", trace, ticks, json);
     if (system(cmd)) {}
     finish();
 }

@@ -228,6 +228,10 @@ uint64_t ab_prof_ticks_to_ns(uint64_t ticks) {
     return ticks * g_timebase.numer / g_timebase.denom;
 }
 
+uint64_t ab_prof_span_ns(uint64_t t0, uint64_t t1) {
+    return ab_prof_ticks_to_ns(t1) - ab_prof_ticks_to_ns(t0);
+}
+
 // =============================================================================
 // Record
 // =============================================================================
@@ -977,17 +981,18 @@ static void trace_split_fields(report_line_t* l, uint64_t elapsed_ns, const ab_p
 // remainder), and split other_ns so that the parts sum to it exactly:
 // rest_ns is what the kernel step's split leaves, and may be a few ns below
 // zero from rounding between the host and GPU clocks.
-static void trace_line(const ab_trace_call_t* c, uint64_t t0_ns, uint64_t elapsed_ns,
+static void trace_line(const ab_trace_call_t* c, uint64_t t0, uint64_t t1,
                        const uint64_t* stage_ns, ab_prof_fallback_t fallback,
                        ab_prof_staged_t staged, const ab_prof_split_t* split) {
     static const char* const hash_keys[3] = {"hash_a", "hash_b", "hash_c"};
+    uint64_t t0_ns = ab_prof_ticks_to_ns(t0), t1_ns = ab_prof_ticks_to_ns(t1), elapsed_ns = t1_ns - t0_ns;
     bool z = c->routine[0] == 'z';
     char ta[8], tb[8];
     report_line_t l = { .n = 0 };
     l.buf[0] = '\0';
     line_add(&l, "t0_ns=%llu t1_ns=%llu routine=%s ta=%s tb=%s M=%d N=%d K=%d "
                  "lda=%d ldb=%d ldc=%d alpha=%a",
-             (unsigned long long)t0_ns, (unsigned long long)(t0_ns + elapsed_ns), c->routine,
+             (unsigned long long)t0_ns, (unsigned long long)t1_ns, c->routine,
              trans_text(c->ta, ta), trans_text(c->tb, tb), c->m, c->n, c->k,
              c->lda, c->ldb, c->ldc, c->alpha[0]);
     if (z) line_add(&l, ",%a", c->alpha[1]);
@@ -1029,16 +1034,16 @@ static void trace_line(const ab_trace_call_t* c, uint64_t t0_ns, uint64_t elapse
     trace_write(&l);
 }
 
-void ab_trace_record(const ab_trace_call_t* c, uint64_t t0_ns, uint64_t elapsed_ns,
+void ab_trace_record(const ab_trace_call_t* c, uint64_t t0, uint64_t t1,
                      const uint64_t* stage_ns, ab_prof_fallback_t fallback,
                      ab_prof_staged_t staged) {
-    trace_line(c, t0_ns, elapsed_ns, stage_ns, fallback, staged, NULL);
+    trace_line(c, t0, t1, stage_ns, fallback, staged, NULL);
 }
 
-void ab_trace_record_split(const ab_trace_call_t* c, uint64_t t0_ns, uint64_t elapsed_ns,
+void ab_trace_record_split(const ab_trace_call_t* c, uint64_t t0, uint64_t t1,
                            const uint64_t* stage_ns, ab_prof_fallback_t fallback,
                            ab_prof_staged_t staged, const ab_prof_split_t* s) {
-    trace_line(c, t0_ns, elapsed_ns, stage_ns, fallback, staged, s);
+    trace_line(c, t0, t1, stage_ns, fallback, staged, s);
 }
 
 // =============================================================================

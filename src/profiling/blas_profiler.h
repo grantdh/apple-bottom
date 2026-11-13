@@ -241,6 +241,12 @@ void ab_prof_print_fallback(const char* routine, int m, int n, int k, const char
 // Convert mach_absolute_time() ticks to nanoseconds using timebase.
 uint64_t ab_prof_ticks_to_ns(uint64_t ticks);
 
+// The time from tick t0 to tick t1 in ns: the difference of the two
+// converted, so that t0's conversion plus it is t1's, as on a trace line.
+// Converting t1 - t0 instead can come out 1 ns less (Apple silicon's
+// timebase is 125/3).
+uint64_t ab_prof_span_ns(uint64_t t0, uint64_t t1);
+
 // Get current time in mach_absolute_time ticks.
 uint64_t ab_prof_now_ticks(void);
 
@@ -293,9 +299,13 @@ int  ab_trace_hash_enabled(void);
 
 // Append the call's line to this process's trace file, <AB_TRACE>.<pid>,
 // which the first line of each process creates with a '#' header. The call
-// started at t0_ns (mach_absolute_time in ns) and took elapsed_ns; the other
-// arguments are those of ab_prof_record (stage_ns non-NULL: the GPU computed C).
-void ab_trace_record(const ab_trace_call_t* call, uint64_t t0_ns, uint64_t elapsed_ns,
+// started at tick t0 and ended at tick t1 (mach_absolute_time); the line's
+// t0_ns and t1_ns are each converted from its tick, as every host clock read
+// on it is (the at_* steps), so that no step of the call reads before t0_ns
+// or after t1_ns (ab_prof_span_ns).
+// The other arguments are those of ab_prof_record (stage_ns non-NULL: the GPU
+// computed C).
+void ab_trace_record(const ab_trace_call_t* call, uint64_t t0, uint64_t t1,
                      const uint64_t* stage_ns, ab_prof_fallback_t fallback,
                      ab_prof_staged_t staged);
 
@@ -303,7 +313,7 @@ void ab_trace_record(const ab_trace_call_t* call, uint64_t t0_ns, uint64_t elaps
 // line (path=split, or fallback:<reason> for a GPU part made again on
 // Accelerate) with s's stages, or, for one the row did not split, the line
 // ab_trace_record writes with the row added.
-void ab_trace_record_split(const ab_trace_call_t* call, uint64_t t0_ns, uint64_t elapsed_ns,
+void ab_trace_record_split(const ab_trace_call_t* call, uint64_t t0, uint64_t t1,
                            const uint64_t* stage_ns, ab_prof_fallback_t fallback,
                            ab_prof_staged_t staged, const ab_prof_split_t* s);
 

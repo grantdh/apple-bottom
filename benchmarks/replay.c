@@ -517,10 +517,10 @@ static void native_call(const Call *c, Resident *res, int rank) {
         B[p] = resident_shape(res, ROLE_B, p, c->k, c->n, rank);
         C[p] = resident_shape(res, ROLE_C, p, c->m, c->n, rank);
     }
-    uint64_t t0 = now_ns();
+    uint64_t t0 = ab_prof_now_ticks();
     ABStatus st = parts == 1 ? ab_dgemm_scaled(c->alpha[0], A[0], B[0], c->beta[0], C[0])
                              : ab_zgemm(A[0], A[1], B[0], B[1], C[0], C[1]);
-    uint64_t elapsed = now_ns() - t0;
+    uint64_t t1 = ab_prof_now_ticks(), elapsed = ab_prof_span_ns(t0, t1);
     if (st != AB_OK)
         worker_fail(rank, "native %cgemm %d x %d x %d failed: %s", c->routine, c->m, c->n, c->k,
                     ab_status_string(st));
@@ -533,7 +533,7 @@ static void native_call(const Call *c, Resident *res, int rank) {
     uint64_t stage[AB_PROF_STAGE_COUNT] = {0};
     stage[AB_PROF_STAGE_KERNEL] = ab_prof_take_kernel_ns(elapsed, &tc.split);
     if (ab_trace_enabled())
-        ab_trace_record(&tc, t0, elapsed, stage, AB_PROF_FB_NONE, AB_PROF_STAGED_NONE);
+        ab_trace_record(&tc, t0, t1, stage, AB_PROF_FB_NONE, AB_PROF_STAGED_NONE);
 }
 
 static int worker_main(int fd, int rank) {
