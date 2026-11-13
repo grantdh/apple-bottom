@@ -52,18 +52,22 @@ same call through its seam (`SEAM`, below), which `AB_SPLIT` uses inside `dgemm_
 
   With the arms, each round of the fixed block runs:
   1. an idle gap (`SPLIT_GAP_S`, default 1 s);
-  2. one untimed `HEAD` call, then the CPU-only configs, Accelerate and `HEAD` (their order alternating
+  2. untimed `HEAD` calls, then the CPU-only configs, Accelerate and `HEAD` (their order alternating
      by round), so neither follows a config that used the GPU;
-  3. one untimed `TAIL` call, then the GPU alone and `TAIL` (alternating likewise);
-  4. one untimed call of `S<g>`, then the trio `SEAM`, `S<g>`, `S<g>b` repeat by repeat, in round
-     r mod 6's order of a Williams design: over every 6 rounds each of the three runs first equally
-     often and comes right before and right after each of the others equally often, none follows
+  3. untimed `TAIL` calls, then the GPU alone and `TAIL` (alternating likewise);
+  4. untimed calls of `S<g>`, then the trio `SEAM`, `S<g>`, `S<g>b` repeat by repeat, in round r mod
+     6's order of a Williams design: over every 6 rounds each of the three runs first equally often
+     and comes right before and right after each of the others equally often, none follows
      Accelerate, the GPU, `HEAD` or `TAIL`, and the calls paired by (round, repeat) sit within one
      repeat of the trio. Use a multiple of 6 rounds; the report says when the count is not one.
 
-  The untimed calls keep every timed call off a group's cold start: in the smoke runs the first call
-  after the gap took up to twice as long, and the first GPU call after the CPU-only group up to five
-  times.
+  Each group's untimed calls (its opener) last about `SPLIT_OPEN_S` (default 0.05 s, 1 to 16 calls,
+  sized from process 0's call times), so that no timed call is the group's cold first one. In the
+  round-2 smoke runs, without openers, the first call after the gap took up to twice as long and the
+  first GPU call after the CPU-only group up to five times; with one untimed `S<g>` call
+  before the trio, the trio's first timed call on UM160 1×8 (calls of about 6 ms) was still 8% slower
+  than the other two of its repeat (median over rounds, 5 of 6 rounds slower), while on Z4096 and
+  RK160 at 4×2 it was not.
 
   Before the block the split runs untimed for `SPLIT_WARM_S` seconds (default 2 with the arms, 0
   without), so the block does not start cool. `raw.tsv`'s `prev` column names each call's

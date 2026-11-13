@@ -203,6 +203,7 @@ typedef struct {
     int np, ncfg, g[MAXCFG], kind[MAXCFG], best;   // ncfg: ACC, GPU and the sweep's splits
     int fixed, rounds;   // fixed: SPLIT_G or SPLIT_F set, no sweep; rounds of the fixed block
     int nwarm;           // untimed split calls before the fixed block
+    int nopen[3];        // with the arms, untimed calls opening each group of a round: HEAD, TAIL, the split
     // outside load per round of the fixed block, from process 0's snapshots (load_snap): the round's
     // start and end, and with the arms the end of its GPU-idle stretch (the idle gap and the CPU-only
     // configs, when none of this run's processes uses the GPU); other processes' CPU over the stretch
@@ -480,6 +481,7 @@ static void order_of(int r, int n, int *ord) {  // interleave: rotate by r, reve
 // One call of a fixed-block round: config k's repeat rep, or an untimed call of k (rep -1).
 typedef struct { int k, rep; } Step;
 #define MAXSTEP 512   // calls per round (main checks the cases' repeats against it)
+#define NOPEN_MAX 16  // untimed calls opening a group, at most
 // append one call of config k to a round's plan (rep -1: untimed); main() refuses repeats that would
 // not fit, so running out of room is a bug: stop rather than write past the plan
 static int add_step(Step *p, int n, int k, int rep) {
@@ -497,11 +499,11 @@ static int add_reps(Step *p, int n, int k, int reps) {   // config k's repeats 0
 static const int W6[NW6][3] = {{1, 0, 2}, {2, 0, 1}, {0, 2, 1}, {1, 2, 0}, {2, 1, 0}, {0, 1, 2}};
 // Round r of the fixed block, the user split at config bk. Without the arms, as before: Accelerate,
 // GPU and the split with their repeats back to back, rotated and reversed by round (order_of). With
-// them (after the idle gap child() runs first), three groups, each opened by an untimed call of its
-// own kind so that no timed call is a group's cold first one (benchmarks/split/README.md): an untimed
-// HEAD, then the CPU-only configs ACC and HEAD; an untimed TAIL, then the GPU alone and TAIL (each
-// pair's order alternating by round); an untimed user split, then the trio SEAM, S<g>, S<g>b, repeat
-// by repeat, in W6[r % NW6]'s order. So ACC and HEAD never follow a GPU config, no arm of the trio follows ACC, GPU,
+// them (after the idle gap child() runs first), three groups, each opened by untimed calls of its own
+// kind for about SPLIT_OPEN_S (shm->nopen) so that no timed call is a group's cold first one
+// (benchmarks/split/README.md): untimed HEAD, then the CPU-only configs ACC and HEAD; untimed TAIL,
+// then the GPU alone and TAIL (each pair's order alternating by round); the untimed user split, then
+// the trio SEAM, S<g>, S<g>b, repeat by repeat, in W6[r % NW6]'s order. So ACC and HEAD never follow a GPU config, no arm of the trio follows ACC, GPU,
 // HEAD or TAIL, and pairs by (round, rep) stay within one repeat of the trio. Round 0 runs the user
 // split before its twin, so its first result (the bit checks' reference) comes first.
 static int fixed_plan(const Case *c, int r, int bk, Step *p) {
@@ -514,10 +516,10 @@ static int fixed_plan(const Case *c, int r, int bk, Step *p) {
     }
     const int cf[2][2] = {{CF_ACC, shm->k_head}, {CF_GPU, shm->k_tail}}, rp[2][2] = {{c->fx_acc, c->fx_split}, {c->fx_gpu, c->fx_split}};
     for (int e = 0; e < 2; e++) {
-        n = add_step(p, n, cf[e][1], -1);   // untimed HEAD, then untimed TAIL: each group's warm-up
+        for (int i = 0; i < shm->nopen[e]; i++) n = add_step(p, n, cf[e][1], -1);   // the opener: untimed HEAD, then TAIL
         for (int i = 0; i < 2; i++) n = add_reps(p, n, cf[e][i ^ (r & 1)], rp[e][i ^ (r & 1)]);
     }
-    n = add_step(p, n, bk, -1);
+    for (int i = 0; i < shm->nopen[2]; i++) n = add_step(p, n, bk, -1);
     const int trio[3] = {bk, shm->k_seam, shm->k_split2};
     for (int rep = 0; rep < c->fx_split; rep++)
         for (int j = 0; j < 3; j++) n = add_step(p, n, trio[W6[r % NW6][j]], rep);
@@ -580,6 +582,17 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
     int bk = shm->best;
     // warm-up of the arms (untimed): the seam's thread and pool slots, the slices alone
     for (int k = shm->ncfg; k < shm->ncfg + shm->narm; k++) { set_cfg(x, k); barrier(); one_call(x, k, &v); }
+    // the groups' openers (fixed_plan): untimed calls of HEAD, TAIL and the user split lasting about
+    // SPLIT_OPEN_S (default 0.05 s), 1 to NOPEN_MAX calls, sized by process 0's call times
+    if (shm->narm) {
+        const int opener[3] = {shm->k_head, shm->k_tail, bk};
+        for (int e = 0; e < 3; e++) {
+            set_cfg(x, opener[e]); barrier(); one_call(x, opener[e], &v);
+            double n = ceil(envd("SPLIT_OPEN_S", 0.05) / fmax(v.v[V_TOTAL], 1e-6));
+            if (id == 0) shm->nopen[e] = n < 1 ? 1 : n > NOPEN_MAX ? NOPEN_MAX : (int)n;
+        }
+        barrier();
+    }
     // warm-up before the block (untimed): the split at g for SPLIT_WARM_S seconds (default 2 with the
     // arms, 0 without), so the block does not start cool; process 0's call time sets the count for all
     const double warm_s = envd("SPLIT_WARM_S", shm->narm ? 2 : 0);
@@ -1394,7 +1407,7 @@ int main(int argc, char **argv) {
         shm->kind[shm->k_seam] = KD_SEAM; shm->kind[shm->k_split2] = KD_SPLIT2; shm->kind[shm->k_head] = KD_HEAD; shm->kind[shm->k_tail] = KD_TAIL;
     }
     int need = (shm->fixed ? 0 : 3 * shm->ncfg * c->sweep_reps) + rounds * (c->fx_acc + c->fx_gpu + c->fx_split * (1 + shm->narm)) + 2;
-    if (c->fx_acc + c->fx_gpu + c->fx_split * (1 + shm->narm) + (shm->narm ? 3 : 0) > MAXSTEP) {   // fixed_plan's calls: 3 untimed with the arms
+    if (c->fx_acc + c->fx_gpu + c->fx_split * (1 + shm->narm) + (shm->narm ? 3 * NOPEN_MAX : 0) > MAXSTEP) {   // fixed_plan's calls, openers included
         fprintf(stderr, "%d repeats per round need more than MAXSTEP %d calls\n", c->fx_split, MAXSTEP);
         unlink(path); return 2;
     }
