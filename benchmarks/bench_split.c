@@ -469,7 +469,17 @@ static void order_of(int r, int n, int *ord) {  // interleave: rotate by r, reve
 // One call of a fixed-block round: config k's repeat rep, or an untimed call of k (rep -1).
 typedef struct { int k, rep; } Step;
 #define MAXSTEP 512   // calls per round (main checks the cases' repeats against it)
-static int add_reps(Step *p, int n, int k, int reps) { for (int r = 0; r < reps; r++) p[n++] = (Step){k, r}; return n; }
+// append one call of config k to a round's plan (rep -1: untimed); main() refuses repeats that would
+// not fit, so running out of room is a bug: stop rather than write past the plan
+static int add_step(Step *p, int n, int k, int rep) {
+    if (n >= MAXSTEP) { fprintf(stderr, "fixed_plan: more than MAXSTEP %d calls in a round\n", MAXSTEP); exit(2); }
+    p[n] = (Step){k, rep};
+    return n + 1;
+}
+static int add_reps(Step *p, int n, int k, int reps) {   // config k's repeats 0..reps-1
+    for (int r = 0; r < reps; r++) n = add_step(p, n, k, r);
+    return n;
+}
 // The trio's orders, a Williams design for three (0 S<g>, 1 SEAM, 2 S<g>b): over NW6 rounds each arm
 // runs first, and right before and right after each other arm, equally often.
 #define NW6 6
@@ -493,13 +503,13 @@ static int fixed_plan(const Case *c, int r, int bk, Step *p) {
     }
     const int cf[2][2] = {{CF_ACC, shm->k_head}, {CF_GPU, shm->k_tail}}, rp[2][2] = {{c->fx_acc, c->fx_split}, {c->fx_gpu, c->fx_split}};
     for (int e = 0; e < 2; e++) {
-        p[n++] = (Step){cf[e][1], -1};   // untimed HEAD, then untimed TAIL: each group's warm-up
+        n = add_step(p, n, cf[e][1], -1);   // untimed HEAD, then untimed TAIL: each group's warm-up
         for (int i = 0; i < 2; i++) n = add_reps(p, n, cf[e][i ^ (r & 1)], rp[e][i ^ (r & 1)]);
     }
-    p[n++] = (Step){bk, -1};
+    n = add_step(p, n, bk, -1);
     const int trio[3] = {bk, shm->k_seam, shm->k_split2};
     for (int rep = 0; rep < c->fx_split; rep++)
-        for (int j = 0; j < 3; j++) p[n++] = (Step){trio[W6[r % NW6][j]], rep};
+        for (int j = 0; j < 3; j++) n = add_step(p, n, trio[W6[r % NW6][j]], rep);
     return n;
 }
 // outside load: process 0's snapshots at the fixed block's round boundaries (defined with the samplers)
@@ -1370,7 +1380,10 @@ int main(int argc, char **argv) {
         shm->kind[shm->k_seam] = KD_SEAM; shm->kind[shm->k_split2] = KD_SPLIT2; shm->kind[shm->k_head] = KD_HEAD; shm->kind[shm->k_tail] = KD_TAIL;
     }
     int need = (shm->fixed ? 0 : 3 * shm->ncfg * c->sweep_reps) + rounds * (c->fx_acc + c->fx_gpu + c->fx_split * (1 + shm->narm)) + 2;
-    if (c->fx_acc + c->fx_gpu + c->fx_split * (1 + shm->narm) + (shm->narm ? 3 : 0) > MAXSTEP)   // fixed_plan's calls: 3 untimed with the arms { fprintf(stderr, "too many repeats per round (MAXSTEP %d)\n", MAXSTEP); unlink(path); return 2; }
+    if (c->fx_acc + c->fx_gpu + c->fx_split * (1 + shm->narm) + (shm->narm ? 3 : 0) > MAXSTEP) {   // fixed_plan's calls: 3 untimed with the arms
+        fprintf(stderr, "%d repeats per round need more than MAXSTEP %d calls\n", c->fx_split, MAXSTEP);
+        unlink(path); return 2;
+    }
     if (need > MAXREC) {   // records per process: the sweep, the fixed block, the two completion orders
         fprintf(stderr, "SPLIT_ROUNDS=%d needs %d records per process, more than MAXREC %d\n", rounds, need, MAXREC);
         unlink(path); return 2;
