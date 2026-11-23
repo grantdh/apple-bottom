@@ -17,7 +17,9 @@
 #                  G3 (library seam against user code): the squares and the QE-shaped cases with copied
 #                  operands (SPLIT_NOREG=1) at 1x8 and 4x2, AB_STAGING_MB 8192 or 2048; no Z8192 at 4x2;
 #                  6 rounds of 2 repeats, so the arms' order is balanced and intervals can be by round;
-#                  no AB_TRACE or AB_REPORT, which profile the user split's GPU slices but not the seam
+#                  no AB_TRACE or AB_REPORT, which profile the user split's GPU slices but not the seam;
+#                  SPLIT_G3_ROUNDS=<n>, a positive multiple of 6, sets their rounds (g3.py's proposed
+#                  rule, pending Grant, reruns an inconclusive case at 12)
 # Default: every suite but smoke and the G3 suites, in that order (about 60 min, 27 of them the sustained
 # runs; from the 2026-10-28 timings with the arms, openers, gaps and warm-up added).
 #
@@ -30,6 +32,8 @@
 # does not start and end on AC power from an adapter of SPLIT_MIN_W watts or more (or the power is not
 # right now), else 1.
 # SPLIT_DRY=1 makes the same checks (without waiting) and prints each case's command instead.
+# SPLIT_CASES="<case> ..." runs only those cases of the given suites (a G3 rerun, say). A name that none
+# of them has, or an unknown suite, stops the script with exit status 2 before the power checks.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 bin=${BENCH_SPLIT:-$here/../../build/bench_split}
@@ -45,6 +49,11 @@ min_w=${SPLIT_MIN_W:-90}
 min_batt=${SPLIT_MIN_BATT:-95}
 batt_wait=${SPLIT_BATT_WAIT_S:-900}
 dry=${SPLIT_DRY:-}
+cases=$(set -f; echo ${SPLIT_CASES:-})   # one space between names, whatever separated them
+[ -z "${SPLIT_CASES:-}" ] || [ -n "$cases" ] || { echo "SPLIT_CASES names no case" >&2; exit 2; }
+g3_rounds=${SPLIT_G3_ROUNDS:-6}
+case $g3_rounds in *[!0-9]*) g3_rounds=0 ;; *) g3_rounds=$((10#$g3_rounds)) ;; esac
+[ "$g3_rounds" -gt 0 ] && [ $((g3_rounds % 6)) -eq 0 ] || { echo "SPLIT_G3_ROUNDS=${SPLIT_G3_ROUNDS:-}: give a positive multiple of 6" >&2; exit 2; }
 
 onac() { pmset -g batt | head -1 | grep -q "'AC Power'"; }
 adapter_w() { pmset -g adapter | sed -nE 's/^ *Wattage = ([0-9]+)W.*/\1/p' | head -1; }
@@ -77,7 +86,6 @@ report_power_ok() {   # report_power_ok <file>: its start and end lines say AC p
     done
 }
 note() { echo "$(date '+%F %T') $2: $(pmset -g batt | tr '\n' ' ') | adapter $(adapter_w) W | load $(sysctl -n vm.loadavg)" >> "$1/power.log"; }
-power_ok "before the first case" || exit 75
 # go <dir> <prefix> <marker> <label> <command ...>: run one case into <dir>/<prefix>.out, unless that
 # already holds a <marker> line; afterwards it must hold one and have started and ended on AC power from
 # an adapter of min_w W or more, else the case's files are moved aside and the script stops
@@ -103,11 +111,19 @@ go() {
         exit 1
     fi
 }
+# want <case>: SPLIT_CASES is unset or names the case; while listing (the first pass over the suites),
+# note the case and say no
+listing=1 seen=
+want() {
+    [ -n "$listing" ] && { seen="$seen $1 "; return 1; }
+    [ -z "$cases" ] || case " $cases " in *" $1 "*) ;; *) return 1 ;; esac
+}
 # one <suite> <np> <veclib threads> <data> <case> [VAR=value ...]: the VAR=value settings come last,
 # so they override env_common and the trace file (env keeps the last value of a name; AB_TRACE= with
 # no value turns the trace off)
 one() {
     local sub=$1 np=$2 vl=$3 data=$4 c=$5; shift 5
+    want "$c" || return 0
     local pre=$c.np$np.d$data
     go "$out/$sub" "$pre" SUMMARY "$c np=$np veclib=$vl data=$data" \
         env "${env_common[@]}" VECLIB_MAXIMUM_THREADS="$vl" AB_TRACE="$out/$sub/$pre.trace" "$@" "$bin" run "$c" "$np" "$out/$sub" "$data"
@@ -115,6 +131,7 @@ one() {
 # sus <case>: sustained runs at the GPU part g of sq1x8's fixed block for the same case
 sus() {
     local c=$1 g
+    want "$c" || return 0
     one sq1x8 1 8 0 "$c"
     g=$(sed -nE 's/^SUMMARY .* g=([0-9]+) .*/\1/p' "$out/sq1x8/$c.np1.d0.out" 2>/dev/null)
     go "$out/sustain" "$c.sustain" SUSTAIN "sustain $c g=$g" \
@@ -125,6 +142,7 @@ QE="UN1000 UN512 UM160 UM320 UM1000 RK500 RK160"
 QE8="A8_UN512 A8_RK512 A8_RK1000 B8_UM1152 B8_RK1152"
 SQ="D2048 D4096 D8192 Z2048 Z4096 Z8192"
 SQ4X2="D2048 D4096 D8192 Z2048 Z4096"   # Z8192 at 4x2 does not fit in 64 GB (README, Memory)
+run_suites() {
 for s in $suites; do
     case $s in
     smoke)         one smoke 1 8 0 D2048; one smoke 1 8 0 Z2048; one smoke 4 2 0 UM160; one smoke 4 2 0 RK160 ;;
@@ -139,7 +157,17 @@ for s in $suites; do
     sustain)       sus D8192; sus Z8192 ;;
     g3-1x8-s8192|g3-1x8-s2048|g3-4x2-s8192|g3-4x2-s2048)
         case $s in g3-1x8-*) np=1 vl=8 cs="$SQ $QE" ;; *) np=4 vl=2 cs="$SQ4X2 $QE" ;; esac
-        for c in $cs; do one "$s" "$np" "$vl" 0 "$c" SPLIT_NOREG=1 AB_STAGING_MB="${s##*-s}" SPLIT_ROUNDS=6 SPLIT_REPS=2 AB_TRACE= AB_REPORT=; done ;;
+        for c in $cs; do one "$s" "$np" "$vl" 0 "$c" SPLIT_NOREG=1 AB_STAGING_MB="${s##*-s}" SPLIT_ROUNDS="$g3_rounds" SPLIT_REPS=2 AB_TRACE= AB_REPORT=; done ;;
     *)             echo "unknown suite: $s" >&2; exit 2 ;;
     esac
 done
+}
+run_suites   # listing: unknown suites and SPLIT_CASES names stop here, before the power checks
+set -f   # names, not patterns
+for c in $cases; do
+    case "$seen" in *" $c "*) ;; *) echo "SPLIT_CASES: no case $c in the suites:$suites" >&2; exit 2 ;; esac
+done
+set +f
+power_ok "before the first case" || exit 75
+listing=
+run_suites

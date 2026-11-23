@@ -714,12 +714,16 @@ dispatch-table-check:
 # their rows keep the evidence rules, after the rules' own self-test on made-up
 # tables (part of ci-local and CI; it warns when src/ changed since a table's
 # library commit).
-.PHONY: split-table split-table-check
+.PHONY: split-table split-table-check split-tools-check
 split-table:
 	python3 scripts/ingest_split.py --regenerate
 
 split-table-check:
 	@python3 scripts/ingest_split.py --self-test && python3 scripts/ingest_split.py --regenerate --check && echo "✓ split-table-check: src/split_table.h matches benchmarks/split/tables/"
+
+# The split benchmarks' analysis scripts against the code they read (no GPU, no scipy needed).
+split-tools-check:
+	@python3 -B -I benchmarks/split/fit_shares.py --self-test && python3 -B -I benchmarks/split/g3.py --self-test && echo "✓ split-tools-check: fit_shares.py and g3.py self-tests pass"
 
 # QE call-mix replay, see "Replay" in benchmarks/qe/README.md; test-replay is not in `make test`.
 $(BUILD)/replay: benchmarks/replay.c $(SRC)/blas_trans.h $(SRC)/dispatch.h $(PROF_H) tests/test_blas_check.h lib | $(BUILD)
@@ -884,7 +888,7 @@ build-check: $(BUILD)/fft_metal_src.h | $(BUILD)/check
 # test_qe_golden (its TEST_QE_GOLDEN line says PASS, or SKIP on another device).
 # The report is written only after every binary passed, so TEST_PASSED =
 # TEST_TOTAL and TEST_FAILED = 0.
-ci-local: version-check dispatch-table-check split-table-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_range_guard $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_staging $(BUILD)/test_blas2 $(BUILD)/test_fft $(BUILD)/test_strassen $(BUILD)/test_split $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
+ci-local: version-check dispatch-table-check split-table-check split-tools-check $(BUILD)/test_precision $(BUILD)/test_correctness $(BUILD)/test_chaos $(BUILD)/test_device_api $(BUILD)/test_dispatch $(BUILD)/test_range_guard $(BUILD)/test_blas_abi $(BUILD)/test_trace $(BUILD)/test_qe_golden $(BUILD)/test_staging $(BUILD)/test_blas2 $(BUILD)/test_fft $(BUILD)/test_strassen $(BUILD)/test_split $(BUILD)/test_convergence test-ghost-detection test-symbols test-fortran
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════════════"
 	@echo "CI Local Validation"

@@ -64,5 +64,8 @@ jobs:
     - name: Built-in split tables match their filed evidence
       run: make split-table-check
 
+    - name: Split benchmark scripts' self-tests
+      run: make split-tools-check
+
     - name: Range guard stage-2 tests (no GPU)
       run: make build/test_range_guard && ./build/test_range_guard

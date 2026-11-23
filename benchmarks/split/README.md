@@ -148,15 +148,17 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
   and an `AB_TRACE` file per process.
 - **G3 suites** (`g3-1x8-s8192`, `g3-1x8-s2048`, `g3-4x2-s8192`, `g3-4x2-s2048`, or `g3` for all four;
   not in the default run): the six squares and the seven QE-shaped cases of the 2026-10-28 results with
-  copied operands (`SPLIT_NOREG=1`), at 1×8 and at 4×2, with `AB_STAGING_MB` 8192 and 2048, so that
-  the library's seam and the user split meet the staged path's copies and a small pool. Design section
-  12's 20 cases are those results' rows (the squares at 1×8, the QE shapes at 4×2 and at 1×8); the
-  squares at 4×2 are extra. Each runs 6 rounds of 2 repeats (`SPLIT_ROUNDS=6 SPLIT_REPS=2`): the trio's
-  order is balanced over the 6 rounds, and rounds are the unit of `g3.py`'s reading (b). They run with `AB_TRACE` and `AB_REPORT`
-  off: those profile the user split's GPU slices (`ab_[dz]gemm_blas` takes the profiler's lock and
-  writes a trace line per call) but not the seam, which the library does not profile, so with them on
-  the comparison would lean towards the seam. `raw.tsv` has the seam's timeline either way. `ZGEMM
-  8192²` is not run at 4×2 (see Memory). `g3.py` reads the results.
+  copied operands (`SPLIT_NOREG=1`), at 1×8 and at 4×2, with `AB_STAGING_MB` 8192 and 2048, so that the
+  library's seam and the user split meet the staged path's copies and a small pool. Design section 12's
+  20 cases are those results' rows (the squares at 1×8, the QE shapes at 4×2 and at 1×8); the squares at
+  4×2 are extra. Each runs 6 rounds of 2 repeats (`SPLIT_ROUNDS=6 SPLIT_REPS=2`): the trio's order is
+  balanced over the 6 rounds, and rounds are the unit of `g3.py`'s reading (c), G3's. `SPLIT_G3_ROUNDS`
+  sets another multiple of 6, and `SPLIT_CASES` runs only the cases it names, for a rerun (G3 by row,
+  below). They run with `AB_TRACE` and `AB_REPORT` off: those profile the user split's GPU slices
+  (`ab_[dz]gemm_blas` takes the profiler's lock and writes a trace line per call) but not the seam,
+  which the library does not profile, so with them on the comparison would lean towards the seam.
+  `raw.tsv` has the seam's timeline either way. `ZGEMM 8192²` is not run at 4×2 (see Memory). `g3.py`
+  reads the results.
 - **Machine:** run on an otherwise idle Mac on AC power, from an adapter of at least 90 W
   (`SPLIT_MIN_W`), with the battery at 95% or more (`SPLIT_MIN_BATT`) and neither charging nor finishing
   its charge, as the AB_SPLIT pilot required. The script checks all three at the start and before each
@@ -221,28 +223,29 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 | `classify_trace.py <dir>` | every traced GPU call as staged path, host path or fallback, by shape, with median stage times |
 | `power.py <dir>/<case>.np<N>.d<data> ...` | wall power by run of consecutive calls, trimming SMC's ~1 s lag. With the arms the trio alternates call by call and forms no runs, so only Accelerate, the GPU, `HEAD` and `TAIL` get figures; for the split's use `SPLIT_ARMS=0`, `power4x2` or the sustained runs |
 | `fit_shares.py --table T <run> ...` | the next share of each row of the split table `T`, from the `AB_REPORT` lines of runs made with it (those whose headers carry `T`'s digest), each row's first split call per process left out (its GPU part from the first whose tail ran) (design section 8's rule; `--cut` shows whether a share moves the cut; details in its docstring) |
-| `g3.py <dir> ... [--tsv FILE]` | G3 per case and layout: `SEAM` ÷ `S<g>` and `S<g>b` ÷ `S<g>` paired by (round, repeat) with BCa and Hodges-Lehmann intervals, G3's three readings (below), the outside load (flagged over 1.5 cores or a GPU busy fraction of 0.05, or with a round not measured, or from a report older than `load_unmeasured`), and the seam's timeline beside the user split's parts. Verdicts go only to rows under G3's conditions and protocol; reports run.sh set aside or whose power fails run.sh's conditions are left out and listed. The docstring has the details. A verdict needs scipy (`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3` on the M2 Max; see below) |
+| `g3.py <dir> ... [--tsv FILE]` | G3 per case and layout: `SEAM` ÷ `S<g>` and `S<g>b` ÷ `S<g>` paired by (round, repeat) with BCa and Hodges-Lehmann intervals, three readings (below; (c) is G3's), G3 by row over a run and its reruns (each row's runs in the order run.sh finished them) with each open row's run.sh command, the outside load (flagged over 1.5 cores or a GPU busy fraction of 0.05, or with a round not measured, or from a report older than `load_unmeasured`), and the seam's timeline beside the user split's parts. Verdicts go only to rows under G3's conditions and protocol; reports run.sh set aside or whose power fails run.sh's conditions are left out and listed. The docstring has the details. A verdict needs scipy (`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3` on the M2 Max; see below) |
 
-## G3's three readings
+## G3's readings
 
 Design section 12's G3 line reads "upper bound over max(1.03, null spread): fix first", and does not
-define the null spread. `g3.py` prints three readings for every G3 row; choosing among them, or
-another, is a gate-line decision for Grant.
+define the null spread. `g3.py` prints three readings for every G3 row. Grant chose (c) on 2026-11-22,
+before the G3 run (the smoke runs below checked the instrument); (a) and (b) are printed for
+comparison.
 
-- **(a) As designed:** the upper bound of `SEAM` ÷ `S<g>` against max(1.03, the upper bound of
-  `S<g>b` ÷ `S<g>`), both two-sided 95% intervals over the (round, repeat) pairs (BCa, with the
+- **(a) As designed, not chosen:** the upper bound of `SEAM` ÷ `S<g>` against max(1.03, the upper
+  bound of `S<g>b` ÷ `S<g>`), both two-sided 95% intervals over the (round, repeat) pairs (BCa, with the
   Hodges-Lehmann interval as a check); above it, "fix first". The pairs of one round share its
   position and state, so they are not independent, and the threshold is itself a random upper bound:
   when the user split is noisy against itself, the verdict is close to a coin flip.
-- **(b) Proposed, needs Grant:** rounds as the unit, as Grant chose for G5. Per round, the mean over
+- **(b) Proposed, not chosen:** rounds as the unit, as Grant chose for G5. Per round, the mean over
   its repeats of log(`SEAM` ÷ `S<g>`) and of log(`S<g>b` ÷ `S<g>`); over the rounds a one-sided 95% t
   upper bound on each mean. "pass" if the seam's bound is 1.03 or less; else "inconclusive: add
   rounds" if the null's own bound is above 1.03; else "fix first". Noise can still give "fix first"
   here, when the seam's bound passes 1.03 by chance and the null's does not, but less often than (a).
   It never says "fix first" while the null's bound is above 1.03, however slow the seam.
-- **(c) Recommended, not decided:** the same per-round t bounds, the seam's alone, per row. "pass" if
-  the seam's upper bound is 1.03 or less; else "fix first" if its one-sided 95% lower bound is above
-  1.00 (the seam is slower than the user split); else "inconclusive: add rounds".
+- **(c) G3's reading:** the same per-round t bounds, the seam's alone, per row. "pass" if the seam's
+  upper bound is 1.03 or less; else "fix first" if its one-sided 95% lower bound is above 1.00 (the
+  seam is slower than the user split); else "inconclusive: add rounds".
 
 Each row also gives the seam's one-sided lower bound and the null spread by round: the sd of the
 null's per-round mean log ratios and the range of its per-round ratios.
@@ -258,9 +261,9 @@ The null check is at 95% per row. An instrument that is fine still fails it by c
 (3.0-8.5% over the simulation's 48 lines, 4.8% on average); such a row is rerun, and a fine rerun
 fails again by chance 5% of the time. Over a run's 50 G3 rows at least one fails by chance with
 probability 1 - 0.95^50 = 92%, and about 2.5 are expected, so a full G3 run should plan for two or
-three reruns. Whether to keep this level is Grant's choice (see Still for Grant, below).
+three reruns. Grant kept this level on 2026-11-22 (see Decided, below).
 
-`g3.py --simulate --sims 400 --resamples 999` models the readings and the null check's withholding,
+`g3.py --simulate --sims 400 --resamples 999 --rule-sims 0` models the readings and the null check's withholding,
 for a seam exactly as fast as the user split (where "fix first" is a false alarm) and for one 5%, 10%
 and 20% slower, at G3's 6 rounds of 2 repeats. Each call's log time has noise of sd 1-5%, and each arm
 in each round an offset of sd 0-2% (a round by arm effect, as position and drift give). Per line it
@@ -309,19 +312,72 @@ and a GPU busy fraction of 0.13-0.17, which `g3.py` flags). At 0.03 and 6 rounds
 bound sits about 2.5% above its mean (t = 2.015 over 6 rounds), so a null mean of 1.005 already puts it
 past 1.03: that is why (b) so often says "inconclusive" at that noise.
 
-### Still for Grant
+### Decided, 2026-11-22, before the G3 run
 
-`g3.py` prints its readings and withholds verdicts as above. These choices it leaves open:
-
-- **The reading:** (a) as designed, (b) proposed, (c) recommended, or another.
-- **The null check's level:** per row at 95%, as now: a failed row is rerun, and a chance repeat is
-  5%; over a run's 50 rows, 92% of runs fail at least one row by chance. Or a family-wise level over
-  the run's rows: Bonferroni over 50 rows puts each row's two-sided interval at 99.9%, so about 5% of
-  runs (4.9%) fail a row by chance, but at 6 rounds that interval is 2.7 times as wide (t = 6.87
-  against 2.57) and lets a larger instrument fault through. `g3.py` keeps 95% per row until Grant
-  chooses.
-- **"fix first" per row or over the run:** at (c)'s false-alarm rate of 2-5% per row, 50 rows of a
-  seam as fast as the user split still expect about 1-2.5 false "fix first"; a family rule would trade
-  some detection for fewer.
+- **The reading:** (c), Grant's choice.
+- **The null check's level:** 95% per row, Grant's choice: a row whose null fails is rerun.
+  Bonferroni over 50 rows (99.9% per row, 4.9% of runs failing a row by chance) was not chosen: at 6
+  rounds its interval is 2.7 times as wide (t = 6.87 against 2.57) and lets a larger instrument fault
+  through.
 - **The outside-load limits:** 1.5 cores, the AB_SPLIT pilot's, and a GPU busy fraction of 0.05, set
-  on the round-2 smoke runs (`--max-fcpu`, `--max-gpu-busy`).
+  on the round-2 smoke runs (`--max-fcpu`, `--max-gpu-busy`), Grant's choice.
+- **"fix first" confirmed by a rerun; inconclusive rows rerun at 12 rounds, then Grant's call:**
+  proposed with these, for Grant to confirm; `g3.py` applies them until he decides. A row read "fix
+  first" is rerun at the same rounds, and "fix first" stands only when two runs in a row with a verdict
+  read it. A single reading would give 0.9-2.7 false
+  "fix first" rows in a 50-row run of a seam as fast as the user split at 2-5% call noise ((c)'s
+  1.9-5.3% of rows with a verdict, above). With the rerun, and the 12-round reruns of inconclusive rows
+  (G3 by row, below), a false one stands on 0.01-0.37% of rows at that noise, and 0.6-17% of 50-row runs
+  show one (7-10% on the lines whose spread by round matches the quiet smoke runs). A seam 5% slower
+  ends at "fix first" on 82-100% of rows, 10% or 20% slower on 100.00%. A family rule over the run's rows
+  was not chosen: Bonferroni over 50 rows puts the one-sided t at 6 rounds at 5.89 against 2.02, so at
+  3% noise the seam's mean would have to be 7.5% above the user split's, instead of 2.5%, before its
+  lower bound clears 1.00 (from those quantiles, not simulated).
+
+### G3 by row
+
+`g3.py` reads a G3 run and its reruns together, given in any order: it orders each row's runs by the
+time `run.sh` logged the case as finished (the `power.log` beside each report). Its docstring has the
+rules (the last three proposed, pending Grant; see Decided, above): the last run with a verdict decides; "fix first" needs two in a row; a withheld row (flagged,
+null failed, or its report left out for power) is rerun at its rounds, an inconclusive one at 12
+rounds; and a row still inconclusive at 12 is Grant's call. G3 reads "fix first" when a row's "fix
+first" stands, "pass" when all 50 rows pass (13 cases at 1×8 and 12 at 4×2, each at 2048 and 8192 MB),
+and "open" otherwise, with the build the reports name; runs of two builds give no verdict, nor does a
+build named `-dirty` or `unknown`, which does not tell its source. The table prints each open row's
+command, for example:
+
+```bash
+SPLIT_CASES=UM160 SPLIT_G3_ROUNDS=12 benchmarks/split/run.sh /path/to/g3-rerun1 g3-4x2-s2048
+```
+
+```bash
+/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 benchmarks/split/g3.py /path/to/g3 /path/to/g3-rerun1
+```
+
+`g3.py --simulate --sims 0 --rule-sims 100000` runs simulated rows through the same rules, from a first
+run at 6 rounds, with the noise model above (14 minutes on the M2 Max). Shares of rows over 100,000 rows
+per line (run 2026-11-22; the run has every combination; these lines are at 2-5% call noise, and at 1%
+a seam as fast as the user split passes on 98.65-100.00% of rows, one 5% slower ends at "fix first" on
+99.80-100.00%):
+
+| true SEAM/S | call noise sd | round x arm sd | pass | fix first | inconclusive at 12: Grant's call | runs per row | 50 rows: some row fix first | 50 rows: reruns |
+|---|---|---|---|---|---|---|---|---|
+| 1.00 | 0.02 | 0.00 | 99.99% | 0.01% | 0.00% | 1.13 | 0.6% | 6.5 |
+| 1.00 | 0.02 | 0.02 | 95.66% | 0.21% | 4.13% | 1.54 | 9.9% | 27.2 |
+| 1.00 | 0.03 | 0.00 | 98.74% | 0.14% | 1.12% | 1.42 | 7.0% | 21.0 |
+| 1.00 | 0.03 | 0.01 | 96.94% | 0.19% | 2.88% | 1.51 | 8.9% | 25.5 |
+| 1.00 | 0.03 | 0.02 | 88.73% | 0.28% | 10.99% | 1.68 | 13.0% | 34.1 |
+| 1.00 | 0.05 | 0.00 | 76.75% | 0.37% | 22.88% | 1.80 | 17.0% | 40.2 |
+| 1.00 | 0.05 | 0.02 | 67.08% | 0.35% | 32.57% | 1.87 | 16.1% | 43.4 |
+| 1.05 | 0.02 | 0.02 | 0.36% | 99.59% | 0.05% | 2.38 | 100.0% | 69.1 |
+| 1.05 | 0.03 | 0.01 | 0.29% | 99.70% | 0.01% | 2.33 | 100.0% | 66.5 |
+| 1.05 | 0.05 | 0.02 | 1.49% | 82.30% | 16.20% | 2.97 | 100.0% | 98.4 |
+| 1.10 | 0.05 | 0.02 | 0.00% | 100.00% | 0.00% | 2.21 | 100.0% | 60.7 |
+| 1.20 | 0.05 | 0.02 | 0.00% | 100.00% | 0.00% | 2.11 | 100.0% | 55.3 |
+
+A G3 run of a seam as fast as the user split should plan for reruns. On the lines whose spread by round,
+sqrt(call noise² + 2 × round-by-arm sd²), is within the quiet smoke runs' 0.028-0.038, there are 21-27
+reruns per 50 rows, most of them at 12 rounds, since (c) leaves 31-43% of those lines' rows with a
+verdict inconclusive at 6 rounds; 1.1-4.1% of rows (0.6-2.1 of 50) are still inconclusive at 12 rounds
+and go to Grant. At 5% call noise those become 40-43 reruns and 23-33% of rows. `make split-tools-check`
+runs `g3.py --self-test`, which checks run.sh's G3 suites and the rules on fixed inputs.
