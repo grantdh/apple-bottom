@@ -76,7 +76,8 @@ layout:
   than that count (unknown, not 0), is flagged. The GPU limit, 0.05, is set on this measure: 0.000-0.005 per round in
   the quiet round-2 smoke runs, 0.12-0.17 with another session's GPU work.
 - The seam's timeline per call, summarised over every process's SEAM calls, median [min-max] in ms:
-  init (thread created - cut) and start (GPU part's start - thread created), beside the user split's
+  init (GPU part handed over - cut) and start (GPU part's start - handed over: the split worker's
+  wake-up, a thread's start in runs before the worker), beside the user split's
   GPU start (its GPU thread's start after the call's); the CPU part and the GPU part, each beside the
   user split's; the wait for the GPU (join - CPU part's end) beside the user split's; after the join
   (the K axis's sum or a redo); and the GPU part's submit (commit to GPUStartTime), GPU execution

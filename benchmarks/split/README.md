@@ -42,9 +42,13 @@ same call through its seam (`SEAM`, below), which `AB_SPLIT` uses inside `dgemm_
 - **Arms** (the fixed block, at the split's GPU part g, each with as many repeats per round as the
   split; `SPLIT_ARMS=0` leaves them out):
   - `SEAM`: the library's split of the same call through its seam (`ab_internal_dgemm_split` /
-    `ab_internal_zgemm_split` in `src/split_slice.h`): staged path, free completion order, a thread
-    per call, and on K a partial product allocated per call. Each call's outcome and timeline
-    (`ab_internal_last_split`) go to `raw.tsv`.
+    `ab_internal_zgemm_split` in `src/split_slice.h`): staged path, free completion order, the GPU
+    part on the library's split worker (one thread per process, started by its first split and parked
+    between calls, as the user split's GPU thread is; a call that finds it held makes a thread of its
+    own), and on K a partial product allocated per call. Each call's outcome and timeline
+    (`ab_internal_last_split`) go to `raw.tsv`. bench_split runs on a library at 98e8db4 or earlier
+    (G3 of 2026-11-22, the attribution of 2026-11-26) made a thread per call; do not pool their `SEAM`
+    rows with later runs.
   - `S<g>b`: a second user-code split, identical to `S<g>`, so the user split can be timed against
     itself (G3's null run).
   - `HEAD`: the CPU slice alone, on the calling thread.
@@ -78,8 +82,8 @@ same call through its seam (`SEAM`, below), which `AB_SPLIT` uses inside `dgemm_
   part of C that `HEAD` and `TAIL` write against the user split's (their first call after the user
   split's first, so from round 1).
 - **GPU thread per call (attribution):** `SPLIT_GPU_FRESH=1` runs the user split's GPU slice (in `S<g>`,
-  `S<g>b` and `TAIL`) on a thread made for each call, as the seam does, instead of on the one GPU thread
-  each process makes at its start; the completion-order checks keep the latter. SUMMARY reports it
+  `S<g>b` and `TAIL`) on a thread made for each call, as the seam did before its split worker (library
+  98e8db4 and earlier), instead of on the one GPU thread each process makes at its start; the completion-order checks keep the latter. SUMMARY reports it
   (`gpu_fresh=1`), and `g3.py` gives such runs no G3 verdict.
 - **Fixed share:** `SPLIT_G=<g>` skips the sweep and runs the fixed block at GPU part g. `SPLIT_F=<f>`
   does the same at the GPU part the library would cut at share f (`ab_split_cut` in `src/split_slice.h`,
@@ -192,7 +196,7 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 | file | content |
 |---|---|
 | `<case>.np<N>.d<data>.out` | the report: sweep table, fixed block, bits, errors, power, then a `SUMMARY` line |
-| `.raw.tsv` | every timed call: process, phase (0 sweep, 1 fixed block, 2 completion order), round, configuration (`cfg` index and `name`: `ACC`, `GPU`, `S<g>`, `S<g>b`, `SEAM`, `HEAD`, `TAIL`), GPU part g, repeat, times in s (`total`, the slices `cpu` and `gpu`, the caller's wait `join`, the GPU slice's start after the call's `wake`, the K axis's sum `kadd`, and the call's `t0`, `t1` on `mach_absolute_time`); for `SEAM` calls also the outcome (`KEPT`, `KEPT_4M`, `RANGE`, `GPU_FAILED`, ...; `-` on other rows), retries, operands in place, and the timeline in ns on the same clock (`at_*`: cut, thread created, CPU part start and end, GPU part start and end, join, end; `gpu_*`: first commit, `GPUStartTime`, `GPUEndTime`, last completion, encode, submit, wake and temporaries times, threadgroups, largest grid, dispatches, command buffers, kernel kinds, Metal error), 0 where a step did not happen |
+| `.raw.tsv` | every timed call: process, phase (0 sweep, 1 fixed block, 2 completion order), round, configuration (`cfg` index and `name`: `ACC`, `GPU`, `S<g>`, `S<g>b`, `SEAM`, `HEAD`, `TAIL`), GPU part g, repeat, times in s (`total`, the slices `cpu` and `gpu`, the caller's wait `join`, the GPU slice's start after the call's `wake`, the K axis's sum `kadd`, and the call's `t0`, `t1` on `mach_absolute_time`); for `SEAM` calls also the outcome (`KEPT`, `KEPT_4M`, `RANGE`, `GPU_FAILED`, ...; `-` on other rows), retries, operands in place, and the timeline in ns on the same clock (`at_*`: cut, GPU part handed to its thread, CPU part start and end, GPU part start and end, join, end; `gpu_*`: first commit, `GPUStartTime`, `GPUEndTime`, last completion, encode, submit, wake and temporaries times, threadgroups, largest grid, dispatches, command buffers, kernel kinds, Metal error), 0 where a step did not happen; `pooled` (on `SEAM` rows, 1 when the GPU part ran on the split worker and 0 when it ran on a thread made for the call or none ran; 0 on other rows, whatever thread ran their GPU slice) |
 | `.power.tsv` | the SMC samples |
 | `.ior.tsv` | IOReport samples (power runs only) |
 | `.rounds.tsv` | per round of the fixed block: its start, the end of its GPU-idle stretch and its end (`t0`, `idle_t1`, `t1`), other processes' CPU in cores over the stretch and the round (`fcpu_idle`, `fcpu_round`), the GPU's busy fraction over the stretch (`gpu_busy_idle`); `nan` where not measured (the stretch without the arms, the GPU without IOReport) |
@@ -215,7 +219,11 @@ benchmarks/split/run.sh /path/to/out sq1x8 qe4x2
 - **Arms in `SUMMARY`:** `seam_ms`, `split2_ms`, `head_ms`, `tail_ms` (lockstep medians), `seam_ratio`
   and `null_ratio` (medians over the (round, repeat) pairs of `SEAM` ÷ `S<g>` and `S<g>b` ÷ `S<g>`),
   `pairs`, `seam_out` (outcome counts), `seam_rep_diff`, `seam_vs_split` (elements of C that differ
-  from the user split's), `split2_rep_diff`, `head_vs_split` and `tail_vs_split` (-1: not compared).
+  from the user split's), `split2_rep_diff`, `head_vs_split` and `tail_vs_split` (-1: not compared),
+  `seam_pooled` (fixed-block `SEAM` calls whose GPU part ran on the split worker / all of them).
+- **Caller's QoS in `SUMMARY`:** `caller_qos` (process 0's calling thread's `qos_class_self()`; 0x15 is
+  `QOS_CLASS_DEFAULT`, the split worker's class). A command-line program's main thread is usually 0x21
+  (`QOS_CLASS_USER_INTERACTIVE`), so its `SEAM` calls lend the worker that class while they wait for it.
 - **Hashes:** `h_split`, `h_gpu` and `h_acc` in `SUMMARY` are this program's own, over the 64-bit words
   of C. Equal hashes across runs or machines mean equal bits. They cannot be compared with `AB_TRACE_HASH`.
 
