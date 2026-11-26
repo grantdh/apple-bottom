@@ -39,7 +39,7 @@ typedef struct {
 // AB_TRACE's t0_ns); 0 for a step that did not happen.
 typedef struct {
     uint64_t cut_ns;            // the attempt began: the cut decided (dgemm_/zgemm_) or the seam called
-    uint64_t create_ns;         // just before the GPU part's thread was created
+    uint64_t create_ns;         // just before the GPU part was handed to its thread (the split worker, or one made for it)
     uint64_t cpu0_ns, cpu1_ns;  // the CPU part's start and end, on the caller
     uint64_t gpu0_ns, gpu1_ns;  // the GPU part's start and end, on its thread
     uint64_t join_ns;           // the join returned

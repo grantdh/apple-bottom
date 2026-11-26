@@ -335,11 +335,12 @@ enum {
                                                      // buffer (commit_and_wait) fails, no other
     AB_PROF_FAIL_REDO_4M,        // redo_4m: every staged ZGEMM's 4M run fails
     AB_PROF_FAIL_SCALES,         // scales: the staged path's line scales read as unlike the host's
-    AB_PROF_FAIL_SPLIT_THREAD,   // split_thread: AB_SPLIT cannot make its thread
+    AB_PROF_FAIL_SPLIT_THREAD,   // split_thread: no thread can run AB_SPLIT's GPU part (its worker held, pthread_create failing)
     AB_PROF_FAIL_SPLIT_SCRATCH,  // split_scratch: AB_SPLIT cannot allocate the K axis's product
-    AB_PROF_FAIL_SPLIT_FPCR,     // split_fpcr: AB_SPLIT's thread runs with flush to zero
+    AB_PROF_FAIL_SPLIT_FPCR,     // split_fpcr: AB_SPLIT's GPU part finds its thread flushing to zero
     AB_PROF_FAIL_SPLIT_POISON,   // split_poison: AB_SPLIT fills the K axis's product with 1.0 once made
     AB_PROF_FAIL_NONFINITE,      // nonfinite: every staged run ends as if its epilogue met a NaN
+    AB_PROF_FAIL_SPLIT_POOL,     // split_pool: AB_SPLIT's worker never starts: each GPU part takes a thread of its own
 };
 
 // AB_HOST_PACK=1 (as the other flags: set, not empty, not starting with 0):

@@ -70,7 +70,6 @@
 #include <unistd.h>
 
 #define CHILD_TIMEOUT_S 120     // a --child still running then is ended by SIGALRM
-#define FORK_WAIT_S     30      // and so is the lines scenario's fork()ed child
 
 static int tests_passed = 0;
 static int tests_failed = 0;

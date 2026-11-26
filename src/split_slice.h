@@ -5,8 +5,9 @@
 //
 // A call the split table covers (dispatch.h) is cut along one axis of
 // length L: Accelerate computes the head [0, L - g) on the calling thread,
-// the GPU the tail [L - g, L) on a thread of its own (blas_wrapper.c). Both
-// parts keep the call's TRANS flags, leading dimensions and alpha:
+// the GPU the tail [L - g, L) on the process's split worker, or on a thread
+// of its own while another call holds it (blas_wrapper.c). Both parts keep
+// the call's TRANS flags, leading dimensions and alpha:
 //   N  C's columns: the GPU's part reads B from column (tb 'N') or row
 //      (otherwise) L - g, and writes C from column L - g; A whole.
 //   M  C's rows: the GPU's part reads A from row (ta 'N') or column L - g,
@@ -110,7 +111,7 @@ typedef enum {
                             // product, or its C, could overflow FP64), or its C held NaN or Inf
     AB_SPLIT_GPU_FAILED,    // ... its run failed: no buffers, a command buffer failed twice,
                             // line scales unlike the host's, Inf or NaN in its epilogue, or
-                            // the worker's floating-point control
+                            // its thread's floating-point control
     AB_SPLIT_DECLINED,      // not split (record.declined says why): the seam made the whole
                             // call on cblas, dgemm_/zgemm_ by their own routing
     AB_SPLIT_NOT_CUT,       // dgemm_/zgemm_: a row with f = 0, or an axis too short to cut;
@@ -135,7 +136,10 @@ typedef struct {
     int retries;        // staged runs repeated after a failed command buffer
     bool retry_kept;    // ... and the repeat stood
     bool scales;        // the GPU part's line scales were not the host's
+    bool pooled;        // the GPU part ran on the process's split worker, not a thread made for it
+    bool lent;          // the caller lent the worker its QoS class while it waited (pooled only)
     int in_place;       // operands the GPU part used in place
+    uint64_t thread;    // the thread that ran the GPU part (pthread_threadid_np); 0 if none ran
     int row;            // the split table's row (dgemm_/zgemm_), -1 for the seam
     char axis;
     int L, g;
@@ -153,5 +157,11 @@ int ab_internal_zgemm_split(const ab_split_forced_t *f, char ta, char tb, int M,
 // The record of this thread's last BLAS-ABI GEMM if it reached the split (the
 // seam, or a call a row covered); false otherwise.
 bool ab_internal_last_split(ab_split_record_t *out);
+
+// The thread id (pthread_threadid_np) of this process's split worker, for
+// tests: 0 before its first split whose tail ran on a thread (either engine),
+// under AB_TEST_FAIL_STAGE=split_pool, and in a child forked after the worker
+// started.
+uint64_t ab_internal_split_worker(void);
 
 #endif // AB_SPLIT_SLICE_H

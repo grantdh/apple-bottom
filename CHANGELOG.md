@@ -37,7 +37,7 @@ All notable changes to this project will be documented in this file.
   The library and `test_dispatch` now link IOKit (a static link adds
   `-framework IOKit`; pkg-config carries it); `test_dispatch` checks
   every built-in table against its own measurements (23 tests, were 9;
-  `test_split` has 12).
+  `test_split` has 13).
 
 - **BLAS-2 on the GPU: DGEMV, ZGEMV (`'N'`, `'T'`, `'C'`) and ZHEMV**
   (`src/blas2.m`, `src/blas2_abi.c`). The kernels read the caller's
@@ -296,6 +296,26 @@ All notable changes to this project will be documented in this file.
   epilogues' bits is in
   [LIMITATIONS.md](docs/vv/LIMITATIONS.md#framing) (hostile audit
   2026-11-10, L7).
+- **`AB_SPLIT` runs its GPU part on one parked thread per process.** Each
+  split made a thread for its GPU part and joined it before returning. The
+  first split whose GPU part runs now starts a thread named
+  `apple-bottom split`, with the application's signals blocked, that waits
+  between calls and runs one call's GPU part at a time. The signals macOS
+  raises on a thread for what it does stay open, as on libdispatch's
+  threads: a fault's or trap's (SIGILL, SIGTRAP, SIGEMT, SIGFPE, SIGBUS,
+  SIGSEGV, SIGSYS), since blocked, a bad read there is retried forever at
+  full CPU on macOS 27, and the profiling timer's tick (SIGPROF). SIGPIPE,
+  which libdispatch also opens, stays blocked: macOS sends it to the
+  process, not the writer. A call that finds the worker held by another,
+  or cannot start it, makes a thread of its own as before (now with the
+  same mask); no call waits for it. A child forked after it started has
+  none, and its splits make their own threads. G3 (2026-11-26, M2 Max)
+  found the seam about 2% slower than the user-code split of
+  `benchmarks/bench_split.c`, whose GPU thread lives for the process, on
+  UM1000 at 1x8. Measured the same day at 1x8 with 12 alternating pairs,
+  the thread per call cost the seam 2.4% on UM1000 and 1.3% on UN1000, and
+  with the user split's GPU part on a thread per call too
+  (`SPLIT_GPU_FRESH=1`) the gap closed. Results are bitwise unchanged.
 
 ### Fixed
 - **`ab_dtrsm` and `ab_dgesv_mpir` no longer ignore a failed GPU step.**

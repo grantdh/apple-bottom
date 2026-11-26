@@ -84,7 +84,6 @@ void ab_prof_dump(FILE *out);
 #define MIN_GPU_DIM     32      // AB_DISPATCH_DEFAULT_MIN_DIM in dispatch.h
 #define OLD_MAX_DIM     46340   // v1.3 per-dimension limit, now a per-matrix one
 #define CASE_TIMEOUT_S  120
-#define FORK_WAIT_S     30      // a fork()ed child still running then is ended by SIGALRM
 
 #define LONG_K_BOUND    8.0     // long-K error bound, units of u² (U2, see gen_long_k)
 #define N_THREADS       8

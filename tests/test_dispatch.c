@@ -1675,7 +1675,7 @@ static void test_split_builtin_matches_evidence(void) {
 // AB_SPLIT: the slices on Accelerate (the seam, engine 1)
 // =============================================================================
 // The library's executor cuts a call and runs both parts on cblas, the tail
-// on its own thread, in each completion order. C must be bitwise the two
+// on the split worker, in each completion order. C must be bitwise the two
 // parts made one after the other by cblas on slices this file works out
 // itself (the K axis: the head into C, the tail into a scratch product added
 // in FP64), with A, B and C's padding untouched.

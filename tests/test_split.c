@@ -17,6 +17,8 @@
 //   determinism  repeats, after other shapes, registered and misaligned
 //                memory, under background load, 8 threads each splitting
 //   registered   in place on the N axis, never C on the M axis
+//   worker       one split worker runs every GPU part; callers that find it
+//                held run theirs on threads of their own, with the same bits
 // and dgemm_/zgemm_ under AB_SPLIT in child processes (test_spawn.h) with a
 // split table covering the calls of TCALLS: AB_SPLIT unset, empty and 0
 // alike, AB_MODE=cpu, every AB_TEST_FAIL_STAGE failure, AB_HOST_PACK,
@@ -40,17 +42,21 @@
 #include "test_spawn.h"
 #include <Accelerate/Accelerate.h>
 #include <complex.h>
+#include <libproc.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
+#include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <malloc/malloc.h>
 #include <math.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -145,10 +151,11 @@ static void free_operands(Operands *o) {
     free(o->C0);
 }
 
-// The seam on the call c with A, B and C at the given element offsets.
-static int seam(const Call *c, char axis, int g, int order, int M, int N, int K, const Operands *o,
+// The seam on the call c by engine (0 the staged path, 1 cblas) with A, B and C
+// at the given element offsets.
+static int seam(const Call *c, char axis, int g, int order, int engine, int M, int N, int K, const Operands *o,
                 size_t a, size_t b, double *C, int ldC) {
-    ab_split_forced_t f = {axis, g, order, 0};
+    ab_split_forced_t f = {axis, g, order, engine};
     if (c->r == 'z')
         return ab_internal_zgemm_split(&f, c->ta, c->tb, M, N, K, CMPLX(c->alpha[0], c->alpha[1]),
                                        (const double complex *)o->A + a, o->ldA,
@@ -209,20 +216,20 @@ static bool compose_reference(const Call *c, char axis, int g, const Operands *o
     int got_h, got_t;
     if (axis == 'N') {
         size_t cut = (size_t)(c->N - g);
-        got_h = cut ? seam(c, 'N', 0, 0, c->M, (int)cut, c->K, o, 0, 0, ref, o->ldC) : AB_SPLIT_CPU;
-        got_t = seam(c, 'N', g, 0, c->M, g, c->K, o, 0, nb ? cut * o->ldB : cut, ref + w * cut * o->ldC,
+        got_h = cut ? seam(c, 'N', 0, 0, 0, c->M, (int)cut, c->K, o, 0, 0, ref, o->ldC) : AB_SPLIT_CPU;
+        got_t = seam(c, 'N', g, 0, 0, c->M, g, c->K, o, 0, nb ? cut * o->ldB : cut, ref + w * cut * o->ldC,
                      o->ldC);
     } else if (axis == 'M') {
         size_t cut = (size_t)(c->M - g);
-        got_h = cut ? seam(c, 'M', 0, 0, (int)cut, c->N, c->K, o, 0, 0, ref, o->ldC) : AB_SPLIT_CPU;
-        got_t = seam(c, 'M', g, 0, g, c->N, c->K, o, na ? cut : cut * o->ldA, 0, ref + w * cut, o->ldC);
+        got_h = cut ? seam(c, 'M', 0, 0, 0, (int)cut, c->N, c->K, o, 0, 0, ref, o->ldC) : AB_SPLIT_CPU;
+        got_t = seam(c, 'M', g, 0, 0, g, c->N, c->K, o, na ? cut : cut * o->ldA, 0, ref + w * cut, o->ldC);
     } else {
         size_t cut = (size_t)(c->K - g);
-        got_h = seam(c, 'K', 0, 0, c->M, c->N, (int)cut, o, 0, 0, ref, o->ldC);
+        got_h = seam(c, 'K', 0, 0, 0, c->M, c->N, (int)cut, o, 0, 0, ref, o->ldC);
         Call t = *c;
         t.beta[0] = t.beta[1] = 0.0;
         double *P = calloc(w * (size_t)c->M * c->N, sizeof *P);
-        got_t = seam(&t, 'N', c->N, 0, c->M, c->N, g, o, na ? cut * o->ldA : cut, nb ? cut : cut * o->ldB,
+        got_t = seam(&t, 'N', c->N, 0, 0, c->M, c->N, g, o, na ? cut * o->ldA : cut, nb ? cut : cut * o->ldB,
                      P, c->M);
         for (int j = 0; j < c->N; j++)
             for (size_t i = 0; i < w * (size_t)c->M; i++) ref[w * (size_t)j * o->ldC + i] += P[w * (size_t)j * c->M + i];
@@ -244,7 +251,7 @@ static void compose_case(const Call *c, char axis, int g) {
     if (compose_reference(c, axis, g, &o, ref)) {
         for (int order = 0; order < 3; order++) {
             memcpy(C, o.C0, o.nC * sizeof *C);
-            int got = seam(c, axis, g, order, c->M, c->N, c->K, &o, 0, 0, C, o.ldC);
+            int got = seam(c, axis, g, order, 0, c->M, c->N, c->K, &o, 0, 0, C, o.ldC);
             ab_split_record_t rec;
             check(kept(got) && ab_internal_last_split(&rec) && rec.outcome == got && rec.axis == axis &&
                   rec.g == g, "%s order %d: outcome %d", call_text(c, axis, g), order, got);
@@ -271,6 +278,9 @@ static const char AXES[] = "NMK";
 
 #define ONE {1, 0}
 #define ZERO {0, 0}
+
+// The call the split worker's tests split (T13 and its children).
+static const Call WORKER_CALL = {'d', 'N', 'N', 300, 260, 200, 0, ONE, ZERO};
 
 // T4: the composition on every axis, routine and TRANS pair, scalar set and
 // a range of cuts, with ragged leading dimensions.
@@ -386,7 +396,7 @@ static void accuracy_case(const Call *c, char axis, int g, bool nan_c) {
             for (int i = 0; i < o.w * c->M; i++) o.C0[(size_t)j * o.w * o.ldC + i] = NAN;
     double *C = malloc(o.nC * sizeof *C);
     memcpy(C, o.C0, o.nC * sizeof *C);
-    int got = seam(c, axis, g, 0, c->M, c->N, c->K, &o, 0, 0, C, o.ldC);
+    int got = seam(c, axis, g, 0, 0, c->M, c->N, c->K, &o, 0, 0, C, o.ldC);
     Layout la = {o.rA, o.cA, o.ldA}, lb = {o.rB, o.cB, o.ldB}, lc = {c->M, c->N, o.ldC};
     double complex al = CMPLX(c->alpha[0], c->alpha[1]), be = CMPLX(c->beta[0], c->beta[1]);
     double err = blas_error(c->r == 'z', c->ta, c->tb, c->M, c->N, c->K, al, be, o.A, la, o.B, lb, o.C0,
@@ -459,7 +469,7 @@ static void test_split_accuracy(void) {
             double *C = malloc(o.nC * sizeof *C);
             memcpy(C, o.C0, o.nC * sizeof *C);
             int L = *axis == 'N' ? c.N : *axis == 'M' ? c.M : c.K;
-            int got = seam(&c, *axis, L / 2, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
+            int got = seam(&c, *axis, L / 2, 0, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
             Layout la = {o.rA, o.cA, o.ldA}, lb = {o.rB, o.cB, o.ldB}, lc = {c.M, c.N, o.ldC};
             double err = blas_error(z, 'N', 'N', c.M, c.N, c.K, 1.0, 1.0, o.A, la, o.B, lb, o.C0, lc, C);
             check(kept(got) && err <= TOL, "cancellation %c axis %c: outcome %d error %.2e", c.r, *axis, got,
@@ -513,7 +523,7 @@ static void test_split_exponent_range(void) {
                     double *C = malloc(o.nC * sizeof *C), *ref = malloc(o.nC * sizeof *ref);
                     memcpy(C, o.C0, o.nC * sizeof *C);
                     memcpy(ref, o.C0, o.nC * sizeof *ref);
-                    int got = seam(&c, *axis, g, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
+                    int got = seam(&c, *axis, g, 0, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
                     const char *text = call_text(&c, *axis, g);
                     if (what != PLANT_SCALE && tail_side) {
                         // the tail goes to Accelerate: the cblas parts, P not added on K
@@ -564,7 +574,7 @@ static void test_split_exponent_range(void) {
             double *C = malloc(o.nC * sizeof *C), *ref = malloc(o.nC * sizeof *ref);
             memcpy(C, o.C0, o.nC * sizeof *C);
             memcpy(ref, o.C0, o.nC * sizeof *ref);
-            int got = seam(&c, 'N', g, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
+            int got = seam(&c, 'N', g, 0, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
             ab_split_record_t rec;
             bool same;
             if (head) {
@@ -600,7 +610,7 @@ static void test_split_exponent_range(void) {
             double *C = malloc(o.nC * sizeof *C), *ref = malloc(o.nC * sizeof *ref);
             memcpy(C, o.C0, o.nC * sizeof *C);
             memcpy(ref, o.C0, o.nC * sizeof *ref);
-            int got = seam(s, *axis, 128, 0, s->M, s->N, s->K, &o, 0, 0, C, o.ldC);
+            int got = seam(s, *axis, 128, 0, 0, s->M, s->N, s->K, &o, 0, 0, C, o.ldC);
             parts_reference(s, *axis, 128, &o, ref);
             check(got == AB_SPLIT_RANGE && !memcmp(C, ref, o.nC * sizeof *C), "%s, NaN in the tail: outcome %d, %s",
                   call_text(s, *axis, 128), got, memcmp(C, ref, o.nC * sizeof *C) ? "not the cblas parts" : "parts");
@@ -624,7 +634,7 @@ static void test_split_exponent_range(void) {
     size_t bytes = 0;
     for (int k = 0; k < 6; k++) {
         memcpy(Cr, ro.C0, ro.nC * sizeof *Cr);
-        int out = seam(&r, 'N', 64, 0, r.M, r.N, r.K, &ro, 0, 0, Cr, ro.ldC);
+        int out = seam(&r, 'N', 64, 0, 0, r.M, r.N, r.K, &ro, 0, 0, Cr, ro.ldC);
         check(out == AB_SPLIT_RANGE, "refused tail %d: outcome %d", k, out);
         if (k == 1) bytes = ab_internal_stage_pool_bytes();
         if (k > 1) check(ab_internal_stage_pool_bytes() == bytes, "the pool grew to %zu bytes over refused tails",
@@ -635,27 +645,49 @@ static void test_split_exponent_range(void) {
     finish();
 }
 
-// One reference hash of c cut at g, and the split's own, nruns times.
-static uint64_t split_hash(const Call *c, char axis, int g, const Operands *o, double *C, int order) {
+// The hash of C after c cut at g in `order` by `engine` (seam), from o's C;
+// 0 unless the staged path kept the GPU's part (engine 0) or cblas made both
+// (engine 1, AB_SPLIT_CPU).
+static uint64_t split_hash(const Call *c, char axis, int g, const Operands *o, double *C, int order, int engine) {
     memcpy(C, o->C0, o->nC * sizeof *C);
-    int got = seam(c, axis, g, order, c->M, c->N, c->K, o, 0, 0, C, o->ldC);
-    return kept(got) ? hash_doubles(C, o->nC) : 0;
+    int got = seam(c, axis, g, order, engine, c->M, c->N, c->K, o, 0, 0, C, o->ldC);
+    return (engine ? got == AB_SPLIT_CPU : kept(got)) ? hash_doubles(C, o->nC) : 0;
 }
 
+static uint64_t self_tid(void) {
+    uint64_t t = 0;
+    pthread_threadid_np(NULL, &t);
+    return t;
+}
+
+// n splits (one if n < 2) of c cut at g on axis in `order` (seam, engine 0)
+// on a thread of its own, at QoS class qos (QOS_CLASS_UNSPECIFIED: as made),
+// once *go is set (NULL: at once): the thread's id, the last split's hash
+// and record, and how many splits lent the split worker the thread's class.
 typedef struct {
     const Call *c;
     const Operands *o;
     char axis;
-    int g;
-    uint64_t hash;
+    int g, order, n;
+    qos_class_t qos;
     atomic_int *go;
+    uint64_t tid, hash;
+    ab_split_record_t rec;
+    int lent;
 } SplitThread;
 
 static void *split_thread(void *arg) {
     SplitThread *t = arg;
+    if (t->qos != QOS_CLASS_UNSPECIFIED) pthread_set_qos_class_self_np(t->qos, 0);
+    t->tid = self_tid();
     double *C = malloc(t->o->nC * sizeof *C);
-    while (!atomic_load(t->go)) {}
-    t->hash = split_hash(t->c, t->axis, t->g, t->o, C, 0);
+    while (t->go && !atomic_load(t->go)) {}
+    int k = 0;
+    do {
+        t->hash = split_hash(t->c, t->axis, t->g, t->o, C, t->order, 0);
+        ab_internal_last_split(&t->rec);
+        t->lent += t->rec.lent;
+    } while (++k < t->n);
     free(C);
     return NULL;
 }
@@ -667,6 +699,41 @@ static void *busy_thread(void *arg) {
     while (!atomic_load(&g_load_stop)) x = x * 1.0000001 + 1e-9;
     (void)arg;
     return NULL;
+}
+
+// The CPU time thread tid of this process has used, in ns; UINT64_MAX if unknown.
+static uint64_t thread_cpu_ns(uint64_t tid) {
+    struct proc_threadinfo ti;
+    return proc_pidinfo(getpid(), PROC_PIDTHREADID64INFO, tid, &ti, sizeof ti) == (int)sizeof ti
+               ? ti.pth_user_time + ti.pth_system_time
+               : UINT64_MAX;
+}
+
+// The send right this task holds on thread tid, with one user reference of
+// its own (to mach_port_deallocate); MACH_PORT_NULL if no thread has that id.
+static mach_port_t thread_port(uint64_t tid) {
+    thread_act_array_t th;
+    mach_msg_type_number_t n;
+    mach_port_t found = MACH_PORT_NULL;
+    if (task_threads(mach_task_self(), &th, &n) != KERN_SUCCESS) return MACH_PORT_NULL;
+    for (mach_msg_type_number_t i = 0; i < n; i++) {
+        thread_identifier_info_data_t id;
+        mach_msg_type_number_t count = THREAD_IDENTIFIER_INFO_COUNT;
+        if (found == MACH_PORT_NULL &&
+            thread_info(th[i], THREAD_IDENTIFIER_INFO, (thread_info_t)&id, &count) == KERN_SUCCESS &&
+            id.thread_id == tid)
+            found = th[i];
+        else
+            mach_port_deallocate(mach_task_self(), th[i]);
+    }
+    vm_deallocate(mach_task_self(), (vm_address_t)th, n * sizeof *th);
+    return found;
+}
+
+// The user references of the send right p (0 if unknown).
+static mach_port_urefs_t send_refs(mach_port_t p) {
+    mach_port_urefs_t r = 0;
+    return mach_port_get_refs(mach_task_self(), p, MACH_PORT_RIGHT_SEND, &r) == KERN_SUCCESS ? r : 0;
 }
 
 // T7 (in this process): the bits repeat whatever ran before, on registered
@@ -683,23 +750,23 @@ static void test_split_determinism(void) {
         const Call *c = &QE[i];
         Operands o = operands(c);
         double *C = malloc(o.nC * sizeof *C);
-        uint64_t h0 = split_hash(c, AX[i], G[i], &o, C, 0);
+        uint64_t h0 = split_hash(c, AX[i], G[i], &o, C, 0, 0);
         check(h0 != 0, "%s: not kept", call_text(c, AX[i], G[i]));
         for (int r = 0; r < 3; r++)
-            check(split_hash(c, AX[i], G[i], &o, C, r % 3) == h0, "%s: repeat %d differs", call_text(c, AX[i], G[i]), r);
+            check(split_hash(c, AX[i], G[i], &o, C, r % 3, 0) == h0, "%s: repeat %d differs", call_text(c, AX[i], G[i]), r);
         // after other shapes, larger and smaller
         Call other = {'z', 'N', 'N', 2000, 700, 300, 0, ONE, ZERO};
         Operands oo = operands(&other);
         double *Co = malloc(oo.nC * sizeof *Co);
-        split_hash(&other, 'N', 320, &oo, Co, 0);
+        split_hash(&other, 'N', 320, &oo, Co, 0, 0);
         free(Co);
         free_operands(&oo);
-        check(split_hash(c, AX[i], G[i], &o, C, 0) == h0, "%s: differs after another shape", call_text(c, AX[i], G[i]));
+        check(split_hash(c, AX[i], G[i], &o, C, 0, 0) == h0, "%s: differs after another shape", call_text(c, AX[i], G[i]));
         // under background load
         atomic_store(&g_load_stop, 0);
         pthread_t busy[8];
         for (int b = 0; b < 8; b++) pthread_create(&busy[b], NULL, busy_thread, NULL);
-        check(split_hash(c, AX[i], G[i], &o, C, 0) == h0, "%s: differs under load", call_text(c, AX[i], G[i]));
+        check(split_hash(c, AX[i], G[i], &o, C, 0, 0) == h0, "%s: differs under load", call_text(c, AX[i], G[i]));
         atomic_store(&g_load_stop, 1);
         for (int b = 0; b < 8; b++) pthread_join(busy[b], NULL);
         // 8 threads each splitting the same call into its own C
@@ -707,7 +774,7 @@ static void test_split_determinism(void) {
         SplitThread t[8];
         pthread_t tid[8];
         for (int k = 0; k < 8; k++) {
-            t[k] = (SplitThread){c, &o, AX[i], G[i], 0, &go};
+            t[k] = (SplitThread){.c = c, .o = &o, .axis = AX[i], .g = G[i], .go = &go};
             pthread_create(&tid[k], NULL, split_thread, &t[k]);
         }
         atomic_store(&go, 1);
@@ -727,11 +794,11 @@ static void test_split_determinism(void) {
             r.A = A + off;
             r.B = B + off;
             r.C0 = o.C0;
-            uint64_t here = split_hash(c, AX[i], G[i], &r, Cr + off, 0);
+            uint64_t here = split_hash(c, AX[i], G[i], &r, Cr + off, 0, 0);
             bool reg = ab_register_host_memory(A, bA) == AB_OK && ab_register_host_memory(B, bB) == AB_OK &&
                        ab_register_host_memory(Cr, bC) == AB_OK;
             check(reg && here != 0, "registering the operands");
-            check(split_hash(c, AX[i], G[i], &r, Cr + off, 0) == here, "%s: differs on %s registered memory",
+            check(split_hash(c, AX[i], G[i], &r, Cr + off, 0, 0) == here, "%s: differs on %s registered memory",
                   call_text(c, AX[i], G[i]), misalign ? "misaligned" : "aligned");
             ab_unregister_host_memory(A);
             ab_unregister_host_memory(B);
@@ -741,6 +808,108 @@ static void test_split_determinism(void) {
         free(C);
         free_operands(&o);
     }
+    finish();
+}
+
+// T13 (in this process): one split worker runs every GPU part this process
+// splits, in every order and on both engines, its timeline whole; callers
+// that find it held run theirs on threads of their own with the same bits,
+// and it is given back; a caller above its class lends it its own while it
+// waits and ends the loan, one below does not; parked, it uses no CPU. In
+// children, on the worker and (split_pool) on a thread of its own: a
+// cancellation pending through a split acts only after it, the worker blocks
+// a signal sent to it alone but not one raised on it, a signal the
+// application has blocked on its threads after a split goes to its sigwait,
+// not to the library's thread, and a bad read on the GPU's part faults on the
+// tail's thread.
+static void test_split_worker(void) {
+    const Call *c = &WORKER_CALL;
+    Operands o = operands(c);
+    double *C = malloc(o.nC * sizeof *C);
+    ab_split_record_t rec;
+    uint64_t h0 = split_hash(c, 'N', 128, &o, C, 0, 0);
+    ab_internal_last_split(&rec);
+    const uint64_t W = rec.thread;
+    check(h0 && W && W != self_tid() && W == ab_internal_split_worker(),
+          "first split: kept %d, thread %llu, worker %llu", h0 != 0, (unsigned long long)W,
+          (unsigned long long)ab_internal_split_worker());
+    for (int k = 0; k < 12; k++) {   // 6 on the staged path, 6 on cblas (engine 1), orders 0, 1, 2
+        const int order = k % 3, engine = k >= 6;
+        uint64_t h = split_hash(c, 'N', 128, &o, C, order, engine);
+        ab_internal_last_split(&rec);
+        const bool as_expected = engine ? h != 0 : h == h0;
+        const char *fault = engine ? NULL : times_fault(&rec.times, order);
+        check(as_expected && rec.thread == W && !fault,
+              "split %d (engine %d, order %d): as expected %d, on %s, timeline %s", k, engine, order, as_expected,
+              rec.thread == W ? "the worker" : "another thread", fault ? fault : "whole");
+    }
+    // 8 callers at once: those that find the worker held run on threads of their own
+    atomic_int go = 0;
+    SplitThread r[8];
+    pthread_t t[8];
+    for (int k = 0; k < 8; k++) {
+        r[k] = (SplitThread){.c = c, .o = &o, .axis = 'N', .g = 128, .go = &go};
+        pthread_create(&t[k], NULL, split_thread, &r[k]);
+    }
+    atomic_store(&go, 1);
+    int npooled = 0;
+    for (int k = 0; k < 8; k++) pthread_join(t[k], NULL);
+    for (int k = 0; k < 8; k++) {
+        const uint64_t th = r[k].rec.thread;
+        npooled += th == W;
+        check(r[k].hash == h0 && th && th != r[k].tid,
+              "caller %d of 8: same bits %d, thread %llu (the caller %llu, the worker %llu)", k, r[k].hash == h0,
+              (unsigned long long)th, (unsigned long long)r[k].tid, (unsigned long long)W);
+    }
+    // the callers spin on go and overlap the worker's hold: one at least finds it held
+    check(npooled >= 1 && npooled < 8, "8 callers: %d of 8 on the worker (none %s)", npooled,
+          npooled ? "on a thread of its own" : "on the idle worker");
+    split_hash(c, 'N', 128, &o, C, 0, 0);
+    ab_internal_last_split(&rec);
+    check(rec.thread == W, "after 8 callers: the worker not given back");
+    // a caller above the worker's class (QOS_CLASS_DEFAULT) lends it its own
+    // while it waits, one below does not
+    const qos_class_t Q[] = {QOS_CLASS_UTILITY, QOS_CLASS_USER_INITIATED};
+    for (int k = 0; k < 2; k++) {
+        SplitThread q = {.c = c, .o = &o, .axis = 'N', .g = 128, .order = 2, .qos = Q[k]};
+        pthread_t th;
+        pthread_create(&th, NULL, split_thread, &q);
+        pthread_join(th, NULL);
+        check(q.hash == h0 && q.rec.thread == W && q.rec.lent == (Q[k] > QOS_CLASS_DEFAULT),
+              "caller at QoS %#x: on the worker %d, lent %d", (unsigned)Q[k], q.rec.thread == W, q.rec.lent);
+    }
+    // every loan ends: each one open holds a reference to the worker's thread port
+    mach_port_t wp = thread_port(W);
+    mach_port_urefs_t refs0 = send_refs(wp);
+    SplitThread lr = {.c = c, .o = &o, .axis = 'N', .g = 128, .qos = QOS_CLASS_USER_INITIATED, .n = 20};
+    pthread_t lt;
+    pthread_create(&lt, NULL, split_thread, &lr);
+    pthread_join(lt, NULL);
+    mach_port_urefs_t refs1 = send_refs(wp);
+    check(wp != MACH_PORT_NULL && refs0 && lr.lent == lr.n && refs1 == refs0,
+          "20 loans: %d lent, the worker's port references %u before, %u after", lr.lent, refs0, refs1);
+    if (wp != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), wp);
+    // parked: no CPU
+    uint64_t u0 = thread_cpu_ns(W);
+    usleep(50000);
+    uint64_t u1 = thread_cpu_ns(W);
+    check(u0 != UINT64_MAX && u1 != UINT64_MAX && u1 - u0 < 1000000,
+          "the parked worker used %llu ns of CPU in 50 ms", (unsigned long long)(u1 - u0));
+    // the children, each judging its own conditions (child_cancel, child_sigwait, child_fault)
+    const char *const plain[] = {NULL}, *const no_pool[] = {"AB_TEST_FAIL_STAGE=split_pool", NULL};
+    const char *const CHILDREN[] = {"cancel", "sigwait", "fault"};
+    for (size_t k = 0; k < 2 * TEST_REGISTRY_SIZE(CHILDREN); k++) {
+        const bool off = k & 1;
+        int status, ok = -1, pooled = -1;
+        char *out = run_child(CHILDREN[k / 2], off ? no_pool : plain, &status);
+        const char *l = out ? strstr(out, "worker_child ") : NULL;
+        if (l) sscanf(l, "worker_child ok %d pooled %d", &ok, &pooled);
+        check(status == 0 && ok == 1 && pooled == !off, "%s child%s: status %d, output: %.300s", CHILDREN[k / 2],
+              off ? " (split_pool)" : "", status, out ? out : "");
+        free(out);
+    }
+    free(C);
+    free_operands(&o);
     finish();
 }
 
@@ -763,7 +932,7 @@ static void test_split_registered_c(void) {
     for (int m = 0; m < 2; m++) {
         char axis = m ? 'M' : 'N';
         memcpy(C, o.C0, o.nC * sizeof *C);
-        int got = seam(&c, axis, 128, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
+        int got = seam(&c, axis, 128, 0, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
         ab_split_record_t rec;
         int in_place = -1;
         bool staged = ab_internal_last_staged(&in_place);
@@ -794,7 +963,7 @@ static void test_split_caller_fpcr(void) {
     __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
     fz = fpcr | 1ULL << 24;
     __asm__ volatile("msr fpcr, %0" : : "r"(fz));
-    got = seam(&c, 'N', 128, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
+    got = seam(&c, 'N', 128, 0, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
     __asm__ volatile("msr fpcr, %0" : : "r"(fpcr));
     ab_split_record_t rec;
     check(got == AB_SPLIT_DECLINED && ab_internal_last_split(&rec) && rec.declined == 3 /* fpcr */,
@@ -880,8 +1049,13 @@ static void abi_call(const Call *c, const Operands *o, double *C) {
 
 // Child: each call of TCALLS twice; a line per call: its index, both
 // hashes, the split record (outcome -1 without one), the path and the error
-// against cblas. Then the GPU's GEMM count and the split table's source.
+// against cblas. Then the GPU's GEMM count and the split table's source, and
+// a line on the threads that ran the first runs' GPU parts: whether the
+// process has a split worker, the GPU parts, those on the worker and the
+// distinct threads.
 static void child_calls(void) {
+    uint64_t seen[N_TCALLS];            // the threads that ran the first runs' GPU parts
+    int tails = 0, pooled = 0, threads = 0;
     for (int i = 0; i < N_TCALLS; i++) {
         Operands o = tcall_operands(i);
         double *C = malloc(o.nC * sizeof *C);
@@ -901,24 +1075,52 @@ static void child_calls(void) {
         printf("call %d %016llx %016llx %d %d %d %d %d %d %d %s %.3e\n", i, (unsigned long long)h[0],
                (unsigned long long)h[1], rec.outcome, rec.declined, rec.staged, rec.retries, rec.retry_kept,
                rec.scales, (int)rec.times.gpu.mtl_error, ab_get_last_dispatch_path(), err);
+        if (rec.thread) {
+            tails++;
+            pooled += rec.pooled;
+            int k = 0;
+            while (k < threads && seen[k] != rec.thread) k++;
+            if (k == threads) seen[threads++] = rec.thread;
+        }
         free(C);
         free_operands(&o);
     }
     printf("gpu_gemms %llu\nsource %s\n", (unsigned long long)gpu_gemm_count(), ab_split_source());
+    printf("split_worker %d tails %d pooled %d threads %d\n", ab_internal_split_worker() != 0, tails, pooled, threads);
+}
+
+// A small engine-1 split (cblas on both parts, at test_blas_abi's fork shape,
+// which Accelerate runs in a fork()ed child): its hash (split_hash) and record.
+static uint64_t fork_split(ab_split_record_t *rec) {
+    static const Call c = {'d', 'N', 'N', 96, 80, 72, 0, ONE, ZERO};
+    g_seed = 0xF02CULL;
+    Operands o = operands(&c);
+    double *C = malloc(o.nC * sizeof *C);
+    uint64_t h = split_hash(&c, 'N', 32, &o, C, 0, 1);
+    ab_internal_last_split(rec);
+    free(C);
+    free_operands(&o);
+    return h;
 }
 
 // Child: the first call, then fork(); the forked child makes it again
 // (declined: no Metal context there, so cblas's whole call), checks its
-// bits and ends with _exit or exit.
+// bits and ends with _exit or exit. Before the fork the parent splits a
+// small call on cblas (engine 1) on its split worker; the forked child,
+// which has no worker, splits it on a thread of its own with the same bits.
 static int child_fork(bool use_exit) {
     Operands o = tcall_operands(0);
     double *C = malloc(o.nC * sizeof *C), *ref = malloc(o.nC * sizeof *ref);
     memcpy(C, o.C0, o.nC * sizeof *C);
     abi_call(&TCALLS[0].c, &o, C);
     printf("parent path %s\n", ab_get_last_dispatch_path());
+    ab_split_record_t pr = {0};
+    uint64_t eh = fork_split(&pr);
+    printf("parent pooled %d\n", pr.pooled);
     fflush(stdout);
     pid_t pid = fork();
     if (pid == 0) {
+        alarm(FORK_WAIT_S);   // fork() cleared the alarm: a tail handed to a worker the child lacks fails, not hangs
         memcpy(C, o.C0, o.nC * sizeof *C);
         memcpy(ref, o.C0, o.nC * sizeof *ref);
         abi_call(&TCALLS[0].c, &o, C);
@@ -928,6 +1130,11 @@ static int child_fork(bool use_exit) {
         ab_internal_last_split(&rec);
         printf("forked outcome %d declined %d same %d path %s\n", rec.outcome, rec.declined,
                !memcmp(C, ref, o.nC * sizeof *C), ab_get_last_dispatch_path());
+        fflush(stdout);
+        ab_split_record_t fr = {0};
+        uint64_t fh = fork_split(&fr);
+        printf("forked pooled %d same %d worker %llu\n", fr.pooled, eh && fh == eh,
+               (unsigned long long)ab_internal_split_worker());
         fflush(stdout);
         if (use_exit) exit(0);
         _exit(0);
@@ -1012,12 +1219,175 @@ static void child_k_refused(void) {
         double *C = malloc(o.nC * sizeof *C), *ref = malloc(o.nC * sizeof *ref);
         memcpy(C, o.C0, o.nC * sizeof *C);
         memcpy(ref, o.C0, o.nC * sizeof *ref);
-        int got = seam(&c, 'K', 1024, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
+        int got = seam(&c, 'K', 1024, 0, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
         parts_reference(&c, 'K', 1024, &o, ref);
         printf("k_refused %c %d %d\n", c.r, got, !memcmp(C, ref, o.nC * sizeof *C));
         free(C); free(ref);
         free_operands(&o);
     }
+}
+
+// Child: a split on a thread whose cancellation is pending throughout (set
+// before the split, acted on at pthread_testcancel after it), between one on
+// the main thread and another. One line: ok if that thread was cancelled
+// after it finished its split, all three splits have the same bits and the
+// last ran where the cancelled one did (on the worker unless split_pool), and
+// whether the cancelled one ran on the worker. No cancellation point lies
+// between pthread_cancel and the split's own pthread_setcancelstate
+// (gpu_ready, staged_why, part_stage_begin and dispatch_semaphore_create are
+// none).
+typedef struct {
+    const Operands *o;
+    uint64_t hash;
+    atomic_int done;
+    ab_split_record_t rec;
+} CancelRun;
+
+static void *cancel_run(void *arg) {
+    CancelRun *r = arg;
+    double *C = malloc(r->o->nC * sizeof *C);
+    pthread_cleanup_push(free, C);
+    pthread_cancel(pthread_self());
+    r->hash = split_hash(&WORKER_CALL, 'N', 128, r->o, C, 1, 0);
+    ab_internal_last_split(&r->rec);
+    atomic_store(&r->done, 1);
+    pthread_testcancel();
+    pthread_cleanup_pop(1);
+    return NULL;
+}
+
+static void child_cancel(void) {
+    Operands o = operands(&WORKER_CALL);
+    double *C = malloc(o.nC * sizeof *C);
+    uint64_t h0 = split_hash(&WORKER_CALL, 'N', 128, &o, C, 1, 0);
+    CancelRun r = {.o = &o};
+    pthread_t t;
+    void *ret = NULL;
+    if (pthread_create(&t, NULL, cancel_run, &r) == 0) pthread_join(t, &ret);
+    uint64_t h1 = split_hash(&WORKER_CALL, 'N', 128, &o, C, 1, 0);
+    ab_split_record_t after = {0};
+    ab_internal_last_split(&after);
+    bool ok = ret == PTHREAD_CANCELED && atomic_load(&r.done) && h0 && r.hash == h0 && h1 == h0 &&
+              after.pooled == r.rec.pooled;
+    printf("worker_child ok %d pooled %d\n", ok, r.rec.pooled);
+    free(C);
+    free_operands(&o);
+}
+
+// child_sigwait's split: as asked (AB_SPLIT_CPU) and, on the worker, with the
+// mask worker_mask_ok requires; and whether it ran on the worker.
+typedef struct { bool split, pooled; } SigwaitSplit;
+
+// The thread that ran worker_mask_ok's handler for each signal, by number.
+static _Atomic uint64_t probe_tid[NSIG];
+
+static void probe_handler(int sig) { atomic_store(&probe_tid[sig], self_tid()); }
+
+// Whether the worker W blocks the application's signals and opens its own,
+// by signals sent to it alone (pthread_kill), so no other thread can take
+// them: SIGUSR1, and SIGPIPE (which macOS sends a writer's process, not the
+// writer), must stay pending there; SIGSEGV and SIGPROF must run their
+// handlers there (which also shows a signal sent this way does arrive). Each
+// handler runs once (SA_RESETHAND), so a real fault later still ends the child.
+static bool worker_mask_ok(uint64_t W) {
+    mach_port_t port = thread_port(W);
+    if (port == MACH_PORT_NULL) return false;
+    pthread_t pw = pthread_from_mach_thread_np(port);
+    mach_port_deallocate(mach_task_self(), port);
+    if (!pw) return false;
+    static const int SENT[] = {SIGUSR1, SIGPIPE, SIGSEGV, SIGPROF};
+    const struct sigaction sa = {.sa_handler = probe_handler, .sa_flags = SA_RESETHAND};
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(SENT); i++) sigaction(SENT[i], &sa, NULL);
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(SENT); i++) pthread_kill(pw, SENT[i]);
+    for (int i = 0; i < 1000 && !(atomic_load(&probe_tid[SIGSEGV]) && atomic_load(&probe_tid[SIGPROF])); i++)
+        usleep(1000);
+    usleep(20000);   // SIGUSR1 and SIGPIPE, were they open, arrive with the others
+    return atomic_load(&probe_tid[SIGSEGV]) == W && atomic_load(&probe_tid[SIGPROF]) == W &&
+           !atomic_load(&probe_tid[SIGUSR1]) && !atomic_load(&probe_tid[SIGPIPE]);
+}
+
+static void *sigwait_run(void *arg) {
+    const SigwaitSplit *w = arg;
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, SIGTERM);
+    int got = 0;
+    bool took = sigwait(&s, &got) == 0 && got == SIGTERM;
+    printf("worker_child ok %d pooled %d\n", w->split && took, w->pooled);
+    fflush(stdout);
+    _exit(0);
+}
+
+// Child: one engine-1 split, the worker's mask (worker_mask_ok, when it ran
+// there), then the sigwait pattern: SIGTERM blocked on the application's
+// threads, one of them taking it in sigwait. A thread of the library's that
+// left it unblocked could take it instead, and its default action would end
+// the child; which thread the kernel picks is not fixed, so the mask probe is
+// the check that always sees it. One line: ok if the split went as asked, the
+// mask holds and sigwait took SIGTERM, and whether the split ran on the worker.
+static void child_sigwait(void) {
+    Operands o = operands(&WORKER_CALL);
+    double *C = malloc(o.nC * sizeof *C);
+    ab_split_record_t rec = {0};
+    SigwaitSplit w = {.split = split_hash(&WORKER_CALL, 'N', 128, &o, C, 0, 1) != 0};
+    ab_internal_last_split(&rec);
+    w.pooled = rec.pooled;
+    w.split = w.split && (!w.pooled || worker_mask_ok(rec.thread));
+    free(C);
+    free_operands(&o);
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, SIGTERM);
+    pthread_sigmask(SIG_BLOCK, &s, NULL);
+    pthread_t t;
+    if (pthread_create(&t, NULL, sigwait_run, &w) != 0) return;
+    kill(getpid(), SIGTERM);   // pending on the process until sigwait takes it
+    sleep(5);
+    printf("worker_child ok 0 pooled %d (sigwait never returned)\n", w.pooled);
+}
+
+// child_fault's bound: its fault comes on the GPU part's first read of B,
+// milliseconds after the split before it has set Metal up.
+#define FAULT_WAIT_S 5
+
+static void fault_handler(int sig) {
+    (void)sig;
+    const char *m = pthread_main_np() ? "worker_child ok 0 pooled 0 (the fault reached the caller)\n"
+                  : self_tid() == ab_internal_split_worker() ? "worker_child ok 1 pooled 1\n"
+                                                             : "worker_child ok 1 pooled 0\n";
+    write(STDOUT_FILENO, m, strlen(m));
+    _exit(0);
+}
+
+// Child (on the main thread): one split that starts the worker, then one
+// whose GPU part reads memory the caller has made inaccessible (B's columns
+// from N - 128 on, the GPU's on the N axis, from a page boundary on), the
+// GPU's part first. The read must fault on the tail's thread as on any other;
+// with the fault signals blocked there it would be retried forever, and
+// alarm(FAULT_WAIT_S) ends the child. One line, from the SIGBUS/SIGSEGV
+// handler: ok if the fault reached the tail's thread, not the caller, and
+// whether that was the worker (ab_internal_split_worker() is 0 without one).
+static void child_fault(void) {
+    const Call *c = &WORKER_CALL;
+    Operands o = operands(c);
+    double *C = malloc(o.nC * sizeof *C);
+    split_hash(c, 'N', 128, &o, C, 2, 0);
+    const size_t page = (size_t)getpagesize(), head = (size_t)o.ldB * (c->N - 128) * sizeof(double);
+    const size_t lead = (page - head % page) % page;
+    const size_t len = (lead + o.nB * sizeof(double) + page - 1) & ~(page - 1);
+    char *map = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (map == MAP_FAILED) return;
+    Operands f = o;
+    f.B = (double *)(map + lead);
+    memcpy(f.B, o.B, o.nB * sizeof(double));
+    if (mprotect(map + lead + head, len - lead - head, PROT_NONE)) return;
+    const struct sigaction sa = {.sa_handler = fault_handler};
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGSEGV, &sa, NULL);
+    alarm(FAULT_WAIT_S);
+    memcpy(C, o.C0, o.nC * sizeof *C);
+    int got = seam(c, 'N', 128, 2, 0, c->M, c->N, c->K, &f, 0, 0, C, o.ldC);
+    printf("worker_child ok 0 pooled 0 (no fault: outcome %d)\n", got);
 }
 
 // Child: the bytes in use after 50 more split calls (10 rounds of TCALLS'
@@ -1090,6 +1460,9 @@ static int child_main(const char *scenario) {
     else if (!strcmp(scenario, "k_refused")) child_k_refused();
     else if (!strcmp(scenario, "trace_ticks")) child_trace_ticks();
     else if (!strcmp(scenario, "range_first")) child_range_first();
+    else if (!strcmp(scenario, "cancel")) child_cancel();
+    else if (!strcmp(scenario, "sigwait")) child_sigwait();
+    else if (!strcmp(scenario, "fault")) child_fault();
     else printf("unknown scenario %s\n", scenario);
     fflush(stdout);
     return 0;
@@ -1116,9 +1489,16 @@ typedef struct {
     double err;
 } CallLine;
 
+// What a child's split_worker line says (child_calls).
+typedef struct { int worker, tails, pooled, threads; } WorkerLine;
+
+// A child's call lines, its GPU GEMM count, its split table's source and, if
+// w is not NULL, its split_worker line; false if a call line or the
+// split_worker line asked for is missing.
 static bool parse_calls(const char *out, CallLine lines[N_TCALLS], uint64_t *gpu_gemms, char *source,
-                        size_t source_len) {
+                        size_t source_len, WorkerLine *w) {
     int seen = 0;
+    bool worker = false;
     for (const char *p = out; p && *p; p = strchr(p, '\n') ? strchr(p, '\n') + 1 : NULL) {
         int i;
         unsigned long long h0, h1, gg;
@@ -1135,9 +1515,12 @@ static bool parse_calls(const char *out, CallLine lines[N_TCALLS], uint64_t *gpu
             *gpu_gemms = gg;
         } else if (sscanf(p, "source %255s", src) == 1) {
             snprintf(source, source_len, "%s", src);
+        } else if (w && sscanf(p, "split_worker %d tails %d pooled %d threads %d", &w->worker, &w->tails, &w->pooled,
+                               &w->threads) == 4) {
+            worker = true;
         }
     }
-    return seen == (1 << N_TCALLS) - 1;
+    return seen == (1 << N_TCALLS) - 1 && (!w || worker);
 }
 
 // The parent's references for call i: cblas's whole call, the cblas parts,
@@ -1192,6 +1575,8 @@ static const Scenario SCENARIOS[] = {
     {"scales", {"AB_TEST_FAIL_STAGE=scales"}, AB_SPLIT_GPU_FAILED, REF_PARTS, -1, 6, 0, 1},
     {"split_thread", {"AB_TEST_FAIL_STAGE=split_thread"}, AB_SPLIT_DECLINED, REF_WHOLE, 6 /* thread */, ANY,
      ANY, ANY},
+    // the worker off: each GPU part on a thread of its own, with the worker's outcomes and bits
+    {"split_pool", {"AB_TEST_FAIL_STAGE=split_pool"}, AB_SPLIT_KEPT, REF_SPLIT, -1, ANY, 0, 0},
     {"split_fpcr", {"AB_TEST_FAIL_STAGE=split_fpcr"}, AB_SPLIT_GPU_FAILED, REF_PARTS, -1, 3 /* fpcr */, 0, 0},
     // a NaN the GPU made of finite data (T and C layouts, a DGEMM reading C): gpu_failed, not range
     {"nonfinite", {"AB_TEST_FAIL_STAGE=nonfinite"}, AB_SPLIT_GPU_FAILED, REF_PARTS, -1, 7 /* nonfinite */, 0, 0},
@@ -1201,14 +1586,26 @@ static const Scenario SCENARIOS[] = {
     {"min_gpu_dim", {"AB_MIN_GPU_DIM=0"}, AB_SPLIT_KEPT, REF_SPLIT, -1, ANY, 0, 0},
 };
 
+// A child's GPU parts all on its one split worker, or with the worker off
+// (AB_TEST_FAIL_STAGE=split_pool) each on a thread of its own; no worker
+// where no GPU part ran (AB_SPLIT unset, split_thread, host_pack, cpu).
+static void check_worker(const char *name, const WorkerLine *w, bool off) {
+    bool ok = off || !w->tails ? !w->worker && w->pooled == 0 && w->threads == w->tails
+                               : w->worker && w->pooled == w->tails && w->threads == 1;
+    check(ok, "%s: worker %d, %d GPU parts, %d pooled, on %d threads", name, w->worker, w->tails, w->pooled,
+          w->threads);
+}
+
 // Checks one child's call lines against what the scenario expects.
 static void check_calls(const Scenario *s, const char *out, int status) {
     CallLine l[N_TCALLS];
     uint64_t gpu_gemms = UINT64_MAX;
     char source[256] = "";
-    if (!check(status == 0 && parse_calls(out, l, &gpu_gemms, source, sizeof source),
+    WorkerLine w;
+    if (!check(status == 0 && parse_calls(out, l, &gpu_gemms, source, sizeof source, &w),
                "scenario %s: child status %d, output: %.300s", s->name, status, out ? out : ""))
         return;
+    check_worker(s->name, &w, !strcmp(s->name, "split_pool"));
     for (int i = 0; i < N_TCALLS; i++) {
         const Refs *r = refs(i);
         check(l[i].h[0] == l[i].h[1], "scenario %s call %d: the two runs differ", s->name, i);
@@ -1282,8 +1679,10 @@ static void test_split_scenarios(void) {
         CallLine l[N_TCALLS];
         uint64_t gg;
         char source[256];
-        if (check(status == 0 && parse_calls(out, l, &gg, source, sizeof source), "%s: child output %.300s",
-                  ONE_HIT[k].fail, out ? out : ""))
+        WorkerLine w;
+        if (check(status == 0 && parse_calls(out, l, &gg, source, sizeof source, &w), "%s: child output %.300s",
+                  ONE_HIT[k].fail, out ? out : "")) {
+            check_worker(ONE_HIT[k].fail, &w, false);
             for (int i = 0; i < N_TCALLS; i++) {
                 if (!cut_call(i)) continue;
                 const Refs *r = refs(i);
@@ -1299,6 +1698,7 @@ static void test_split_scenarios(void) {
                       ONE_HIT[k].fail, i, l[i].outcome, want, l[i].declined, l[i].retries, l[i].retry_kept,
                       l[i].h[0] == ref ? "has" : "does not have");
             }
+        }
         free(out);
     }
     finish();
@@ -1317,8 +1717,8 @@ static const char *split_field(const char *s, const char *const *fields) {
 }
 
 // T3: AB_SPLIT unset, empty and 0 alike: every call on its own route (the
-// whole call on cblas under auto here), no record, and no AB_SPLIT field in
-// the reports or the trace.
+// whole call on cblas under auto here), no record, no split worker started,
+// and no AB_SPLIT field in the reports or the trace.
 static void test_split_off(void) {
     char trace[PATH_MAX + 16], trace_env[PATH_MAX + 32];
     snprintf(trace, sizeof trace, "%s/off", g_dir);
@@ -1336,7 +1736,8 @@ static void test_split_off(void) {
         CallLine l[N_TCALLS];
         uint64_t gg;
         char source[256] = "";
-        if (check(status == 0 && parse_calls(out, l, &gg, source, sizeof source), "AB_SPLIT %s: output %.300s",
+        WorkerLine w;
+        if (check(status == 0 && parse_calls(out, l, &gg, source, sizeof source, &w), "AB_SPLIT %s: output %.300s",
                   settings[k] ? settings[k] : "unset", out ? out : "")) {
             for (int i = 0; i < N_TCALLS; i++) {
                 check(l[i].outcome == -1 && l[i].h[0] == refs(i)->whole && strcmp(l[i].path, "split"),
@@ -1347,6 +1748,7 @@ static void test_split_off(void) {
             }
             check(!strcmp(source, "off"), "ab_split_source() is %s with AB_SPLIT %s", source,
                   settings[k] ? settings[k] : "unset");
+            check_worker(settings[k] ? settings[k] : "AB_SPLIT unset", &w, false);
             const char *field = split_field(out, REPORT_FIELDS);
             check(!field, "AB_SPLIT %s: the reports carry %s", settings[k] ? settings[k] : "unset", field);
         }
@@ -1389,7 +1791,7 @@ static void test_split_veclib(void) {
             CallLine l[N_TCALLS];
             uint64_t gg;
             char source[256];
-            if (check(status == 0 && parse_calls(out, l, &gg, source, sizeof source), "%s: output %.300s",
+            if (check(status == 0 && parse_calls(out, l, &gg, source, sizeof source, NULL), "%s: output %.300s",
                       settings[k], out ? out : ""))
                 for (int i = 0; i < N_TCALLS; i++) {
                     h[run][i] = l[i].h[0];
@@ -1405,7 +1807,9 @@ static void test_split_veclib(void) {
 }
 
 // T8: fork() after a split call: the forked child is declined (no Metal
-// context), gets cblas's bits, and ends with _exit and with exit.
+// context), gets cblas's bits, and ends with _exit and with exit; its
+// engine-1 split runs on a thread of its own (the child has no split worker)
+// with the bits of the parent's, which ran on the parent's worker.
 static void test_split_fork(void) {
     char table_env[PATH_MAX + 64];
     const char *env[16];
@@ -1420,10 +1824,18 @@ static void test_split_fork(void) {
         if (f) sscanf(f, "forked outcome %d declined %d same %d path %15s", &outcome, &declined, &same, path);
         const char *s = out ? strstr(out, "forked status") : NULL;
         if (s) sscanf(s, "forked status %d", &fstatus);
+        int pp = -1, fp = -1, fs = -1;
+        unsigned long long fw = ULLONG_MAX;
+        const char *pl = out ? strstr(out, "parent pooled") : NULL;
+        if (pl) sscanf(pl, "parent pooled %d", &pp);
+        const char *fl = out ? strstr(out, "forked pooled") : NULL;
+        if (fl) sscanf(fl, "forked pooled %d same %d worker %llu", &fp, &fs, &fw);
         check(status == 0 && out && strstr(out, "parent path split") && outcome == AB_SPLIT_DECLINED &&
               declined == 0 /* no_device */ && same && !strcmp(path, "cpu") && fstatus == 0,
               "%s: status %d, forked outcome %d declined %d same %d path %s status %d", how[k], status, outcome,
               declined, same, path, fstatus);
+        check(pp == 1 && fp == 0 && fs == 1 && fw == 0,
+              "%s: parent pooled %d; forked pooled %d, same bits %d, worker %llu", how[k], pp, fp, fs, fw);
         free(out);
     }
     finish();
@@ -1676,11 +2088,11 @@ static void test_split_interactions(void) {
     char source[256];
     split_env(&def, env, table_env);
     char *out = run_child("calls", env, &status);
-    bool ok_d = status == 0 && parse_calls(out, ld, &gg, source, sizeof source);
+    bool ok_d = status == 0 && parse_calls(out, ld, &gg, source, sizeof source, NULL);
     free(out);
     split_env(&fast, env, table_env);
     out = run_child("calls", env, &status);
-    bool ok_f = status == 0 && parse_calls(out, lf, &gg, source, sizeof source);
+    bool ok_f = status == 0 && parse_calls(out, lf, &gg, source, sizeof source, NULL);
     check(ok_d && ok_f && out && strstr(out, "AB_PRECISION=fast") && strstr(out, "AB_SPLIT=1 split_table="),
           "fast: children failed or a token is missing");
     free(out);
@@ -1749,6 +2161,7 @@ static const TestCase TESTS[] = {
     {"test_split_accuracy", test_split_accuracy},
     {"test_split_exponent_range", test_split_exponent_range},
     {"test_split_determinism", test_split_determinism},
+    {"test_split_worker", test_split_worker},
     {"test_split_registered_c", test_split_registered_c},
     {"test_split_caller_fpcr", test_split_caller_fpcr},
     {"test_split_off", test_split_off},
