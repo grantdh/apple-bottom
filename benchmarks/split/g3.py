@@ -430,10 +430,10 @@ def not_g3(v, txt, layout, staging, rounds):
     """why the row is not a G3 row, or "" if it is: G3's conditions (design section 12: copied operands,
     uniform data, 1x8 or 4x2, staging 2048 or 8192 MB), then the G3 suites' protocol (AB_TRACE and
     AB_REPORT off, which would profile only the user split; a positive multiple of 6 rounds, over which
-    the trio's order is balanced)"""
+    the trio's order is balanced; the user split's own GPU thread, not SPLIT_GPU_FRESH's thread per call)"""
     if not (v.get("reg") == "0" and v.get("data") == "0" and layout in G3_CASES and staging in G3_STAGING):
         return "not G3"
-    if env(txt, "AB_TRACE") != "off" or env(txt, "AB_REPORT") != "off" or rounds <= 0 or rounds % 6:
+    if env(txt, "AB_TRACE") != "off" or env(txt, "AB_REPORT") != "off" or rounds <= 0 or rounds % 6 or v.get("gpu_fresh", "0") != "0":
         return "not G3 (protocol)"
     return ""
 
