@@ -125,6 +125,9 @@ static const char *on_off(const char *name, bool any_value) {
     return v && *v && (any_value || *v != '0') ? "on" : "off";
 }
 static bool noreg(void) { return envd("SPLIT_NOREG", 0) != 0; }   // SPLIT_NOREG=1: the operands are not registered
+// SPLIT_GPU_FRESH=1 (attribution): the user split's GPU slice runs on a thread made for each call, as the seam's
+// does, instead of on the GPU thread made once per process; free order only (the completion-order checks keep it)
+static bool fresh(void) { static int f = -1; if (f < 0) f = envd("SPLIT_GPU_FRESH", 0) != 0; return f; }
 static void sh_line(const char *cmd, char *out, size_t n) {
     FILE *f = popen(cmd, "r"); out[0] = 0;
     if (f) { if (!fgets(out, (int)n, f)) out[0] = 0; pclose(f); }
@@ -302,6 +305,15 @@ static void *gpu_thread(void *arg) {
     }
     return NULL;
 }
+static void *gpu_once(void *arg) {   // one GPU slice on its own thread (SPLIT_GPU_FRESH=1)
+    (void)arg;
+    g_tg0 = now();
+    gpu_slice(&X);
+    g_tg1 = now();
+    shm->gpucalls[myid]++;
+    if (strcmp(ab_get_last_dispatch_path(), "gpu")) shm->notgpu[myid]++;
+    return NULL;
+}
 static void kadd(Ctx *x) {  // C = fl(C_cpu + P_gpu)
     const Case *c = x->c; zc *C = x->C; const zc *P = x->P;
     for (int j = 0; j < c->N; j++) for (int i = 0; i < c->M; i++) C[(size_t)j * c->ldc + i] += P[(size_t)j * c->M + i];
@@ -335,13 +347,17 @@ static void one_call(Ctx *x, int k, Call *o) {
             if (m->join_ns) { v[V_JOIN] = ns_s(m->join_ns - m->cpu1_ns); v[V_KADD] = ns_s(m->end_ns - m->join_ns); }
         }
     } else {   // a user-code split (KD_SPLIT, KD_SPLIT2), or its GPU slice alone (KD_TAIL)
-        dispatch_semaphore_signal(sem_go);
-        if (g_delay == 2) dispatch_semaphore_wait(sem_done, DISPATCH_TIME_FOREVER);
+        pthread_t th = NULL;
+        bool own = fresh() && g_delay == 0;
+        if (own) { if (pthread_create(&th, NULL, gpu_once, NULL)) { perror("pthread_create"); exit(1); } }
+        else dispatch_semaphore_signal(sem_go);
+        if (!own && g_delay == 2) dispatch_semaphore_wait(sem_done, DISPATCH_TIME_FOREVER);
         tc0 = now();
         if (kd != KD_TAIL) cpu_slice(x);
         tc1 = now();
-        if (g_delay == 1) dispatch_semaphore_signal(sem_cpu_done);
-        if (g_delay != 2) dispatch_semaphore_wait(sem_done, DISPATCH_TIME_FOREVER);
+        if (!own && g_delay == 1) dispatch_semaphore_signal(sem_cpu_done);
+        if (own) pthread_join(th, NULL);
+        else if (g_delay != 2) dispatch_semaphore_wait(sem_done, DISPATCH_TIME_FOREVER);
         tj = now();
         if (x->c->axis == 'K' && kd != KD_TAIL) kadd(x);
         tk = now();
@@ -1174,12 +1190,12 @@ static void report(const Case *c, int np, int data, bool smc, double idle_w) {
     bool bits = sd == 0 && od == 0 && hs;
     printf("SUMMARY case=%s np=%d data=%d acc_ms=%.3f gpu_ms=%.3f split_ms=%.3f g=%d f=%.3f sp_acc=%.3f sp_gpu=%.3f sp_best=%.3f acc_gfs=%.1f gpu_gfs=%.1f split_gfs=%.1f "
            "bits_repeat=%s split_reps=%d gpu_rep_diff=%d acc_rep_diff=%d err_u2=%.3f err_gpu_u2=%.3f err_acc_u2=%.4f notgpu=%d pdtr_acc=%.1f pdtr_gpu=%.1f pdtr_split=%.1f idle=%.1f n=%d/%d/%d "
-           "reg=%d sus_w=%.1f/%.1f/%.1f sus_j=%.3f/%.3f/%.3f h_split=%016llx h_gpu=%016llx h_acc=%016llx share=%s rounds=%d reps=%d/%d/%d arms=%d fcpu_max=%.2f gpu_idle_busy_max=%.3f fcpu_round_max=%.2f load_unmeasured=%d",
+           "reg=%d sus_w=%.1f/%.1f/%.1f sus_j=%.3f/%.3f/%.3f h_split=%016llx h_gpu=%016llx h_acc=%016llx share=%s rounds=%d reps=%d/%d/%d arms=%d fcpu_max=%.2f gpu_idle_busy_max=%.3f fcpu_round_max=%.2f load_unmeasured=%d gpu_fresh=%d",
            c->name, np, data, La * 1e3, Lg * 1e3, Ls * 1e3, shm->g[bk], fb, La / Ls, Lg / Ls, best1 / Ls, F / La / 1e9, F / Lg / 1e9, F / Ls / 1e9,
            bits ? "yes" : "NO", sr, gd, ad, emax / U2, shm->err_gpu / U2, shm->err_acc / U2, notgpu, pw[0], pw[1], pw[2], idle_w, na, ng, ns,
            shm->reg_ok[0], sw[0], sw[1], sw[2], sj[0], sj[1], sj[2],
            (unsigned long long)shm->hash_split[0], (unsigned long long)shm->hash_gpu[0], (unsigned long long)shm->hash_acc[0],
-           shm->fixed ? "fixed" : "sweep", shm->rounds, c->fx_acc, c->fx_gpu, c->fx_split, shm->narm, fcpu_max, bmax, fround_max, unmeasured);
+           shm->fixed ? "fixed" : "sweep", shm->rounds, c->fx_acc, c->fx_gpu, c->fx_split, shm->narm, fcpu_max, bmax, fround_max, unmeasured, fresh());
     if (shm->narm) {
         printf(" seam_ms=%.3f split2_ms=%.3f head_ms=%.3f tail_ms=%.3f seam_ratio=%.4f null_ratio=%.4f pairs=%d seam_out=", Lm * 1e3, Ls2 * 1e3, Lh * 1e3, Lt * 1e3, rseam, rnull, nseam);
         bool first = true;
