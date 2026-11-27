@@ -1637,13 +1637,17 @@ static void *split_own_tail(void *arg) {
 // 1x8, 2026-11-26), with GPU execution equal. A call that finds the worker
 // held by another, or cannot start it, makes a thread of its own as before;
 // none waits for the worker. Both kinds of thread are made by
-// split_thread_create and run split_tail after split_open_own_signals: they
-// differ only in lifetime. The worker's class is set to QOS_CLASS_DEFAULT,
-// the class a thread made with default attributes has (sys/qos.h), whichever
-// call starts it. Nothing of a call stays on it: split_run_gpu takes the
-// thread's earlier GPU time before a tail, and the split_fpcr hook sets FZ
-// for its check alone. A child forked after the worker started has none: its
-// tails take threads of their own. A child forked before the first split
+// split_thread_create and run split_tail after split_open_own_signals. The
+// worker also lives for the process, names itself, and is joined by
+// semaphore, with a caller above its class lending it that class
+// (split_join); a thread of its own is joined by pthread_join. The worker's
+// class is set to QOS_CLASS_DEFAULT, the class a thread made with default
+// attributes has (sys/qos.h), whichever call starts it. Nothing of a call
+// stays on it: split_run_gpu takes the thread's earlier GPU time before a
+// tail, and the split_fpcr hook sets FZ for its check alone. A child forked
+// after the worker started has none, and no Metal context (gpu_ready), so
+// its staged tails are declined; only the tests' cblas engine runs a tail
+// there, on a thread of its own. A child forked before the first split
 // starts its own.
 enum { POOL_NONE, POOL_IDLE, POOL_BUSY, POOL_OFF };
 static struct {
@@ -1734,8 +1738,12 @@ static bool split_start(split_job_t *j, pthread_t *own) {
 // The join: the tail is done and its thread no longer touches j. A caller in
 // pthread_join may lend its priority to the thread it waits for; a semaphore
 // does not, so a caller above the worker's class (QOS_CLASS_DEFAULT,
-// split_pool_start) lends it its own class while it waits. The worker is
-// given back here, before the caller's NaN scan, redo or K sum.
+// split_pool_start) lends it its own class while it waits. macOS caps both at
+// DEFAULT in a process without an application role, such as a command-line
+// program (xnu task_policy.c squashes USER_INITIATED and USER_INTERACTIVE to
+// LEGACY there), so the loan changes nothing in one; it matters in an app or
+// a daemon. The worker is given back here, before the caller's NaN scan, redo
+// or K sum.
 static void split_join(split_job_t *j, pthread_t own) {
     if (!j->pooled) {
         pthread_join(own, NULL);

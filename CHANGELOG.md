@@ -300,22 +300,32 @@ All notable changes to this project will be documented in this file.
   split made a thread for its GPU part and joined it before returning. The
   first split whose GPU part runs now starts a thread named
   `apple-bottom split`, with the application's signals blocked, that waits
-  between calls and runs one call's GPU part at a time. The signals macOS
-  raises on a thread for what it does stay open, as on libdispatch's
-  threads: a fault's or trap's (SIGILL, SIGTRAP, SIGEMT, SIGFPE, SIGBUS,
-  SIGSEGV, SIGSYS), since blocked, a bad read there is retried forever at
-  full CPU on macOS 27, and the profiling timer's tick (SIGPROF). SIGPIPE,
-  which libdispatch also opens, stays blocked: macOS sends it to the
-  process, not the writer. A call that finds the worker held by another,
-  or cannot start it, makes a thread of its own as before (now with the
-  same mask); no call waits for it. A child forked after it started has
-  none, and its splits make their own threads. G3 (2026-11-26, M2 Max)
-  found the seam about 2% slower than the user-code split of
-  `benchmarks/bench_split.c`, whose GPU thread lives for the process, on
-  UM1000 at 1x8. Measured the same day at 1x8 with 12 alternating pairs,
-  the thread per call cost the seam 2.4% on UM1000 and 1.3% on UN1000, and
-  with the user split's GPU part on a thread per call too
-  (`SPLIT_GPU_FRESH=1`) the gap closed. Results are bitwise unchanged.
+  between calls and runs one call's GPU part at a time. Its first step opens
+  the signals macOS raises on a thread for what that thread does, as
+  libdispatch's threads do: a fault's or trap's (SIGILL, SIGTRAP, SIGEMT,
+  SIGFPE, SIGBUS, SIGSEGV, SIGSYS) and the profiling timer's tick (SIGPROF).
+  Blocked, a bad read on the thread is retried forever at full CPU on macOS
+  27 instead of ending the process. SIGPIPE, which libdispatch also opens,
+  stays blocked: macOS sends it to the process, not the writer. A call that
+  finds the worker held by another, or cannot start it, makes a thread of
+  its own as before (now with the same mask); no call waits for it. A caller
+  above `QOS_CLASS_DEFAULT` lends the worker its class while it waits. macOS
+  caps a process without an application role, such as a command-line
+  program, at DEFAULT (xnu `task_policy.c` squashes USER_INITIATED and
+  USER_INTERACTIVE to LEGACY), so there the loan changes nothing: on
+  2026-11-27 the worker's base priority stayed at 31 under a USER_INITIATED
+  caller and rose to 37 once the process took `TASK_DEFAULT_APPLICATION`. A
+  child forked after the worker started has none and no Metal context, so
+  its calls under `AB_SPLIT` are declined and run whole on Accelerate, as
+  before. G3 (2026-11-26, M2 Max) found the seam about 2% slower than the
+  user-code split of `benchmarks/bench_split.c`, whose GPU thread lives for
+  the process, on UM1000 at 1x8; with the user split's GPU part on a thread
+  per call too (`SPLIT_GPU_FRESH=1`), 12 alternating pairs the same day
+  closed the gap (2.4% on UM1000, 1.3% on UN1000). On the worker
+  (2026-11-27, 1x8, 12 repeats per arm, display asleep), the seam's time
+  over the user split's is 1.0016 (95% CI 1.0000 to 1.0033) on UM1000 and
+  0.9989 (0.9951 to 1.0026) on UN1000, against 1.031 and 1.016 with a thread
+  per call, with GPU execution unchanged. Results are bitwise unchanged.
 
 ### Fixed
 - **`ab_dtrsm` and `ab_dgesv_mpir` no longer ignore a failed GPU step.**
@@ -577,8 +587,10 @@ All notable changes to this project will be documented in this file.
   program built with it first and stops after 30 s, and each sanitizer test run
   stops after 30 minutes ([`tests/README.md`](tests/README.md)).
 - **`test_split` and `make test-split-defects` end a hung test instead of
-  waiting on it.** A planted defect that made the split worker retry a
-  faulting read forever held `make test-split-defects` for 17 hours
+  waiting on it.** Nothing bounded a `test_split` test in its own process,
+  and `tests/split_defects.py` waited on each run: on a development tree
+  whose split worker still blocked its fault signals, a planted read past
+  B was retried forever and held `make test-split-defects` for 17 hours
   (2026-11-26). `test_split` now ends a test still running after 180 s (the
   slowest takes 7 s on an M2 Max) and a child process after 120 s (was
   300 s), and `tests/split_defects.py` ends a build or test still running
