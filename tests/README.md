@@ -192,7 +192,9 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     within 4x the default error; the native, batched, asynchronous and
     device GEMMs unchanged at shapes the table covers, each returning AB_OK,
     and `dgemv_` unchanged (it returns no status, and no row covers BLAS-2);
-    no memory growth; and calibrate, replay and bench_split refusing to run
+    no memory growth; and calibrate, replay and bench_split refusing to run.
+    A test still running after 180 s, or a child after 120 s, is ended by
+    SIGALRM, and the run fails (the slowest test takes 7 s on an M2 Max).
 
 - **Not yet registry-based (one `main`, no ghost guard):**
   - `tests/test_precision.c` — 17 tests (the last compares
@@ -211,7 +213,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 |---|---|
 | `make ci-local` | `make version-check`, `make dispatch-table-check` (the built-in routing tables against `benchmarks/calibration/`), `make split-table-check` (the filing rules' self-test, and the built-in split tables against `benchmarks/split/tables/`), `make split-tools-check` (the self-tests of `benchmarks/split/fit_shares.py` and `g3.py`), every suite of `make test`, the chaos tests and the V-2 convergence study (the DGEMM error-versus-N study of `docs/vv/VV_REPORT.md`, `tests/verification/test_convergence.c`); writes `build/CI_REPORT.txt` |
 | `make split-table` | `scripts/ingest_split.py --regenerate`: rebuilds `src/split_table.h` from the tables filed under `benchmarks/split/tables/` (no GPU) |
-| `make test-split-defects` | `tests/split_defects.py`: plants each defect it lists in a copy of the tree, one at a time, rebuilds, and requires one of the suites named for it to fail; a defect whose edit no longer applies or does not build counts as stale (38 defects; GPU, about 3 min) |
+| `make test-split-defects` | `tests/split_defects.py`: plants each defect it lists in a copy of the tree, one at a time, rebuilds, and requires one of the suites named for it to fail; a defect whose edit no longer applies or does not build counts as stale, and a build or test still running after 300 s is ended, with every process it started, and counts as failing (38 defects; GPU, about 3 min) |
 | `make test-chaos` | pathological inputs, IEEE edge cases, concurrent threads |
 | `make test-verification` | the V-2 convergence study alone |
 | `make test-rectangular` | `test_rectangular.c`: tall, wide, thin-K and conjugate-transposed shapes up to 18277 × 150 × 18277, componentwise against cblas, then timings (peaks at ~21 GB) |

@@ -7,15 +7,20 @@ Copies the source tree (without build/ and .git) into a scratch directory, build
 build/test_dispatch and build/test_split there, and checks that the catching tests pass on the clean
 copy. Then for each defect (or those named) it applies the defect's edits, rebuilds, runs the tests
 that should catch it, and restores the files: the defect counts as caught if one of those tests
-fails. Prints a line per defect and exits 1 if any defect went uncaught, or is stale: its edit no longer
-matches the source, or the source no longer builds with it. Needs the GPU; about 3 minutes.
+fails. A build or test still running after RUN_LIMIT_S seconds is ended, with every process it
+started, and counts as failing (a TIMEOUT line says so), so a defect that hangs a test is caught,
+not waited on. Prints a line per defect and exits 1 if any defect went uncaught, or is stale: its
+edit no longer matches the source, or the source no longer builds with it. Needs the GPU; about 3
+minutes.
 `make test-split-defects` runs it. Python 3.9, standard library only.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -25,6 +30,9 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BW, SL, DC, BP = "src/blas_wrapper.c", "src/split_slice.h", "src/dispatch.c", "src/profiling/blas_profiler.c"
 DISPATCH = ["build/test_dispatch"]
 SPLIT = lambda *names: ["build/test_split", *names]   # noqa: E731
+# A clean build or test takes under a minute, and test_split ends a test of its own after 180 s
+# (TEST_TIMEOUT_S): this bound is the backstop.
+RUN_LIMIT_S = 300
 
 # name, the edits (file, old text, new text; old must occur once), the tests that must catch it.
 DEFECTS = [
@@ -171,10 +179,26 @@ def run(cmd, cwd, log):
     with open(log, "a") as f:
         f.write(f"$ {' '.join(cmd)}\n")
         f.flush()
-        return subprocess.run(cmd, cwd=cwd, stdout=f, stderr=subprocess.STDOUT).returncode
+        # a process group of its own, for one kill to end all it started
+        p = subprocess.Popen(cmd, cwd=cwd, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            return p.wait(timeout=RUN_LIMIT_S)
+        except BaseException as e:
+            # the time limit, or this script ended (the group misses the terminal's Ctrl-C)
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(p.pid, signal.SIGKILL)
+            p.wait()
+            if not isinstance(e, subprocess.TimeoutExpired):
+                raise
+            f.write(f"split_defects: ended after {RUN_LIMIT_S} s\n")
+            print(f"  TIMEOUT {' '.join(cmd)}: ended after {RUN_LIMIT_S} s")
+            return 1
 
 
 def main():
+    sys.stdout.reconfigure(line_buffering=True)   # each defect's line reaches a log as it is made
+    for sig in (signal.SIGTERM, signal.SIGHUP):    # as SystemExit, so run() ends its group
+        signal.signal(sig, lambda n, _: sys.exit(128 + n))
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("names", nargs="*", help="defects to plant (default: all)")
     ap.add_argument("--keep", help="build in this directory and keep it (default: a temporary one)")

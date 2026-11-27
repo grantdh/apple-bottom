@@ -576,6 +576,14 @@ All notable changes to this project will be documented in this file.
   hangs in its own initialization, before `main()`. `test-asan` now runs an empty
   program built with it first and stops after 30 s, and each sanitizer test run
   stops after 30 minutes ([`tests/README.md`](tests/README.md)).
+- **`test_split` and `make test-split-defects` end a hung test instead of
+  waiting on it.** A planted defect that made the split worker retry a
+  faulting read forever held `make test-split-defects` for 17 hours
+  (2026-11-26). `test_split` now ends a test still running after 180 s (the
+  slowest takes 7 s on an M2 Max) and a child process after 120 s (was
+  300 s), and `tests/split_defects.py` ends a build or test still running
+  after 300 s, with every process it started, prints a TIMEOUT line and
+  counts it as failing ([`tests/README.md`](tests/README.md)).
 - **Native operations report a failed command buffer.** `ab_matrix_zero`,
   `ab_matrix_copy`, `ab_matrix_add`, `ab_matrix_sub`, `ab_matrix_scale`,
   `ab_dsyrk`, `ab_dgemm_batched`, `ab_zherk`'s transposes and the command buffers

@@ -60,7 +60,11 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define CHILD_TIMEOUT_S 300
+// A test still running after TEST_TIMEOUT_S (the slowest takes 7 s on an M2
+// Max), or a --child after CHILD_TIMEOUT_S, is ended by SIGALRM: a hang fails
+// here, with the last [k/N] line naming the test, instead of being waited on.
+#define TEST_TIMEOUT_S 180
+#define CHILD_TIMEOUT_S 120     // within its test's bound, so the test reports it
 #define U2_DD 0x1p-48          // u^2 of the DD arithmetic
 
 #ifndef AB_BUILD_DIR
@@ -2212,7 +2216,9 @@ int main(int argc, char **argv) {
         printf("[%d/%d] %-30s ... ", i + 1, N_TESTS, TESTS[i].name);
         fflush(stdout);
         int pre = tests_passed + tests_failed;
+        alarm(TEST_TIMEOUT_S);
         TESTS[i].fn();
+        alarm(0);
         if (tests_passed + tests_failed == pre) {
             fprintf(stderr, "\nFATAL: ghost test — '%s' reported no result\n", TESTS[i].name);
             abort();
