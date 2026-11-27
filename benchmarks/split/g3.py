@@ -14,8 +14,8 @@ the start and end lines, and at the start a battery of 95% or more, neither char
 its charge, when printed; a G3 row's report left out for power counts as a withheld run of that row).
 Only rows under G3's conditions get a verdict: copied operands, uniform
 data, 1x8 or 4x2, AB_STAGING_MB 2048 or 8192 (else "not G3"), and G3's protocol, AB_TRACE and
-AB_REPORT off and a positive multiple of 6 rounds (else "not G3 (protocol)"). For each case and
-layout:
+AB_REPORT off, a positive multiple of 6 rounds and the user split's GPU slice on its process's GPU
+thread (gpu_fresh=0, not SPLIT_GPU_FRESH=1) (else "not G3 (protocol)"). For each case and layout:
 
 - Pairs by (round, rep) of the fixed block's lockstep times (the slowest process per repeat):
   SEAM with the user split S<g>, and the twin S<g>b with S<g> (the null run: the user split against
@@ -93,7 +93,7 @@ import argparse, functools, glob, math, os, re, statistics, sys
 from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # rawtsv.py, also under python3 -I
-from rawtsv import env, fixed_pairs, parse, power_problem, read  # noqa: E402
+from rawtsv import env, fixed_pairs, gpu_fresh, parse, power_problem, read  # noqa: E402
 
 try:
     import numpy as np
@@ -434,7 +434,7 @@ def not_g3(v, txt, layout, staging, rounds):
     the trio's order is balanced; the user split's own GPU thread, not SPLIT_GPU_FRESH's thread per call)"""
     if not (v.get("reg") == "0" and v.get("data") == "0" and layout in G3_CASES and staging in G3_STAGING):
         return "not G3"
-    if env(txt, "AB_TRACE") != "off" or env(txt, "AB_REPORT") != "off" or rounds <= 0 or rounds % 6 or v.get("gpu_fresh", "0") != "0":
+    if env(txt, "AB_TRACE") != "off" or env(txt, "AB_REPORT") != "off" or rounds <= 0 or rounds % 6 or gpu_fresh(v):
         return "not G3 (protocol)"
     return ""
 

@@ -49,6 +49,12 @@ def env(txt, name):
     return m.group(1) if m else None
 
 
+def gpu_fresh(v):
+    """whether a SUMMARY or SUSTAIN line (parse's dict) ran with SPLIT_GPU_FRESH=1: the user split's
+    GPU slice on a thread per call; reports from before the field ran without it"""
+    return v.get("gpu_fresh", "0") != "0"
+
+
 def on_ac(txt):
     """the report's start and end lines both say AC power"""
     return all(re.search(rf"^{w}: Now drawing from 'AC Power'", txt, re.M) for w in ("start", "end"))

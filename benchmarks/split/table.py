@@ -10,12 +10,13 @@ repeats; the largest error in u^2 = 2^-48; and whether the case started and ende
 Cases run with the arms (raw.tsv's name column has SEAM) get a second table: the library's seam and
 the user split's twin against the user split (medians of the ratios paired by round and repeat), the
 slices alone, and the seam's outcomes and bits. Then the sustained runs' throughput, wall power and
-GPU clock.
+GPU clock. A run with gpu_fresh=1 (SPLIT_GPU_FRESH: the user split's GPU slice on a thread per call,
+not the process's GPU thread) is marked in its first column.
 """
 import glob, os, re, statistics, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # rawtsv.py, also under python3 -I
-from rawtsv import env, fixed_pairs, on_ac, parse, read  # noqa: E402
+from rawtsv import env, fixed_pairs, gpu_fresh, on_ac, parse, read  # noqa: E402
 
 CLASS = {
     "D2048": "DGEMM 2048²", "D4096": "DGEMM 4096²", "D8192": "DGEMM 8192²",
@@ -39,6 +40,11 @@ def mr(v):
     return f"{statistics.median(v):.2f} [{min(v):.2f}–{max(v):.2f}]"
 
 
+def fresh_mark(v):
+    """The mark of a report run with SPLIT_GPU_FRESH=1."""
+    return " (GPU slice on a thread per call)" if gpu_fresh(v) else ""
+
+
 def main():
     root = sys.argv[1]
     arms = []
@@ -46,8 +52,8 @@ def main():
     print("| suite | shape class | layout | data | Accelerate alone ms | GPU alone ms | split ms (f) | vs Accelerate | vs GPU "
           "| split ÷ summed GF/s | bits repeat | max err (u²) | power |")
     print("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
-    for s in subs:
-        for f in sorted(glob.glob(os.path.join(root, s, "*.out"))):
+    for sub in subs:
+        for f in sorted(glob.glob(os.path.join(root, sub, "*.out"))):
             txt = open(f).read()
             v = parse(txt, "SUMMARY")
             if not v:
@@ -57,6 +63,7 @@ def main():
             fb = {k: list(x.values()) for k, x in fp.items()}
             la, lg, ls = (statistics.median(fb[k]) for k in ("ACC", "GPU", "SPLIT"))
             data = ("QE-like" if v["data"] == "1" else "uniform") + (", copied" if v.get("reg", "4") == "0" else "")
+            s = sub + fresh_mark(v)
             print(f"| {s} | {CLASS.get(v['case'], v['case'])} | {v['np']}×{threads} | {data} | {mr(fb['ACC'])} | {mr(fb['GPU'])} | "
                   f"{mr(fb['SPLIT'])} ({float(v['f']):.2f}) | {la / ls:.2f}× | {lg / ls:.2f}× | {la * lg / (ls * (la + lg)):.2f} | "
                   f"{v['bits_repeat']} ({v['split_reps']}) | {float(v['err_u2']):.2f} | {'AC' if on_ac(txt) else 'NOT AC'} |")
@@ -87,6 +94,7 @@ def main():
             v = parse(txt, "SUSTAIN")
             if not v:
                 continue
+            v["case"] += fresh_mark(v)
             m = re.search(r"^case \S+ \w+ M=(\d+) N=(\d+) K=(\d+), split axis (\w)", txt, re.M)
             length = int(m.group({"M": 1, "N": 2, "K": 3}[m.group(4)]))
             st, bu, w, mhz = (v[k].split("/") for k in ("steady_gfs", "burst_gfs", "wall_w", "mhz"))

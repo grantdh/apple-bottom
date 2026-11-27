@@ -1365,11 +1365,11 @@ static int sustain(const Case *c, const char *outdir, int g, double secs, double
     printf("SUSTAIN case=%s g=%d g_bal=%d steady_gfs=%.1f/%.1f/%.1f/%.1f burst_gfs=%.1f/%.1f/%.1f/%.1f sp_gpu=%.3f sp_acc=%.3f sp_gpu_bal=%.3f sp_acc_bal=%.3f "
            "wall_w=%.1f/%.1f/%.1f/%.1f sys_w=%.1f/%.1f/%.1f/%.1f batt_w=%.1f/%.1f/%.1f/%.1f mhz=%.0f/%.0f/%.0f/%.0f burst_mhz=%.0f/%.0f/%.0f/%.0f bits_diff=%d/%d/%d/%d "
            "acc_end_gfs=%.1f acc_end_w=%.1f head_ms=%.3f tail_ms=%.3f split_steady_ms=%.3f split_cpu_ms=%.3f split_gpu_ms=%.3f overlap=%.3f cpu_x=%.3f gpu_x=%.3f "
-           "head_w=%.1f tail_w=%.1f head_mhz=%.0f tail_mhz=%.0f bits_checked=%s noreg=%d data=%d seed=%llu order=",
+           "head_w=%.1f tail_w=%.1f head_mhz=%.0f tail_mhz=%.0f bits_checked=%s noreg=%d data=%d gpu_fresh=%d seed=%llu order=",
            c->name, g, shm->g[bcfg[SB_BAL]], F4(sg), F4(bg), sg[SB_SPLIT] / sg[SB_GPU], sg[SB_SPLIT] / sg[SB_ACC], sg[SB_BAL] / sg[SB_GPU], sg[SB_BAL] / sg[SB_ACC],
            F4(sw), F4(ss), F4(sb), F4(smhz), F4(bmhz), F4(bdiff),
            sg[SB_ACC_END], sw[SB_ACC_END], sms[SB_HEAD], sms[SB_TAIL], sms[SB_SPLIT], scpu, sgpu, (sms[SB_HEAD] + sms[SB_TAIL]) / sms[SB_SPLIT],
-           scpu / sms[SB_HEAD], sgpu / sms[SB_TAIL], sw[SB_HEAD], sw[SB_TAIL], smhz[SB_HEAD], smhz[SB_TAIL], check ? "yes" : "no", noreg(), data, (unsigned long long)seed);
+           scpu / sms[SB_HEAD], sgpu / sms[SB_TAIL], sw[SB_HEAD], sw[SB_TAIL], smhz[SB_HEAD], smhz[SB_TAIL], check ? "yes" : "no", noreg(), data, fresh(), (unsigned long long)seed);
 #undef F4
     static const char *const SB_TAG[NSB] = {"split", "GPU", "ACC", "bal", "HEAD", "TAIL", "ACC2"};
     for (int s = 0; s < NSB; s++) printf("%s%s", s ? "," : "", SB_TAG[order[s]]);

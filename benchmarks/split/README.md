@@ -83,8 +83,8 @@ same call through its seam (`SEAM`, below), which `AB_SPLIT` uses inside `dgemm_
   split's first, so from round 1).
 - **GPU thread per call (attribution):** `SPLIT_GPU_FRESH=1` runs the user split's GPU slice (in `S<g>`,
   `S<g>b` and `TAIL`) on a thread made for each call, as the seam did before its split worker (library
-  98e8db4 and earlier), instead of on the one GPU thread each process makes at its start; the completion-order checks keep the latter. SUMMARY reports it
-  (`gpu_fresh=1`), and `g3.py` gives such runs no G3 verdict.
+  98e8db4 and earlier), instead of on the one GPU thread each process makes at its start; the completion-order checks keep the latter. SUMMARY and
+  the sustained runs' SUSTAIN line report it (`gpu_fresh=1`), `g3.py` gives such runs no G3 verdict and `table.py` marks them.
 - **Fixed share:** `SPLIT_G=<g>` skips the sweep and runs the fixed block at GPU part g. `SPLIT_F=<f>`
   does the same at the GPU part the library would cut at share f (`ab_split_cut` in `src/split_slice.h`,
   with the `AB_MIN_GPU_DIM` floor, default 32); a share that does not cut the axis is refused.
