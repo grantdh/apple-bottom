@@ -13,7 +13,8 @@ than on either engine alone? With well-scaled operands, it did in all 20 cases m
 
 **The split is made in user code, by `bench_split`.** `dgemm_` and `zgemm_` do not split a call in
 1.5.0, and `AB_MODE=auto` would run every call measured here on Accelerate alone. A split inside the
-library is planned for 1.6.0.
+library was planned for 1.6.0 when this was written; 1.6.0 has none
+([roadmap](../../../docs/ROADMAP.md#next)).
 
 Program and how to run it: [`benchmarks/split/`](../../split/README.md) (`bench_split.c`).
 

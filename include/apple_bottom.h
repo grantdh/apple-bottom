@@ -9,6 +9,12 @@
 //   - With the macOS 15 SDK (Xcode 16+) on macOS 15+, shaders use MTLMathModeSafe;
 //     otherwise they are compiled with fastMathEnabled = NO. Both keep full DD precision.
 //
+// Precision mode: AB_PRECISION=fast, read each time the library initializes,
+// makes every GPU GEMM-family kernel (all APIs) accumulate lazily, Dot2-style:
+// a few percent faster and about 1 bit less accurate, with results that differ
+// from the default mode's in the last bits (docs/INTEGRATION.md, Environment
+// Variables). Otherwise the kernels give the bits of release 1.4.0.
+//
 // Storage: ABMatrix data passed to ab_matrix_upload / ab_matrix_download is
 // row-major (C order). The BLAS ABI (ab_*gemm_blas, dgemm_/zgemm_) and the
 // device-buffer API (apple_bottom_device.h) are column-major, as in BLAS.
@@ -38,13 +44,12 @@
 //   DGEMM through N=6144 and every Quantum ESPRESSO si64 shape is slower on the GPU
 //   (0.06-0.84x); other ZGEMMs reach at most 1.02x (6144, one operand transposed).
 //   Anchor: benchmarks/results/2026-10-14-52f1880-calibrate/
-//   (`make calibrate`, which on 1.5.0 measures the staged path). AB_MODE=auto, the
+//   (`make calibrate`, which since 1.5.0 measures the staged path). AB_MODE=auto, the
 //   default, follows that measurement (src/dispatch_table.h): a call goes to the GPU
 //   only where the GPU was >= 1.10x faster. DSYRK/ZHERK end-to-end behavior expected
 //   to be similar to GEMM (same conversion path); not directly measured.
-//   Quantum ESPRESSO si64 forced onto the staged path (AB_MODE=gpu) takes 1.01-1.06x
-//   its time on Accelerate, with the same energies:
-//   benchmarks/results/2026-10-29-351d56c-staged-refusals/.
+//   Quantum ESPRESSO si64 forced onto the staged path (AB_MODE=gpu) is not faster than
+//   Accelerate, with the same energies: README.md, Performance.
 //
 // API Limits:
 //   - Matrix size: rows * cols <= AB_MAX_MATRIX_ELEMENTS (2^31 - 1) and the DD
@@ -59,9 +64,21 @@
 //     power-of-two scale (0 for nonzero entries within 2^±39; otherwise
 //     entries spanning at most 2^78 are centred on 1), which the GPU
 //     operations carry and ab_matrix_download removes; a matrix spanning
-//     more keeps FP32's range relative to its scale. The BLAS ABI scales
-//     rows of op(A) and columns of op(B) instead, and runs on Accelerate
-//     what that cannot keep in range (docs/vv/LIMITATIONS.md, Exponent range).
+//     more keeps FP32's range relative to its scale. Results are not
+//     re-centred: a result's scale comes from its operands' scales, never
+//     from its values, so a chain of products whose magnitudes shrink or
+//     grow drifts away from it: lost precision below about 2^-80, 0 below
+//     2^-126, Inf past 2^128, with AB_OK. ab_matrix_download +
+//     ab_matrix_upload re-centres a result (one FP64 rounding);
+//     ab_matrix_copy does not. A sum of terms on different scales takes the
+//     larger scale: alpha op(A) op(B) + beta C in ab_dgemm_scaled, the
+//     operands of ab_matrix_add and ab_matrix_sub, and the parts or products
+//     a ZGEMM combines. A term that is the whole of an element can then be
+//     lost when its scale is far below the other's, and under ZGEMM's 3M a
+//     part far below the other loses precision in every product. The native API has no
+//     guard and no fallback. The BLAS ABI instead scales each row of op(A)
+//     and column of op(B), and runs on Accelerate what its guard refuses
+//     (docs/vv/LIMITATIONS.md, Exponent range).
 // =============================================================================
 #ifndef APPLE_BOTTOM_H
 #define APPLE_BOTTOM_H
@@ -75,9 +92,9 @@ extern "C" {
 #endif
 
 #define APPLE_BOTTOM_VERSION_MAJOR 1
-#define APPLE_BOTTOM_VERSION_MINOR 5
-#define APPLE_BOTTOM_VERSION_PATCH 1
-#define APPLE_BOTTOM_VERSION_STRING "1.5.1"
+#define APPLE_BOTTOM_VERSION_MINOR 6
+#define APPLE_BOTTOM_VERSION_PATCH 0
+#define APPLE_BOTTOM_VERSION_STRING "1.6.0"
 
 typedef struct ABMatrix_s* ABMatrix;
 typedef struct ABSession_s* ABSession;
@@ -173,10 +190,28 @@ void ab_future_destroy(ABFuture f);
 
 // BLAS operations
 ABStatus ab_dgemm(ABMatrix A, ABMatrix B, ABMatrix C);
+// If |alpha| lies in [2^-39, 2^40), beta is 0 or in that range, and C's scale
+// is A's plus B's (as for data in the window), alpha multiplies C's stored
+// values instead of changing its scale, so a small alpha on small data can
+// take them out of FP32's range (Exponent range, above). Otherwise C takes
+// the larger of the scales of alpha op(A) op(B) and beta C, so in an element where the
+// larger term is 0 and the scales are far apart, the smaller term loses
+// precision (below about 2^-80 of that scale) or becomes 0 (below 2^-126 of it),
+// with AB_OK; the same holds for ab_batch_dgemm_scaled and ab_dgemm_strassen.
 ABStatus ab_dgemm_scaled(double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C);
 ABStatus ab_zgemm(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci);
 
-// Extended ZGEMM with transpose support (for QE compatibility)
+// Extended ZGEMM with transpose support (for QE compatibility).
+// Every ZGEMM entry (ab_zgemm, ab_zgemm_ex, ab_zgemm_strassen, ab_zgemm_async,
+// ab_batch_zgemm, ab_zgemm_batched) needs each imaginary part in its real
+// part's shape, op(A) M x K, op(B) K x N and C M x N. Otherwise it returns
+// AB_ERROR_DIMENSION_MISMATCH before any GPU work: ab_zgemm_async as a
+// completed future holding it, ab_zgemm_batched before any entry runs.
+// Each brings real and imaginary parts (3M) or paired products (4M) to the
+// larger of their scales before combining them, so a part or product on a
+// scale far below the other's can lose precision or become 0, with AB_OK:
+// under 3M in every product that uses it, under 4M where the larger product
+// is 0 (Exponent range, above).
 ABStatus ab_zgemm_ex(
     ABTranspose transA, ABTranspose transB,
     ABMatrix Ar, ABMatrix Ai,
@@ -184,12 +219,37 @@ ABStatus ab_zgemm_ex(
     ABMatrix Cr, ABMatrix Ci
 );
 
+// Strassen-Winograd, one level (docs/STRASSEN.md): each real product from 7
+// half-size DD GEMMs and 15 block additions instead of 8 GEMMs, any shape.
+// ab_dgemm_strassen computes what ab_dgemm_scaled does, ab_zgemm_strassen
+// what ab_zgemm does (Gauss-3M, or 4M for imbalanced parts), with every
+// real product by Strassen-Winograd; scales are kept as theirs are. Faster
+// only for large matrices, and less accurate: the error bound is normwise,
+// not componentwise, so rows or columns much smaller than the rest lose
+// relative accuracy. The workspace, 1.75 N^2 DD values for a square N,
+// comes from the pool the ZGEMM temporaries use (AB_STAGING_MB).
+//   AB_STRASSEN=1      ab_dgemm, ab_dgemm_scaled, ab_zgemm and ab_zgemm_ex,
+//                      and the BLAS-ABI and device-API GEMMs that run on the
+//                      GPU, take Strassen-Winograd products when M, N and K
+//                      are all >= AB_STRASSEN_MIN (default 4096). Not routed:
+//                      the batched, asynchronous and ABBatch GEMMs, ZHERK,
+//                      DTRSM and ab_dgesv_mpir, and BLAS-ABI calls with rows
+//                      or columns outside 2^±20 (scaled line by line, which
+//                      Strassen-Winograd's block sums would mix). Read once
+//                      per process; unset, results are bitwise unchanged.
+ABStatus ab_dgemm_strassen(double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C);
+ABStatus ab_zgemm_strassen(ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi,
+                           ABMatrix Cr, ABMatrix Ci);
+
 ABStatus ab_dsyrk(ABMatrix A, ABMatrix C);
 
 // Triangular solve: solves op(A) * X = alpha * B  or  X * op(A) = alpha * B
 // where A is triangular. Result overwrites B.
 // Uses blocked forward/back-substitution with DGEMM for the panel updates.
 // GPU-efficient for N >= 1024 (panel solves are CPU-bound for small blocks).
+// A panel update whose GPU step fails (a GPU buffer, a conversion, the
+// command buffer) runs on Accelerate in FP64 instead, as dgemm_ runs a call
+// whose GPU step fails, so AB_OK means B holds X either way.
 //
 // Parameters:
 //   side:   AB_LEFT  → op(A) * X = alpha * B
@@ -200,13 +260,32 @@ ABStatus ab_dsyrk(ABMatrix A, ABMatrix C);
 //   alpha:  scalar multiplier
 //   A:      triangular matrix (N × N)
 //   B:      right-hand side / solution matrix (M × N), overwritten with X
+// A panel update whose GPU step fails is done on Accelerate in FP64 instead.
 ABStatus ab_dtrsm(ABSide side, ABUplo uplo, ABTranspose transA, ABDiag diag,
                   double alpha, ABMatrix A, ABMatrix B);
 
 // Mixed-Precision Iterative Refinement: solves A * X = B
 // Uses FP32 LU factorization (Accelerate LAPACK) + DD-DGEMM residual correction.
 // Avoids explicit inversion (κ² error) and bespoke DD-DTRSM shaders.
-// Converges to DD precision (~10⁻¹⁵) in 1-3 iterations for well-conditioned A.
+// Refinement stops when ||B - A·X||_F < 10⁻¹⁴·||B||_F, after 2-3 corrections
+// for a well-conditioned A. It also stops when a correction does not at least
+// halve the worst column's ||r_j||∞ / ||x_j||∞, or after 10 residuals, and
+// then keeps X if every column passes LAPACK dsgesv's test,
+// ||r_j||∞ <= √N · 2⁻⁴⁸ · ||A||∞ · ||x_j||∞ (DD's unit roundoff 2⁻⁴⁸ in place
+// of FP64's 2⁻⁵³): the DD residual of a dense A levels off above 10⁻¹⁴·||B||_F
+// from N ≈ 150. Otherwise, or where FP32 cannot solve the system (A or B
+// outside FP32's range, a singular FP32 factorization), X is solved in FP64
+// instead, by dgetrf and dgetrs on the host copies, as dsgesv falls back; FP32
+// refinement stops converging near κ(A) ≈ 10⁷-10⁸. AB_PROFILE=1 prints a line
+// for such a solve (`AB_PROFILE ab_dgesv_mpir N=… NRHS=…  FP64 LU fallback:
+// <why>`). AB_OK thus means X passed one of the two tests or is FP64 LU's.
+// A residual whose GPU step fails is computed on Accelerate in FP64 instead.
+// The residual is a native GEMM, with one power-of-two scale per matrix (API
+// Limits): entries of A, X or B far below the largest of their matrix lose
+// precision there, which the test cannot see.
+//
+// Returns AB_ERROR_KERNEL_FAILED, B unchanged, if A is singular in FP64
+// (dgetrf info > 0).
 //
 // Parameters:
 //   A: N×N coefficient matrix (not modified)
@@ -215,6 +294,8 @@ ABStatus ab_dgesv_mpir(ABMatrix A, ABMatrix B);
 
 // ZHERK: C = A × Aᴴ (Hermitian rank-K update)
 // Computes Cr = Ar×Arᵀ + Ai×Aiᵀ, Ci = Ai×Arᵀ - Ar×Aiᵀ
+// (Cr's two terms are brought to the larger of their scales, as in
+// ab_matrix_add).
 // Uses GPU DSYRK for real part + GPU transpose + DGEMM for imaginary part.
 // All operations stay on GPU — no CPU-side data transfer.
 ABStatus ab_zherk(ABMatrix Ar, ABMatrix Ai, ABMatrix Cr, ABMatrix Ci);
@@ -222,6 +303,9 @@ ABStatus ab_zherk(ABMatrix Ar, ABMatrix Ai, ABMatrix Cr, ABMatrix Ci);
 // Element-wise operations
 ABStatus ab_matrix_add(ABMatrix A, ABMatrix B, ABMatrix C);
 ABStatus ab_matrix_sub(ABMatrix A, ABMatrix B, ABMatrix C);
+// A := alpha A. With |alpha| in [2^-39, 2^40), alpha multiplies the stored
+// values (A's scale does not take its exponent), so repeated scaling of small
+// data loses precision, as in ab_dgemm_scaled.
 ABStatus ab_matrix_scale(double alpha, ABMatrix A);
 
 // Batched GEMM API — amortizes Metal command buffer overhead across many GEMMs.
@@ -246,6 +330,7 @@ typedef struct ABBatch_s* ABBatch;
 ABBatch ab_batch_create(void);
 void ab_batch_destroy(ABBatch batch);
 ABStatus ab_batch_dgemm(ABBatch batch, ABMatrix A, ABMatrix B, ABMatrix C);
+// alpha, beta and C's scale as in ab_dgemm_scaled.
 ABStatus ab_batch_dgemm_scaled(ABBatch batch, double alpha, ABMatrix A, ABMatrix B, double beta, ABMatrix C);
 ABStatus ab_batch_zgemm(ABBatch batch, ABMatrix Ar, ABMatrix Ai, ABMatrix Br, ABMatrix Bi, ABMatrix Cr, ABMatrix Ci);
 ABStatus ab_batch_barrier(ABBatch batch);
@@ -297,7 +382,11 @@ const char* ab_status_string(ABStatus status);
 // DGEMM whose alpha or beta lies outside 2^±20 are redone on the host path,
 // as is every call when AB_HOST_PACK=1 or the CPU's floating-point control
 // is not the default (rounding, flush to zero, default NaN), on which the
-// host conversion's bits depend.
+// host conversion's bits depend. ab_zgemm_blas's FP64 epilogue bound is from
+// above only: a part of the product scaled back below 2^-1022 loses bits
+// before alpha multiplies it, so the result's absolute error term grows with
+// alpha, up to (|Re alpha| + |Im alpha| + 2) 2^-1074 (docs/vv/LIMITATIONS.md,
+// Exponent range).
 void ab_dgemm_blas(char transA, char transB, int M, int N, int K,
                    double alpha, const double* A, int ldA,
                    const double* B, int ldB,
@@ -309,10 +398,37 @@ void ab_zgemm_blas(char transA, char transB, int M, int N, int K,
                    double _Complex beta,
                    double _Complex* C, int ldC);
 
-// Returns the dispatch path taken by the most recent ab_*_blas (or dgemm_/zgemm_)
-// call on this thread: "gpu" only if the GPU computed C, "cpu" if cblas did
-// (including a fallback after a GPU failure), or "none" before any call. Thread-local.
+// BLAS-2, the same way (README.md, "BLAS-2"): y := alpha op(A) x + beta y
+// (GEMV, op from trans) and y := alpha A x + beta y with A Hermitian (ZHEMV,
+// the uplo triangle referenced). These are the entry points of the dgemv_,
+// zgemv_ and zhemv_ Fortran symbols. A GPU call reads A in place through a
+// mapping made for that call, so a one-shot product pays to map A each time;
+// for a matrix used in many products, keep it in a device buffer and call
+// ab_dev_dgemv / ab_dev_zgemv / ab_dev_zhemv (apple_bottom_device.h), whose
+// accuracy and range these share.
+void ab_dgemv_blas(char trans, int M, int N, double alpha, const double* A, int ldA,
+                   const double* x, int incx, double beta, double* y, int incy);
+void ab_zgemv_blas(char trans, int M, int N, double _Complex alpha,
+                   const double _Complex* A, int ldA, const double _Complex* x, int incx,
+                   double _Complex beta, double _Complex* y, int incy);
+void ab_zhemv_blas(char uplo, int N, double _Complex alpha,
+                   const double _Complex* A, int ldA, const double _Complex* x, int incx,
+                   double _Complex beta, double _Complex* y, int incy);
+
+// Returns the dispatch path taken by the most recent ab_*_blas (or dgemm_/zgemm_,
+// dgemv_/zgemv_/zhemv_, ab_dev_*gemv / ab_dev_zhemv) call on this thread: "gpu"
+// only if the GPU computed the result, "cpu" if cblas did (including a fallback
+// after a GPU failure), "split" if AB_SPLIT made it partly on each and the GPU's
+// part stood, or "none" before any call. Thread-local.
 const char* ab_get_last_dispatch_path(void);
+
+// Where AB_SPLIT's rows come from in this process (read once, with the other
+// routing settings): "off" (AB_SPLIT unset, empty or 0), "builtin:<chip>@<commit>"
+// (the built-in table for this chip, measured on that commit),
+// "file:<path>@<digest>" (AB_SPLIT_TABLE, with the first 12 hex digits of the
+// SHA-256 of the bytes read), "none:uncalibrated-chip" or "none:unknown-chip"
+// (on, but no table: nothing is split).
+const char* ab_split_source(void);
 
 // Zero-copy operands for the BLAS-ABI entry points. A GPU-routed call copies
 // each operand into GPU buffers the library reuses (memcpy speed, ~50-100
@@ -343,6 +459,10 @@ ABStatus ab_unregister_host_memory(const void* ptr);
 // "unknown" in place of the commit when built outside a git checkout or from a copy
 // vendored inside another repository. Static string.
 const char* ab_build_info(void);
+
+// "fast" if the library was initialized with AB_PRECISION=fast, else "default"
+// (also before ab_init). Static string.
+const char* ab_precision_mode(void);
 
 // BLAS-ABI diagnostics (dgemm_, zgemm_, ab_*gemm_, ab_*gemm_blas), read once
 // per process from the environment; both reports start with ab_build_info():
@@ -376,14 +496,19 @@ const char* ab_build_info(void);
 //                 referenced elements, to spot repeated operands.
 //   AB_TEST_FAIL_STAGE=alloc|kernel  test-only: every ab_matrix_create() and
 //                 staging buffer (alloc), or the command buffer of every
-//                 ab_dgemm_scaled(), ab_zgemm() and staged call (kernel),
-//                 fails, so GPU-routed BLAS-ABI calls fall back to cblas.
+//                 staged, BLAS-2 and synchronous native call but
+//                 ab_fft_execute (kernel), fails, so GPU-routed BLAS-ABI
+//                 calls fall back to cblas and native calls return
+//                 AB_ERROR_KERNEL_FAILED (ab_dtrsm and ab_dgesv_mpir redo
+//                 the failed step on cblas).
+//   AB_TEST_FAIL_ONLY=n  test-only: with AB_TEST_FAIL_STAGE=kernel, only the
+//                 process's n-th of those command buffers fails.
 //   AB_HOST_PACK=1  every GPU call takes the host path (host pack,
 //                 conversion and epilogue) instead of the staged path.
-//   AB_STAGING_MB=n  the GPU buffers the staged path, and the native
-//                 ZGEMMs for their temporaries, keep between calls, at
-//                 most n MB per process (default 2048; 0: none, each call
-//                 makes its own).
+//   AB_STAGING_MB=n  the GPU buffers the staged path, the native ZGEMMs
+//                 for their temporaries and the device-buffer API for its
+//                 operands keep between calls, at most n MB per process
+//                 (default 2048; 0: none, each call makes its own).
 // A call that falls back counts as a CPU call, its wall time including the
 // failed GPU attempt. A fork()ed child starts with empty counters, reports
 // only calls of its own and traces to a file of its own. The native ABMatrix

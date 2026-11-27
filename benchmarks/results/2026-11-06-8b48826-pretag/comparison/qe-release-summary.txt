@@ -1,0 +1,28 @@
+('B_si64_160b_k222', 8)
+   old-gpu [54.9, 55.1] {'-2990.44093534'} {'9'} rc {0} load [1.4, 3.2] [3.3, 5.5]
+   new-gpu [55.7, 55.6] {'-2990.44093534'} {'9'} rc {0} load [1.4, 3.2] [4.5, 6.2]
+   new-cpu [53.9, 53.5] {'-2990.44093534'} {'9'} rc {0} load [1.4, 3.2] [6.9, 6.9]
+   new-gpu/old-gpu per rep [1.015, 1.009]
+   new-gpu/new-cpu per rep [1.033, 1.04] mean 1.037
+   old-gpu/new-cpu per rep [1.019, 1.031]
+    new-gpu r 0 gpu_failed sum 0 range sum 166
+    new-gpu r 1 gpu_failed sum 0 range sum 166
+('A_si64_500b_k222', 8)
+   old-gpu [102.3, 104.4] {'-2990.44276150'} {'7'} rc {0} load [4.3, 4.4] [6.3, 4.9]
+   new-gpu [102.9, 103.3] {'-2990.44276150'} {'7'} rc {0} load [4.3, 4.4] [6.5, 5.8]
+   new-cpu [95.2, 93.8] {'-2990.44276150'} {'7'} rc {0} load [4.3, 4.4] [7.9, 8.0]
+   new-gpu/old-gpu per rep [1.006, 0.989]
+   new-gpu/new-cpu per rep [1.081, 1.101] mean 1.091
+   old-gpu/new-cpu per rep [1.075, 1.113]
+    new-gpu r 0 gpu_failed sum 0 range sum 84
+    new-gpu r 1 gpu_failed sum 0 range sum 84
+('B_si64_160b_k222', 1)
+   old-gpu [192.8, 192.6] {'-2990.44093535'} {'9'} rc {0} load [3.9, 4.9] [1.5, 1.4]
+   new-gpu [193.1, 193.4] {'-2990.44093535'} {'9'} rc {0} load [3.9, 4.9] [1.6, 1.4]
+   new-cpu [183.2, 183.1] {'-2990.44093535'} {'9'} rc {0} load [3.9, 4.9] [3.2, 2.3]
+   new-gpu/old-gpu per rep [1.001, 1.004]
+   new-gpu/new-cpu per rep [1.054, 1.056] mean 1.055
+   old-gpu/new-cpu per rep [1.053, 1.052]
+    new-gpu r 0 gpu_failed sum 0 range sum 24
+    new-gpu r 1 gpu_failed sum 0 range sum 24
+invalid blocks: 1

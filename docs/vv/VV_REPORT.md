@@ -1,16 +1,16 @@
 # Verification & Validation Report
 ## apple-bottom v1.0.2 — FP64-Class BLAS for Apple Silicon GPU
 
-> **Status (Revision 1.4, 2026-10-31).** This report documents v1.0.2
+> **Status (Revision 1.6, 2026-11-10).** This report documents v1.0.2
 > (March 2026) and is kept as a record of it.
 > Its production approvals are withdrawn, and its statements on rectangular
-> shapes, thread safety and the max-element error are corrected inline,
+> shapes, thread safety, the max-element error and the exponent range are corrected inline,
 > with the old text struck through. For the current library see
 > [LIMITATIONS.md](LIMITATIONS.md), [PRECISION_ENVELOPE.md](PRECISION_ENVELOPE.md),
 > [`tests/README.md`](../../tests/README.md) and the Quantum ESPRESSO results
 > in the [README](../../README.md#performance).
 
-**Report Version**: 1.4
+**Report Version**: 1.6
 **Date**: 2026-04-23
 **Status**: Verification (V-2, unit suites) current; validation: VAL-1 revision 2 passes for accuracy on Quantum ESPRESSO Si64 (see Revision 1.2)
 **Validated Baseline**: Git tag `v1.0.2-bugfix` (SHA: f3e2fc1)
@@ -18,6 +18,8 @@
 **Revision 1.2 (2026-10-14)**: Correction of VAL-1; see the notice below.
 **Revision 1.3 (2026-10-30)**: Kept as a record of v1.0.2; production approvals withdrawn; rectangular shapes, thread safety, the max-element measure, the Fortran example and the test system corrected.
 **Revision 1.4 (2026-10-31)**: Agreement row and agreement bullet of §4.2.2 and measured error and conclusion of §4.2.3 struck through (withdrawn in Revision 1.2).
+**Revision 1.5 (2026-11-06)**: §5.2: the exponent-range and FP32-subnormal rows corrected for the range guard's gaps.
+**Revision 1.6 (2026-11-10)**: §5.2: the exponent-range and NaN rows extended to native results, which are not re-centred, and to the device GEMMs.
 **Test System**: Apple M2 Max, macOS 14.7, Metal 3
 **Validation Standard**: NASA-STD-7009A, ASME V&V 10-2006
 
@@ -413,10 +415,10 @@ Single ZGEMM: ~N · 10⁻¹⁵ ≈ 400 · 10⁻¹⁵ = 4×10⁻¹³
 
 | Condition | Status | Behavior |
 |-----------|--------|----------|
-| **Exponents far from 1** | ✓ Scaled by powers of two | BLAS ABI: rows/columns rescaled, Accelerate where no scaling suffices; native: one scale per matrix, spans up to 2⁷⁸ ([LIMITATIONS.md](LIMITATIONS.md#exponent-range)) |
+| **Exponents far from 1** | ~~✓ Scaled by powers of two~~ ⚠ Scaled by powers of two, with gaps (Revision 1.5) | BLAS ABI: rows/columns rescaled, Accelerate where ~~no scaling suffices~~ the guard refuses the call; some data passes the guard and loses accuracy with no fallback ([What the guard misses](LIMITATIONS.md#what-the-guard-misses)); native: one scale per matrix, spans up to 2⁷⁸, results not re-centred, no fallback; device GEMMs: the same, with each operand's scale measured on every call (Revision 1.6) ([LIMITATIONS.md](LIMITATIONS.md#exponent-range)) |
 | **Condition number κ > 10¹²** | ❌ Insufficient precision | Error becomes `κ·N·2⁻⁴⁸ > 10⁻³` |
-| **FP32 subnormals (< 2⁻¹²⁶ after scaling)** | ⚠ Flushed to zero by the GPU | The scaling keeps data clear of them |
-| **NaN, ±Infinity** | ⚠ BLAS ABI: Accelerate; native: propagates | Native: DD's `∞ − ∞` gives NaN |
+| **FP32 subnormals (< 2⁻¹²⁶ after scaling)** | ⚠ Flushed to zero by the GPU | ~~The scaling keeps data clear of them~~ The scaling and the guard do not keep every input clear of them: see [What the guard misses](LIMITATIONS.md#what-the-guard-misses) (Revision 1.5) |
+| **NaN, ±Infinity** | ⚠ BLAS ABI: Accelerate; native and device GEMMs: propagate (Revision 1.6) | Native and device GEMMs: DD's `∞ − ∞` gives NaN |
 
 ### 5.3 Algorithmic Limitations
 
@@ -804,8 +806,8 @@ boost-clock volatility directly.
 
 **Classification**: Engineering Validation
 **Distribution**: Public
-**Version**: 1.4
-**Date**: 2026-03-31 (revised 2026-04-23, 2026-10-14, 2026-10-30 and 2026-10-31)
+**Version**: 1.5
+**Date**: 2026-03-31 (revised 2026-04-23, 2026-10-14, 2026-10-30, 2026-10-31 and 2026-11-06)
 **Next Review**: ~~Upon v1.1.0 release or code modifications to DGEMM kernel~~ None: kept as a record of v1.0.2 (Revision 1.3)
 
 **Revision History**:
@@ -817,6 +819,7 @@ boost-clock volatility directly.
 | 1.2 | 2026-10-14 | VAL-1 withdrawn (the GPU was not exercised); performance expectations replaced by the 1.4.0 measurements | Grant Heileman |
 | 1.3 | 2026-10-30 | Kept as a record of v1.0.2; production approvals withdrawn; rectangular shapes, thread safety, the max-element measure, the Fortran example and the test system corrected | Grant Heileman |
 | 1.4 | 2026-10-31 | Agreement row and agreement bullet of §4.2.2 and measured error and conclusion of §4.2.3 struck through (withdrawn in Revision 1.2) | Grant Heileman |
+| 1.5 | 2026-11-06 | §5.2: the exponent-range and FP32-subnormal rows corrected for the range guard's gaps | Grant Heileman |
 
 ---
 

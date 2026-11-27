@@ -1,0 +1,10 @@
+date: 2026-10-29 10:07:50 EDT
+machine: Mac14,6, Apple M2 Max, 8P+4E CPU, 38-core GPU, 64 GB
+os: macOS 27.0.1 (26A434); pmset powermode 0
+power at start: AC Power; 
+load at start: 4.90 7.70 8.33
+library: build identity c37db7c23314, 8538f832fd2624ffe1dde96dbedf4a1dfc443515f298f5e39b0ed30ab7ea0ec7  libapplebottom.dylib
+command: bench_gemv --routines zhemv --reps 9 --warmup 2 --csv bench_gemv_runK.csv (K = 1..5)
+power at end: AC Power; 67%; charging; 9:03 remaining
+load at end: 3.73 6.49 7.79
+batch: 92 s

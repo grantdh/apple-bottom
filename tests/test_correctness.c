@@ -3,6 +3,7 @@
 // =============================================================================
 
 #include "apple_bottom.h"
+#include "test_kernels.h"
 #include "test_registry.h"
 #include <limits.h>
 #include <stdio.h>
@@ -1522,6 +1523,115 @@ static void test_mpir_non_square(void) {
     if (s == AB_ERROR_INVALID_ARG) PASS(); else FAIL("expected INVALID_ARG");
 }
 
+static double frob_rel_err_rect(const double* X, const double* Xref, int rows, int cols);
+
+// Row-major n x n A = U diag(s) Vᵀ, U and V orthogonal (QR of random
+// matrices), s geometric from 1 down to 1/kappa: condition number kappa.
+static double* mpir_kappa_matrix(int n, double kappa, long seed) {
+    double* Q[2] = {malloc((size_t)n * n * sizeof(double)), malloc((size_t)n * n * sizeof(double))};
+    double* tau = malloc((size_t)n * sizeof(double));
+    int lwork = 64 * n, info = 0;
+    double* work = malloc((size_t)lwork * sizeof(double));
+    srand48(seed);
+    for (int q = 0; q < 2; q++) {  // column-major U, then V
+        for (size_t i = 0; i < (size_t)n * n; i++) Q[q][i] = drand48() * 2 - 1;
+        dgeqrf_(&n, &n, Q[q], &n, tau, work, &lwork, &info);
+        dorgqr_(&n, &n, &n, Q[q], &n, tau, work, &lwork, &info);
+    }
+    for (int k = 0; k < n; k++)  // U = U diag(s)
+        for (int i = 0; i < n; i++) Q[0][(size_t)k * n + i] *= pow(kappa, -(double)k / (n - 1));
+    // Column-major V (U diag(s))ᵀ = Aᵀ, which is A row-major
+    double* A = malloc((size_t)n * n * sizeof(double));
+    cblas_dgemm(CblasColMajor, CblasNoTrans, CblasTrans, n, n, n, 1.0, Q[1], n, Q[0], n, 0.0,
+                A, n);
+    free(Q[0]); free(Q[1]); free(tau); free(work);
+    return A;
+}
+
+// κ = 1e10 is far past what FP32 LU can refine (near 1e7-1e8): the residual
+// stalls or grows, and the solve must fall back to FP64 LU (dgetrf/dgetrs),
+// as LAPACK dsgesv does. Before that fallback, ab_dgesv_mpir returned AB_OK
+// after 10 iterations with a relative error near 50 and a backward error near
+// 4e-9; FP64 LU gives about 1e-7 and 1e-16.
+static void test_mpir_ill_conditioned(void) {
+    TEST("MPIR: κ = 1e10 falls back to FP64 (N=64)");
+    ab_init();
+    int N = 64, NRHS = 4;
+    size_t B_count = (size_t)N * NRHS;
+
+    double* A_data = mpir_kappa_matrix(N, 1e10, 2026);
+    double* X_true = malloc(B_count * sizeof(double));
+    double* B_data = malloc(B_count * sizeof(double));
+    double* X_sol = malloc(B_count * sizeof(double));
+    double* R = malloc(B_count * sizeof(double));
+    srand48(7);
+    for (size_t i = 0; i < B_count; i++) X_true[i] = drand48() * 2 - 1;
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                N, NRHS, N, 1.0, A_data, N, X_true, NRHS, 0.0, B_data, NRHS);
+
+    ABMatrix mA = ab_matrix_create(N, N);
+    ABMatrix mB = ab_matrix_create(N, NRHS);
+    ab_matrix_upload(mA, A_data, true);
+    ab_matrix_upload(mB, B_data, true);
+    ABStatus s = ab_dgesv_mpir(mA, mB);
+    ab_matrix_download(mB, X_sol, true);
+
+    // Backward error ||B - A X||_F / (||A||_F ||X||_F + ||B||_F), and forward error
+    memcpy(R, B_data, B_count * sizeof(double));
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                N, NRHS, N, -1.0, A_data, N, X_sol, NRHS, 1.0, R, NRHS);
+    int nb = (int)B_count;
+    double bwd = cblas_dnrm2(nb, R, 1) / (cblas_dnrm2(N * N, A_data, 1) * cblas_dnrm2(nb, X_sol, 1) +
+                                          cblas_dnrm2(nb, B_data, 1));
+    double fwd = frob_rel_err_rect(X_sol, X_true, N, NRHS);
+
+    ab_matrix_destroy(mA);
+    ab_matrix_destroy(mB);
+    ab_shutdown();
+    free(A_data); free(X_true); free(B_data); free(X_sol); free(R);
+
+    if (s == AB_OK && bwd <= 1e-14 && fwd <= 1e-4) PASS();
+    else { char buf[80]; snprintf(buf, 80, "s=%d bwd=%.2e fwd=%.2e", s, bwd, fwd); FAIL(buf); }
+}
+
+// 1 + 2^-30 rounds to 1 in FP32, so [[1, 1], [1, 1 + 2^-30]] is singular to
+// sgetrf but not to FP64, which solves it exactly: AB_OK with X = (1, 2)
+// (before, AB_ERROR_KERNEL_FAILED). A singular in FP64 too, [[1, 2], [2, 4]],
+// still gives AB_ERROR_KERNEL_FAILED, with B left as it was.
+static void test_mpir_fp32_singular(void) {
+    TEST("MPIR: FP32-singular A solved in FP64");
+    ab_init();
+    const double A_data[4] = {1.0, 1.0, 1.0, 1.0 + ldexp(1.0, -30)};
+    const double B_data[2] = {3.0, 3.0 + ldexp(1.0, -29)};
+    const double S_data[4] = {1.0, 2.0, 2.0, 4.0};
+    const double C_data[2] = {1.0, 2.0};
+    double X[2] = {0.0, 0.0}, Y[2] = {0.0, 0.0};
+
+    ABMatrix mA = ab_matrix_create(2, 2), mB = ab_matrix_create(2, 1);
+    ABMatrix mS = ab_matrix_create(2, 2), mC = ab_matrix_create(2, 1);
+    ab_matrix_upload(mA, A_data, false);
+    ab_matrix_upload(mB, B_data, false);
+    ab_matrix_upload(mS, S_data, false);
+    ab_matrix_upload(mC, C_data, false);
+    ABStatus s1 = ab_dgesv_mpir(mA, mB);
+    ABStatus s2 = ab_dgesv_mpir(mS, mC);
+    ab_matrix_download(mB, X, false);
+    ab_matrix_download(mC, Y, false);
+
+    ab_matrix_destroy(mA); ab_matrix_destroy(mB);
+    ab_matrix_destroy(mS); ab_matrix_destroy(mC);
+    ab_shutdown();
+
+    bool solved = s1 == AB_OK && fabs(X[0] - 1.0) <= 1e-6 && fabs(X[1] - 2.0) <= 2e-6;
+    bool singular = s2 == AB_ERROR_KERNEL_FAILED && Y[0] == 1.0 && Y[1] == 2.0;
+    if (solved && singular) PASS();
+    else {
+        char buf[96];
+        snprintf(buf, 96, "s1=%d X=(%.3g, %.3g) s2=%d", s1, X[0], X[1], s2);
+        FAIL(buf);
+    }
+}
+
 // =============================================================================
 // Batch API Tests
 // =============================================================================
@@ -1760,6 +1870,165 @@ static void test_batch_committed_reuse(void) {
     ab_shutdown();
 
     if (s == AB_ERROR_INVALID_ARG) PASS(); else FAIL("expected INVALID_ARG after commit");
+}
+
+// =============================================================================
+// Native ZGEMM shapes: every entry checks all six handles before it encodes
+// anything; a mismatched one was read or written past its end with AB_OK.
+// =============================================================================
+
+// op(A) 8x6 times op(B) 6x5 into C 8x5. ZS_AI_BAD..ZS_CI_BAD are wrong
+// imaginary parts; ZS_AT..ZS_BIT are A and B stored for op = transpose;
+// ZS_BK, ZS_BKI a B with 5 rows; ZS_CR_N with ZS_CI_BAD a C with 4 columns.
+enum { ZS_AR, ZS_AI, ZS_BR, ZS_BI, ZS_CR, ZS_CI, ZS_AI_BAD, ZS_BI_BAD, ZS_CI_BAD,
+       ZS_AT, ZS_AIT, ZS_BT, ZS_BIT, ZS_BK, ZS_BKI, ZS_CR_N, ZS_N };
+static const int ZS_DIMS[ZS_N][2] = {{8, 6}, {8, 6}, {6, 5}, {6, 5}, {8, 5}, {8, 5}, {4, 6},
+                                     {6, 4}, {8, 4}, {6, 8}, {6, 8}, {5, 6}, {5, 6},
+                                     {5, 5}, {5, 5}, {8, 4}};
+
+// One refused call per op() rule, every imaginary part in its real part's
+// shape (Ar, Ai, Br, Bi, Cr, Ci): N (C 8x4), M (op(A) 5x6), K (op(B) 5x5).
+static const int ZS_OP_RULES[][6] = {
+    {ZS_AR, ZS_AI, ZS_BR, ZS_BI, ZS_CR_N, ZS_CI_BAD},
+    {ZS_BT, ZS_BIT, ZS_BR, ZS_BI, ZS_CR, ZS_CI},
+    {ZS_AR, ZS_AI, ZS_BK, ZS_BKI, ZS_CR, ZS_CI},
+};
+// The same rules with op(A) = A^T and op(B) = B^H, for ab_zgemm_ex.
+static const int ZS_OP_RULES_T[][6] = {
+    {ZS_AT, ZS_AIT, ZS_BT, ZS_BIT, ZS_CR_N, ZS_CI_BAD},
+    {ZS_BR, ZS_BI, ZS_BT, ZS_BIT, ZS_CR, ZS_CI},
+    {ZS_AT, ZS_AIT, ZS_BK, ZS_BKI, ZS_CR, ZS_CI},
+};
+#define ZS_N_RULES ((int)(sizeof ZS_OP_RULES / sizeof ZS_OP_RULES[0]))
+// Rule r's six handles from table t, as the ZGEMM entries take them.
+#define ZS_RULE_ARGS_IN(t, m, r)                                                              \
+    (m)[t[r][0]], (m)[t[r][1]], (m)[t[r][2]], (m)[t[r][3]], (m)[t[r][4]], (m)[t[r][5]]
+#define ZS_RULE_ARGS(m, r) ZS_RULE_ARGS_IN(ZS_OP_RULES, m, r)
+
+#define ZS_MM AB_ERROR_DIMENSION_MISMATCH
+
+// ab_init() and the ZS_N matrices, matrix i holding i + e/64 at element e so
+// zs_intact sees any write to it; false if one could not be made.
+static bool zs_begin(ABMatrix m[ZS_N]) {
+    ab_init();
+    double d[64];
+    bool ok = true;
+    for (int i = 0; i < ZS_N; i++) {
+        for (int e = 0; e < 64; e++) d[e] = i + e / 64.0;
+        m[i] = ab_matrix_create(ZS_DIMS[i][0], ZS_DIMS[i][1]);
+        ok = ok && m[i] && ab_matrix_upload(m[i], d, false) == AB_OK;
+    }
+    return ok;
+}
+
+static bool zs_intact(ABMatrix m[ZS_N], int i) {
+    double d[64];
+    if (ab_matrix_download(m[i], d, false) != AB_OK) return false;
+    for (int e = 0; e < ZS_DIMS[i][0] * ZS_DIMS[i][1]; e++)
+        if (d[e] != i + e / 64.0) return false;
+    return true;
+}
+
+static bool zs_c_intact(ABMatrix m[ZS_N]) {
+    return zs_intact(m, ZS_CR) && zs_intact(m, ZS_CI) && zs_intact(m, ZS_CI_BAD) &&
+           zs_intact(m, ZS_CR_N);
+}
+
+static void zs_end(ABMatrix m[ZS_N], bool ok, const char* why) {
+    for (int i = 0; i < ZS_N; i++) ab_matrix_destroy(m[i]);
+    ab_shutdown();
+    if (ok) PASS(); else FAIL(why);
+}
+
+static void test_zgemm_shape_mismatch(void) {
+    TEST("ZGEMM shapes: ab_zgemm, _ex, _strassen");
+    ABMatrix m[ZS_N];
+    bool ok = zs_begin(m);
+    // An imaginary part of another shape, Cr of another shape, and, with
+    // transposes, an imaginary part stored in op()'s shape instead of its real part's.
+    ok = ok && ab_zgemm(m[ZS_AR], m[ZS_AI_BAD], m[ZS_BR], m[ZS_BI], m[ZS_CR], m[ZS_CI]) == ZS_MM &&
+         ab_zgemm(m[ZS_AR], m[ZS_AI], m[ZS_BR], m[ZS_BI_BAD], m[ZS_CR], m[ZS_CI]) == ZS_MM &&
+         ab_zgemm(m[ZS_AR], m[ZS_AI], m[ZS_BR], m[ZS_BI], m[ZS_CR], m[ZS_CI_BAD]) == ZS_MM &&
+         ab_zgemm(m[ZS_AR], m[ZS_AI], m[ZS_BR], m[ZS_BI], m[ZS_CI_BAD], m[ZS_CI]) == ZS_MM &&
+         ab_zgemm_ex(AB_TRANS, AB_CONJ_TRANS, m[ZS_AT], m[ZS_AI], m[ZS_BT], m[ZS_BIT], m[ZS_CR],
+                     m[ZS_CI]) == ZS_MM &&
+         ab_zgemm_ex(AB_TRANS, AB_CONJ_TRANS, m[ZS_AT], m[ZS_AIT], m[ZS_BT], m[ZS_BI], m[ZS_CR],
+                     m[ZS_CI]) == ZS_MM &&
+         ab_zgemm_strassen(m[ZS_AR], m[ZS_AI], m[ZS_BR], m[ZS_BI_BAD], m[ZS_CR], m[ZS_CI]) == ZS_MM;
+    for (int r = 0; r < ZS_N_RULES; r++) {
+        ok = ok && ab_zgemm(ZS_RULE_ARGS(m, r)) == ZS_MM &&
+             ab_zgemm_ex(AB_TRANS, AB_CONJ_TRANS, ZS_RULE_ARGS_IN(ZS_OP_RULES_T, m, r)) == ZS_MM;
+    }
+    ok = ok && zs_c_intact(m);
+    // The same transposes with matching parts are accepted.
+    ok = ok && ab_zgemm_ex(AB_TRANS, AB_CONJ_TRANS, m[ZS_AT], m[ZS_AIT], m[ZS_BT], m[ZS_BIT],
+                           m[ZS_CR], m[ZS_CI]) == AB_OK;
+    zs_end(m, ok, "a mismatched shape was not refused, or C was written");
+}
+
+// Whether f is a completed future holding DIMENSION_MISMATCH; destroys it.
+static bool zs_refused(ABFuture f) {
+    bool ok = f && ab_future_is_ready(f) && ab_future_status(f) == ZS_MM &&
+              ab_future_wait(f) == ZS_MM;
+    ab_future_destroy(f);
+    return ok;
+}
+
+static void test_zgemm_async_shape_mismatch(void) {
+    TEST("ZGEMM shapes: ab_zgemm_async");
+    ABMatrix m[ZS_N];
+    bool ok = zs_begin(m);
+    ok = ok && zs_refused(ab_zgemm_async(m[ZS_AR], m[ZS_AI], m[ZS_BR], m[ZS_BI_BAD], m[ZS_CR],
+                                         m[ZS_CI])) &&
+         zs_refused(ab_zgemm_async(m[ZS_AR], m[ZS_AI], m[ZS_BR], m[ZS_BI], m[ZS_CR],
+                                   m[ZS_CI_BAD]));
+    for (int r = 0; r < ZS_N_RULES; r++) ok = ok && zs_refused(ab_zgemm_async(ZS_RULE_ARGS(m, r)));
+    ok = ok && zs_c_intact(m);
+    zs_end(m, ok, "expected a completed future holding DIMENSION_MISMATCH");
+}
+
+static void test_batch_zgemm_shape_mismatch(void) {
+    TEST("ZGEMM shapes: ab_batch_zgemm");
+    ABMatrix m[ZS_N];
+    bool ok = zs_begin(m);
+    ABBatch batch = ab_batch_create();
+    ok = ok && batch &&
+         ab_batch_zgemm(batch, m[ZS_AR], m[ZS_AI_BAD], m[ZS_BR], m[ZS_BI], m[ZS_CR], m[ZS_CI]) ==
+             ZS_MM &&
+         ab_batch_zgemm(batch, m[ZS_AR], m[ZS_AI], m[ZS_BR], m[ZS_BI], m[ZS_CR], m[ZS_CI_BAD]) ==
+             ZS_MM;
+    for (int r = 0; r < ZS_N_RULES; r++)
+        ok = ok && ab_batch_zgemm(batch, ZS_RULE_ARGS(m, r)) == ZS_MM;
+    ok = ok && ab_batch_commit(batch) == AB_OK && ab_batch_wait(batch) == AB_OK;
+    ab_batch_destroy(batch);
+    ok = ok && zs_c_intact(m);
+    zs_end(m, ok, "a mismatched shape was not refused, or C was written");
+}
+
+static void test_zgemm_batched_shape_mismatch(void) {
+    TEST("ZGEMM shapes: ab_zgemm_batched");
+    ABMatrix m[ZS_N];
+    bool ok = zs_begin(m);
+    // Entry 0 is valid and writes C if it runs. Entry 1 first has a short Ai,
+    // then holds each op() rule's refused call in turn.
+    ABMatrix Ars[] = {m[ZS_AR], m[ZS_AR]}, Ais[] = {m[ZS_AI], m[ZS_AI_BAD]};
+    ABMatrix Brs[] = {m[ZS_BR], m[ZS_BR]}, Bis[] = {m[ZS_BI], m[ZS_BI]};
+    ABMatrix Crs[] = {m[ZS_CR], m[ZS_CR]}, Cis[] = {m[ZS_CI], m[ZS_CI]};
+    ABMatrix Bis_bad[] = {m[ZS_BI_BAD]};
+    ok = ok && ab_zgemm_batched(2, Ars, Ais, Brs, Bis, Crs, Cis) == ZS_MM &&
+         ab_zgemm_batched(1, Ars, Ais, Brs, Bis_bad, Crs, Cis) == ZS_MM;
+    for (int r = 0; r < ZS_N_RULES; r++) {
+        const int* x = ZS_OP_RULES[r];
+        Ars[1] = m[x[0]];
+        Ais[1] = m[x[1]];
+        Brs[1] = m[x[2]];
+        Bis[1] = m[x[3]];
+        Crs[1] = m[x[4]];
+        Cis[1] = m[x[5]];
+        ok = ok && ab_zgemm_batched(2, Ars, Ais, Brs, Bis, Crs, Cis) == ZS_MM;
+    }
+    ok = ok && zs_c_intact(m);
+    zs_end(m, ok, "a mismatched entry was not refused before any ran");
 }
 
 // =============================================================================
@@ -2062,11 +2331,18 @@ static void test_morton_qe_realistic_dims(void) {
 
 // K-P0-1: power-of-2 tile grids that are neither square nor 2:1 wide, where
 // the Morton remap is not a bijection and used to leave tiles of C unwritten.
-// 64x64 tiles: 256x1024 (grid 16x4), 1024x256 (4x16). 32x32 tiles (C of at
-// most 480x480 elements): 256x128 (4x8), 512x256 (8x16), 128x512 (16x4),
-// 1024x64 (2x32). Tall-skinny 128x16 tiles (ab_dgemm_scaled with M >= 4N):
-// 2048x128 (8x16). ab_dgemm_async also covers K-P1-3 under MTL_DEBUG_LAYER=1.
+// The shapes must put every GEMM kernel but dd_dsyrk (square grids only) on
+// such grids: 64x64 (dd_dgemm, dd_dgemm_ab), 32x32 for small grids
+// (dd_dgemm_narrow, dd_dgemm_ab_narrow; use_narrow_tiles) and tall-skinny
+// 128x16 (dd_dgemm_ab_ts: ab_dgemm_scaled with M >= 4N), and each call the
+// kernel its shape names. ab_dgemm_async also covers K-P1-3 under
+// MTL_DEBUG_LAYER=1.
 typedef enum { MR_DGEMM, MR_DGEMM_SCALED, MR_DGEMM_ASYNC } MortonRectOp;
+
+static const char *const MORTON_RECT_OP[] = {
+    [MR_DGEMM] = "ab_dgemm", [MR_DGEMM_SCALED] = "ab_dgemm_scaled",
+    [MR_DGEMM_ASYNC] = "ab_dgemm_async",
+};
 
 static double morton_rect_err(MortonRectOp op, int M, int N, int K) {
     double* A = malloc((size_t)M * K * sizeof(double));
@@ -2111,25 +2387,45 @@ static void test_morton_rect_pow2_grids(void) {
     TEST("K-P0-1: DGEMM non-square pow2 tile grids");
     ab_init();
 
-    static const struct { int M, N; } shapes[] = {
-        {512, 256}, {256, 1024}, {1024, 256}, {1024, 64}, {2048, 128},
-        {256, 128}, {128, 512},
+    // The kernels of ab_dgemm and ab_dgemm_async (one dispatch helper) and of
+    // ab_dgemm_scaled, with their tile grids (columns x rows)
+    static const struct { int M, N; const char *kernel, *scaled; } shapes[] = {
+        {512,  256,  "dd_dgemm_narrow", "dd_dgemm_ab_narrow"},   // 8x16
+        {256,  1024, "dd_dgemm",        "dd_dgemm_ab"},          // 16x4
+        {1024, 256,  "dd_dgemm",        "dd_dgemm_ab_narrow"},   // 4x16, 8x32
+        {1024, 64,   "dd_dgemm_narrow", "dd_dgemm_ab_narrow"},   // 2x32
+        {2048, 128,  "dd_dgemm",        "dd_dgemm_ab_narrow"},   // 2x32, 4x64
+        {256,  128,  "dd_dgemm_narrow", "dd_dgemm_ab_narrow"},   // 4x8
+        {128,  512,  "dd_dgemm_narrow", "dd_dgemm_ab_narrow"},   // 16x4
+        {8192, 256,  "dd_dgemm",        "dd_dgemm_ab_ts"},       // 4x128, 16x64
     };
     static const MortonRectOp ops[] = {MR_DGEMM, MR_DGEMM_SCALED, MR_DGEMM_ASYNC};
 
     int all_ok = 1;
     double worst_err = 0;
+    char moved[256] = "", ran[192];
+    KernelCounts start = kernel_counts();
     for (size_t si = 0; si < TEST_REGISTRY_SIZE(shapes); si++) {
         for (size_t oi = 0; oi < TEST_REGISTRY_SIZE(ops); oi++) {
+            const char *want = ops[oi] == MR_DGEMM_SCALED ? shapes[si].scaled : shapes[si].kernel;
+            KernelCounts before = kernel_counts();
             double err = morton_rect_err(ops[oi], shapes[si].M, shapes[si].N, 64);
+            KernelCounts k = kernel_counts_since(&before);
+            if (!kernel_check(&k, want, ran, sizeof ran) && !moved[0])
+                snprintf(moved, sizeof moved, "%s %dx%d %s", MORTON_RECT_OP[ops[oi]],
+                         shapes[si].M, shapes[si].N, ran);
             if (!(err < 1e-13)) all_ok = 0;
             if (err > worst_err) worst_err = err;
         }
     }
+    KernelCounts all = kernel_counts_since(&start);
+    const char *missing = kernel_missing(&all, false, "dd_dsyrk");
+    if (missing && !moved[0]) snprintf(moved, sizeof moved, "no shape runs %s", missing);
 
     ab_shutdown();
 
-    if (all_ok) PASS();
+    if (moved[0]) FAIL(moved);
+    else if (all_ok) PASS();
     else { char buf[80]; snprintf(buf, 80, "worst=%.2e", worst_err); FAIL(buf); }
 }
 
@@ -2567,26 +2863,26 @@ static void test_xr_elementwise(void) {
 // Each case runs with AB_PREFETCH=1, which puts every GEMM-family dispatch on
 // a register-prefetch kernel, and with AB_PREFETCH=0, which keeps them all on
 // the plain kernels, each pass on a freshly initialized library. The FP64
-// results must be bitwise equal, and each call must have dispatched as many
-// prefetch kernels as it has products (three for ZGEMM's Gauss-3M), none
-// with AB_PREFETCH=0. Together the cases run every prefetch kernel.
+// results must be bitwise equal, and each call must have dispatched its
+// kernel's prefetch instance (AB_PREFETCH=1) or plain one (AB_PREFETCH=0) once
+// per product (three for ZGEMM's Gauss-3M) and nothing else. Together the
+// cases must run every prefetch kernel.
 
-extern uint64_t ab_internal_prefetch_dispatches(void);   // src/apple_bottom.m
-
-// op: 'd' ab_dgemm, 's' ab_dgemm_scaled (alpha -0.7, beta 1.3), 'z' ab_zgemm,
-// 'y' ab_dsyrk (A is M×K, C is M×M)
-typedef struct { char op; int M, N, K; } PrefetchCase;
+// op: 'd' ab_dgemm, 's' ab_dgemm_scaled (alpha -0.7, beta 1.3), 'z' ab_zgemm
+// (three concurrent products), 'y' ab_dsyrk (A is M×K, C is M×M); kernel:
+// the kernel of its products
+typedef struct { char op; int M, N, K; const char *kernel; } PrefetchCase;
 static const PrefetchCase PF_CASES[] = {
-    {'d',  520,  500,  300},   // dd_dgemm_pf
-    {'d',  300,  200,  513},   // dd_dgemm_narrow_pf
-    {'s',  490,  500,  129},   // dd_dgemm_ab_pf
-    {'s',  500,  300,  700},   // dd_dgemm_ab_narrow_pf
-    {'s', 2000,   40,  300},   // dd_dgemm_ab_ts_pf
-    {'z',  520,  500,  100},   // three concurrent products each: dd_dgemm_pf,
-    {'z',  256,  200,  300},   // dd_dgemm_narrow_pf,
-    {'z', 1024,   40,  513},   // dd_dgemm_ab_ts_pf
-    {'y',  500,  500, 1000},   // dd_dsyrk_pf
-    {'y',  130,  130,   64},
+    {'d', 1100, 1000,  300, "dd_dgemm"},
+    {'d',  300,  200,  513, "dd_dgemm_narrow"},
+    {'s', 1000, 1100,  129, "dd_dgemm_ab"},
+    {'s',  500,  300,  700, "dd_dgemm_ab_narrow"},
+    {'s', 4000,   40,  300, "dd_dgemm_ab_ts"},
+    {'z', 1100, 1000,  100, "dd_dgemm"},
+    {'z',  256,  200,  300, "dd_dgemm_narrow"},
+    {'z', 4000,   40,  513, "dd_dgemm_ab_ts"},
+    {'y',  500,  500, 1000, "dd_dsyrk"},
+    {'y',  130,  130,   64, "dd_dsyrk"},
 };
 #define N_PF_CASES ((int)TEST_REGISTRY_SIZE(PF_CASES))
 
@@ -2635,16 +2931,35 @@ static double *pf_case(const PrefetchCase *c, long seed, size_t *n) {
 }
 
 // Every case on a fresh library with AB_PREFETCH=mode: res[c] NULL where one
-// failed, pf[c] its prefetch dispatches
-static void pf_run(const char *mode, double **res, size_t *n, uint64_t *pf) {
+// failed, ran[c] the kernels it dispatched
+static void pf_run(const char *mode, double **res, size_t *n, KernelCounts *ran) {
     setenv("AB_PREFETCH", mode, 1);
     bool ok = ab_init() == AB_OK;
     for (int c = 0; c < N_PF_CASES; c++) {
-        uint64_t before = ab_internal_prefetch_dispatches();
+        KernelCounts before = kernel_counts();
         res[c] = ok ? pf_case(&PF_CASES[c], 4000 + 10 * c, &n[c]) : NULL;
-        pf[c] = ab_internal_prefetch_dispatches() - before;
+        ran[c] = kernel_counts_since(&before);
     }
     if (ok) ab_shutdown();
+}
+
+// Checks that case p dispatched its kernel's _pf instance once per product
+// with AB_PREFETCH=1 (on) and its plain instance with AB_PREFETCH=0 (off), and
+// nothing else; if not, msg says what ran
+static void pf_check_kernels(const PrefetchCase *p, const KernelCounts *on,
+                             const KernelCounts *off, char *msg, size_t n) {
+    const uint64_t products = p->op == 'z' ? 3 : 1;
+    const KernelCounts *ran[2] = {off, on};
+    for (int pf = 1; pf >= 0; pf--) {
+        int k = kernel_kind(ran[pf], p->kernel);
+        if (k >= 0 && ran[pf]->n[k][pf] == products && kernel_total(ran[pf]) == products)
+            continue;
+        char got[192];
+        snprintf(msg, n, "%c %dx%dx%d with AB_PREFETCH=%d ran %s, not %s%s x%llu", p->op, p->M,
+                 p->N, p->K, pf, kernel_list(ran[pf], got, sizeof got), p->kernel,
+                 pf ? "_pf" : "", (unsigned long long)products);
+        return;
+    }
 }
 
 static void test_prefetch_same_bits(void) {
@@ -2653,25 +2968,38 @@ static void test_prefetch_same_bits(void) {
     char *keep = saved ? strdup(saved) : NULL;
     double *on[N_PF_CASES], *off[N_PF_CASES];
     size_t n_on[N_PF_CASES], n_off[N_PF_CASES];
-    uint64_t pf_on[N_PF_CASES], pf_off[N_PF_CASES];
+    KernelCounts ran_on[N_PF_CASES], ran_off[N_PF_CASES];
 
-    pf_run("1", on, n_on, pf_on);
-    pf_run("0", off, n_off, pf_off);
+    KernelCounts start = kernel_counts();
+    uint64_t pf_start = ab_internal_prefetch_dispatches();
+    pf_run("1", on, n_on, ran_on);
+    KernelCounts all_on = kernel_counts_since(&start);
+    uint64_t pf_all = ab_internal_prefetch_dispatches() - pf_start;
+    pf_start += pf_all;
+    pf_run("0", off, n_off, ran_off);
+    uint64_t pf_none = ab_internal_prefetch_dispatches() - pf_start;
     if (keep) setenv("AB_PREFETCH", keep, 1); else unsetenv("AB_PREFETCH");
     free(keep);
 
-    char msg[128] = "";
+    char msg[256] = "";
     for (int c = 0; c < N_PF_CASES && !msg[0]; c++) {
         const PrefetchCase *p = &PF_CASES[c];
-        uint64_t products = p->op == 'z' ? 3 : 1;
         if (!on[c] || !off[c])
             snprintf(msg, sizeof msg, "%c %dx%dx%d failed", p->op, p->M, p->N, p->K);
         else if (n_on[c] != n_off[c] || memcmp(on[c], off[c], n_on[c] * sizeof(double)))
             snprintf(msg, sizeof msg, "%c %dx%dx%d: bits differ", p->op, p->M, p->N, p->K);
-        else if (pf_on[c] != products || pf_off[c] != 0)
-            snprintf(msg, sizeof msg, "%c %dx%dx%d: %llu prefetch dispatches, %llu with AB_PREFETCH=0",
-                     p->op, p->M, p->N, p->K, (unsigned long long)pf_on[c], (unsigned long long)pf_off[c]);
+        else
+            pf_check_kernels(p, &ran_on[c], &ran_off[c], msg, sizeof msg);
     }
+    // Then every kernel's prefetch instance must have run in a case
+    const char *missing = kernel_missing(&all_on, true, NULL);
+    if (missing && !msg[0]) snprintf(msg, sizeof msg, "no case runs %s_pf", missing);
+    // 1.5's counter is the sum of the _pf instances', and has none of the plain ones
+    uint64_t pf_sum = 0;
+    for (int k = 0; k < all_on.kinds; k++) pf_sum += all_on.n[k][1];
+    if ((pf_all != pf_sum || pf_none) && !msg[0])
+        snprintf(msg, sizeof msg, "ab_internal_prefetch_dispatches counted %llu and %llu, not %llu and 0",
+                 (unsigned long long)pf_all, (unsigned long long)pf_none, (unsigned long long)pf_sum);
     for (int c = 0; c < N_PF_CASES; c++) { free(on[c]); free(off[c]); }
     if (msg[0]) FAIL(msg); else PASS();
 }
@@ -2769,12 +3097,18 @@ static const TestCase TESTS[] = {
     {"test_mpir_null_safety",                 test_mpir_null_safety},
     {"test_mpir_dimension_mismatch",          test_mpir_dimension_mismatch},
     {"test_mpir_non_square",                  test_mpir_non_square},
+    {"test_mpir_ill_conditioned",             test_mpir_ill_conditioned},
+    {"test_mpir_fp32_singular",               test_mpir_fp32_singular},
     {"test_batch_basic_dgemm",                test_batch_basic_dgemm},
     {"test_batch_multiple_dgemm",             test_batch_multiple_dgemm},
     {"test_batch_barrier",                    test_batch_barrier},
     {"test_batch_null_safety",                test_batch_null_safety},
     {"test_batch_zgemm",                      test_batch_zgemm},
     {"test_batch_committed_reuse",            test_batch_committed_reuse},
+    {"test_zgemm_shape_mismatch",             test_zgemm_shape_mismatch},
+    {"test_zgemm_async_shape_mismatch",       test_zgemm_async_shape_mismatch},
+    {"test_batch_zgemm_shape_mismatch",       test_batch_zgemm_shape_mismatch},
+    {"test_zgemm_batched_shape_mismatch",     test_zgemm_batched_shape_mismatch},
     {"test_fused_zgemm_precision",            test_fused_zgemm_precision},
     {"test_async_zgemm_true",                 test_async_zgemm_true},
     {"test_bug1_async_dimension_packing",     test_bug1_async_dimension_packing},

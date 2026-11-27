@@ -8,5 +8,5 @@ Description: FP64-class BLAS for Apple Silicon GPU via double-float arithmetic o
 URL: https://github.com/grantdh/apple-bottom
 Version: @VERSION@
 Libs: -L${libdir} -Wl,-rpath,${libdir} -lapplebottom
-Libs.private: -lc++ -framework Metal -framework Foundation -framework Accelerate
+Libs.private: -lc++ -framework Metal -framework Foundation -framework Accelerate -framework IOKit
 Cflags: -I${includedir}

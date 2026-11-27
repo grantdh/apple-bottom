@@ -1,0 +1,55 @@
+===== narrow
+dgemm_NN_544x544x544.jsonl n 10 old med 1.192 new med 1.014 ratio 0.85 CI 0.847 0.858 min..max 0.816 0.864 paths {'gpu'}
+dgemm_NN_832x832x832.jsonl n 10 old med 2.652 new med 2.793 ratio 1.053 CI 1.051 1.055 min..max 1.05 1.213 paths {'gpu'}
+dgemm_TN_600x600x9140.jsonl n 10 old med 16.017 new med 14.932 ratio 0.934 CI 0.933 0.976 min..max 0.887 1.002 paths {'gpu'}
+zgemm_CN_500x500x9140.jsonl n 10 old med 29.066 new med 28.569 ratio 0.983 CI 0.982 1.018 min..max 0.979 1.063 paths {'gpu'}
+zgemm_NN_1024x40x4608.jsonl n 10 old med 12.085 new med 8.796 ratio 0.959 CI 0.755 0.973 min..max 0.41 1.035 paths {'gpu'}
+===== narrow2
+dgemm_TN_600x600x9140.jsonl n 15 old med 15.995 new med 14.944 ratio 0.934 CI 0.933 0.935 min..max 0.932 0.937 paths {'gpu'}
+    0 old 15.99 new 14.93 ratio 0.934 load 1.34 1.31
+    1 old 16.0 new 14.93 ratio 0.933 load 1.37 1.31
+    2 old 16.0 new 14.95 ratio 0.935 load 1.37 1.66
+    3 old 15.99 new 14.95 ratio 0.935 load 1.66 1.66
+    4 old 15.99 new 14.94 ratio 0.935 load 1.53 1.53
+    5 old 16.01 new 14.93 ratio 0.932 load 1.4 1.4
+    6 old 16.0 new 14.95 ratio 0.934 load 1.4 1.37
+    7 old 16.01 new 14.92 ratio 0.932 load 1.42 1.37
+    8 old 15.98 new 14.92 ratio 0.934 load 1.42 1.31
+    9 old 15.99 new 14.98 ratio 0.937 load 1.31 1.31
+    10 old 16.03 new 14.96 ratio 0.933 load 1.28 1.28
+    11 old 15.98 new 14.92 ratio 0.933 load 1.18 1.18
+    12 old 15.98 new 14.96 ratio 0.936 load 1.18 1.48
+    13 old 16.0 new 14.96 ratio 0.935 load 1.45 1.48
+    14 old 16.0 new 14.94 ratio 0.934 load 1.45 1.33
+zgemm_CN_500x500x9140.jsonl n 15 old med 29.083 new med 28.608 ratio 0.999 CI 0.98 1.002 min..max 0.963 1.004 paths {'gpu'}
+    0 old 29.61 new 28.59 ratio 0.966 load 1.43 1.43
+    1 old 29.04 new 28.52 ratio 0.982 load 1.31 1.31
+    2 old 29.08 new 29.11 ratio 1.001 load 1.21 1.21
+    3 old 29.05 new 28.56 ratio 0.983 load 1.11 1.21
+    4 old 29.63 new 28.53 ratio 0.963 load 1.11 1.1
+    5 old 29.03 new 29.13 ratio 1.004 load 1.1 1.1
+    6 old 29.07 new 29.14 ratio 1.002 load 1.49 1.49
+    7 old 29.69 new 29.15 ratio 0.982 load 1.45 1.45
+    8 old 29.1 new 29.21 ratio 1.004 load 1.42 1.42
+    9 old 29.15 new 28.07 ratio 0.963 load 1.38 1.42
+    10 old 29.14 new 28.54 ratio 0.98 load 1.38 1.35
+    11 old 28.56 new 28.59 ratio 1.001 load 1.4 1.35
+    12 old 28.56 new 28.61 ratio 1.002 load 1.4 1.4
+    13 old 28.64 new 28.62 ratio 0.999 load 1.37 1.37
+    14 old 29.09 new 29.18 ratio 1.003 load 1.34 1.34
+zgemm_NN_1024x40x4608.jsonl n 15 old med 6.686 new med 6.415 ratio 0.96 CI 0.948 0.961 min..max 0.798 1.292 paths {'gpu'}
+    0 old 6.13 new 6.41 ratio 1.046 load 1.33 1.33
+    1 old 6.68 new 6.41 ratio 0.961 load 1.22 1.22
+    2 old 6.69 new 6.42 ratio 0.96 load 1.2 1.2
+    3 old 6.7 new 6.41 ratio 0.958 load 1.43 1.2
+    4 old 6.68 new 6.16 ratio 0.922 load 1.43 1.31
+    5 old 6.67 new 6.41 ratio 0.96 load 1.31 1.31
+    6 old 6.68 new 6.41 ratio 0.959 load 1.21 1.21
+    7 old 6.69 new 6.41 ratio 0.959 load 1.19 1.19
+    8 old 6.69 new 6.42 ratio 0.96 load 1.1 1.1
+    9 old 6.68 new 6.42 ratio 0.961 load 1.49 1.1
+    10 old 13.34 new 13.74 ratio 1.03 load 1.49 2.65
+    11 old 15.78 new 12.6 ratio 0.798 load 2.65 2.65
+    12 old 10.82 new 13.98 ratio 1.292 load 3.56 3.56
+    13 old 12.71 new 12.05 ratio 0.948 load 5.52 5.52
+    14 old 13.92 new 12.5 ratio 0.898 load 8.92 8.92

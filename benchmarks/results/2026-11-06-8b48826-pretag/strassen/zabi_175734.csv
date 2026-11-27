@@ -1,0 +1,3 @@
+mode,routine,M,K,N,method,reps,wall_med_ms,wall_min_ms,gpu_med_ms,temps_med_ms,submit_med_ms,wake_med_ms,gflops
+abi,zgemm,4096,4096,4096,gpu,3,601.279,601.104,0.000,0.000,0.000,0.000,914.3
+abi,zgemm,6144,6144,6144,gpu,3,2108.623,2096.951,0.000,0.000,0.000,0.000,879.9

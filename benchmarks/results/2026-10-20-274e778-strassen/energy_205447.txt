@@ -1,0 +1,44 @@
+apple-bottom 1.4.0 (274e778d5065)
+power source: Now drawing from 'AC Power'
+
+== idle
+  idle                       w0  15.0s  GPU     0.0 -  CPU     0.0 - | PDTR  121.4 W (+  nan)  PSTR   34.0  PPBR   1.6 | GPU IOReport   0.2 W, SMC rails   0.1 W,  463 MHz, busy   9% | PHPC  12.5 PSVR   6.3
+  => idle: PDTR 121.4 W, GPU 0.20 W
+
+== classical DD 4096
+  classical DD 4096          w0  10.0s  GPU   687.1 GF  CPU     0.0 GF | PDTR  136.8 W (+ 15.4)  PSTR  117.3  PPBR   1.6 | GPU IOReport  61.9 W, SMC rails  60.1 W, 1386 MHz, busy 100% | PHPC  85.9 PSVR  88.5
+  classical DD 4096          w1  10.0s  GPU   686.9 GF  CPU     0.0 GF | PDTR  136.8 W (+ 15.4)  PSTR  118.5  PPBR   1.5 | GPU IOReport  62.4 W, SMC rails  60.5 W, 1385 MHz, busy 100% | PHPC  89.4 PSVR  89.5
+  classical DD 4096          w2  10.0s  GPU   673.3 GF  CPU     0.0 GF | PDTR  136.7 W (+ 15.4)  PSTR  119.6  PPBR   1.6 | GPU IOReport  62.0 W, SMC rails  60.2 W, 1379 MHz, busy 100% | PHPC  90.1 PSVR  89.9
+  => classical DD 4096: 682.4 GF/s total; wall increment 15.4 W -> 0.023 J per GF (44347 GF/kJ); GPU energy above idle 61.9 W -> 0.091 J per GPU GF
+
+== Strassen DD 4096
+  Strassen DD 4096           w0  10.0s  GPU   728.4 GF  CPU     0.0 GF | PDTR  136.7 W (+ 15.4)  PSTR  113.4  PPBR   1.5 | GPU IOReport  59.3 W, SMC rails  57.1 W, 1387 MHz, busy 100% | PHPC  83.4 PSVR  85.0
+  Strassen DD 4096           w1  10.0s  GPU   741.8 GF  CPU     0.0 GF | PDTR  136.7 W (+ 15.3)  PSTR  115.7  PPBR   1.7 | GPU IOReport  59.8 W, SMC rails  57.4 W, 1388 MHz, busy 100% | PHPC  83.9 PSVR  87.2
+  Strassen DD 4096           w2  10.0s  GPU   728.2 GF  CPU     0.0 GF | PDTR  136.7 W (+ 15.3)  PSTR  116.1  PPBR   1.6 | GPU IOReport  58.8 W, SMC rails  56.3 W, 1377 MHz, busy 100% | PHPC  82.0 PSVR  86.1
+  => Strassen DD 4096: 732.8 GF/s total; wall increment 15.3 W -> 0.021 J per GF (47780 GF/kJ); GPU energy above idle 59.1 W -> 0.081 J per GPU GF
+
+== Accelerate DGEMM 4096
+  Accelerate DGEMM 4096      w0  10.0s  GPU     0.0 GF  CPU   590.8 GF | PDTR  136.7 W (+ 15.3)  PSTR   65.4  PPBR   1.6 | GPU IOReport   0.2 W, SMC rails   0.1 W,  448 MHz, busy   7% | PHPC  36.1 PSVR  34.6
+  Accelerate DGEMM 4096      w1  10.0s  GPU     0.0 GF  CPU   590.7 GF | PDTR  136.7 W (+ 15.4)  PSTR   64.7  PPBR   1.6 | GPU IOReport   0.2 W, SMC rails   0.1 W,  460 MHz, busy   6% | PHPC  37.2 PSVR  34.6
+  => Accelerate DGEMM 4096: 590.7 GF/s total; wall increment 15.4 W -> 0.026 J per GF (38477 GF/kJ); GPU energy above idle -0.0 W -> nan J per GPU GF
+
+== classical DD 8192
+  classical DD 8192          w0  10.0s  GPU   769.3 GF  CPU     0.0 GF | PDTR  136.7 W (+ 15.4)  PSTR  122.7  PPBR   1.7 | GPU IOReport  62.5 W, SMC rails  60.4 W, 1386 MHz, busy 100% | PHPC  91.1 PSVR  90.8
+  classical DD 8192          w1  10.0s  GPU   659.5 GF  CPU     0.0 GF | PDTR  136.7 W (+ 15.4)  PSTR  121.1  PPBR   1.7 | GPU IOReport  59.6 W, SMC rails  57.5 W, 1358 MHz, busy 100% | PHPC  88.8 PSVR  88.2
+  classical DD 8192          w2  10.0s  GPU   659.6 GF  CPU     0.0 GF | PDTR  136.7 W (+ 15.3)  PSTR  117.4  PPBR   1.6 | GPU IOReport  56.3 W, SMC rails  52.8 W, 1323 MHz, busy 100% | PHPC  81.4 PSVR  82.4
+  => classical DD 8192: 696.1 GF/s total; wall increment 15.4 W -> 0.022 J per GF (45350 GF/kJ); GPU energy above idle 59.3 W -> 0.085 J per GPU GF
+
+== Strassen DD 8192
+  Strassen DD 8192           w0  10.0s  GPU   769.4 GF  CPU     0.0 GF | PDTR  136.7 W (+ 15.3)  PSTR  118.3  PPBR   1.5 | GPU IOReport  61.5 W, SMC rails  58.8 W, 1379 MHz, busy 100% | PHPC  89.0 PSVR  88.4
+  Strassen DD 8192           w1  10.0s  GPU   659.5 GF  CPU     0.0 GF | PDTR  136.7 W (+ 15.3)  PSTR  113.5  PPBR   1.6 | GPU IOReport  57.7 W, SMC rails  54.3 W, 1342 MHz, busy 100% | PHPC  85.2 PSVR  82.8
+  Strassen DD 8192           w2  10.0s  GPU   769.3 GF  CPU     0.0 GF | PDTR  136.7 W (+ 15.3)  PSTR  111.4  PPBR   1.6 | GPU IOReport  56.6 W, SMC rails  52.7 W, 1330 MHz, busy 100% | PHPC  80.7 PSVR  81.1
+  => Strassen DD 8192: 732.7 GF/s total; wall increment 15.3 W -> 0.021 J per GF (47833 GF/kJ); GPU energy above idle 58.4 W -> 0.080 J per GPU GF
+
+== Accelerate DGEMM 8192
+  Accelerate DGEMM 8192      w0  10.0s  GPU     0.0 GF  CPU   659.4 GF | PDTR  136.7 W (+ 15.3)  PSTR   64.8  PPBR   1.6 | GPU IOReport   0.1 W, SMC rails   0.1 W,  455 MHz, busy   6% | PHPC  38.5 PSVR  34.6
+  Accelerate DGEMM 8192      w1  10.0s  GPU     0.0 GF  CPU   549.5 GF | PDTR  136.7 W (+ 15.4)  PSTR   64.7  PPBR   1.6 | GPU IOReport   0.1 W, SMC rails   0.1 W,  449 MHz, busy   6% | PHPC  37.1 PSVR  34.7
+  => Accelerate DGEMM 8192: 604.5 GF/s total; wall increment 15.4 W -> 0.025 J per GF (39371 GF/kJ); GPU energy above idle -0.1 W -> nan J per GPU GF
+
+== idle (again)
+  idle (again)               w0  15.0s  GPU     0.0 -  CPU     0.0 - | PDTR  123.2 W (+  1.8)  PSTR   33.5  PPBR   1.6 | GPU IOReport   0.1 W, SMC rails   0.1 W,  452 MHz, busy   6% | PHPC   9.5 PSVR   5.6
+  => idle: PDTR 123.2 W, GPU 0.14 W

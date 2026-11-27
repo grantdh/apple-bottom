@@ -2,7 +2,22 @@
 
 See [CHANGELOG.md](../CHANGELOG.md) for what has shipped.
 
-## 1.5 — the BLAS ABI's work moves to the GPU (this release)
+## 1.6 — matrix-vector products, FFT and routing per chip
+
+- **BLAS-2 on the GPU:** DGEMV, ZGEMV and ZHEMV, from a device buffer or the
+  BLAS ABI, which reads the caller's matrix in place.
+- **Double-float FFT**, batched 1D, 2D and 3D.
+- **Routing tables per chip.** A chip without a table of its own keeps every
+  `AB_MODE=auto` call on Accelerate until it is calibrated.
+- **The device-buffer API** converts where its operands lie and keeps its
+  buffers between calls.
+- **Opt-in:** `AB_PRECISION=fast` and Strassen-Winograd products. Neither has
+  a proven componentwise bound; with both unset the results keep their bits.
+- **The range guard's measured gaps closed:** the data 1.5.x was measured to
+  let through with a degraded result runs on Accelerate, or on the GPU at DD
+  accuracy ([what the guard misses](vv/LIMITATIONS.md#what-the-guard-misses)).
+
+## 1.5 — the BLAS ABI's work moves to the GPU
 
 - **The staged path.** A `dgemm_`/`zgemm_` call routed to the GPU copies
   its operands into GPU buffers the library reuses, or reads memory
@@ -11,7 +26,8 @@ See [CHANGELOG.md](../CHANGELOG.md) for what has shipped.
   multiplies, converts back and applies alpha and beta, with the host
   path's bits.
 - **Data outside FP32's exponent range** is scaled by powers of two, or
-  sent to Accelerate, instead of giving silently wrong GPU results.
+  sent to Accelerate. Some data passed the guard and lost accuracy until
+  1.6.0 ([what the guard misses](vv/LIMITATIONS.md#what-the-guard-misses)).
 - **ZGEMM with imbalanced real and imaginary parts** runs as four real
   products; the BLAS ABI and the device-buffer API decide per row and
   column.
@@ -32,12 +48,12 @@ Accelerate.
 
 ## Next
 
-- **Calibrate the staged path.** `make calibrate` on 1.5.0 measures it;
+- **Calibrate the staged path.** `make calibrate` since 1.5.0 measures it;
   the built-in routing table still comes from 1.4.0's host path.
-- **Split one call between Accelerate and the GPU inside the library**,
-  planned for 1.6.0. `bench_split` does it in user code
+- **Split one call between Accelerate and the GPU inside the library.**
+  `bench_split` does it in user code
   ([split benchmark](../benchmarks/results/2026-10-28-415cb5d-hybrid-split/));
-  `dgemm_` and `zgemm_` do not split calls in 1.5.0.
+  `dgemm_` and `zgemm_` make each call on one engine today.
 - **Split-K** for long-K, small-output shapes, so that more than a few
   dozen threadgroups run (the `kernel` candidate below).
 
@@ -91,9 +107,24 @@ Candidates, each aimed at a measured stage:
 
 - `AB_VERIFY`: optional randomized check (Freivalds) of GPU results.
 - Thread-safe contexts for concurrent callers.
-- Calibration tables for more chips (M1, M3, M4 families). `make calibrate`
-  results from other machines are welcome as pull requests.
+- Calibration tables for more chips (M1, M3, M4 and M5 families). The library
+  picks its built-in table by chip and GPU core count and leaves an
+  uncalibrated chip on Accelerate; `make calibrate` on your machine files
+  yours under `benchmarks/calibration/`, and a pull request with that
+  directory and the regenerated `src/dispatch_table.h` adds it for everyone.
 - Homebrew formula.
+- Re-centre native results: measure each GPU result's range and rescale it
+  by a power of two, so that chains of products keep DD accuracy. Then
+  alpha's exponent can go into the scale, which removes the loss from an
+  alpha with |alpha| in [2⁻³⁹, 2⁴⁰)
+  ([Exponent range](vv/LIMITATIONS.md#exponent-range); 1.6.0 documents both
+  limits).
+- A range guard for the device GEMMs (`ab_dev_dgemm`, `ab_dev_zgemm`), with
+  Accelerate as the fallback, as the BLAS ABI has
+  ([Exponent range](vv/LIMITATIONS.md#exponent-range)).
+- Fold alpha's exponent into the scale-back of the ZGEMM and BLAS-2
+  epilogues, as DGEMM does, so that neither underflows nor overflows before
+  alpha is applied ([Exponent range](vv/LIMITATIONS.md#exponent-range)).
 
 ## Later
 

@@ -1,0 +1,14 @@
+== A_si64_500b_k222 done: True True | iters ['7'] ['7'] | wall ['4m38.92s'] ['1m41.73s']
+   total energy old/new: [-2990.4427615] [-2990.4427615]
+   E: n=1 max|old-new|=0.000e+00 limit=1e-08 ok
+   Eit: n=6 max|old-new|=0.000e+00 limit=1e-08 ok
+   B: n=2000 max|old-new|=0.000e+00 limit=0.0001 ok
+   F: n=1344 max|old-new|=0.000e+00 limit=1e-06 ok
+   TF: n=1 max|old-new|=0.000e+00 limit=1e-06 ok
+== B_si64_160b_k222 done: True True | iters ['9'] ['9'] | wall ['3m55.55s'] ['54.73s']
+   total energy old/new: [-2990.44093534] [-2990.44093534]
+   E: n=1 max|old-new|=0.000e+00 limit=1e-08 ok
+   Eit: n=8 max|old-new|=0.000e+00 limit=1e-08 ok
+   B: n=640 max|old-new|=0.000e+00 limit=0.0001 ok
+   F: n=1344 max|old-new|=0.000e+00 limit=1e-06 ok
+   TF: n=1 max|old-new|=0.000e+00 limit=1e-06 ok

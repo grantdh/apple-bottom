@@ -1,0 +1,10 @@
+bench_fft: apple-bottom 1.4.0 (c13854306d56); FFTW fftw-3.3.10-neon (fftw-neon, MEASURE plans), 8 threads, reps 3, warm-up 3.0 s
+accuracy (forward, batch 1, random 53-bit inputs in [-1,1)):
+    48^3  GPU L2 6.21e-15 max 7.78e-15 | fftw-neon L2 2.58e-16 max 3.12e-16 | GPU/FFTW L2 24.1x | GPU transform only L2 6.19e-15 max 7.53e-15  (reference 0.0 s)
+    64^3  GPU L2 5.87e-15 max 6.19e-15 | fftw-neon L2 2.52e-16 max 2.98e-16 | GPU/FFTW L2 23.3x | GPU transform only L2 5.84e-15 max 6.19e-15  (reference 0.0 s)
+    72^3  GPU L2 6.89e-15 max 8.56e-15 | fftw-neon L2 3.06e-16 max 4.09e-16 | GPU/FFTW L2 22.5x | GPU transform only L2 6.87e-15 max 8.48e-15  (reference 0.0 s)
+    96^3  GPU L2 6.59e-15 max 7.94e-15 | fftw-neon L2 2.86e-16 max 3.47e-16 | GPU/FFTW L2 23.0x | GPU transform only L2 6.57e-15 max 8.04e-15  (reference 0.1 s)
+   100^3  GPU L2 7.03e-15 max 8.09e-15 | fftw-neon L2 3.03e-16 max 3.51e-16 | GPU/FFTW L2 23.2x | GPU transform only L2 7.01e-15 max 8.18e-15  (reference 0.1 s)
+   108^3  GPU L2 7.47e-15 max 8.28e-15 | fftw-neon L2 3.71e-16 max 4.52e-16 | GPU/FFTW L2 20.1x | GPU transform only L2 7.46e-15 max 8.25e-15  (reference 0.1 s)
+   120^3  GPU L2 7.22e-15 max 8.21e-15 | fftw-neon L2 3.03e-16 max 3.47e-16 | GPU/FFTW L2 23.8x | GPU transform only L2 7.21e-15 max 8.15e-15  (reference 0.2 s)
+   128^3  GPU L2 6.54e-15 max 7.04e-15 | fftw-neon L2 2.79e-16 max 3.41e-16 | GPU/FFTW L2 23.4x | GPU transform only L2 6.52e-15 max 7.23e-15  (reference 0.2 s)

@@ -42,13 +42,14 @@ All changes must:
    `make bench-regression` on your branch
 
 If you change the BLAS-ABI GPU path or the kernels, rerun `make calibrate`
-on an idle machine on AC power and commit the regenerated
-`src/dispatch_table.h` with its `benchmarks/results/` directory, so that
-`AB_MODE=auto` keeps following measurement. Calibrations from other chips
-are welcome as their own pull requests: run
-`make calibrate CALIBRATE_SOURCE=/dev/null` so the built-in M2 Max table
-stays as it is, and submit the `benchmarks/results/<date>-<sha>-calibrate/`
-directory (its `dispatch_table.txt` can be used at once with
+on an idle machine on AC power: it files this chip's table under
+`benchmarks/calibration/<chip>/` and regenerates `src/dispatch_table.h`;
+commit both with the `benchmarks/results/<date>-<sha>-calibrate/` directory,
+so that `AB_MODE=auto` keeps following measurement. Calibrations from other
+chips are welcome as their own pull requests: `make calibrate` there files
+the new chip beside the others (a new chip never touches the M2 Max table),
+so submit `benchmarks/calibration/<chip>/`, the regenerated header and the
+results directory (its `dispatch_table.txt` can also be used at once with
 `AB_DISPATCH_TABLE`).
 ## Pull Requests
 

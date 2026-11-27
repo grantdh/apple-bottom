@@ -5,15 +5,19 @@
 //
 // A GPU-routed dgemm_/zgemm_ (blas_wrapper.c) first tries this path:
 //   1. ab_internal_stage_acquire(): the call's GPU buffers, from a per-process
-//      pool (no fresh MTLBuffers once it has grown). An operand lying in
-//      memory registered with ab_register_host_memory() is used in place.
+//      pool (no fresh MTLBuffers once it has grown), and Strassen-Winograd's
+//      workspace from a second slot when AB_STRASSEN routes the shape. An
+//      operand lying in memory registered with ab_register_host_memory() is
+//      used in place.
 //   2. The caller copies each other operand the GPU reads into its staging
 //      buffer (ab_internal_stage_host()), packed: column by column, one
 //      block when the operand is dense.
 //   3. ab_internal_stage_run(): one command buffer converts op(A), op(B) (and
 //      a DGEMM's C) to row-major DD on the GPU, runs the GEMM kernels of the
 //      ABMatrix API, and converts the result and applies the epilogue on the
-//      GPU, into C's staging buffer or C in place.
+//      GPU, into C's staging buffer or C in place. Under AB_STRASSEN there are
+//      two: Strassen-Winograd's products wait for the lines' scales, and a
+//      call with a scaled line takes classical ones.
 //   4. The caller copies the result into C. A ZGEMM with alpha != 1 or beta
 //      not 0 or 1 ("split") instead takes the product as the host epilogue
 //      reads it (ab_internal_stage_split()) and runs that epilogue.
@@ -30,16 +34,19 @@
 // same. A ZGEMM whose parts call for 4M runs as Gauss-3M first; then a second
 // command buffer forms 4M's imaginary part, as the host path's 4M does (its
 // real part is 3M's), and the epilogue again. A call the guard does not
-// certify runs on Accelerate (the host path's guard would say the same);
-// any other, and one whose GPU epilogue meets Inf or NaN, is made on the
-// host path instead, with its own bits; so the GPU writes C in place only
-// when it does not read it.
+// certify, or a ZGEMM whose epilogue could overflow (ab_zgemm_product_fits),
+// runs on Accelerate (the host path's guard would say the same); any other,
+// and one whose GPU epilogue meets Inf or NaN (or a C of 2^1022 or more
+// beside beta = 1), is made on the host path instead, whose guard decides it
+// again, with its own bits; so the GPU writes C in place only when it does
+// not read it.
 //
 // The pool keeps at most AB_STAGING_MB MB between calls
 // (ab_staging_cap_bytes()). Slots are per call, so threads calling at once
 // each get their own. ab_shutdown() empties it.
 // The native ZGEMMs (ab_zgemm, ab_zgemm_ex, the batched and asynchronous
-// ones) take their Gauss-3M or 4M temporaries from it too.
+// ones) take their Gauss-3M or 4M temporaries from it too, and the device
+// API (device_api.m) its operands' ABMatrix handles (ab_internal_stage_views).
 // =============================================================================
 #ifndef AB_GPU_STAGE_H
 #define AB_GPU_STAGE_H
@@ -74,6 +81,10 @@ typedef struct {
     ab_stage_matrix_t x[3];       // A, B, C
     bool c_in;                    // the GPU reads C: DGEMM beta != 0, ZGEMM alpha = 1, beta = 1
     bool split;                   // ZGEMM with other alpha or beta: the host epilogue
+    bool classical;               // classical products even where AB_STRASSEN routes the shape
+                                  // (AB_SPLIT's parts: Strassen's bound is normwise only)
+    bool c_staged;                // C staged even in registered memory (AB_SPLIT's M axis,
+                                  // whose C rows in place were never measured)
     double alpha[2], beta[2];     // real, imaginary; a DGEMM's applied in DD by the GEMM kernel
 } ab_stage_gemm_t;
 
@@ -93,7 +104,8 @@ int ab_internal_stage_in_place(const ab_stage_t *s);
 typedef enum {
     AB_STAGE_RAN,           // the result as ab_internal_stage_host() or ab_internal_stage_split()
                             // gives it, to use if the guard lets it stand
-    AB_STAGE_NONFINITE,     // the epilogue met Inf or NaN
+    AB_STAGE_NONFINITE,     // the epilogue met Inf or NaN, or (ZGEMM, beta = 1) a C of 2^1022
+                            // or more (ab_zgemm_c_fits)
     AB_STAGE_FAILED,        // the command buffer failed
 } ab_stage_result_t;
 
@@ -125,6 +137,13 @@ void ab_internal_stage_count(const ab_stage_gemm_t *g, double copy_in_ms, double
 
 // Returns the slot to the pool, or frees what is beyond AB_STAGING_MB.
 void ab_internal_stage_release(ab_stage_t *s);
+
+// n (1 to 15) DD matrices of the given shapes, each a new ABMatrix in out over
+// a buffer of one slot, unscaled (as ab_matrix_create() makes them) but
+// holding what the buffer last held. The caller frees them with
+// ab_matrix_destroy() and then the slot with ab_internal_stage_release().
+// NULL if Metal refuses a buffer (as under AB_TEST_FAIL_STAGE=alloc).
+ab_stage_t *ab_internal_stage_views(int n, const int rows[], const int cols[], ABMatrix out[]);
 
 // Bytes the pool holds, in use or idle (tests).
 size_t ab_internal_stage_pool_bytes(void);

@@ -1,0 +1,66 @@
+grid blocks 116; failed runs 0; highest load1 seen in a run 11.3
+mode  routine tr               shape      a,b     old ms     new ms  new/old           95% CI  verdict       path(new)
+auto  dgemm  TN  1024x1024x1024          1,0      3.135      3.124    0.997 [ 0.988, 0.999]  faster       cpu
+auto  dgemm  TN  2048x2048x2048          1,0     26.510     26.385    0.994 [ 0.985, 0.999]  faster       cpu
+auto  dgemv  NN  2048x2048x0             1,0      1.008      0.657    0.656 [ 0.579, 0.733]  faster       gpu
+auto  dgemv  NN  4096x4096x0             1,0      6.592      2.132    0.322 [ 0.321, 0.325]  faster       gpu
+auto  dgemv  NN  8192x8192x0             1,0     26.784      7.866    0.294 [ 0.291, 0.294]  faster       gpu
+auto  zgemm  CN  1024x1024x1024          1,0     13.079     13.472    1.006 [ 1.001, 1.031]  slower       cpu
+auto  zgemm  CN  4096x4096x4096          1,0    887.181    886.158    0.999 [ 0.997, 1.000]  faster       cpu
+auto  zgemm  NN  2048x2048x2048          1,0    111.402    111.510    1.001 [ 1.000, 1.003]  slower       cpu
+auto  zgemm  NN  4096x4096x4096          1,0    881.112    879.285    0.997 [ 0.994, 0.999]  faster       cpu
+auto  zgemv  CN  2048x2048x0             1,0      2.187      0.573    0.263 [ 0.261, 0.263]  faster       cpu
+auto  zgemv  CN  4096x4096x0             1,0     11.232      2.808    0.250 [ 0.249, 0.250]  faster       cpu
+auto  zgemv  CN  8192x8192x0             1,0     54.595      8.586    0.157 [ 0.157, 0.158]  faster       cpu
+auto  zgemv  NN  2048x2048x0             1,0      6.666      1.601    0.239 [ 0.235, 0.245]  faster       cpu
+auto  zgemv  NN  3072x3072x0             1,0     14.667      2.350    0.160 [ 0.158, 0.161]  faster       gpu
+auto  zgemv  NN  4096x4096x0             1,0     31.794      4.025    0.126 [ 0.126, 0.128]  faster       gpu
+auto  zgemv  NN  8192x8192x0             1,0    146.122     15.121    0.104 [ 0.103, 0.104]  faster       gpu
+auto  zhemv  UN  2048x2048x0             1,0      5.353      1.132    0.213 [ 0.207, 0.221]  faster       gpu
+auto  zhemv  UN  4096x4096x0             1,0     24.810      3.945    0.159 [ 0.158, 0.160]  faster       gpu
+auto  zhemv  UN  8192x8192x0             1,0    105.594     14.522    0.138 [ 0.135, 0.140]  faster       gpu
+gpu   devd   NN  18280x160x160           1,0      6.557      3.118    0.475 [ 0.472, 0.477]  faster       none
+gpu   devd   TN  160x160x18280         1,0     11.769      4.984    0.424 [ 0.422, 0.428]  faster       none
+gpu   devz   CN  160x160x9140      0.75,-2     10.010      6.444    0.644 [ 0.640, 0.651]  faster       none
+gpu   devz   CN  160x160x9140          1,0      9.806      6.350    0.646 [ 0.644, 0.654]  faster       none
+gpu   devz   NN  9140x160x160       0.75,-2     12.011      4.963    0.414 [ 0.409, 0.422]  faster       none
+gpu   devz   NN  9140x160x160           1,0      7.347      4.351    0.592 [ 0.585, 0.595]  faster       none
+gpu   dgemm  NN  544x544x544           1,0      1.216      1.031    0.849 [ 0.845, 0.855]  faster       gpu
+gpu   dgemm  NN  832x832x832           1,0      2.665      2.802    1.051 [ 1.050, 1.053]  slower       gpu
+gpu   dgemm  NN  1024x1024x1024          1,0      4.620      4.648    1.006 [ 1.005, 1.008]  slower       gpu
+gpu   dgemm  TN  544x544x544           1,0      1.210      1.033    0.854 [ 0.851, 0.860]  faster       gpu
+gpu   dgemm  TN  600x600x9140          1,0     15.972     14.930    0.934 [ 0.934, 0.935]  faster       gpu
+gpu   dgemm  TN  832x832x832           1,0      2.662      2.800    1.052 [ 1.050, 1.053]  slower       gpu
+gpu   dgemm  TN  1024x1024x1024          1,0      4.621      4.655    1.008 [ 1.006, 1.008]  slower       gpu
+gpu   dgemv  NN  2048x2048x0             1,0      1.099      0.655    0.598 [ 0.555, 0.647]  faster       gpu
+gpu   dgemv  NN  4096x4096x0             1,0      6.628      2.126    0.321 [ 0.319, 0.324]  faster       gpu
+gpu   dgemv  NN  8192x8192x0             1,0     26.804      7.834    0.293 [ 0.289, 0.295]  faster       gpu
+gpu   dgemv  TN  2048x2048x0             1,0      0.529      0.661    1.254 [ 1.241, 1.269]  BLOCK        gpu
+gpu   dgemv  TN  4096x4096x0             1,0      2.251      2.122    0.943 [ 0.936, 0.947]  faster       gpu
+gpu   dgemv  TN  8192x8192x0             1,0     11.028      7.741    0.703 [ 0.699, 0.705]  faster       gpu
+gpu   zgemm  CN  500x500x9140          1,0     29.117     30.767    1.057 [ 1.019, 1.076]  slower       gpu
+gpu   zgemm  CN  544x544x544           1,0      2.665      2.412    0.905 [ 0.904, 0.907]  faster       gpu
+gpu   zgemm  NN  544x544x544           1,0      2.673      2.414    0.903 [ 0.902, 0.905]  faster       gpu
+gpu   zgemm  NN  1024x40x4608          1,0      6.373      6.093    0.956 [ 0.915, 0.958]  faster       gpu
+gpu   zgemm  TT  544x544x544           1,0      2.653      2.390    0.901 [ 0.895, 0.903]  faster       gpu
+gpu   zgemm  TT  2048x2048x2048          1,0     76.543     77.772    1.012 [ 1.005, 1.020]  slower       gpu
+gpu   zgemv  CN  2048x2048x0             1,0      2.204      1.150    0.522 [ 0.518, 0.528]  faster       gpu
+gpu   zgemv  CN  4096x4096x0             1,0     11.259      4.009    0.356 [ 0.354, 0.359]  faster       gpu
+gpu   zgemv  CN  8192x8192x0             1,0     55.034     14.872    0.270 [ 0.269, 0.271]  faster       gpu
+gpu   zgemv  NN  2048x2048x0             1,0      6.696      1.125    0.168 [ 0.167, 0.169]  faster       gpu
+gpu   zgemv  NN  3072x3072x0             1,0     14.741      2.329    0.158 [ 0.156, 0.160]  faster       gpu
+gpu   zgemv  NN  4096x4096x0             1,0     31.758      4.011    0.126 [ 0.126, 0.127]  faster       gpu
+gpu   zgemv  NN  8192x8192x0             1,0    146.072     15.158    0.104 [ 0.103, 0.104]  faster       gpu
+gpu   zhemv  UN  2048x2048x0             1,0      5.027      1.129    0.225 [ 0.217, 0.229]  faster       gpu
+gpu   zhemv  UN  4096x4096x0             1,0     25.261      3.976    0.156 [ 0.155, 0.160]  faster       gpu
+gpu   zhemv  UN  8192x8192x0             1,0    108.235     14.358    0.133 [ 0.132, 0.134]  faster       gpu
+summary by mode and verdict: {('auto', 'no difference'): 36, ('auto', 'faster'): 17, ('auto', 'slower'): 2, ('gpu', 'faster'): 28, ('gpu', 'no difference'): 26, ('gpu', 'slower'): 6, ('gpu', 'BLOCK'): 1}
+
+== auto-mode GEMM blocks with no difference: 33 of 39
+
+== QE si64, ABAB, unmodified inputs; watts seen {140} max load1 at block start 4.96
+input                layout   n    old s    new s  new/old           95% CI verdict      energies, iterations
+A_si64_500b_k222     1x1     10    303.5    303.3    1.000 [ 0.996, 1.003] no difference ['-2990.44276149'] ['7']
+A_si64_500b_k222     8x1     10     96.1     95.7    1.000 [ 0.992, 1.009] no difference ['-2990.44276150'] ['7']
+B_si64_160b_k222     1x1     10    182.9    182.8    0.999 [ 0.997, 1.001] no difference ['-2990.44093535'] ['9']
+B_si64_160b_k222     8x1     10     53.4     53.5    0.998 [ 0.980, 1.010] no difference ['-2990.44093534'] ['9']

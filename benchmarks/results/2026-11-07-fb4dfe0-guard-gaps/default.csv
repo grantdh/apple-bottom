@@ -1,0 +1,34 @@
+routine,trans,M,N,K,data,path,re_u2,im_u2
+zgemm,TT,4096,4096,4096,uniform,gpu,1.18,2.27
+zgemm,TT,4096,4096,4096,spread,gpu,7.24,25.6
+zgemm,TT,4096,4096,4096,imag-80,cpu,1.47,1.75
+zgemm,TT,4096,4096,4096,imag-100,cpu,1.47,1.75
+zgemm,TT,4096,4096,4096,imag-130,cpu,1.47,1.75
+zgemm,TT,4096,4096,4096,tiny,gpu,1.28,1.87
+zgemv,N-,3072,3072,0,uniform,gpu,0.147,0.139
+zhemv,U-,2048,2048,0,uniform,gpu,0.184,0.131
+zgemv,N-,3072,3072,0,spread,gpu,1.35,1.59
+zhemv,U-,2048,2048,0,spread,gpu,1.95,2.35
+zgemv,N-,3072,3072,0,imag-80,cpu,1.66,1.42
+zhemv,U-,2048,2048,0,imag-80,cpu,1.1,0.565
+zgemv,N-,3072,3072,0,imag-100,cpu,1.66,1.42
+zhemv,U-,2048,2048,0,imag-100,cpu,1.1,0.565
+zgemv,N-,3072,3072,0,imag-130,cpu,1.66,1.42
+zhemv,U-,2048,2048,0,imag-130,cpu,1.1,0.565
+zgemv,N-,3072,3072,0,tiny,cpu,0.051,0.0609
+zhemv,U-,2048,2048,0,tiny,cpu,0.0432,0.0426
+zgemm,NN,8,8,2,uniform,cpu,0.0407,0.0596
+zgemm,NN,8,8,2,spread,cpu,0.0588,0.0614
+zgemm,NN,8,8,2,imag-80,cpu,0.0508,0.0624
+zgemm,NN,8,8,2,imag-100,cpu,0.0508,0.0624
+zgemm,NN,8,8,2,imag-130,cpu,0.0508,0.0624
+zgemm,NN,8,8,2,tiny,cpu,0.044,0.0556
+zgemm,NN,544,481,600,spread,cpu,0.434,0.654
+zgemm,NN,544,481,600,imag-100,cpu,0.75,0.482
+dgemm,NN,8,8,2,tiny,cpu,0.0576,0
+dgemm,NN,8,8,2,smallc-98 beta 1.04858e+06,cpu,0,0
+dgemm,NN,8,8,2,smallc-98 beta 1,cpu,0,0
+dgemm,NN,8,8,2,smallc-100 beta 1,cpu,0,0
+dgemm,NN,8,8,2,smallc-130 beta 1,cpu,0,0
+dev_zgemm,NN,544,481,600,spread,device,7.45,58
+dev_zgemm,NN,544,481,600,imag-100,device,15.5,14

@@ -1,0 +1,4 @@
+mode,routine,M,K,N,method,reps,wall_med_ms,wall_min_ms,gpu_med_ms,temps_med_ms,submit_med_ms,wake_med_ms,gflops
+abi,dgemm,4096,4096,4096,gpu+strassen,5,188.655,187.277,0.000,0.000,0.000,0.000,728.5
+abi,dgemm,6144,6144,6144,gpu+strassen,5,638.937,632.629,0.000,0.000,0.000,0.000,726.0
+abi,dgemm,8192,8192,8192,gpu+strassen,5,1522.049,1518.100,0.000,0.000,0.000,0.000,722.4

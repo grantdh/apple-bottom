@@ -1,0 +1,69 @@
+suite label class path: largest error in u^2 of the part's own scale, real part and imaginary part, with the case
+data new-auto cancel cpu re 0.0629 CC/160x160x9140/a1,0_b0,0/p0/i1/cancel | im 0.0568 NN/160x160x9140/a1,0_b0.25,0/p0/i1/cancel
+data new-auto dec25 cpu re 0.0851 CN/160x160x9140/a1,0_b0,0/p0/i1/dec25 | im 0.109 CC/160x160x9140/a1,0_b0,0/p0/i1/dec25
+data new-auto mix16 cpu re 4.05 CC/160x160x9140/a1,0_b0.25,0/p0/i1/mix16 | im 3.62 CN/160x160x9140/a1,0_b0.25,0/p0/i1/mix16
+data new-auto mix40 cpu re 3.62 NN/160x160x9140/a1,0_b0.25,0/p0/i1/mix40 | im 3.57 NC/160x160x9140/a1,0_b0.25,0/p0/i1/mix40
+data new-auto opp300 cpu re 0.0947 CC/160x160x9140/a1,0_b0.25,0/p0/i1/opp300 | im 0.0828 NN/160x160x9140/a1,0_b0.25,0/p0/i1/opp300
+data new-auto spread cpu re 0.724 CC/160x160x9140/a1,0_b0,0/p0/i1/spread | im 0.79 CC/160x160x9140/a1,0_b0.25,0/p0/i1/spread
+data new-auto sub cpu re 0.108 NN/160x160x9140/a1,0_b0.25,0/p0/i1/sub | im 0.0914 CC/160x160x9140/a1,0_b0,0/p0/i1/sub
+data new-auto timag100 cpu re 3.06 CN/160x160x9140/a1,0_b0.25,0/p0/i1/timag100 | im 2.54 CC/160x160x9140/a1,0_b0,0/p0/i1/timag100
+data new-auto timag130 cpu re 2.94 CN/160x160x9140/a1,0_b0,0/p0/i1/timag130 | im 2.59 CC/160x160x9140/a1,0_b0,0/p0/i1/timag130
+data new-auto timag80 cpu re 3.21 CC/160x160x9140/a1,0_b0.25,0/p0/i1/timag80 | im 2.88 NC/160x160x9140/a1,0_b0,0/p0/i1/timag80
+data new-auto tiny1042 cpu re 1.69 CC/160x160x9140/a1,0_b0.25,0/p0/i1/tiny1042 | im 1.34 CC/160x160x9140/a1,0_b0.25,0/p0/i1/tiny1042
+data new-auto tinyc100 cpu re 0.0882 NN/160x160x9140/a1,0_b1.04858e+06,0/p0/i1/tinyc100 | im 0.0827 NC/160x160x9140/a1,0_b1.04858e+06,0/p0/i1/tinyc100
+data new-auto tinyc130 cpu re 0.102 NN/160x160x9140/a1,0_b1.04858e+06,0/p0/i1/tinyc130 | im 0.0785 NN/160x160x9140/a1,0_b1,0/p0/i1/tinyc130
+data new-auto tinyc98 cpu re 0.0886 CN/160x160x9140/a1,0_b1.04858e+06,0/p0/i1/tinyc98 | im 0.0787 NC/160x160x9140/a1,0_b1,0/p0/i1/tinyc98
+data new-auto unif cpu re 0.0881 NN/160x160x9140/a1,0_b0,0/p0/i1/unif | im 0.0886 CN/160x160x9140/a1,0_b0.25,0/p0/i1/unif
+data new-auto zeros cpu re 0.0879 CC/160x160x9140/a1,0_b0,0/p0/i1/zeros | im 0.119 NN/160x160x9140/a1,0_b0,0/p0/i1/zeros
+data new-cpu cancel cpu re 0.0629 CC/160x160x9140/a1,0_b0,0/p0/i1/cancel | im 0.0568 NN/160x160x9140/a1,0_b0.25,0/p0/i1/cancel
+data new-cpu dec25 cpu re 0.0851 CN/160x160x9140/a1,0_b0,0/p0/i1/dec25 | im 0.109 CC/160x160x9140/a1,0_b0,0/p0/i1/dec25
+data new-cpu mix16 cpu re 4.05 CC/160x160x9140/a1,0_b0.25,0/p0/i1/mix16 | im 3.62 CN/160x160x9140/a1,0_b0.25,0/p0/i1/mix16
+data new-cpu mix40 cpu re 3.62 NN/160x160x9140/a1,0_b0.25,0/p0/i1/mix40 | im 3.57 NC/160x160x9140/a1,0_b0.25,0/p0/i1/mix40
+data new-cpu opp300 cpu re 0.0947 CC/160x160x9140/a1,0_b0.25,0/p0/i1/opp300 | im 0.0828 NN/160x160x9140/a1,0_b0.25,0/p0/i1/opp300
+data new-cpu spread cpu re 0.724 CC/160x160x9140/a1,0_b0,0/p0/i1/spread | im 0.79 CC/160x160x9140/a1,0_b0.25,0/p0/i1/spread
+data new-cpu sub cpu re 0.108 NN/160x160x9140/a1,0_b0.25,0/p0/i1/sub | im 0.0914 CC/160x160x9140/a1,0_b0,0/p0/i1/sub
+data new-cpu timag100 cpu re 3.06 CN/160x160x9140/a1,0_b0.25,0/p0/i1/timag100 | im 2.54 CC/160x160x9140/a1,0_b0,0/p0/i1/timag100
+data new-cpu timag130 cpu re 2.94 CN/160x160x9140/a1,0_b0,0/p0/i1/timag130 | im 2.59 CC/160x160x9140/a1,0_b0,0/p0/i1/timag130
+data new-cpu timag80 cpu re 3.21 CC/160x160x9140/a1,0_b0.25,0/p0/i1/timag80 | im 2.88 NC/160x160x9140/a1,0_b0,0/p0/i1/timag80
+data new-cpu tiny1042 cpu re 1.69 CC/160x160x9140/a1,0_b0.25,0/p0/i1/tiny1042 | im 1.34 CC/160x160x9140/a1,0_b0.25,0/p0/i1/tiny1042
+data new-cpu tinyc100 cpu re 0.0882 NN/160x160x9140/a1,0_b1.04858e+06,0/p0/i1/tinyc100 | im 0.0827 NC/160x160x9140/a1,0_b1.04858e+06,0/p0/i1/tinyc100
+data new-cpu tinyc130 cpu re 0.102 NN/160x160x9140/a1,0_b1.04858e+06,0/p0/i1/tinyc130 | im 0.0785 NN/160x160x9140/a1,0_b1,0/p0/i1/tinyc130
+data new-cpu tinyc98 cpu re 0.0886 CN/160x160x9140/a1,0_b1.04858e+06,0/p0/i1/tinyc98 | im 0.0787 NC/160x160x9140/a1,0_b1,0/p0/i1/tinyc98
+data new-cpu unif cpu re 0.0881 NN/160x160x9140/a1,0_b0,0/p0/i1/unif | im 0.0886 CN/160x160x9140/a1,0_b0.25,0/p0/i1/unif
+data new-cpu zeros cpu re 0.0879 CC/160x160x9140/a1,0_b0,0/p0/i1/zeros | im 0.119 NN/160x160x9140/a1,0_b0,0/p0/i1/zeros
+data new-gpu cancel gpu re 1.12 NC/257x129x300/a1,0_b0.25,0/p0/i1/cancel | im 3.88 TT/9x7x5/a1,0_b0.25,0/p0/i1/cancel
+data new-gpu dec25 gpu re 1.83 CN/160x160x9140/a1,0_b0,0/p0/i1/dec25 | im 3.39 NN/160x160x9140/a1,0_b0,0/p0/i1/dec25
+data new-gpu mix16 gpu re 1.54 CC/160x160x9140/a1,0_b0,0/p0/i1/mix16 | im 4.14 CN/160x160x9140/a1,0_b0.25,0/p0/i1/mix16
+data new-gpu mix40 gpu re 1.96 NC/160x160x9140/a1,0_b0,0/p0/i1/mix40 | im 3.25 CC/160x160x9140/a1,0_b0.25,0/p0/i1/mix40
+data new-gpu opp300 gpu re 1.88 NC/257x129x300/a1,0_b0,0/p0/i1/opp300 | im 3.5 CC/160x160x9140/a1,0_b0.25,0/p0/i1/opp300
+data new-gpu spread gpu re 9.07 CC/160x160x9140/a1,0_b0.25,0/p0/i1/spread | im 887 NC/257x129x300/a1,0_b0,0/p0/i1/spread
+data new-gpu sub gpu re 1.71 CN/160x160x9140/a1,0_b0,0/p0/i1/sub | im 5.05 TT/9x7x5/a1,0_b0.25,0/p0/i1/sub
+data new-gpu timag100 gpu re 67.4 NN/160x160x9140/a1,0_b0.25,0/p0/i1/timag100 | im 2.34e+06 NC/9x7x5/a1,0_b0,0/p0/i1/timag100
+data new-gpu timag130 gpu re 68.2 CN/160x160x9140/a1,0_b0,0/p0/i1/timag130 | im 2.37e+14 NN/9x7x5/a1,0_b0,0/p0/i1/timag130
+data new-gpu timag80 gpu re 64.7 NN/160x160x9140/a1,0_b0.25,0/p0/i1/timag80 | im 47.4 NC/160x160x9140/a1,0_b0,0/p0/i1/timag80
+data new-gpu tiny1042 gpu re 2.32e+14 NT/9x7x5/a1,0_b0,0/p0/i1/tiny1042 | im 2.37e+14 TC/9x7x5/a1,0_b0,0/p0/i1/tiny1042
+data new-gpu tinyc100 gpu re 1.65 NN/160x160x9140/a1,0_b1,0/p0/i1/tinyc100 | im 3.22 CT/9x7x5/a1,0_b1.04858e+06,0/p0/i1/tinyc100
+data new-gpu tinyc130 gpu re 1.72 CN/257x129x300/a1,0_b1.04858e+06,0/p0/i1/tinyc130 | im 3.38 NC/160x160x9140/a1,0_b1,0/p0/i1/tinyc130
+data new-gpu tinyc98 gpu re 1.75 NN/257x129x300/a1,0_b1,0/p0/i1/tinyc98 | im 3.91 NC/9x7x5/a1,0_b1,0/p0/i1/tinyc98
+data new-gpu unif gpu re 2.1 NN/257x129x300/a1,0_b0,0/p0/i1/unif | im 3.07 NC/160x160x9140/a1,0_b0,0/p0/i1/unif
+data new-gpu zeros gpu re 1.65 CC/257x129x300/a1,0_b0,0/p0/i1/zeros | im 19.1 CN/9x7x5/a1,0_b0,0/p0/i1/zeros
+dev new-gpu mix16 none re 2.26 CN/160x160x9140/a0.3,-1.1_b0.25,0.5/p0/i1/mix16 | im 3.06 CN/160x160x9140/a1,0_b0,0/p0/i1/mix16
+dev new-gpu spread none re 23.8 NT/544x481x600/a0.3,-1.1_b0.25,0.5/p17/i1/spread | im 166 CN/544x481x600/a1,0_b0,0/p0/i1/spread
+dev new-gpu timag100 none re 64 CN/160x160x9140/a1,0_b0,0/p0/i1/timag100 | im 333 CN/160x160x9140/a0.3,-1.1_b0.25,0.5/p0/i1/timag100
+dev new-gpu unif none re 2.78 NT/544x481x600/a0.3,-1.1_b0.25,0.5/p17/i1/unif | im 3.46 CC/544x481x600/a0.75,0_b-2,0/p0/i1/unif
+
+uniform and spread at the quoted calls
+new-auto data/zgemm/NC/257x129x300/a1,0_b0,0/p0/i1/unif cpu re 0.0675 im 0.072
+new-gpu data/zgemm/NC/257x129x300/a1,0_b0,0/p0/i1/unif gpu re 1.47 im 2.29
+new-cpu data/zgemm/NC/257x129x300/a1,0_b0,0/p0/i1/unif cpu re 0.0675 im 0.072
+new-auto data/zgemm/NC/257x129x300/a1,0_b0,0/p0/i1/spread cpu re 0.427 im 0.501
+new-gpu data/zgemm/NC/257x129x300/a1,0_b0,0/p0/i1/spread gpu re 7.29 im 887
+new-cpu data/zgemm/NC/257x129x300/a1,0_b0,0/p0/i1/spread cpu re 0.427 im 0.501
+new-gpu dev/devz/NN/544x481x600/a1,0_b0,0/p0/i1/unif none re 1.3 im 1.85
+new-gpu dev/devz/NN/544x481x600/a1,0_b0,0/p17/i1/unif none re 1.12 im 2.47
+new-gpu dev/devz/CN/544x481x600/a1,0_b0,0/p0/i1/unif none re 1.26 im 2.12
+new-gpu dev/devz/CN/544x481x600/a1,0_b0,0/p17/i1/unif none re 1.2 im 2.47
+new-gpu dev/devz/NN/544x481x600/a1,0_b0,0/p0/i1/spread none re 5.74 im 72.1
+new-gpu dev/devz/NN/544x481x600/a1,0_b0,0/p17/i1/spread none re 6.21 im 81.9
+new-gpu dev/devz/CN/544x481x600/a1,0_b0,0/p0/i1/spread none re 6.12 im 166
+new-gpu dev/devz/CN/544x481x600/a1,0_b0,0/p17/i1/spread none re 6.59 im 118

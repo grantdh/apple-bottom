@@ -1,0 +1,127 @@
+apple-bottom BLAS-2 benchmark: apple-bottom 1.4.0 (317bb917c8b4-dirty), Apple M2 Max
+
+dgemv 'N' 4096 x 4096 (lda 4096), A referenced 0.13 GB
+  resident gpu       0.629 ms    213.5 GB/s  err 4.5e-16
+  staged   gpu       2.080 ms     64.5 GB/s  err 4.5e-16
+  accel    cpu       6.531 ms     20.6 GB/s  err 2.1e-16
+  cloop12  cpu     2.394 ms     56.1 GB/s  err 2.1e-16
+
+dgemv 'T' 4096 x 4096 (lda 4096), A referenced 0.13 GB
+  resident gpu       0.554 ms    242.2 GB/s  err 6.2e-16
+  staged   gpu       2.203 ms     60.9 GB/s  err 6.2e-16
+  accel    cpu       2.329 ms     57.6 GB/s  err 2.1e-17
+  cloop12  cpu     1.246 ms    107.7 GB/s  err 5.6e-17
+
+zgemv 'N' 4096 x 4096 (lda 4096), A referenced 0.27 GB
+  resident gpu       1.054 ms    254.7 GB/s  err 4.3e-16
+  staged   gpu       4.231 ms     63.4 GB/s  err 4.3e-16
+  accel    cpu       6.784 ms     39.6 GB/s  err 1.0e-16
+  cloop12  cpu     4.631 ms     58.0 GB/s  err 1.1e-16
+
+zgemv 'T' 4096 x 4096 (lda 4096), A referenced 0.27 GB
+  resident gpu       0.982 ms    273.3 GB/s  err 5.8e-16
+  staged   gpu       3.981 ms     67.4 GB/s  err 5.8e-16
+  accel    cpu       2.299 ms    116.8 GB/s  err 1.9e-17
+  cloop12  cpu     2.501 ms    107.3 GB/s  err 7.3e-17
+
+zgemv 'C' 4096 x 4096 (lda 4096), A referenced 0.27 GB
+  resident gpu       0.977 ms    274.8 GB/s  err 4.9e-16
+  staged   gpu       4.225 ms     63.5 GB/s  err 4.9e-16
+  accel    cpu       2.374 ms    113.0 GB/s  err 2.5e-17
+  cloop12  cpu     2.459 ms    109.2 GB/s  err 6.2e-17
+
+zhemv 'U' 4096 x 4096 (lda 4096), A referenced 0.13 GB
+  resident gpu       1.252 ms    107.2 GB/s  err 4.0e-16
+  staged   gpu       4.136 ms     32.5 GB/s  err 4.0e-16
+  accel    cpu      15.517 ms      8.7 GB/s  err 1.3e-16
+  cloop8   cpu      1.898 ms     70.7 GB/s  err 6.1e-17
+
+zhemv 'L' 4096 x 4096 (lda 4096), A referenced 0.13 GB
+  resident gpu       1.231 ms    109.1 GB/s  err 5.0e-16
+  staged   gpu       4.285 ms     31.3 GB/s  err 5.0e-16
+  accel    cpu      14.805 ms      9.1 GB/s  err 4.6e-17
+  cloop8   cpu      1.771 ms     75.8 GB/s  err 5.9e-17
+
+dgemv 'N' 8192 x 8192 (lda 8192), A referenced 0.54 GB
+  resident gpu       1.847 ms    290.7 GB/s  err 7.2e-16
+  staged   gpu       8.641 ms     62.1 GB/s  err 7.2e-16
+  accel    cpu      26.568 ms     20.2 GB/s  err 1.9e-16
+  cloop8   cpu      8.789 ms     61.1 GB/s  err 1.9e-16
+
+dgemv 'T' 8192 x 8192 (lda 8192), A referenced 0.54 GB
+  resident gpu       1.675 ms    320.6 GB/s  err 4.7e-16
+  staged   gpu       7.912 ms     67.9 GB/s  err 4.7e-16
+  accel    cpu       9.758 ms     55.0 GB/s  err 2.3e-17
+  cloop8   cpu      4.327 ms    124.1 GB/s  err 5.8e-17
+
+zgemv 'N' 8192 x 8192 (lda 8192), A referenced 1.07 GB
+  resident gpu       3.559 ms    301.7 GB/s  err 7.6e-16
+  staged   gpu      16.142 ms     66.5 GB/s  err 7.6e-16
+  accel    cpu      26.925 ms     39.9 GB/s  err 1.5e-16
+  cloop8   cpu     11.748 ms     91.4 GB/s  err 1.0e-16
+
+zgemv 'T' 8192 x 8192 (lda 8192), A referenced 1.07 GB
+  resident gpu       3.183 ms    337.3 GB/s  err 4.6e-16
+  staged   gpu      16.576 ms     64.8 GB/s  err 4.6e-16
+  accel    cpu       9.090 ms    118.1 GB/s  err 1.9e-17
+  cloop12  cpu     9.980 ms    107.6 GB/s  err 6.2e-17
+
+zgemv 'C' 8192 x 8192 (lda 8192), A referenced 1.07 GB
+  resident gpu       3.218 ms    333.6 GB/s  err 5.5e-16
+  staged   gpu      16.131 ms     66.6 GB/s  err 5.5e-16
+  accel    cpu       8.844 ms    121.4 GB/s  err 1.9e-17
+  cloop8   cpu      8.738 ms    122.9 GB/s  err 6.1e-17
+
+zhemv 'U' 8192 x 8192 (lda 8192), A referenced 0.54 GB
+  resident gpu       3.931 ms    136.6 GB/s  err 6.0e-16
+  staged   gpu      16.508 ms     32.5 GB/s  err 6.0e-16
+  accel    cpu      65.241 ms      8.2 GB/s  err 1.3e-16
+  cloop8   cpu      6.224 ms     86.3 GB/s  err 7.2e-17
+
+zhemv 'L' 8192 x 8192 (lda 8192), A referenced 0.54 GB
+  resident gpu       3.894 ms    137.9 GB/s  err 5.8e-16
+  staged   gpu      16.671 ms     32.2 GB/s  err 5.8e-16
+  accel    cpu      64.384 ms      8.3 GB/s  err 8.5e-17
+  cloop8   cpu      5.830 ms     92.1 GB/s  err 9.2e-17
+
+dgemv 'N' 16384 x 16384 (lda 16384), A referenced 2.15 GB
+  resident gpu       7.069 ms    303.8 GB/s  err 8.8e-16
+  staged   gpu      33.807 ms     63.5 GB/s  err 8.8e-16
+  accel    cpu     113.335 ms     18.9 GB/s  err 1.1e-16
+  cloop8   cpu     24.918 ms     86.2 GB/s  err 1.1e-16
+
+dgemv 'T' 16384 x 16384 (lda 16384), A referenced 2.15 GB
+  resident gpu       5.988 ms    358.6 GB/s  err 5.0e-16
+  staged   gpu      32.210 ms     66.7 GB/s  err 5.0e-16
+  accel    cpu      41.553 ms     51.7 GB/s  err 2.4e-17
+  cloop8   cpu     16.973 ms    126.5 GB/s  err 7.4e-17
+
+zgemv 'N' 16384 x 16384 (lda 16384), A referenced 4.29 GB
+  resident gpu      14.113 ms    304.3 GB/s  err 1.0e-15
+  staged   gpu      93.805 ms     45.8 GB/s  err 1.0e-15
+  accel    cpu     111.941 ms     38.4 GB/s  err 1.2e-16
+  cloop8   cpu     44.097 ms     97.4 GB/s  err 8.7e-17
+
+zgemv 'T' 16384 x 16384 (lda 16384), A referenced 4.29 GB
+  resident gpu      11.992 ms    358.2 GB/s  err 5.3e-16
+  staged   gpu      82.299 ms     52.2 GB/s  err 5.3e-16
+  accel    cpu      38.482 ms    111.6 GB/s  err 1.7e-17
+  cloop8   cpu     37.611 ms    114.2 GB/s  err 7.0e-17
+
+zgemv 'C' 16384 x 16384 (lda 16384), A referenced 4.29 GB
+  resident gpu      11.967 ms    358.9 GB/s  err 4.9e-16
+  staged   gpu      82.255 ms     52.2 GB/s  err 4.9e-16
+  accel    cpu      39.746 ms    108.1 GB/s  err 1.6e-17
+  cloop8   cpu     34.006 ms    126.3 GB/s  err 7.4e-17
+
+zhemv 'U' 16384 x 16384 (lda 16384), A referenced 2.15 GB
+  resident gpu      13.905 ms    154.5 GB/s  err 7.7e-16
+  staged   gpu      81.659 ms     26.3 GB/s  err 7.7e-16
+  accel    cpu     250.060 ms      8.6 GB/s  err 1.1e-16
+  cloop12  cpu    20.610 ms    104.2 GB/s  err 8.4e-17
+
+zhemv 'L' 16384 x 16384 (lda 16384), A referenced 2.15 GB
+  resident gpu      13.389 ms    160.4 GB/s  err 9.7e-16
+  staged   gpu      91.179 ms     23.6 GB/s  err 9.7e-16
+  accel    cpu     248.521 ms      8.6 GB/s  err 8.7e-17
+  cloop12  cpu    25.699 ms     83.6 GB/s  err 7.8e-17

@@ -1,0 +1,7 @@
+date: 2026-10-23 18:46:49 EDT
+machine: Mac14,6, Apple M2 Max, 8P+4E CPU, 38-core GPU, 64 GB
+os: 27.0.1 (26A434); power: AC Power
+load at start: { 4.95 5.74 3.64 }
+worktree: c13854306d56
+load at end: { 4.64 5.49 6.02 }
+load at end (after energy): { 5.78 6.05 6.13 }

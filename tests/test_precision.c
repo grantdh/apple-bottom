@@ -28,10 +28,13 @@
 //   normwise 0.21–0.23 √K·u² (DGEMM), 0.32 √K·u² (ZGEMM). NW_BOUND = 1.
 //   A build without MTLMathModeSafe exceeds both by more than 10⁶x.
 //
-// The first case is a MathModeSafe smoke test (exact 1x1 products).
+// The first case is a MathModeSafe smoke test (exact 1x1 products); the last
+// one compares AB_PRECISION=fast with the default mode (fast_vs_default).
 
 #include "apple_bottom.h"
+#include "test_blas_check.h"   // clear_ab_env()
 #include "test_dot2.h"
+#include "test_kernels.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +56,7 @@ typedef struct {
     GemmOp op;
     int M, K, N;
     double alpha, beta;    // OP_DGEMM_SCALED only
+    const char* kernel;    // if set, every GEMM dispatch must run it (or its _pf instance)
 } PrecisionCase;
 
 // Number of real planes per matrix: ZGEMM has real and imaginary parts.
@@ -136,48 +140,75 @@ cleanup:
     return st;
 }
 
-// Returns 1 if passed, 0 if failed
-static int run_case(const PrecisionCase* pc) {
-    const int planes = n_planes(pc);
-    const size_t nA = (size_t)pc->M * pc->K, nB = (size_t)pc->K * pc->N, nC = (size_t)pc->M * pc->N;
-    double *A[2] = {NULL, NULL}, *B[2] = {NULL, NULL}, *C0 = NULL;
-    double *G[2] = {NULL, NULL}, *R[2] = {NULL, NULL}, *L[2] = {NULL, NULL};
-
+// A case's inputs, from its own seed: the same in every pass.
+static void case_inputs(const PrecisionCase* pc, double* A[2], double* B[2], double** C0) {
     srand48(pc->M + pc->K + pc->N);
-    for (int p = 0; p < planes; p++) {
-        A[p] = random_matrix(nA);
-        B[p] = random_matrix(nB);
-        G[p] = malloc(nC * sizeof(double));
-        R[p] = calloc(nC, sizeof(double));
-        L[p] = calloc(nC, sizeof(double));
+    for (int p = 0; p < n_planes(pc); p++) {
+        A[p] = random_matrix((size_t)pc->M * pc->K);
+        B[p] = random_matrix((size_t)pc->K * pc->N);
     }
-    if (pc->op == OP_DGEMM_SCALED) C0 = random_matrix(nC);
+    *C0 = pc->op == OP_DGEMM_SCALED ? random_matrix((size_t)pc->M * pc->N) : NULL;
+}
 
-    int passed = 0;
-    ABStatus st = gpu_gemm(pc, A, B, C0, G);
-    if (st != AB_OK) {
-        printf("  %-34s │ %s │ ✗ FAIL\n", pc->label, ab_status_string(st));
-        goto cleanup;
-    }
-    reference_gemm(pc, A, B, C0, R, L);
-
-    double d2 = 0, r2 = 0, cw = 0;
-    for (int p = 0; p < planes; p++) {
+// G's normwise and componentwise errors against R and L (NaN-propagating max).
+static void case_errors(const PrecisionCase* pc, double* const G[2], double* const R[2],
+                        double* const L[2], double* nw, double* cw) {
+    const size_t nC = (size_t)pc->M * pc->N;
+    double d2 = 0, r2 = 0;
+    *cw = 0;
+    for (int p = 0; p < n_planes(pc); p++) {
         for (size_t i = 0; i < nC; i++) {
             double d = G[p][i] - R[p][i];
             double e = fabs(d) / L[p][i];
             d2 += d * d;
             r2 += R[p][i] * R[p][i];
-            if (!(e <= cw)) cw = e;   // NaN-propagating max
+            if (!(e <= *cw)) *cw = e;
         }
     }
-    double nw = sqrt(d2 / r2), unit = sqrt((double)pc->K) * U2;
-    passed = nw / unit <= NW_BOUND && cw / unit <= CW_BOUND;
+    *nw = sqrt(d2 / r2);
+}
+
+// A case's reference and bound, and its default-mode errors in units of √K·u²
+// (NaN if the GPU failed), kept for fast_vs_default.
+typedef struct { double *R[2], *L[2]; double nw, cw; } CaseRef;
+
+// Returns 1 if passed, 0 if failed.
+static int run_case(const PrecisionCase* pc, CaseRef* ref) {
+    const int planes = n_planes(pc);
+    const size_t nC = (size_t)pc->M * pc->N;
+    double *A[2] = {NULL, NULL}, *B[2] = {NULL, NULL}, *C0 = NULL, *G[2] = {NULL, NULL};
+
+    case_inputs(pc, A, B, &C0);
+    *ref = (CaseRef){{NULL, NULL}, {NULL, NULL}, NAN, NAN};
+    for (int p = 0; p < planes; p++) {
+        G[p] = malloc(nC * sizeof(double));
+        ref->R[p] = calloc(nC, sizeof(double));
+        ref->L[p] = calloc(nC, sizeof(double));
+    }
+
+    int passed = 0;
+    KernelCounts before = kernel_counts();
+    ABStatus st = gpu_gemm(pc, A, B, C0, G);
+    KernelCounts ran = kernel_counts_since(&before);
+    if (st != AB_OK) {
+        printf("  %-34s │ %s │ ✗ FAIL\n", pc->label, ab_status_string(st));
+        goto cleanup;
+    }
+    reference_gemm(pc, A, B, C0, ref->R, ref->L);
+
+    double nw, cw, unit = sqrt((double)pc->K) * U2;
+    case_errors(pc, G, ref->R, ref->L, &nw, &cw);
+    ref->nw = nw / unit;
+    ref->cw = cw / unit;
+    char kernels[192];
+    int on_kernel = !pc->kernel || kernel_check(&ran, pc->kernel, kernels, sizeof kernels);
+    passed = ref->nw <= NW_BOUND && ref->cw <= CW_BOUND && on_kernel;
     printf("  %-34s │ %.2e %8.3g │ %.2e %8.3g │ %s\n",
-           pc->label, nw, nw / unit, cw, cw / unit, passed ? "✓ PASS" : "✗ FAIL");
+           pc->label, nw, ref->nw, cw, ref->cw, passed ? "✓ PASS" : "✗ FAIL");
+    if (!on_kernel) printf("    %s\n", kernels);
 
 cleanup:
-    for (int p = 0; p < 2; p++) { free(A[p]); free(B[p]); free(G[p]); free(R[p]); free(L[p]); }
+    for (int p = 0; p < 2; p++) { free(A[p]); free(B[p]); free(G[p]); }
     free(C0);
     return passed;
 }
@@ -209,7 +240,50 @@ static int run_safe_math_smoke(void) {
     return passed;
 }
 
+// AB_PRECISION=fast (lazy accumulation) takes effect when the library
+// initializes: re-initialize in fast mode, run every case again against the
+// default pass's reference, and require each case's normwise and componentwise
+// errors within FAST_ERROR_RATIO times the default mode's, and some of them
+// changed. Returns 1 if passed; the library is shut down after it.
+#define FAST_ERROR_RATIO 4.0
+
+static int fast_vs_default(const PrecisionCase* cases, const CaseRef* refs, int n_cases) {
+    ab_shutdown();
+    setenv("AB_PRECISION", "fast", 1);
+    int passed = ab_init() == AB_OK && strcmp(ab_precision_mode(), "fast") == 0;
+    int changed = 0;
+    double worst = 0;
+    const char* worst_label = "-";
+    for (int c = 0; passed && c < n_cases; c++) {
+        const PrecisionCase* pc = &cases[c];
+        double *A[2] = {NULL, NULL}, *B[2] = {NULL, NULL}, *C0 = NULL, *G[2] = {NULL, NULL};
+        double nw = NAN, cw = NAN, unit = sqrt((double)pc->K) * U2;
+        case_inputs(pc, A, B, &C0);
+        for (int p = 0; p < n_planes(pc); p++) G[p] = malloc((size_t)pc->M * pc->N * sizeof(double));
+        if (gpu_gemm(pc, A, B, C0, G) == AB_OK) {
+            case_errors(pc, G, refs[c].R, refs[c].L, &nw, &cw);
+            nw /= unit;
+            cw /= unit;
+        }
+        changed += nw != refs[c].nw || cw != refs[c].cw;
+        double r = fmax(nw / refs[c].nw, cw / refs[c].cw);
+        if (!(r <= FAST_ERROR_RATIO)) passed = 0;   // NaN fails
+        if (r > worst) { worst = r; worst_label = pc->label; }
+        for (int p = 0; p < 2; p++) { free(A[p]); free(B[p]); free(G[p]); }
+        free(C0);
+    }
+    passed = passed && changed > 0;
+    ab_shutdown();
+    unsetenv("AB_PRECISION");
+    printf("  %-34s │ worst %.2fx of default (<= %.0fx), %s; %d of %d errors changed │ %s\n",
+           "AB_PRECISION=fast vs default", worst, FAST_ERROR_RATIO, worst_label, changed, n_cases,
+           passed ? "✓ PASS" : "✗ FAIL");
+    return passed;
+}
+
 int main(void) {
+    clear_ab_env();   // the default mode, whatever the environment
+
     printf("╔══════════════════════════════════════════════════════════════════════════╗\n");
     printf("║  apple-bottom Precision Test (componentwise + normwise vs Dot2 FP64 ref)  ║\n");
     printf("╚══════════════════════════════════════════════════════════════════════════╝\n\n");
@@ -222,33 +296,43 @@ int main(void) {
     printf("  Case (kernel)                      │ normwise   /√K·u² │ compwise   /√K·u² │ Status\n");
     printf("─────────────────────────────────────┼───────────────────┼───────────────────┼────────\n");
 
+    // A label's kernel in parentheses is the case's `kernel`, which it must run
     static const PrecisionCase cases[] = {
-        // ab_dgemm: dd_dgemm, or dd_dgemm_narrow for a C of at most 480x480
-        {"ab_dgemm 64x64 K=64 (narrow)",         OP_DGEMM,   64,   64,   64, 0, 0},
-        {"ab_dgemm 128x128 K=128",               OP_DGEMM,  128,  128,  128, 0, 0},
-        {"ab_dgemm 256x256 K=256",               OP_DGEMM,  256,  256,  256, 0, 0},
-        {"ab_dgemm 512x512 K=512 (dd_dgemm)",    OP_DGEMM,  512,  512,  512, 0, 0},
-        {"ab_dgemm 1024x1024 K=1024",            OP_DGEMM, 1024, 1024, 1024, 0, 0},
-        {"ab_dgemm 2048x2048 K=2048",            OP_DGEMM, 2048, 2048, 2048, 0, 0},
-        {"ab_dgemm 100x100 K=4096 (narrow)",     OP_DGEMM,  100, 4096,  100, 0, 0},
-        {"ab_dgemm 1000x50 K=200 (narrow)",      OP_DGEMM, 1000,  200,   50, 0, 0},
+        // ab_dgemm: dd_dgemm, or dd_dgemm_narrow for a small grid (see use_narrow_tiles)
+        {"ab_dgemm 64x64 K=64 (narrow)",      OP_DGEMM,   64,   64,   64, 0, 0, "dd_dgemm_narrow"},
+        {"ab_dgemm 128x128 K=128",            OP_DGEMM,  128,  128,  128, 0, 0, NULL},
+        {"ab_dgemm 256x256 K=256",            OP_DGEMM,  256,  256,  256, 0, 0, NULL},
+        {"ab_dgemm 512x512 K=512 (dd_dgemm)", OP_DGEMM,  512,  512,  512, 0, 0, "dd_dgemm"},
+        {"ab_dgemm 1024x1024 K=1024",         OP_DGEMM, 1024, 1024, 1024, 0, 0, NULL},
+        {"ab_dgemm 2048x2048 K=2048",         OP_DGEMM, 2048, 2048, 2048, 0, 0, NULL},
+        {"ab_dgemm 100x100 K=4096 (narrow)",  OP_DGEMM,  100, 4096,  100, 0, 0, "dd_dgemm_narrow"},
+        {"ab_dgemm 1000x50 K=200 (narrow)",   OP_DGEMM, 1000,  200,   50, 0, 0, "dd_dgemm_narrow"},
         // ab_dgemm_scaled: dd_dgemm_ab, dd_dgemm_ab_ts when M >= 4N, or
-        // dd_dgemm_ab_narrow for a small C (see use_narrow_tiles)
-        {"scaled 700x600 K=500 (dd_dgemm_ab)",   OP_DGEMM_SCALED,   700, 500, 600, 0.7, -1.3},
-        {"scaled 500x300 K=700 (narrow)",        OP_DGEMM_SCALED,   500, 700, 300, 0.7, -1.3},
-        {"scaled 1000x50 K=200 a1b0 (narrow)",   OP_DGEMM_SCALED,  1000, 200,  50, 1.0,  0.0},
-        {"scaled 18277x150 K=300 (ts, QE)",      OP_DGEMM_SCALED, 18277, 300, 150, 0.7, -1.3},
-        // ab_zgemm: Gauss 3M, three real GEMMs plus DD add/sub
-        {"ab_zgemm 256x256 K=256 (narrow)",      OP_ZGEMM,  256,  256,  256, 0, 0},
-        {"ab_zgemm 1024x64 K=512 (narrow)",      OP_ZGEMM, 1024,  512,   64, 0, 0},
-        {"ab_zgemm 1024x40 K=512 (ts)",          OP_ZGEMM, 1024,  512,   40, 0, 0},
+        // dd_dgemm_ab_narrow for a small grid (see use_narrow_tiles)
+        {"scaled 1100x1000 K=500 (dd_dgemm_ab)", OP_DGEMM_SCALED, 1100, 500, 1000, 0.7, -1.3,
+         "dd_dgemm_ab"},
+        {"scaled 500x300 K=700 (narrow)",        OP_DGEMM_SCALED, 500, 700, 300, 0.7, -1.3,
+         "dd_dgemm_ab_narrow"},
+        {"scaled 1000x50 K=200 a1b0 (narrow)",   OP_DGEMM_SCALED, 1000, 200, 50, 1.0, 0.0,
+         "dd_dgemm_ab_narrow"},
+        {"scaled 18277x150 K=300 (ts, QE)",      OP_DGEMM_SCALED, 18277, 300, 150, 0.7, -1.3,
+         "dd_dgemm_ab_ts"},
+        // ab_zgemm: Gauss 3M, three real GEMMs plus DD add/sub, on the scaled
+        // kernels (alpha 1, beta 0) when M >= 4N
+        {"ab_zgemm 256x256 K=256 (narrow)",   OP_ZGEMM,  256,  256,  256, 0, 0, "dd_dgemm_narrow"},
+        {"ab_zgemm 1024x64 K=512 (narrow)",   OP_ZGEMM, 1024,  512,   64, 0, 0, "dd_dgemm_ab_narrow"},
+        {"ab_zgemm 4000x40 K=512 (ts)",       OP_ZGEMM, 4000,  512,   40, 0, 0, "dd_dgemm_ab_ts"},
     };
     const int n_cases = (int)(sizeof(cases) / sizeof(cases[0]));
-    const int n_total = n_cases + 1;   // + the smoke test
+    const int n_total = n_cases + 2;   // + the smoke test and fast_vs_default
+    CaseRef refs[sizeof(cases) / sizeof(cases[0])];
 
     int n_passed = run_safe_math_smoke();
     for (int c = 0; c < n_cases; c++)
-        n_passed += run_case(&cases[c]);
+        n_passed += run_case(&cases[c], &refs[c]);
+    n_passed += fast_vs_default(cases, refs, n_cases);
+    for (int c = 0; c < n_cases; c++)
+        for (int p = 0; p < 2; p++) { free(refs[c].R[p]); free(refs[c].L[p]); }
 
     printf("\n═══════════════════════════════════════════════════════════════════════════\n");
     if (n_passed == n_total) {

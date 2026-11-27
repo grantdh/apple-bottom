@@ -1,0 +1,2332 @@
+// =============================================================================
+// test_split.c — AB_SPLIT: one BLAS-ABI GEMM split between Accelerate and the GPU
+// =============================================================================
+// The executor (src/blas_wrapper.c, src/split_slice.h) through its seam,
+// ab_internal_dgemm_split and ab_internal_zgemm_split, on the GPU, in this
+// process (references made here on the same memory):
+//   composition  a call cut at g is, bit for bit, cblas on the head slice
+//                (the seam with g = 0 on that slice) and the staged path on
+//                the tail slice alone (the seam with g = L on it); on the K
+//                axis, the head into C plus the GPU's product of the tail
+//                added in FP64
+//   accuracy     against cblas (TOL) and, for DGEMM with alpha 1 and beta 0,
+//                Dot2 within (3K + 13) u^2 |A||B|; ragged ld, NaN padding,
+//                beta 0 over NaN in C, signed zeros, cancellation, cuts at
+//                1 and L - 1, a long K on the K axis
+//   range        NaN, Inf and scaled lines in the head only or the tail only
+//   determinism  repeats, after other shapes, registered and misaligned
+//                memory, under background load, 8 threads each splitting
+//   registered   in place on the N axis, never C on the M axis
+//   worker       one split worker runs every GPU part; callers that find it
+//                held run theirs on threads of their own, with the same bits
+// and dgemm_/zgemm_ under AB_SPLIT in child processes (test_spawn.h) with a
+// split table covering the calls of TCALLS: AB_SPLIT unset, empty and 0
+// alike, AB_MODE=cpu, every AB_TEST_FAIL_STAGE failure, AB_HOST_PACK,
+// AB_STRASSEN, AB_STAGING_MB=0, AB_PRECISION=fast, VECLIB_MAXIMUM_THREADS,
+// fork(), the reports (AB_REPORT, AB_PROFILE, its JSON, AB_TRACE), the
+// other APIs unchanged, memory growth, and the benchmark drivers' refusals.
+//
+// Usage: test_split                       the test
+//        test_split <test_name>...        those tests only
+//        test_split --child <scenario>    one child (AB_SPLIT_TABLE from the parent)
+// =============================================================================
+
+#include "apple_bottom.h"
+#include "apple_bottom_device.h"
+#include "gpu_stage.h"
+#include "profiling/blas_profiler.h"
+#include "split_slice.h"
+#include "test_blas_check.h"
+#include "test_dot2.h"
+#include "test_registry.h"
+#include "test_spawn.h"
+#include <Accelerate/Accelerate.h>
+#include <complex.h>
+#include <libproc.h>
+#include <limits.h>
+#include <mach-o/dyld.h>
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/task_policy.h>
+#include <malloc/malloc.h>
+#include <math.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdarg.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+// A test still running after TEST_TIMEOUT_S (the slowest takes 7 s on an M2
+// Max), or a --child after CHILD_TIMEOUT_S, is ended by SIGALRM: a hang fails
+// here, with the last [k/N] line naming the test, instead of being waited on.
+#define TEST_TIMEOUT_S 180
+#define CHILD_TIMEOUT_S 120     // within its test's bound, so the test reports it
+#define U2_DD 0x1p-48          // u^2 of the DD arithmetic
+
+#ifndef AB_BUILD_DIR
+#define AB_BUILD_DIR "build"
+#endif
+
+static int tests_passed = 0, tests_failed = 0;
+static char g_why[512];        // the current test's first failure
+
+// Records the first failure of the current test; returns cond.
+static bool check(bool cond, const char *fmt, ...) {
+    if (!cond && !g_why[0]) {
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(g_why, sizeof g_why, fmt, ap);
+        va_end(ap);
+    }
+    return cond;
+}
+
+static void finish(void) {
+    if (g_why[0]) {
+        printf("✗ FAIL (%s)\n", g_why);
+        tests_failed++;
+        g_why[0] = 0;
+    } else {
+        printf("✓ PASS\n");
+        tests_passed++;
+    }
+}
+
+// =============================================================================
+// Calls and operands
+// =============================================================================
+
+// One call as the BLAS ABI takes it; alpha, beta as (real, imaginary).
+typedef struct {
+    char r, ta, tb;
+    int M, N, K, pad;
+    double alpha[2], beta[2];
+} Call;
+
+// Its operands, column-major with leading dimension rows + pad, padding NaN.
+typedef struct {
+    int w;                       // doubles per element
+    int ldA, ldB, ldC, rA, cA, rB, cB;
+    size_t nA, nB, nC;           // doubles
+    double *A, *B, *C0;
+} Operands;
+
+static uint64_t g_seed = 0x2545F4914F6CDD1DULL;
+
+static double uniform(void) {
+    uint64_t z = (g_seed += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return ((double)((z ^ (z >> 31)) >> 11) * 0x1p-53) * 2.0 - 1.0;
+}
+
+static double *stored_operand(int w, int rows, int cols, int ld, size_t *n) {
+    *n = (size_t)w * ld * (cols ? cols : 1);
+    double *x = malloc(*n * sizeof *x);
+    for (size_t i = 0; i < *n; i++) x[i] = NAN;
+    for (int j = 0; j < cols; j++)
+        for (int i = 0; i < w * rows; i++) x[(size_t)j * w * ld + i] = uniform();
+    return x;
+}
+
+static Operands operands(const Call *c) {
+    Operands o = {.w = c->r == 'z' ? 2 : 1};
+    bool na = is_notrans(c->ta), nb = is_notrans(c->tb);
+    o.rA = na ? c->M : c->K;
+    o.cA = na ? c->K : c->M;
+    o.rB = nb ? c->K : c->N;
+    o.cB = nb ? c->N : c->K;
+    o.ldA = o.rA + c->pad;
+    o.ldB = o.rB + c->pad;
+    o.ldC = c->M + c->pad;
+    o.A = stored_operand(o.w, o.rA, o.cA, o.ldA, &o.nA);
+    o.B = stored_operand(o.w, o.rB, o.cB, o.ldB, &o.nB);
+    o.C0 = stored_operand(o.w, c->M, c->N, o.ldC, &o.nC);
+    return o;
+}
+
+static void free_operands(Operands *o) {
+    free(o->A);
+    free(o->B);
+    free(o->C0);
+}
+
+// The seam on the call c by engine (0 the staged path, 1 cblas) with A, B and C
+// at the given element offsets.
+static int seam(const Call *c, char axis, int g, int order, int engine, int M, int N, int K, const Operands *o,
+                size_t a, size_t b, double *C, int ldC) {
+    ab_split_forced_t f = {axis, g, order, engine};
+    if (c->r == 'z')
+        return ab_internal_zgemm_split(&f, c->ta, c->tb, M, N, K, CMPLX(c->alpha[0], c->alpha[1]),
+                                       (const double complex *)o->A + a, o->ldA,
+                                       (const double complex *)o->B + b, o->ldB,
+                                       CMPLX(c->beta[0], c->beta[1]), (double complex *)C, ldC);
+    return ab_internal_dgemm_split(&f, c->ta, c->tb, M, N, K, c->alpha[0], o->A + a, o->ldA,
+                                   o->B + b, o->ldB, c->beta[0], C, ldC);
+}
+
+static bool kept(int outcome) { return outcome == AB_SPLIT_KEPT || outcome == AB_SPLIT_KEPT_4M; }
+
+// The timeline of a split kept by the staged path (split_times.h): every
+// step recorded, in the order the executor takes them in `order` (0 free, 1
+// the CPU's part first, 2 the GPU's). The GPU's GPUStartTime and GPUEndTime
+// are compared with host times within 2 us, for the two clocks' rounding.
+// NULL if it holds, else what fails.
+static const char *times_fault(const ab_split_times_t *t, int order) {
+    const uint64_t tol = 2000;
+    const ab_prof_kernel_split_t *k = &t->gpu;
+    const struct { const char *what; bool ok; } C[] = {
+        {"a step not recorded", t->cut_ns && t->create_ns && t->cpu0_ns && t->cpu1_ns && t->gpu0_ns && t->gpu1_ns &&
+                                    t->join_ns && t->end_ns && k->commit_ns && k->gpu_start_ns && k->gpu_end_ns &&
+                                    k->done_ns},
+        {"cut, create, GPU part start out of order", t->cut_ns <= t->create_ns && t->create_ns <= t->gpu0_ns},
+        {"GPU part: start, commit, GPU start, GPU end, completion, end out of order",
+         t->gpu0_ns <= k->commit_ns && k->commit_ns <= k->gpu_start_ns + tol && k->gpu_start_ns <= k->gpu_end_ns &&
+             k->gpu_end_ns <= k->done_ns + tol && k->done_ns <= t->gpu1_ns},
+        {"CPU part, join, end out of order", t->create_ns <= t->cpu0_ns && t->cpu0_ns <= t->cpu1_ns &&
+                                                 t->cpu1_ns <= t->end_ns && t->gpu1_ns <= t->join_ns &&
+                                                 t->join_ns <= t->end_ns},
+        {"the parts not in the order asked for", order == 1 ? t->cpu1_ns <= t->gpu0_ns
+                                                 : order == 2 ? t->join_ns <= t->cpu0_ns : true},
+        {"no command buffer or GEMM dispatch counted, or a Metal error",
+         k->cmdbufs >= 1 && k->dispatches >= 1 && k->groups >= k->dispatches && k->groups_max >= 1 &&
+             k->groups_max <= k->groups && k->kinds && !k->mtl_error},
+    };
+    for (size_t i = 0; i < sizeof C / sizeof *C; i++)
+        if (!C[i].ok) return C[i].what;
+    return NULL;
+}
+
+static const char *call_text(const Call *c, char axis, int g) {
+    static char s[160];
+    snprintf(s, sizeof s, "%cgemm %c %c %dx%dx%d pad %d alpha %g%+gi beta %g%+gi axis %c g=%d", c->r,
+             c->ta, c->tb, c->M, c->N, c->K, c->pad, c->alpha[0], c->alpha[1], c->beta[0], c->beta[1],
+             axis, g);
+    return s;
+}
+
+// The composition reference of c cut at g on axis, into ref (C0 on entry):
+// the head slice by the seam at g = 0, the tail slice alone by the seam at
+// its own full length (the staged path); on K, the tail's product by the
+// staged path into P (beta 0, ld M), added in FP64. False if a part did not
+// come out as it should (the tail must stand on the GPU).
+static bool compose_reference(const Call *c, char axis, int g, const Operands *o, double *ref) {
+    const size_t w = (size_t)o->w;
+    const bool na = is_notrans(c->ta), nb = is_notrans(c->tb);
+    int got_h, got_t;
+    if (axis == 'N') {
+        size_t cut = (size_t)(c->N - g);
+        got_h = cut ? seam(c, 'N', 0, 0, 0, c->M, (int)cut, c->K, o, 0, 0, ref, o->ldC) : AB_SPLIT_CPU;
+        got_t = seam(c, 'N', g, 0, 0, c->M, g, c->K, o, 0, nb ? cut * o->ldB : cut, ref + w * cut * o->ldC,
+                     o->ldC);
+    } else if (axis == 'M') {
+        size_t cut = (size_t)(c->M - g);
+        got_h = cut ? seam(c, 'M', 0, 0, 0, (int)cut, c->N, c->K, o, 0, 0, ref, o->ldC) : AB_SPLIT_CPU;
+        got_t = seam(c, 'M', g, 0, 0, g, c->N, c->K, o, na ? cut : cut * o->ldA, 0, ref + w * cut, o->ldC);
+    } else {
+        size_t cut = (size_t)(c->K - g);
+        got_h = seam(c, 'K', 0, 0, 0, c->M, c->N, (int)cut, o, 0, 0, ref, o->ldC);
+        Call t = *c;
+        t.beta[0] = t.beta[1] = 0.0;
+        double *P = calloc(w * (size_t)c->M * c->N, sizeof *P);
+        got_t = seam(&t, 'N', c->N, 0, 0, c->M, c->N, g, o, na ? cut * o->ldA : cut, nb ? cut : cut * o->ldB,
+                     P, c->M);
+        for (int j = 0; j < c->N; j++)
+            for (size_t i = 0; i < w * (size_t)c->M; i++) ref[w * (size_t)j * o->ldC + i] += P[w * (size_t)j * c->M + i];
+        free(P);
+    }
+    return check(got_h == AB_SPLIT_CPU && kept(got_t), "%s: reference parts gave %d, %d", call_text(c, axis, g),
+                 got_h, got_t);
+}
+
+// c cut at g on axis, in each order, against its composition reference: C
+// whole (padding included) bitwise, A and B unchanged, the GPU's part kept.
+static void compose_case(const Call *c, char axis, int g) {
+    Operands o = operands(c);
+    double *ref = malloc(o.nC * sizeof *ref), *C = malloc(o.nC * sizeof *C);
+    double *A0 = malloc(o.nA * sizeof *A0), *B0 = malloc(o.nB * sizeof *B0);
+    memcpy(A0, o.A, o.nA * sizeof *A0);
+    memcpy(B0, o.B, o.nB * sizeof *B0);
+    memcpy(ref, o.C0, o.nC * sizeof *ref);
+    if (compose_reference(c, axis, g, &o, ref)) {
+        for (int order = 0; order < 3; order++) {
+            memcpy(C, o.C0, o.nC * sizeof *C);
+            int got = seam(c, axis, g, order, 0, c->M, c->N, c->K, &o, 0, 0, C, o.ldC);
+            ab_split_record_t rec;
+            check(kept(got) && ab_internal_last_split(&rec) && rec.outcome == got && rec.axis == axis &&
+                  rec.g == g, "%s order %d: outcome %d", call_text(c, axis, g), order, got);
+            const char *fault = kept(got) ? times_fault(&rec.times, order) : NULL;
+            check(!fault, "%s order %d: timeline: %s", call_text(c, axis, g), order, fault);
+            check(!memcmp(C, ref, o.nC * sizeof *C), "%s order %d: C is not the composition of its parts",
+                  call_text(c, axis, g), order);
+            check(!strcmp(ab_get_last_dispatch_path(), "split"), "%s: last path %s", call_text(c, axis, g),
+                  ab_get_last_dispatch_path());
+        }
+        check(!memcmp(o.A, A0, o.nA * sizeof *A0) && !memcmp(o.B, B0, o.nB * sizeof *B0),
+              "%s: A or B changed", call_text(c, axis, g));
+    }
+    free(ref); free(C); free(A0); free(B0);
+    free_operands(&o);
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+// The axes this tree's executor cuts.
+static const char AXES[] = "NMK";
+
+#define ONE {1, 0}
+#define ZERO {0, 0}
+
+// The call the split worker's tests split (T13 and its children).
+static const Call WORKER_CALL = {'d', 'N', 'N', 300, 260, 200, 0, ONE, ZERO};
+
+// T4: the composition on every axis, routine and TRANS pair, scalar set and
+// a range of cuts, with ragged leading dimensions.
+static void test_split_composition(void) {
+    static const struct { double alpha[2], beta[2]; } S[] = {
+        {ONE, ZERO}, {ONE, ONE}, {{-1.7, 0.6}, {0.3, -0.45}}, {{2.0, 0.0}, ZERO},
+    };
+    static const char TR[] = "NTC";
+    for (const char *axis = AXES; *axis; axis++)
+        for (int z = 0; z < 2; z++)
+            for (int a = 0; a < (z ? 3 : 2); a++)
+                for (int b = 0; b < (z ? 3 : 2); b++) {
+                    int M = 300, N = 260, K = 200;
+                    if (*axis == 'K') K = 2100;
+                    int L = *axis == 'N' ? N : *axis == 'M' ? M : K, unit = *axis == 'K' ? 64 : 32;
+                    const int G[] = {unit, (L / 2 / unit) * unit, L - unit, 1, L - 1};
+                    for (size_t s = 0; s < TEST_REGISTRY_SIZE(S); s++)
+                        for (size_t gi = 0; gi < TEST_REGISTRY_SIZE(G); gi++) {
+                            Call c = {z ? 'z' : 'd', TR[a], TR[b], M, N, K, (int)((s + gi) % 3),
+                                      {S[s].alpha[0], S[s].alpha[1]}, {S[s].beta[0], S[s].beta[1]}};
+                            compose_case(&c, *axis, G[gi]);
+                        }
+                }
+    // Quantum ESPRESSO's shapes, smaller: updates, narrow updates, reductions.
+    const Call QE[] = {
+        {'z', 'N', 'N', 9000, 256, 160, 0, ONE, ZERO},
+        {'z', 'N', 'N', 9000, 160, 500, 3, ONE, ONE},
+        {'z', 'C', 'N', 320, 320, 9000, 1, ONE, ZERO},
+        {'d', 'N', 'N', 2048, 2048, 2048, 0, ONE, ZERO},
+    };
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(QE); i++)
+        for (const char *axis = AXES; *axis; axis++) {
+            int L = *axis == 'N' ? QE[i].N : *axis == 'M' ? QE[i].M : QE[i].K;
+            int unit = *axis == 'K' ? 64 : 32;
+            compose_case(&QE[i], *axis, (L / 2 / unit) * unit);
+        }
+    finish();
+}
+
+// The parts of c cut at g on axis made one after the other by cblas, into C
+// (C0 on entry): what a GPU part that did not stand leaves. K: the head into
+// C, then the tail with beta 1.
+static enum CBLAS_TRANSPOSE cblas_trans(char t) {
+    return t == 'N' ? CblasNoTrans : t == 'T' ? CblasTrans : CblasConjTrans;
+}
+
+static void cblas_call(const Call *c, int M, int N, int K, const double *A, int ldA, const double *B,
+                       int ldB, const double *beta, double *C, int ldC) {
+    if (M == 0 || N == 0) return;
+    if (c->r == 'z')
+        cblas_zgemm(CblasColMajor, cblas_trans(c->ta), cblas_trans(c->tb), M, N, K,
+                    (const void *)c->alpha, (const void *)A, ldA, (const void *)B, ldB,
+                    (const void *)beta, (void *)C, ldC);
+    else
+        cblas_dgemm(CblasColMajor, cblas_trans(c->ta), cblas_trans(c->tb), M, N, K, c->alpha[0], A, ldA,
+                    B, ldB, beta[0], C, ldC);
+}
+
+static void parts_reference(const Call *c, char axis, int g, const Operands *o, double *C) {
+    const size_t w = (size_t)o->w;
+    const bool na = is_notrans(c->ta), nb = is_notrans(c->tb);
+    static const double one[2] = {1, 0};
+    if (axis == 'N') {
+        size_t cut = (size_t)(c->N - g);
+        cblas_call(c, c->M, (int)cut, c->K, o->A, o->ldA, o->B, o->ldB, c->beta, C, o->ldC);
+        cblas_call(c, c->M, g, c->K, o->A, o->ldA, o->B + w * (nb ? cut * o->ldB : cut), o->ldB, c->beta,
+                   C + w * cut * o->ldC, o->ldC);
+    } else if (axis == 'M') {
+        size_t cut = (size_t)(c->M - g);
+        cblas_call(c, (int)cut, c->N, c->K, o->A, o->ldA, o->B, o->ldB, c->beta, C, o->ldC);
+        cblas_call(c, g, c->N, c->K, o->A + w * (na ? cut : cut * o->ldA), o->ldA, o->B, o->ldB, c->beta,
+                   C + w * cut, o->ldC);
+    } else {
+        size_t cut = (size_t)(c->K - g);
+        cblas_call(c, c->M, c->N, (int)cut, o->A, o->ldA, o->B, o->ldB, c->beta, C, o->ldC);
+        cblas_call(c, c->M, c->N, g, o->A + w * (na ? cut * o->ldA : cut), o->ldA,
+                   o->B + w * (nb ? cut : cut * o->ldB), o->ldB, one, C, o->ldC);
+    }
+}
+
+static uint64_t hash_doubles(const double *x, size_t n) { return fnv1a(x, n * sizeof *x, FNV_OFFSET); }
+
+// Whether x and y hold the same n values, NaN payloads aside.
+static bool same_values(const double *x, const double *y, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        if (!(x[i] == y[i] || (isnan(x[i]) && isnan(y[i])))) return false;
+    return true;
+}
+
+// n doubles in whole pages of their own, for ab_register_host_memory; *bytes
+// is the size to register.
+static double *page_alloc(size_t n, size_t *bytes) {
+    void *p = NULL;
+    *bytes = (n * sizeof(double) + 16383) & ~(size_t)16383;
+    if (posix_memalign(&p, 16384, *bytes)) abort();
+    return p;
+}
+
+static bool all_finite(const Call *c, const Operands *o, const double *C) {
+    for (int j = 0; j < c->N; j++)
+        for (int i = 0; i < o->w * c->M; i++)
+            if (!isfinite(C[(size_t)j * o->w * o->ldC + i])) return false;
+    return true;
+}
+
+// T5: against cblas within TOL, and DGEMM (alpha 1, beta 0) against Dot2
+// within the DD GEMM bound (3K + 13) u^2 |A||B| (docs/vv/PRECISION_ENVELOPE.md);
+// padding untouched; beta = 0 never reads C.
+static void accuracy_case(const Call *c, char axis, int g, bool nan_c) {
+    Operands o = operands(c);
+    if (nan_c)
+        for (int j = 0; j < c->N; j++)
+            for (int i = 0; i < o.w * c->M; i++) o.C0[(size_t)j * o.w * o.ldC + i] = NAN;
+    double *C = malloc(o.nC * sizeof *C);
+    memcpy(C, o.C0, o.nC * sizeof *C);
+    int got = seam(c, axis, g, 0, 0, c->M, c->N, c->K, &o, 0, 0, C, o.ldC);
+    Layout la = {o.rA, o.cA, o.ldA}, lb = {o.rB, o.cB, o.ldB}, lc = {c->M, c->N, o.ldC};
+    double complex al = CMPLX(c->alpha[0], c->alpha[1]), be = CMPLX(c->beta[0], c->beta[1]);
+    double err = blas_error(c->r == 'z', c->ta, c->tb, c->M, c->N, c->K, al, be, o.A, la, o.B, lb, o.C0,
+                            lc, C);
+    check(kept(got), "%s: outcome %d", call_text(c, axis, g), got);
+    check(err <= TOL, "%s: error %.2e against cblas", call_text(c, axis, g), err);
+    check(outside_block_unchanged(C, o.C0, o.nC / o.w, lc, o.w * sizeof(double)),
+          "%s: C outside its M x N block changed", call_text(c, axis, g));
+    if (nan_c) check(all_finite(c, &o, C), "%s: beta = 0 read the NaN in C", call_text(c, axis, g));
+    if (c->r == 'd' && c->alpha[0] == 1.0 && c->beta[0] == 0.0) {
+        // op(A), op(B) row-major for Dot2
+        double *a = malloc((size_t)c->M * c->K * sizeof *a), *b = malloc((size_t)c->K * c->N * sizeof *b);
+        for (int i = 0; i < c->M; i++)
+            for (int k = 0; k < c->K; k++) a[(size_t)i * c->K + k] = o.A[op_index(c->ta, la, i, k)];
+        for (int k = 0; k < c->K; k++)
+            for (int j = 0; j < c->N; j++) b[(size_t)k * c->N + j] = o.B[op_index(c->tb, lb, k, j)];
+        double *S = calloc((size_t)c->M * c->N, sizeof *S), *E = calloc((size_t)c->M * c->N, sizeof *E);
+        double *L = calloc((size_t)c->M * c->N, sizeof *L);
+        dot2_gemm_acc(c->M, c->N, c->K, 1.0, a, b, S, E);
+        abs_gemm_acc(c->M, c->N, c->K, a, NULL, b, NULL, L);
+        double worst = 0;
+        for (int i = 0; i < c->M; i++)
+            for (int j = 0; j < c->N; j++) {
+                size_t r = (size_t)i * c->N + j;
+                double d = fabs(C[(size_t)j * o.ldC + i] - (S[r] + E[r]));
+                worst = fmax(worst, L[r] > 0 ? d / L[r] : d);
+            }
+        check(worst <= (3.0 * c->K + 13.0) * U2_DD, "%s: error %.2f u^2 |A||B| against Dot2, bound %.0f",
+              call_text(c, axis, g), worst / U2_DD, 3.0 * c->K + 13.0);
+        free(a); free(b); free(S); free(E); free(L);
+    }
+    free(C);
+    free_operands(&o);
+}
+
+static void test_split_accuracy(void) {
+    static const char TR[] = "NTC";
+    for (const char *axis = AXES; *axis; axis++)
+        for (int z = 0; z < 2; z++)
+            for (int a = 0; a < (z ? 3 : 2); a++)
+                for (int b = 0; b < (z ? 3 : 2); b++) {
+                    // tall, wide, and long K on K
+                    const int SH[2][3] = {{*axis == 'K' ? 96 : 700, 160, *axis == 'K' ? 3000 : 120},
+                                          {*axis == 'K' ? 64 : 140, *axis == 'K' ? 80 : 500,
+                                           *axis == 'K' ? 1300 : 90}};
+                    for (int s = 0; s < 2; s++) {
+                        int M = SH[s][0], N = SH[s][1], K = SH[s][2];
+                        int L = *axis == 'N' ? N : *axis == 'M' ? M : K;
+                        Call c = {z ? 'z' : 'd', TR[a], TR[b], M, N, K, 1 + s, ONE, ZERO};
+                        accuracy_case(&c, *axis, L / 2, false);
+                        accuracy_case(&c, *axis, 1, false);                  // g = 1
+                        accuracy_case(&c, *axis, L - 1, false);              // cut = 1
+                        c.alpha[0] = -0.75; c.alpha[1] = z ? 0.5 : 0.0;
+                        c.beta[0] = 1.25; c.beta[1] = z ? -0.25 : 0.0;
+                        accuracy_case(&c, *axis, L / 3, false);
+                        c.beta[0] = c.beta[1] = 0.0;
+                        accuracy_case(&c, *axis, L / 3, true);               // beta 0, NaN in C
+                    }
+                }
+    // Signed zeros and cancellation: C0 = -op(A) op(B) by cblas, beta 1.
+    for (const char *axis = AXES; *axis; axis++)
+        for (int z = 0; z < 2; z++) {
+            Call c = {z ? 'z' : 'd', 'N', 'N', 300, 260, *axis == 'K' ? 2100 : 200, 2, ONE, ONE};
+            Operands o = operands(&c);
+            static const double m1[2] = {-1, 0}, zero[2] = {0, 0};
+            Call neg = c;
+            memcpy(neg.alpha, m1, sizeof m1);
+            cblas_call(&neg, c.M, c.N, c.K, o.A, o.ldA, o.B, o.ldB, zero, o.C0, o.ldC);
+            for (int i = 0; i < o.w * c.M; i += 7) o.C0[i] = -0.0;      // and signed zeros
+            double *C = malloc(o.nC * sizeof *C);
+            memcpy(C, o.C0, o.nC * sizeof *C);
+            int L = *axis == 'N' ? c.N : *axis == 'M' ? c.M : c.K;
+            int got = seam(&c, *axis, L / 2, 0, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
+            Layout la = {o.rA, o.cA, o.ldA}, lb = {o.rB, o.cB, o.ldB}, lc = {c.M, c.N, o.ldC};
+            double err = blas_error(z, 'N', 'N', c.M, c.N, c.K, 1.0, 1.0, o.A, la, o.B, lb, o.C0, lc, C);
+            check(kept(got) && err <= TOL, "cancellation %c axis %c: outcome %d error %.2e", c.r, *axis, got,
+                  err);
+            free(C);
+            free_operands(&o);
+        }
+    // Quantum ESPRESSO's long K on the K axis: newq 'T','N' 171 x 64 x 143666.
+    Call qe = {'d', 'T', 'N', 171, 64, 143666, 0, ONE, ZERO};
+    accuracy_case(&qe, 'K', (143666 / 2 / 64) * 64, false);
+    finish();
+}
+
+// A copy of c's operands with values set in one slice: NaN, Inf or a scale.
+typedef enum { PLANT_NAN, PLANT_INF, PLANT_SCALE } Plant;
+
+// Plants v in row (M axis) or column (N axis) or K index l of op(A) / op(B):
+// N axis: column l of op(B); M axis: row l of op(A); K axis: column l of
+// op(A) and row l of op(B).
+static void plant(const Call *c, Operands *o, char axis, int l, Plant what) {
+    Layout la = {o->rA, o->cA, o->ldA}, lb = {o->rB, o->cB, o->ldB};
+    double v = what == PLANT_NAN ? NAN : what == PLANT_INF ? INFINITY : 0;
+    for (int t = 0; t < (axis == 'N' ? c->K : axis == 'M' ? c->K : c->M); t++) {
+        size_t x = axis == 'N' ? op_index(c->tb, lb, t, l) : op_index(c->ta, la, axis == 'M' ? l : t, axis == 'M' ? t : l);
+        double *X = axis == 'N' ? o->B : o->A;
+        for (int p = 0; p < o->w; p++) {
+            double *e = &X[(size_t)o->w * x + p];
+            *e = what == PLANT_SCALE ? *e * 0x1p100 : (t == 3 && p == 0 ? v : *e);
+        }
+    }
+}
+
+static char *run_child(const char *scenario, const char *const *extra, int *status);
+
+// T6: bad data in the head only, or the tail only, on each axis.
+static void test_split_exponent_range(void) {
+    for (const char *axis = AXES; *axis; axis++)
+        for (int z = 0; z < 2; z++)
+            for (Plant what = PLANT_NAN; what <= PLANT_SCALE; what++)
+                for (int tail_side = 0; tail_side < 2; tail_side++) {
+                    // On K the planted index is a column of op(A), not one of the guard's lines.
+                    if (*axis == 'K' && what == PLANT_SCALE) continue;
+                    // K: a product small enough that malloc hands its buffer on, so a P
+                    // added where it should not be holds an earlier call's values.
+                    bool k = *axis == 'K';
+                    Call c = {z ? 'z' : 'd', 'N', 'N', k ? 40 : 300, k ? 40 : 260, k ? 2100 : 200, 1, ONE, ZERO};
+                    int L = *axis == 'N' ? c.N : *axis == 'M' ? c.M : c.K;
+                    int g = *axis == 'K' ? 1024 : 128;
+                    Operands o = operands(&c);
+                    plant(&c, &o, *axis, tail_side ? L - 5 : 5, what);
+                    double *C = malloc(o.nC * sizeof *C), *ref = malloc(o.nC * sizeof *ref);
+                    memcpy(C, o.C0, o.nC * sizeof *C);
+                    memcpy(ref, o.C0, o.nC * sizeof *ref);
+                    int got = seam(&c, *axis, g, 0, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
+                    const char *text = call_text(&c, *axis, g);
+                    if (what != PLANT_SCALE && tail_side) {
+                        // the tail goes to Accelerate: the cblas parts, P not added on K
+                        parts_reference(&c, *axis, g, &o, ref);
+                        // range, whether the guard or the GPU epilogue met it first
+                        check(got == AB_SPLIT_RANGE, "%s, NaN/Inf in the tail: outcome %d", text, got);
+                    } else {
+                        // the head on cblas, the tail (scaled lines included) on the GPU
+                        compose_reference(&c, *axis, g, &o, ref);
+                        check(kept(got), "%s, %s in the %s: outcome %d", text,
+                              what == PLANT_SCALE ? "scaled line" : "NaN/Inf", tail_side ? "tail" : "head", got);
+                    }
+                    // NaN payloads aside, the bits: compare as values where both are NaN.
+                    check(same_values(C, ref, o.nC), "%s, plant %d %s: C is not the expected composition", text,
+                          what, tail_side ? "tail" : "head");
+                    free(C); free(ref);
+                    free_operands(&o);
+                }
+    // A ZGEMM tail goes to Accelerate as out of range, as without AB_SPLIT,
+    // where its epilogue would read NaN in C, or could overflow FP64
+    // (ab_zgemm_product_fits, ab_zgemm_c_fits): its product (op(A) x 2^600,
+    // the tail's 64 columns of op(B) x 2^500), its C (the tail's columns x
+    // 2^1023). With the host epilogue (alpha 2, or 2^-200) a C is refused
+    // unrun and a product after the run; with the GPU's (alpha 1, beta 0 or 1)
+    // once that epilogue meets them. The head stays finite on Accelerate. The
+    // mirror, the head's columns so scaled and the tail's not, keeps the tail
+    // (the head's own overflow is Accelerate's).
+    enum { NAN_C, BIG_P, BIG_C };
+    static const char *const BAD[] = {"NaN in C", "product out of range", "C out of range"};
+    static const struct { int bad; double alpha, beta; } TAIL[] = {
+        {NAN_C, 2.0, 0.5}, {NAN_C, 1.0, 1.0}, {BIG_P, 0x1p-200, 0.0}, {BIG_P, 1.0, 0.0},
+        {BIG_C, 2.0, 1.0}, {BIG_C, 1.0, 1.0},
+    };
+    for (size_t t = 0; t < TEST_REGISTRY_SIZE(TAIL); t++)
+        for (int head = 0; head < 1 + (TAIL[t].bad != NAN_C); head++) {
+            Call c = {'z', 'N', 'N', 300, 260, 200, 0, {TAIL[t].alpha, 0}, {TAIL[t].beta, 0}};
+            Operands o = operands(&c);
+            const int bad = TAIL[t].bad, g = 64, cut = c.N - g;   // the tail: columns cut .. N - 1
+            if (bad == NAN_C) o.C0[(size_t)2 * o.ldC * 250 + 4] = NAN;   // column 250: in the tail
+            for (int j = head ? 0 : cut; bad != NAN_C && j < (head ? cut : c.N); j++) {
+                if (bad == BIG_P)
+                    for (size_t i = 0; i < (size_t)2 * c.K; i++) o.B[(size_t)2 * o.ldB * j + i] *= 0x1p500;
+                else
+                    for (size_t i = 0; i < (size_t)2 * c.M; i++) o.C0[(size_t)2 * o.ldC * j + i] *= 0x1p1023;
+            }
+            for (int k = 0; bad == BIG_P && k < c.K; k++)
+                for (size_t i = 0; i < (size_t)2 * c.M; i++) o.A[(size_t)2 * o.ldA * k + i] *= 0x1p600;
+            double *C = malloc(o.nC * sizeof *C), *ref = malloc(o.nC * sizeof *ref);
+            memcpy(C, o.C0, o.nC * sizeof *C);
+            memcpy(ref, o.C0, o.nC * sizeof *ref);
+            int got = seam(&c, 'N', g, 0, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
+            ab_split_record_t rec;
+            bool same;
+            if (head) {
+                compose_reference(&c, 'N', g, &o, ref);
+                check(kept(got), "ZGEMM alpha %g beta %g, %s in the head: outcome %d", c.alpha[0], c.beta[0],
+                      BAD[bad], got);
+                same = same_values(C, ref, o.nC);
+            } else {
+                parts_reference(&c, 'N', g, &o, ref);
+                check(got == AB_SPLIT_RANGE && ab_internal_last_split(&rec) && rec.staged == 8 /* RANGE */,
+                      "ZGEMM alpha %g beta %g, %s in the tail: outcome %d", c.alpha[0], c.beta[0], BAD[bad], got);
+                same = !memcmp(C, ref, o.nC * sizeof *C);
+            }
+            check(same, "ZGEMM alpha %g beta %g, %s in the %s: C is not the expected parts", c.alpha[0],
+                  c.beta[0], BAD[bad], head ? "head" : "tail");
+            free(C); free(ref);
+            free_operands(&o);
+        }
+    // The scan that makes a NaN read from the data range, on transposed and
+    // conjugated layouts and a DGEMM that reads C: NaN in the tail's op(A)
+    // rows (M axis) or op(B) columns (N axis) is range, and C the cblas parts.
+    static const Call SCAN[] = {
+        {'d', 'T', 'N', 300, 260, 200, 1, ONE, {0.5, 0}},
+        {'d', 'N', 'T', 300, 260, 200, 2, {-1.5, 0}, {0.25, 0}},
+        {'z', 'C', 'N', 300, 260, 200, 1, ONE, ONE},
+        {'z', 'N', 'C', 300, 260, 200, 0, ONE, ZERO},
+    };
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(SCAN); i++)
+        for (const char *axis = "NM"; *axis; axis++) {
+            const Call *s = &SCAN[i];
+            Operands o = operands(s);
+            plant(s, &o, *axis, (*axis == 'N' ? s->N : s->M) - 5, PLANT_NAN);
+            double *C = malloc(o.nC * sizeof *C), *ref = malloc(o.nC * sizeof *ref);
+            memcpy(C, o.C0, o.nC * sizeof *C);
+            memcpy(ref, o.C0, o.nC * sizeof *ref);
+            int got = seam(s, *axis, 128, 0, 0, s->M, s->N, s->K, &o, 0, 0, C, o.ldC);
+            parts_reference(s, *axis, 128, &o, ref);
+            check(got == AB_SPLIT_RANGE && !memcmp(C, ref, o.nC * sizeof *C), "%s, NaN in the tail: outcome %d, %s",
+                  call_text(s, *axis, 128), got, memcmp(C, ref, o.nC * sizeof *C) ? "not the cblas parts" : "parts");
+            free(C); free(ref);
+            free_operands(&o);
+        }
+    // A K tail refused after its run: nothing of P reaches C, though P holds
+    // 1.0 throughout (AB_TEST_FAIL_STAGE=split_poison, in a child).
+    const char *poison[] = {"AB_TEST_FAIL_STAGE=split_poison", NULL};
+    int status;
+    char *kout = run_child("k_refused", poison, &status);
+    check(status == 0 && kout && strstr(kout, "k_refused d 3 1") && strstr(kout, "k_refused z 3 1"),
+          "a refused K tail with a poisoned P: %.200s", kout ? kout : "");
+    free(kout);
+    // Tails refused after their run give their buffers back: the pool keeps
+    // its size over repeats.
+    Call r = {'d', 'N', 'N', 300, 260, 200, 0, ONE, ZERO};
+    Operands ro = operands(&r);
+    plant(&r, &ro, 'N', 255, PLANT_NAN);
+    double *Cr = malloc(ro.nC * sizeof *Cr);
+    size_t bytes = 0;
+    for (int k = 0; k < 6; k++) {
+        memcpy(Cr, ro.C0, ro.nC * sizeof *Cr);
+        int out = seam(&r, 'N', 64, 0, 0, r.M, r.N, r.K, &ro, 0, 0, Cr, ro.ldC);
+        check(out == AB_SPLIT_RANGE, "refused tail %d: outcome %d", k, out);
+        if (k == 1) bytes = ab_internal_stage_pool_bytes();
+        if (k > 1) check(ab_internal_stage_pool_bytes() == bytes, "the pool grew to %zu bytes over refused tails",
+                         ab_internal_stage_pool_bytes());
+    }
+    free(Cr);
+    free_operands(&ro);
+    finish();
+}
+
+// The hash of C after c cut at g in `order` by `engine` (seam), from o's C;
+// 0 unless the staged path kept the GPU's part (engine 0) or cblas made both
+// (engine 1, AB_SPLIT_CPU).
+static uint64_t split_hash(const Call *c, char axis, int g, const Operands *o, double *C, int order, int engine) {
+    memcpy(C, o->C0, o->nC * sizeof *C);
+    int got = seam(c, axis, g, order, engine, c->M, c->N, c->K, o, 0, 0, C, o->ldC);
+    return (engine ? got == AB_SPLIT_CPU : kept(got)) ? hash_doubles(C, o->nC) : 0;
+}
+
+static uint64_t self_tid(void) {
+    uint64_t t = 0;
+    pthread_threadid_np(NULL, &t);
+    return t;
+}
+
+// n splits (one if n < 2) of c cut at g on axis in `order` (seam, engine 0)
+// on a thread of its own, at QoS class qos (QOS_CLASS_UNSPECIFIED: as made),
+// once *go is set (NULL: at once): the thread's id, the last split's hash
+// and record, how many splits lent the split worker the thread's class, the
+// GPU parts' summed time on their thread (gpu0 to gpu1), and done once all ran.
+typedef struct {
+    const Call *c;
+    const Operands *o;
+    char axis;
+    int g, order, n;
+    qos_class_t qos;
+    atomic_int *go;
+    uint64_t tid, hash, gpu_ns;
+    ab_split_record_t rec;
+    int lent;
+    atomic_int done;
+} SplitThread;
+
+static void *split_thread(void *arg) {
+    SplitThread *t = arg;
+    if (t->qos != QOS_CLASS_UNSPECIFIED) pthread_set_qos_class_self_np(t->qos, 0);
+    t->tid = self_tid();
+    double *C = malloc(t->o->nC * sizeof *C);
+    while (t->go && !atomic_load(t->go)) {}
+    int k = 0;
+    do {
+        t->hash = split_hash(t->c, t->axis, t->g, t->o, C, t->order, 0);
+        ab_internal_last_split(&t->rec);
+        t->lent += t->rec.lent;
+        t->gpu_ns += t->rec.times.gpu1_ns - t->rec.times.gpu0_ns;
+    } while (++k < t->n);
+    free(C);
+    atomic_store(&t->done, 1);
+    return NULL;
+}
+
+static atomic_int g_load_stop;
+
+static void *busy_thread(void *arg) {
+    volatile double x = 1.0;
+    while (!atomic_load(&g_load_stop)) x = x * 1.0000001 + 1e-9;
+    (void)arg;
+    return NULL;
+}
+
+// The CPU time thread tid of this process has used, in ns; UINT64_MAX if unknown.
+// The kernel's information on this process's thread tid; false if no thread
+// has that id.
+static bool thread_info64(uint64_t tid, struct proc_threadinfo *ti) {
+    return proc_pidinfo(getpid(), PROC_PIDTHREADID64INFO, tid, ti, sizeof *ti) == (int)sizeof *ti;
+}
+
+static uint64_t thread_cpu_ns(uint64_t tid) {
+    struct proc_threadinfo ti;
+    return thread_info64(tid, &ti) ? ti.pth_user_time + ti.pth_system_time : UINT64_MAX;
+}
+
+// Thread tid's base priority, which its QoS class sets and a QoS override
+// raises (pth_priority; pth_curpri decays); -1 if no thread has that id.
+static int thread_base_pri(uint64_t tid) {
+    struct proc_threadinfo ti;
+    return thread_info64(tid, &ti) ? ti.pth_priority : -1;
+}
+
+// The send right this task holds on thread tid, with one user reference of
+// its own (to mach_port_deallocate); MACH_PORT_NULL if no thread has that id.
+static mach_port_t thread_port(uint64_t tid) {
+    thread_act_array_t th;
+    mach_msg_type_number_t n;
+    mach_port_t found = MACH_PORT_NULL;
+    if (task_threads(mach_task_self(), &th, &n) != KERN_SUCCESS) return MACH_PORT_NULL;
+    for (mach_msg_type_number_t i = 0; i < n; i++) {
+        thread_identifier_info_data_t id;
+        mach_msg_type_number_t count = THREAD_IDENTIFIER_INFO_COUNT;
+        if (found == MACH_PORT_NULL &&
+            thread_info(th[i], THREAD_IDENTIFIER_INFO, (thread_info_t)&id, &count) == KERN_SUCCESS &&
+            id.thread_id == tid)
+            found = th[i];
+        else
+            mach_port_deallocate(mach_task_self(), th[i]);
+    }
+    vm_deallocate(mach_task_self(), (vm_address_t)th, n * sizeof *th);
+    return found;
+}
+
+// The user references of the send right p (0 if unknown).
+static mach_port_urefs_t send_refs(mach_port_t p) {
+    mach_port_urefs_t r = 0;
+    return mach_port_get_refs(mach_task_self(), p, MACH_PORT_RIGHT_SEND, &r) == KERN_SUCCESS ? r : 0;
+}
+
+// T7 (in this process): the bits repeat whatever ran before, on registered
+// and misaligned memory, under load, and from 8 threads splitting at once.
+static void test_split_determinism(void) {
+    const Call QE[] = {
+        {'z', 'N', 'N', 9000, 256, 160, 0, ONE, ZERO},
+        {'z', 'N', 'N', 9000, 160, 500, 1, ONE, ONE},
+        {'z', 'C', 'N', 320, 320, 9000, 0, ONE, ZERO},
+    };
+    const char AX[] = "NMK";
+    const int G[] = {128, 4672, 4544};
+    for (size_t i = 0; i < 3; i++) {
+        const Call *c = &QE[i];
+        Operands o = operands(c);
+        double *C = malloc(o.nC * sizeof *C);
+        uint64_t h0 = split_hash(c, AX[i], G[i], &o, C, 0, 0);
+        check(h0 != 0, "%s: not kept", call_text(c, AX[i], G[i]));
+        for (int r = 0; r < 3; r++)
+            check(split_hash(c, AX[i], G[i], &o, C, r % 3, 0) == h0, "%s: repeat %d differs", call_text(c, AX[i], G[i]), r);
+        // after other shapes, larger and smaller
+        Call other = {'z', 'N', 'N', 2000, 700, 300, 0, ONE, ZERO};
+        Operands oo = operands(&other);
+        double *Co = malloc(oo.nC * sizeof *Co);
+        split_hash(&other, 'N', 320, &oo, Co, 0, 0);
+        free(Co);
+        free_operands(&oo);
+        check(split_hash(c, AX[i], G[i], &o, C, 0, 0) == h0, "%s: differs after another shape", call_text(c, AX[i], G[i]));
+        // under background load
+        atomic_store(&g_load_stop, 0);
+        pthread_t busy[8];
+        for (int b = 0; b < 8; b++) pthread_create(&busy[b], NULL, busy_thread, NULL);
+        check(split_hash(c, AX[i], G[i], &o, C, 0, 0) == h0, "%s: differs under load", call_text(c, AX[i], G[i]));
+        atomic_store(&g_load_stop, 1);
+        for (int b = 0; b < 8; b++) pthread_join(busy[b], NULL);
+        // 8 threads each splitting the same call into its own C
+        atomic_int go = 0;
+        SplitThread t[8];
+        pthread_t tid[8];
+        for (int k = 0; k < 8; k++) {
+            t[k] = (SplitThread){.c = c, .o = &o, .axis = AX[i], .g = G[i], .go = &go};
+            pthread_create(&tid[k], NULL, split_thread, &t[k]);
+        }
+        atomic_store(&go, 1);
+        for (int k = 0; k < 8; k++) {
+            pthread_join(tid[k], NULL);
+            check(t[k].hash == h0, "%s: thread %d of 8 differs", call_text(c, AX[i], G[i]), k);
+        }
+        // registered operands, then misaligned ones (complex arrays 8 bytes off:
+        // staged), each against the same memory unregistered: Accelerate's head
+        // depends on where its operands lie, so the bits repeat per address.
+        for (int misalign = 0; misalign < 2; misalign++) {
+            size_t off = misalign ? 1 : 0, bA, bB, bC;
+            double *A = page_alloc(o.nA + 2, &bA), *B = page_alloc(o.nB + 2, &bB), *Cr = page_alloc(o.nC + 2, &bC);
+            memcpy(A + off, o.A, o.nA * sizeof *A);
+            memcpy(B + off, o.B, o.nB * sizeof *B);
+            Operands r = o;
+            r.A = A + off;
+            r.B = B + off;
+            r.C0 = o.C0;
+            uint64_t here = split_hash(c, AX[i], G[i], &r, Cr + off, 0, 0);
+            bool reg = ab_register_host_memory(A, bA) == AB_OK && ab_register_host_memory(B, bB) == AB_OK &&
+                       ab_register_host_memory(Cr, bC) == AB_OK;
+            check(reg && here != 0, "registering the operands");
+            check(split_hash(c, AX[i], G[i], &r, Cr + off, 0, 0) == here, "%s: differs on %s registered memory",
+                  call_text(c, AX[i], G[i]), misalign ? "misaligned" : "aligned");
+            ab_unregister_host_memory(A);
+            ab_unregister_host_memory(B);
+            ab_unregister_host_memory(Cr);
+            free(A); free(B); free(Cr);
+        }
+        free(C);
+        free_operands(&o);
+    }
+    finish();
+}
+
+// T13 (in this process): one split worker runs every GPU part this process
+// splits, in every order and on both engines, its timeline whole on the
+// staged path; callers that find it held run theirs on threads of their own
+// with the same bits, and it is given back; a caller above its class lends it
+// its own while it waits and ends the loan, one below does not (child_loan:
+// in a process with an application role, the worker's base priority raised
+// for at least half its GPU parts' time and one more reference on its port);
+// parked, it uses under 1 ms of CPU in 50 ms. In children, on the worker and
+// (split_pool) on a thread of its own: a cancellation pending through a split
+// acts only after it; on the worker, the application's signals sent to it
+// alone (SIGUSR1, SIGPIPE) stay pending while its own (SIGSEGV, SIGPROF) run
+// their handlers there; a signal the application has blocked on its threads
+// after a split goes to its sigwait, not to the library's thread; and a bad
+// read on the GPU's part faults on the tail's thread.
+static void test_split_worker(void) {
+    const Call *c = &WORKER_CALL;
+    Operands o = operands(c);
+    double *C = malloc(o.nC * sizeof *C);
+    ab_split_record_t rec;
+    uint64_t h0 = split_hash(c, 'N', 128, &o, C, 0, 0);
+    ab_internal_last_split(&rec);
+    const uint64_t W = rec.thread;
+    check(h0 && W && W != self_tid() && W == ab_internal_split_worker(),
+          "first split: kept %d, thread %llu, worker %llu", h0 != 0, (unsigned long long)W,
+          (unsigned long long)ab_internal_split_worker());
+    for (int k = 0; k < 12; k++) {   // 6 on the staged path, 6 on cblas (engine 1), orders 0, 1, 2
+        const int order = k % 3, engine = k >= 6;
+        uint64_t h = split_hash(c, 'N', 128, &o, C, order, engine);
+        ab_internal_last_split(&rec);
+        const bool as_expected = engine ? h != 0 : h == h0;
+        const char *fault = engine ? NULL : times_fault(&rec.times, order);
+        check(as_expected && rec.thread == W && !fault,
+              "split %d (engine %d, order %d): as expected %d, on %s, timeline %s", k, engine, order, as_expected,
+              rec.thread == W ? "the worker" : "another thread", fault ? fault : "whole");
+    }
+    // 8 callers at once: those that find the worker held run on threads of their own
+    atomic_int go = 0;
+    SplitThread r[8];
+    pthread_t t[8];
+    for (int k = 0; k < 8; k++) {
+        r[k] = (SplitThread){.c = c, .o = &o, .axis = 'N', .g = 128, .go = &go};
+        pthread_create(&t[k], NULL, split_thread, &r[k]);
+    }
+    atomic_store(&go, 1);
+    int npooled = 0;
+    for (int k = 0; k < 8; k++) pthread_join(t[k], NULL);
+    for (int k = 0; k < 8; k++) {
+        const uint64_t th = r[k].rec.thread;
+        npooled += th == W;
+        check(r[k].hash == h0 && th && th != r[k].tid,
+              "caller %d of 8: same bits %d, thread %llu (the caller %llu, the worker %llu)", k, r[k].hash == h0,
+              (unsigned long long)th, (unsigned long long)r[k].tid, (unsigned long long)W);
+    }
+    // the callers spin on go and overlap the worker's hold: one at least finds it held
+    check(npooled >= 1 && npooled < 8, "8 callers: %d of 8 on the worker (none %s)", npooled,
+          npooled ? "on a thread of its own" : "on the idle worker");
+    split_hash(c, 'N', 128, &o, C, 0, 0);
+    ab_internal_last_split(&rec);
+    check(rec.thread == W, "after 8 callers: the worker not given back");
+    // a caller above the worker's class (QOS_CLASS_DEFAULT) lends it its own
+    // while it waits, one below does not (what the loan does: child_loan)
+    const qos_class_t Q[] = {QOS_CLASS_UTILITY, QOS_CLASS_USER_INITIATED};
+    for (size_t k = 0; k < TEST_REGISTRY_SIZE(Q); k++) {
+        SplitThread q = {.c = c, .o = &o, .axis = 'N', .g = 128, .order = 2, .qos = Q[k]};
+        pthread_t th;
+        pthread_create(&th, NULL, split_thread, &q);
+        pthread_join(th, NULL);
+        check(q.hash == h0 && q.rec.thread == W && q.rec.lent == (Q[k] > QOS_CLASS_DEFAULT),
+              "caller at QoS %#x: on the worker %d, lent %d", (unsigned)Q[k], q.rec.thread == W, q.rec.lent);
+    }
+    // every loan ends: each one open holds a reference to the worker's thread port
+    mach_port_t wp = thread_port(W);
+    const mach_port_urefs_t refs0 = send_refs(wp);
+    SplitThread lr = {.c = c, .o = &o, .axis = 'N', .g = 128, .qos = QOS_CLASS_USER_INITIATED, .n = 20};
+    pthread_t lt;
+    pthread_create(&lt, NULL, split_thread, &lr);
+    pthread_join(lt, NULL);
+    mach_port_urefs_t refs1 = send_refs(wp);
+    check(wp != MACH_PORT_NULL && refs0 && lr.lent == lr.n && refs1 == refs0,
+          "20 loans: %d lent, the worker's port references %u before, %u after", lr.lent, refs0, refs1);
+    if (wp != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), wp);
+    // parked: no CPU
+    uint64_t u0 = thread_cpu_ns(W);
+    usleep(50000);
+    uint64_t u1 = thread_cpu_ns(W);
+    check(u0 != UINT64_MAX && u1 != UINT64_MAX && u1 - u0 < 1000000,
+          "the parked worker used %llu ns of CPU in 50 ms", (unsigned long long)(u1 - u0));
+    // the children, each judging its own conditions (child_cancel, child_sigwait, child_fault)
+    const char *const plain[] = {NULL}, *const no_pool[] = {"AB_TEST_FAIL_STAGE=split_pool", NULL};
+    const char *const CHILDREN[] = {"cancel", "sigwait", "fault"};
+    for (size_t k = 0; k < 2 * TEST_REGISTRY_SIZE(CHILDREN); k++) {
+        const bool off = k & 1;
+        int status, ok = -1, pooled = -1;
+        char *out = run_child(CHILDREN[k / 2], off ? no_pool : plain, &status);
+        const char *l = out ? strstr(out, "worker_child ") : NULL;
+        if (l) sscanf(l, "worker_child ok %d pooled %d", &ok, &pooled);
+        check(status == 0 && ok == 1 && pooled == !off, "%s child%s: status %d, output: %.300s", CHILDREN[k / 2],
+              off ? " (split_pool)" : "", status, out ? out : "");
+        free(out);
+    }
+    // what the loan does, on the worker itself (child_loan)
+    int status;
+    char *lo = run_child("loan", plain, &status);
+    const char *l = lo ? strstr(lo, "loan_child role set ") : NULL;
+    int kr = -1, ui = -1, rest = -1;
+    if (l)
+        sscanf(l, "loan_child role set rc %d, a USER_INITIATED thread at %d, the worker at rest %d", &kr, &ui,
+               &rest);
+    check(status == 0 && kr == 0 && ui > rest && rest > 0, "loan child: status %d, the QoS ceiling not lifted: %.300s",
+          status, lo ? lo : "");
+    for (size_t k = 0; k < TEST_REGISTRY_SIZE(Q) && l; k++) {
+        const bool loan = Q[k] > QOS_CLASS_DEFAULT;
+        unsigned qos = 0, r0 = 0, rmax = 0;
+        int same = 0, on = 0, lent = -1, n = 0, p0 = -1, pmax = -1;
+        double raised = -1, gpu = 0;
+        l = strstr(l + 1, "loan_child qos ");
+        if (l)
+            sscanf(l, "loan_child qos %x same %d worker %d lent %d of %d pri %d %d raised %lf of %lf refs %u %u",
+                   &qos, &same, &on, &lent, &n, &p0, &pmax, &raised, &gpu, &r0, &rmax);
+        check(l && qos == (unsigned)Q[k] && same && on && lent == loan * n && (pmax > p0) == loan &&
+                  rmax == r0 + loan && (!loan || 2 * raised >= gpu),
+              "loan child, caller at QoS %#x: %.200s", (unsigned)Q[k], l ? l : "no line");
+    }
+    free(lo);
+    free(C);
+    free_operands(&o);
+    finish();
+}
+
+// T12: on registered memory the N axis's tail uses A, B and C in place
+// (DGEMM, beta 0), the M axis's A and B but never C.
+static void test_split_registered_c(void) {
+    Call c = {'d', 'N', 'N', 1000, 400, 300, 0, ONE, ZERO};
+    Operands o = operands(&c);
+    size_t bA, bB, bC;
+    double *A = page_alloc(o.nA, &bA), *B = page_alloc(o.nB, &bB), *C = page_alloc(o.nC, &bC);
+    memcpy(A, o.A, o.nA * sizeof *A);
+    memcpy(B, o.B, o.nB * sizeof *B);
+    free(o.A);
+    free(o.B);
+    o.A = A;
+    o.B = B;
+    bool reg = ab_register_host_memory(A, bA) == AB_OK && ab_register_host_memory(B, bB) == AB_OK &&
+               ab_register_host_memory(C, bC) == AB_OK;
+    check(reg, "registering the operands");
+    for (int m = 0; m < 2; m++) {
+        char axis = m ? 'M' : 'N';
+        memcpy(C, o.C0, o.nC * sizeof *C);
+        int got = seam(&c, axis, 128, 0, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
+        ab_split_record_t rec;
+        int in_place = -1;
+        bool staged = ab_internal_last_staged(&in_place);
+        check(kept(got) && ab_internal_last_split(&rec) && staged && rec.in_place == in_place &&
+              in_place == (m ? 2 : 3), "axis %c: outcome %d, %d operands in place (expected %d)", axis, got,
+              in_place, m ? 2 : 3);
+    }
+    ab_unregister_host_memory(o.A);
+    ab_unregister_host_memory(o.B);
+    ab_unregister_host_memory(C);
+    free(C);
+    free_operands(&o);
+    finish();
+}
+
+// T8 (in this process): a caller that flushes subnormals is declined, its
+// call made whole on cblas.
+static void test_split_caller_fpcr(void) {
+    Call c = {'d', 'N', 'N', 300, 260, 200, 0, ONE, ZERO};
+    Operands o = operands(&c);
+    double *C = malloc(o.nC * sizeof *C), *ref = malloc(o.nC * sizeof *ref);
+    memcpy(C, o.C0, o.nC * sizeof *C);
+    memcpy(ref, o.C0, o.nC * sizeof *ref);
+    cblas_call(&c, c.M, c.N, c.K, o.A, o.ldA, o.B, o.ldB, c.beta, ref, o.ldC);
+    int got = -1;
+#if defined(__aarch64__)
+    uint64_t fpcr, fz;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+    fz = fpcr | 1ULL << 24;
+    __asm__ volatile("msr fpcr, %0" : : "r"(fz));
+    got = seam(&c, 'N', 128, 0, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
+    __asm__ volatile("msr fpcr, %0" : : "r"(fpcr));
+    ab_split_record_t rec;
+    check(got == AB_SPLIT_DECLINED && ab_internal_last_split(&rec) && rec.declined == 3 /* fpcr */,
+          "FZ caller: outcome %d", got);
+    // cblas under FZ: compare with a reference under FZ too
+    __asm__ volatile("msr fpcr, %0" : : "r"(fz));
+    memcpy(ref, o.C0, o.nC * sizeof *ref);
+    cblas_call(&c, c.M, c.N, c.K, o.A, o.ldA, o.B, o.ldB, c.beta, ref, o.ldC);
+    __asm__ volatile("msr fpcr, %0" : : "r"(fpcr));
+    check(!memcmp(C, ref, o.nC * sizeof *C), "FZ caller: C is not cblas's whole call");
+#endif
+    (void)got;
+    free(C); free(ref);
+    free_operands(&o);
+    finish();
+}
+
+// =============================================================================
+// dgemm_ and zgemm_ under AB_SPLIT, in child processes
+// =============================================================================
+
+static char self_path[PATH_MAX], g_dir[PATH_MAX], g_table[PATH_MAX + 32];
+static char g_label[PATH_MAX + 64];   // ab_split_source(): "file:<g_table>@<TABLE_SHA256>"
+
+// The split table the children run with, and the calls they make: row, axis
+// and cut as the plan gives them (-1: no row).
+static const char TABLE[] =
+    "# AB_SPLIT table for tests/test_split.c\n"
+    "# library: none\n"
+    "zgemm N N N m=1024: n=96: scalars=u f=0.5\n"      // 0
+    "zgemm N N M m=1024: n=33:95 scalars=u f=0.5\n"    // 1
+    "zgemm C N K k=2048: scalars=z f=0.5\n"            // 2
+    "dgemm N N N m=512: f=0.5\n"                       // 3
+    "dgemm T N K k=4096: f=0.5\n"                      // 4
+    "zgemm N T N m=200: f=0\n";                        // 5: attributed, never cut
+#define N_ROWS 6
+// The first 12 hex digits of `shasum -a 256` of TABLE: the reports name the file with them.
+#define TABLE_SHA256 "99da8cd29a2b"
+
+typedef struct {
+    Call c;
+    int row;
+    char axis;
+    int g;
+    double imag;         // imaginary parts scaled by this (4M below 1)
+} TableCall;
+
+static const TableCall TCALLS[] = {
+    {{'z', 'N', 'N', 1200, 128, 64, 1, ONE, ZERO}, 0, 'N', 64, 1.0},
+    {{'z', 'N', 'N', 1100, 64, 100, 2, ONE, ONE}, 1, 'M', 544, 1.0},
+    {{'z', 'C', 'N', 100, 90, 3000, 0, ONE, ZERO}, 2, 'K', 1472, 1.0},
+    {{'d', 'N', 'N', 600, 300, 200, 3, {-1.5, 0}, {0.5, 0}}, 3, 'N', 160, 1.0},
+    {{'d', 'T', 'N', 64, 64, 5000, 1, ONE, ZERO}, 4, 'K', 2496, 1.0},
+    {{'z', 'N', 'T', 300, 300, 300, 0, ONE, ZERO}, 5, 'N', 0, 1.0},
+    {{'z', 'T', 'T', 100, 100, 100, 0, ONE, ZERO}, -1, 0, 0, 1.0},
+    {{'z', 'N', 'N', 1200, 128, 64, 0, ONE, ZERO}, 0, 'N', 64, 0x1p-20},
+    {{'d', 'T', 'N', 64, 64, 5000, 2, ONE, {0.75, 0}}, 4, 'K', 2496, 1.0},   // K with beta != 0
+};
+#define N_TCALLS ((int)TEST_REGISTRY_SIZE(TCALLS))
+
+// Call i's operands, the same in every process.
+static Operands tcall_operands(int i) {
+    g_seed = 0x5EED0000ULL + 7919ULL * (uint64_t)i;
+    Operands o = operands(&TCALLS[i].c);
+    if (o.w == 2 && TCALLS[i].imag != 1.0) {
+        for (size_t k = 1; k < o.nA; k += 2) o.A[k] *= TCALLS[i].imag;
+        for (size_t k = 1; k < o.nB; k += 2) o.B[k] *= TCALLS[i].imag;
+    }
+    return o;
+}
+
+// The call through the Fortran symbols, into C.
+static void abi_call(const Call *c, const Operands *o, double *C) {
+    int M = c->M, N = c->N, K = c->K, ldA = o->ldA, ldB = o->ldB, ldC = o->ldC;
+    if (c->r == 'z') {
+        double complex al = CMPLX(c->alpha[0], c->alpha[1]), be = CMPLX(c->beta[0], c->beta[1]);
+        fortran_zgemm(&c->ta, &c->tb, &M, &N, &K, &al, (const double complex *)o->A, &ldA,
+                      (const double complex *)o->B, &ldB, &be, (double complex *)C, &ldC);
+    } else {
+        fortran_dgemm(&c->ta, &c->tb, &M, &N, &K, &c->alpha[0], o->A, &ldA, o->B, &ldB, &c->beta[0], C, &ldC);
+    }
+}
+
+// Child: each call of TCALLS twice; a line per call: its index, both
+// hashes, the split record (outcome -1 without one), the path and the error
+// against cblas. Then the GPU's GEMM count and the split table's source, and
+// a line on the threads that ran the first runs' GPU parts: whether the
+// process has a split worker, the GPU parts, those on the worker and the
+// distinct threads.
+static void child_calls(void) {
+    uint64_t seen[N_TCALLS];            // the threads that ran the first runs' GPU parts
+    int tails = 0, pooled = 0, threads = 0;
+    for (int i = 0; i < N_TCALLS; i++) {
+        Operands o = tcall_operands(i);
+        double *C = malloc(o.nC * sizeof *C);
+        uint64_t h[2];
+        ab_split_record_t rec = {.outcome = -1, .declined = -1, .staged = -1};
+        for (int r = 0; r < 2; r++) {
+            memcpy(C, o.C0, o.nC * sizeof *C);
+            abi_call(&TCALLS[i].c, &o, C);
+            h[r] = hash_doubles(C, o.nC);
+            if (r == 0 && !ab_internal_last_split(&rec))
+                rec = (ab_split_record_t){.outcome = -1, .declined = -1, .staged = -1};
+        }
+        const Call *c = &TCALLS[i].c;
+        Layout la = {o.rA, o.cA, o.ldA}, lb = {o.rB, o.cB, o.ldB}, lc = {c->M, c->N, o.ldC};
+        double err = blas_error(c->r == 'z', c->ta, c->tb, c->M, c->N, c->K, CMPLX(c->alpha[0], c->alpha[1]),
+                                CMPLX(c->beta[0], c->beta[1]), o.A, la, o.B, lb, o.C0, lc, C);
+        printf("call %d %016llx %016llx %d %d %d %d %d %d %d %s %.3e\n", i, (unsigned long long)h[0],
+               (unsigned long long)h[1], rec.outcome, rec.declined, rec.staged, rec.retries, rec.retry_kept,
+               rec.scales, (int)rec.times.gpu.mtl_error, ab_get_last_dispatch_path(), err);
+        if (rec.thread) {
+            tails++;
+            pooled += rec.pooled;
+            int k = 0;
+            while (k < threads && seen[k] != rec.thread) k++;
+            if (k == threads) seen[threads++] = rec.thread;
+        }
+        free(C);
+        free_operands(&o);
+    }
+    printf("gpu_gemms %llu\nsource %s\n", (unsigned long long)gpu_gemm_count(), ab_split_source());
+    printf("split_worker %d tails %d pooled %d threads %d\n", ab_internal_split_worker() != 0, tails, pooled, threads);
+}
+
+// A small engine-1 split (cblas on both parts, at test_blas_abi's fork shape,
+// which Accelerate runs in a fork()ed child): its hash (split_hash) and record.
+static uint64_t fork_split(ab_split_record_t *rec) {
+    static const Call c = {'d', 'N', 'N', 96, 80, 72, 0, ONE, ZERO};
+    g_seed = 0xF02CULL;
+    Operands o = operands(&c);
+    double *C = malloc(o.nC * sizeof *C);
+    uint64_t h = split_hash(&c, 'N', 32, &o, C, 0, 1);
+    ab_internal_last_split(rec);
+    free(C);
+    free_operands(&o);
+    return h;
+}
+
+// Child: the first call, then fork(); the forked child makes it again
+// (declined: no Metal context there, so cblas's whole call), checks its
+// bits and ends with _exit or exit. Before the fork the parent splits a
+// small call on cblas (engine 1) on its split worker; the forked child,
+// which has no worker, splits it on a thread of its own with the same bits.
+static int child_fork(bool use_exit) {
+    Operands o = tcall_operands(0);
+    double *C = malloc(o.nC * sizeof *C), *ref = malloc(o.nC * sizeof *ref);
+    memcpy(C, o.C0, o.nC * sizeof *C);
+    abi_call(&TCALLS[0].c, &o, C);
+    printf("parent path %s\n", ab_get_last_dispatch_path());
+    ab_split_record_t pr = {0};
+    uint64_t eh = fork_split(&pr);
+    printf("parent pooled %d\n", pr.pooled);
+    fflush(stdout);
+    pid_t pid = fork();
+    if (pid == 0) {
+        alarm(FORK_WAIT_S);   // fork() cleared the alarm: a tail handed to a worker the child lacks fails, not hangs
+        memcpy(C, o.C0, o.nC * sizeof *C);
+        memcpy(ref, o.C0, o.nC * sizeof *ref);
+        abi_call(&TCALLS[0].c, &o, C);
+        cblas_call(&TCALLS[0].c, TCALLS[0].c.M, TCALLS[0].c.N, TCALLS[0].c.K, o.A, o.ldA, o.B, o.ldB,
+                   TCALLS[0].c.beta, ref, o.ldC);
+        ab_split_record_t rec = {.outcome = -1};
+        ab_internal_last_split(&rec);
+        printf("forked outcome %d declined %d same %d path %s\n", rec.outcome, rec.declined,
+               !memcmp(C, ref, o.nC * sizeof *C), ab_get_last_dispatch_path());
+        fflush(stdout);
+        ab_split_record_t fr = {0};
+        uint64_t fh = fork_split(&fr);
+        printf("forked pooled %d same %d worker %llu\n", fr.pooled, eh && fh == eh,
+               (unsigned long long)ab_internal_split_worker());
+        fflush(stdout);
+        if (use_exit) exit(0);
+        _exit(0);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    printf("forked status %d\n", WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+    return 0;
+}
+
+// Child: the other APIs a split never touches, hashed, each GEMM with its
+// status: native ab_dgemm and ab_zgemm, a batch, ab_dgemm_async and
+// ab_dev_dgemm on registered memory, at shapes the table covers; and dgemv_,
+// which returns no status (no row covers BLAS-2). First the status of making
+// and uploading the matrices.
+static void child_other(void) {
+    const int n = 600;                         // a shape TABLE's dgemm N N row covers (m=512:, K <= M)
+    const int zm = 1200, zn = 128, zk = 64;    // and its zgemm N N N row 0 (m=1024: n=96:, K <= M)
+    double *a = malloc((size_t)n * n * sizeof *a), *b = malloc((size_t)n * n * sizeof *b);
+    g_seed = 77;
+    for (int i = 0; i < n * n; i++) { a[i] = uniform(); b[i] = uniform(); }
+    // DGEMM's A, B and C; the real and imaginary parts of ZGEMM's
+    ABMatrix A = ab_matrix_create(n, n), B = ab_matrix_create(n, n), C = ab_matrix_create(n, n),
+             Ar = ab_matrix_create(zm, zk), Ai = ab_matrix_create(zm, zk), Br = ab_matrix_create(zk, zn),
+             Bi = ab_matrix_create(zk, zn), Cr = ab_matrix_create(zm, zn), Ci = ab_matrix_create(zm, zn);
+    const ABMatrix all[] = {A, B, C, Ar, Ai, Br, Bi, Cr, Ci}, to[] = {A, B, Ar, Ai, Br, Bi};
+    const double *from[] = {a, b, a, b, b, a};
+    ABStatus st = AB_OK;
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(all); i++)
+        if (!all[i]) st = AB_ERROR_ALLOC_FAILED;
+    for (size_t i = 0; st == AB_OK && i < TEST_REGISTRY_SIZE(to); i++) st = ab_matrix_upload(to[i], from[i], true);
+    printf("setup %d\n", (int)st);
+    if (st != AB_OK) return;
+    double *c = malloc((size_t)n * n * sizeof *c);
+    st = ab_dgemm(A, B, C);
+    if (st == AB_OK) st = ab_matrix_download(C, c, true);
+    printf("ab_dgemm %d %016llx\n", (int)st, (unsigned long long)hash_doubles(c, (size_t)n * n));
+    st = ab_zgemm(Ar, Ai, Br, Bi, Cr, Ci);
+    if (st == AB_OK) st = ab_matrix_download(Cr, c, true);
+    if (st == AB_OK) st = ab_matrix_download(Ci, c + (size_t)zm * zn, true);
+    printf("ab_zgemm %d %016llx\n", (int)st, (unsigned long long)hash_doubles(c, 2 * (size_t)zm * zn));
+    ABBatch batch = ab_batch_create();
+    st = batch ? ab_batch_dgemm(batch, B, A, C) : AB_ERROR_ALLOC_FAILED;
+    if (st == AB_OK) st = ab_batch_commit(batch);
+    if (st == AB_OK) st = ab_batch_wait(batch);
+    if (batch) ab_batch_destroy(batch);
+    if (st == AB_OK) st = ab_matrix_download(C, c, true);
+    printf("ab_batch_dgemm %d %016llx\n", (int)st, (unsigned long long)hash_doubles(c, (size_t)n * n));
+    ABFuture fut = ab_dgemm_async(B, B, C);
+    st = fut ? ab_future_wait(fut) : AB_ERROR_ALLOC_FAILED;
+    if (fut) ab_future_destroy(fut);
+    if (st == AB_OK) st = ab_matrix_download(C, c, true);
+    printf("ab_dgemm_async %d %016llx\n", (int)st, (unsigned long long)hash_doubles(c, (size_t)n * n));
+    size_t bytes;
+    double *da = page_alloc((size_t)n * n, &bytes), *db = page_alloc((size_t)n * n, &bytes),
+           *dc = page_alloc((size_t)n * n, &bytes);
+    memcpy(da, a, (size_t)n * n * sizeof *da);
+    memcpy(db, b, (size_t)n * n * sizeof *db);
+    ab_dev_buffer_t DA = ab_dev_register(da, bytes), DB = ab_dev_register(db, bytes),
+                    DC = ab_dev_register(dc, bytes);
+    ABStatus dst = DA && DB && DC ? ab_dev_dgemm(AB_NO_TRANS, AB_NO_TRANS, n, n, n, 1.0, DA, n, DB, n, 0.0, DC, n)
+                                  : AB_ERROR_ALLOC_FAILED;
+    printf("ab_dev_dgemm %d %016llx\n", (int)dst, (unsigned long long)hash_doubles(dc, (size_t)n * n));
+    ab_dev_free(DA); ab_dev_free(DB); ab_dev_free(DC);
+    free(da); free(db); free(dc);
+    double *y = calloc((size_t)n, sizeof *y), one = 1.0, zero = 0.0;
+    int nn = n, inc = 1;
+    fortran_dgemv("N", &nn, &nn, &one, a, &nn, b, &inc, &zero, y, &inc);
+    printf("dgemv_ %016llx\n", (unsigned long long)hash_doubles(y, (size_t)n));
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(all); i++) ab_matrix_destroy(all[i]);
+    free(a); free(b); free(c); free(y);
+}
+
+// Child: a K tail refused after its run (NaN in it) under split_poison, for
+// DGEMM with beta 0.75 and ZGEMM with a complex beta: C must be the cblas
+// parts, the head with beta then the tail with beta 1.
+static void child_k_refused(void) {
+    for (int z = 0; z < 2; z++) {
+        Call c = {z ? 'z' : 'd', 'N', 'N', 40, 40, 2100, 1, ONE, {0.75, z ? -0.25 : 0}};
+        Operands o = operands(&c);
+        plant(&c, &o, 'K', 2095, PLANT_NAN);
+        double *C = malloc(o.nC * sizeof *C), *ref = malloc(o.nC * sizeof *ref);
+        memcpy(C, o.C0, o.nC * sizeof *C);
+        memcpy(ref, o.C0, o.nC * sizeof *ref);
+        int got = seam(&c, 'K', 1024, 0, 0, c.M, c.N, c.K, &o, 0, 0, C, o.ldC);
+        parts_reference(&c, 'K', 1024, &o, ref);
+        printf("k_refused %c %d %d\n", c.r, got, !memcmp(C, ref, o.nC * sizeof *C));
+        free(C); free(ref);
+        free_operands(&o);
+    }
+}
+
+// Child: a split on a thread whose cancellation is pending throughout (set
+// before the split, acted on at pthread_testcancel after it), between one on
+// the main thread and another. One line: ok if that thread was cancelled
+// after it finished its split, all three splits have the same bits and the
+// last ran where the cancelled one did (on the worker unless split_pool), and
+// whether the cancelled one ran on the worker. No cancellation point lies
+// between pthread_cancel and the split's own pthread_setcancelstate
+// (gpu_ready, staged_why, part_stage_begin and dispatch_semaphore_create are
+// none).
+typedef struct {
+    const Operands *o;
+    uint64_t hash;
+    atomic_int done;
+    ab_split_record_t rec;
+} CancelRun;
+
+static void *cancel_run(void *arg) {
+    CancelRun *r = arg;
+    double *C = malloc(r->o->nC * sizeof *C);
+    pthread_cleanup_push(free, C);
+    pthread_cancel(pthread_self());
+    r->hash = split_hash(&WORKER_CALL, 'N', 128, r->o, C, 1, 0);
+    ab_internal_last_split(&r->rec);
+    atomic_store(&r->done, 1);
+    pthread_testcancel();
+    pthread_cleanup_pop(1);
+    return NULL;
+}
+
+static void child_cancel(void) {
+    Operands o = operands(&WORKER_CALL);
+    double *C = malloc(o.nC * sizeof *C);
+    uint64_t h0 = split_hash(&WORKER_CALL, 'N', 128, &o, C, 1, 0);
+    CancelRun r = {.o = &o};
+    pthread_t t;
+    void *ret = NULL;
+    if (pthread_create(&t, NULL, cancel_run, &r) == 0) pthread_join(t, &ret);
+    uint64_t h1 = split_hash(&WORKER_CALL, 'N', 128, &o, C, 1, 0);
+    ab_split_record_t after = {0};
+    ab_internal_last_split(&after);
+    bool ok = ret == PTHREAD_CANCELED && atomic_load(&r.done) && h0 && r.hash == h0 && h1 == h0 &&
+              after.pooled == r.rec.pooled;
+    printf("worker_child ok %d pooled %d\n", ok, r.rec.pooled);
+    free(C);
+    free_operands(&o);
+}
+
+// child_sigwait's split: as asked (AB_SPLIT_CPU) and, on the worker, with the
+// mask worker_mask_ok requires; and whether it ran on the worker.
+typedef struct { bool split, pooled; } SigwaitSplit;
+
+// The thread that ran worker_mask_ok's handler for each signal, by number.
+static _Atomic uint64_t probe_tid[NSIG];
+
+static void probe_handler(int sig) { atomic_store(&probe_tid[sig], self_tid()); }
+
+// Whether the worker W blocks the application's signals and opens its own,
+// by signals sent to it alone (pthread_kill), so no other thread can take
+// them: SIGUSR1, and SIGPIPE (which macOS sends a writer's process, not the
+// writer), must stay pending there; SIGSEGV and SIGPROF must run their
+// handlers there (which also shows a signal sent this way does arrive). Each
+// handler runs once (SA_RESETHAND), so a real fault later still ends the child.
+static bool worker_mask_ok(uint64_t W) {
+    mach_port_t port = thread_port(W);
+    if (port == MACH_PORT_NULL) return false;
+    pthread_t pw = pthread_from_mach_thread_np(port);
+    mach_port_deallocate(mach_task_self(), port);
+    if (!pw) return false;
+    static const int SENT[] = {SIGUSR1, SIGPIPE, SIGSEGV, SIGPROF};
+    const struct sigaction sa = {.sa_handler = probe_handler, .sa_flags = SA_RESETHAND};
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(SENT); i++) sigaction(SENT[i], &sa, NULL);
+    for (size_t i = 0; i < TEST_REGISTRY_SIZE(SENT); i++) pthread_kill(pw, SENT[i]);
+    for (int i = 0; i < 1000 && !(atomic_load(&probe_tid[SIGSEGV]) && atomic_load(&probe_tid[SIGPROF])); i++)
+        usleep(1000);
+    usleep(20000);   // SIGUSR1 and SIGPIPE, were they open, arrive with the others
+    return atomic_load(&probe_tid[SIGSEGV]) == W && atomic_load(&probe_tid[SIGPROF]) == W &&
+           !atomic_load(&probe_tid[SIGUSR1]) && !atomic_load(&probe_tid[SIGPIPE]);
+}
+
+static void *sigwait_run(void *arg) {
+    const SigwaitSplit *w = arg;
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, SIGTERM);
+    int got = 0;
+    bool took = sigwait(&s, &got) == 0 && got == SIGTERM;
+    printf("worker_child ok %d pooled %d\n", w->split && took, w->pooled);
+    fflush(stdout);
+    _exit(0);
+}
+
+// Child: one engine-1 split, the worker's mask (worker_mask_ok, when it ran
+// there), then the sigwait pattern: SIGTERM blocked on the application's
+// threads, one of them taking it in sigwait. A thread of the library's that
+// left it unblocked could take it instead, and its default action would end
+// the child; which thread the kernel picks is not fixed, so the mask probe is
+// the check that always sees it. One line: ok if the split went as asked, the
+// mask holds and sigwait took SIGTERM, and whether the split ran on the worker.
+static void child_sigwait(void) {
+    Operands o = operands(&WORKER_CALL);
+    double *C = malloc(o.nC * sizeof *C);
+    ab_split_record_t rec = {0};
+    SigwaitSplit w = {.split = split_hash(&WORKER_CALL, 'N', 128, &o, C, 0, 1) != 0};
+    ab_internal_last_split(&rec);
+    w.pooled = rec.pooled;
+    w.split = w.split && (!w.pooled || worker_mask_ok(rec.thread));
+    free(C);
+    free_operands(&o);
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, SIGTERM);
+    pthread_sigmask(SIG_BLOCK, &s, NULL);
+    pthread_t t;
+    if (pthread_create(&t, NULL, sigwait_run, &w) != 0) return;
+    kill(getpid(), SIGTERM);   // pending on the process until sigwait takes it
+    sleep(5);
+    printf("worker_child ok 0 pooled %d (sigwait never returned)\n", w.pooled);
+}
+
+// child_fault's bound: its fault comes on the GPU part's first read of B,
+// milliseconds after the split before it has set Metal up.
+#define FAULT_WAIT_S 5
+
+static void fault_handler(int sig) {
+    (void)sig;
+    const char *m = pthread_main_np() ? "worker_child ok 0 pooled 0 (the fault reached the caller)\n"
+                  : self_tid() == ab_internal_split_worker() ? "worker_child ok 1 pooled 1\n"
+                                                             : "worker_child ok 1 pooled 0\n";
+    write(STDOUT_FILENO, m, strlen(m));
+    _exit(0);
+}
+
+// Child (on the main thread): one split that starts the worker, then one
+// whose GPU part reads memory the caller has made inaccessible (B's columns
+// from N - 128 on, the GPU's on the N axis, from a page boundary on), the
+// GPU's part first. The read must fault on the tail's thread as on any other;
+// with the fault signals blocked there it would be retried forever, and
+// alarm(FAULT_WAIT_S) ends the child. One line, from the SIGBUS/SIGSEGV
+// handler: ok if the fault reached the tail's thread, not the caller, and
+// whether that was the worker (ab_internal_split_worker() is 0 without one).
+static void child_fault(void) {
+    const Call *c = &WORKER_CALL;
+    Operands o = operands(c);
+    double *C = malloc(o.nC * sizeof *C);
+    split_hash(c, 'N', 128, &o, C, 2, 0);
+    const size_t page = (size_t)getpagesize(), head = (size_t)o.ldB * (c->N - 128) * sizeof(double);
+    const size_t lead = (page - head % page) % page;
+    const size_t len = (lead + o.nB * sizeof(double) + page - 1) & ~(page - 1);
+    char *map = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (map == MAP_FAILED) return;
+    Operands f = o;
+    f.B = (double *)(map + lead);
+    memcpy(f.B, o.B, o.nB * sizeof(double));
+    if (mprotect(map + lead + head, len - lead - head, PROT_NONE)) return;
+    const struct sigaction sa = {.sa_handler = fault_handler};
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGSEGV, &sa, NULL);
+    alarm(FAULT_WAIT_S);
+    memcpy(C, o.C0, o.nC * sizeof *C);
+    int got = seam(c, 'N', 128, 2, 0, c->M, c->N, c->K, &f, 0, 0, C, o.ldC);
+    printf("worker_child ok 0 pooled 0 (no fault: outcome %d)\n", got);
+}
+
+// Child: the QoS loan seen on the worker itself. macOS squashes
+// USER_INITIATED and USER_INTERACTIVE to DEFAULT in a process without an
+// application role, such as this one (xnu task_policy.c, TASK_UNSPECIFIED),
+// the loan with them; the child takes TASK_DEFAULT_APPLICATION, as a task may
+// for itself, and reports whether a USER_INITIATED thread then runs above the
+// worker at rest. Then for a UTILITY and a USER_INITIATED caller, 5 order-2
+// splits each (the caller waits through each GPU part), sampled here while
+// they run: the worker's base priority, the time it stays raised against the
+// GPU parts' time, and its port's send references. One line per caller.
+static void child_loan(void) {
+    const struct task_category_policy role = {.role = TASK_DEFAULT_APPLICATION};
+    const kern_return_t kr = task_policy_set(mach_task_self(), TASK_CATEGORY_POLICY, (task_policy_t)&role,
+                                             TASK_CATEGORY_POLICY_COUNT);
+    const Call *c = &WORKER_CALL;
+    Operands o = operands(c);
+    double *C = malloc(o.nC * sizeof *C);
+    const uint64_t h0 = split_hash(c, 'N', 128, &o, C, 2, 0);
+    const uint64_t W = ab_internal_split_worker();
+    mach_port_t wp = thread_port(W);
+    const mach_port_urefs_t refs0 = send_refs(wp);
+    const int pri0 = thread_base_pri(W);
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+    printf("loan_child role set rc %d, a USER_INITIATED thread at %d, the worker at rest %d\n", kr,
+           thread_base_pri(self_tid()), pri0);
+    const qos_class_t Q[] = {QOS_CLASS_UTILITY, QOS_CLASS_USER_INITIATED};
+    for (size_t k = 0; k < TEST_REGISTRY_SIZE(Q); k++) {
+        SplitThread q = {.c = c, .o = &o, .axis = 'N', .g = 128, .order = 2, .qos = Q[k], .n = 5};
+        int pri = pri0;
+        mach_port_urefs_t refs = refs0;
+        uint64_t raised_ns = 0, last = 0;   // last: when the previous sample was raised, else 0
+        pthread_t th;
+        pthread_create(&th, NULL, split_thread, &q);
+        while (!atomic_load(&q.done)) {
+            const int p = thread_base_pri(W);
+            const mach_port_urefs_t r = send_refs(wp);
+            const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+            if (p > pri0 && last) raised_ns += now - last;
+            last = p > pri0 ? now : 0;
+            if (p > pri) pri = p;
+            if (r > refs) refs = r;
+        }
+        pthread_join(th, NULL);
+        printf("loan_child qos %#x same %d worker %d lent %d of %d pri %d %d raised %.3f of %.3f refs %u %u\n",
+               (unsigned)Q[k], q.hash == h0, q.rec.thread == W, q.lent, q.n, pri0, pri, raised_ns / 1e6, q.gpu_ns / 1e6,
+               refs0, refs);
+    }
+    if (wp != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), wp);
+    free(C);
+    free_operands(&o);
+}
+
+// Child: the bytes in use after 50 more split calls (10 rounds of TCALLS'
+// first 5, every axis), once 10 have grown the pool (MallocNanoZone pinned by
+// the parent).
+static void child_memory(void) {
+    malloc_statistics_t s0, s1;
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass) malloc_zone_statistics(NULL, &s0);
+        for (int r = 0; r < (pass ? 10 : 2); r++)
+            for (int i = 0; i < 5; i++) {
+                Operands o = tcall_operands(i);
+                double *C = malloc(o.nC * sizeof *C);
+                memcpy(C, o.C0, o.nC * sizeof *C);
+                abi_call(&TCALLS[i].c, &o, C);
+                free(C);
+                free_operands(&o);
+            }
+    }
+    malloc_zone_statistics(NULL, &s1);
+    printf("memory growth %lld\n", (long long)s1.size_in_use - (long long)s0.size_in_use);
+}
+
+// The ticks denom - 1 .. denom of the timebase n/d: the second converts to
+// exactly n, while the first's conversion plus the tick's falls 1 ns short of
+// it whenever d does not divide n (2 .. 3 at Apple silicon's 125/3: 83 + 41 is
+// 124). A trace line's t1_ns made of a start and a converted time is then 1
+// ns early.
+static void lossy_ticks(uint64_t *a, uint64_t *b) {
+    mach_timebase_info_data_t tb;
+    mach_timebase_info(&tb);
+    *a = tb.denom - 1;
+    *b = tb.denom;
+}
+
+// Child (AB_SPLIT_TABLE: one zgemm N N N row, scalars=a): a ZGEMM with beta
+// 0.75 and a NaN in its tail's C, which the staged path refuses before
+// running the tail, then the same call on a clean C, whose tail runs.
+static void child_range_first(void) {
+    Call c = {'z', 'N', 'N', 600, 300, 200, 0, ONE, {0.75, 0}};
+    Operands o = operands(&c);
+    double *C = malloc(o.nC * sizeof *C);
+    for (int clean = 0; clean < 2; clean++) {
+        memcpy(C, o.C0, o.nC * sizeof *C);
+        if (!clean) C[(size_t)o.w * o.ldC * (c.N - 1)] = NAN;   // C(0, N - 1), in the N axis's tail
+        abi_call(&c, &o, C);
+    }
+    free(C);
+    free_operands(&o);
+}
+
+// Child (AB_TRACE set): one trace line, for the call from tick a to tick b.
+static void child_trace_ticks(void) {
+    uint64_t a, b;
+    lossy_ticks(&a, &b);
+    ab_trace_call_t c = {.routine = "dgemm", .ta = 'N', .tb = 'N'};
+    if (ab_trace_enabled()) ab_trace_record(&c, a, b, NULL, AB_PROF_FB_NONE, AB_PROF_STAGED_NONE);
+}
+
+static int child_main(const char *scenario) {
+    if (ab_init() != AB_OK) {
+        printf("no Metal device\n");
+        return 1;
+    }
+    if (!strcmp(scenario, "calls")) child_calls();
+    else if (!strcmp(scenario, "fork_exit")) child_fork(true);
+    else if (!strcmp(scenario, "fork__exit")) child_fork(false);
+    else if (!strcmp(scenario, "other")) child_other();
+    else if (!strcmp(scenario, "memory")) child_memory();
+    else if (!strcmp(scenario, "k_refused")) child_k_refused();
+    else if (!strcmp(scenario, "trace_ticks")) child_trace_ticks();
+    else if (!strcmp(scenario, "range_first")) child_range_first();
+    else if (!strcmp(scenario, "cancel")) child_cancel();
+    else if (!strcmp(scenario, "sigwait")) child_sigwait();
+    else if (!strcmp(scenario, "fault")) child_fault();
+    else if (!strcmp(scenario, "loan")) child_loan();
+    else printf("unknown scenario %s\n", scenario);
+    fflush(stdout);
+    return 0;
+}
+
+// Runs the child scenario with the split table and extra settings (NULL-ended).
+static char *run_child(const char *scenario, const char *const *extra, int *status) {
+    const char *env[24];
+    int n = 0;
+    for (; extra && extra[n] && n < 20; n++) env[n] = extra[n];
+    env[n] = NULL;
+    char *argv[] = {self_path, "--child", (char *)scenario, NULL};
+    char *out = NULL;
+    *status = spawn_capture(argv, env, &out);
+    return out;
+}
+
+// What a child's call line says.
+typedef struct {
+    uint64_t h[2];
+    int outcome, declined, staged, retries, retry_kept, scales;
+    int mtl_error;              // the GPU part's first failed command buffer (split_times.h)
+    char path[16];
+    double err;
+} CallLine;
+
+// What a child's split_worker line says (child_calls).
+typedef struct { int worker, tails, pooled, threads; } WorkerLine;
+
+// A child's call lines, its GPU GEMM count, its split table's source and, if
+// w is not NULL, its split_worker line; false if a call line or the
+// split_worker line asked for is missing.
+static bool parse_calls(const char *out, CallLine lines[N_TCALLS], uint64_t *gpu_gemms, char *source,
+                        size_t source_len, WorkerLine *w) {
+    int seen = 0;
+    bool worker = false;
+    for (const char *p = out; p && *p; p = strchr(p, '\n') ? strchr(p, '\n') + 1 : NULL) {
+        int i;
+        unsigned long long h0, h1, gg;
+        CallLine l;
+        char src[256];
+        if (sscanf(p, "call %d %llx %llx %d %d %d %d %d %d %d %15s %lf", &i, &h0, &h1, &l.outcome, &l.declined,
+                   &l.staged, &l.retries, &l.retry_kept, &l.scales, &l.mtl_error, l.path, &l.err) == 12 &&
+            i >= 0 && i < N_TCALLS) {
+            l.h[0] = h0;
+            l.h[1] = h1;
+            lines[i] = l;
+            seen |= 1 << i;
+        } else if (sscanf(p, "gpu_gemms %llu", &gg) == 1) {
+            *gpu_gemms = gg;
+        } else if (sscanf(p, "source %255s", src) == 1) {
+            snprintf(source, source_len, "%s", src);
+        } else if (w && sscanf(p, "split_worker %d tails %d pooled %d threads %d", &w->worker, &w->tails, &w->pooled,
+                               &w->threads) == 4) {
+            worker = true;
+        }
+    }
+    return seen == (1 << N_TCALLS) - 1 && (!w || worker);
+}
+
+// The parent's references for call i: cblas's whole call, the cblas parts,
+// and the composition (the split's bits when its GPU part stands).
+typedef struct { uint64_t whole, parts, split; bool done; } Refs;
+static Refs g_refs[N_TCALLS];
+
+static const Refs *refs(int i) {
+    Refs *r = &g_refs[i];
+    if (r->done) return r;
+    const TableCall *t = &TCALLS[i];
+    Operands o = tcall_operands(i);
+    double *C = malloc(o.nC * sizeof *C);
+    memcpy(C, o.C0, o.nC * sizeof *C);
+    cblas_call(&t->c, t->c.M, t->c.N, t->c.K, o.A, o.ldA, o.B, o.ldB, t->c.beta, C, o.ldC);
+    r->whole = hash_doubles(C, o.nC);
+    if (t->g) {
+        memcpy(C, o.C0, o.nC * sizeof *C);
+        parts_reference(&t->c, t->axis, t->g, &o, C);
+        r->parts = hash_doubles(C, o.nC);
+        memcpy(C, o.C0, o.nC * sizeof *C);
+        compose_reference(&t->c, t->axis, t->g, &o, C);
+        r->split = hash_doubles(C, o.nC);
+    }
+    free(C);
+    free_operands(&o);
+    r->done = true;
+    return r;
+}
+
+static bool cut_call(int i) { return TCALLS[i].g > 0; }
+
+// What a scenario expects of call i: the outcome (-1 none), the reference
+// and the path; NULL ref for "any, but both runs alike".
+typedef enum { REF_WHOLE, REF_PARTS, REF_SPLIT, REF_SELF } RefKind;
+
+typedef struct {
+    const char *name;
+    const char *env[8];
+    // for a cut call: outcome, ref, declined (-2 any), staged (-2 any), retries (-2 any), scales
+    int outcome;
+    RefKind ref;
+    int declined, staged, retries, scales;
+} Scenario;
+
+#define ANY (-2)
+static const Scenario SCENARIOS[] = {
+    {"on", {NULL}, AB_SPLIT_KEPT, REF_SPLIT, -1, ANY, 0, 0},
+    {"cpu", {"AB_MODE=cpu"}, -1, REF_WHOLE, ANY, ANY, ANY, ANY},
+    {"alloc", {"AB_TEST_FAIL_STAGE=alloc"}, AB_SPLIT_GPU_FAILED, REF_PARTS, -1, 5 /* alloc */, 0, 0},
+    {"kernel", {"AB_TEST_FAIL_STAGE=kernel"}, AB_SPLIT_GPU_FAILED, REF_PARTS, -1, 6 /* gpu_failed */, 1, 0},
+    {"scales", {"AB_TEST_FAIL_STAGE=scales"}, AB_SPLIT_GPU_FAILED, REF_PARTS, -1, 6, 0, 1},
+    {"split_thread", {"AB_TEST_FAIL_STAGE=split_thread"}, AB_SPLIT_DECLINED, REF_WHOLE, 6 /* thread */, ANY,
+     ANY, ANY},
+    // the worker off: each GPU part on a thread of its own, with the worker's outcomes and bits
+    {"split_pool", {"AB_TEST_FAIL_STAGE=split_pool"}, AB_SPLIT_KEPT, REF_SPLIT, -1, ANY, 0, 0},
+    {"split_fpcr", {"AB_TEST_FAIL_STAGE=split_fpcr"}, AB_SPLIT_GPU_FAILED, REF_PARTS, -1, 3 /* fpcr */, 0, 0},
+    // a NaN the GPU made of finite data (T and C layouts, a DGEMM reading C): gpu_failed, not range
+    {"nonfinite", {"AB_TEST_FAIL_STAGE=nonfinite"}, AB_SPLIT_GPU_FAILED, REF_PARTS, -1, 7 /* nonfinite */, 0, 0},
+    {"host_pack", {"AB_HOST_PACK=1"}, AB_SPLIT_DECLINED, REF_WHOLE, 2 /* host_pack */, ANY, ANY, ANY},
+    {"strassen", {"AB_STRASSEN=1", "AB_STRASSEN_MIN=1"}, AB_SPLIT_KEPT, REF_SPLIT, -1, ANY, 0, 0},
+    {"staging0", {"AB_STAGING_MB=0"}, AB_SPLIT_KEPT, REF_SPLIT, -1, ANY, 0, 0},
+    {"min_gpu_dim", {"AB_MIN_GPU_DIM=0"}, AB_SPLIT_KEPT, REF_SPLIT, -1, ANY, 0, 0},
+};
+
+// A child's GPU parts all on its one split worker, or with the worker off
+// (AB_TEST_FAIL_STAGE=split_pool) each on a thread of its own; no worker
+// where no GPU part ran (AB_SPLIT unset, split_thread, host_pack, cpu).
+static void check_worker(const char *name, const WorkerLine *w, bool off) {
+    bool ok = off || !w->tails ? !w->worker && w->pooled == 0 && w->threads == w->tails
+                               : w->worker && w->pooled == w->tails && w->threads == 1;
+    check(ok, "%s: worker %d, %d GPU parts, %d pooled, on %d threads", name, w->worker, w->tails, w->pooled,
+          w->threads);
+}
+
+// Checks one child's call lines against what the scenario expects.
+static void check_calls(const Scenario *s, const char *out, int status) {
+    CallLine l[N_TCALLS];
+    uint64_t gpu_gemms = UINT64_MAX;
+    char source[256] = "";
+    WorkerLine w;
+    if (!check(status == 0 && parse_calls(out, l, &gpu_gemms, source, sizeof source, &w),
+               "scenario %s: child status %d, output: %.300s", s->name, status, out ? out : ""))
+        return;
+    check_worker(s->name, &w, !strcmp(s->name, "split_pool"));
+    for (int i = 0; i < N_TCALLS; i++) {
+        const Refs *r = refs(i);
+        check(l[i].h[0] == l[i].h[1], "scenario %s call %d: the two runs differ", s->name, i);
+        if (!cut_call(i) || s->outcome < 0) {
+            // no row, or a row that does not cut: AB_SPLIT unset's route; the whole call on cblas
+            int want = s->outcome < 0 || TCALLS[i].row < 0 ? -1 : AB_SPLIT_NOT_CUT;
+            check(l[i].outcome == want && l[i].h[0] == r->whole && !strcmp(l[i].path, "cpu"),
+                  "scenario %s call %d: outcome %d (want %d), path %s, %s cblas's whole call", s->name, i,
+                  l[i].outcome, want, l[i].path, l[i].h[0] == r->whole ? "is" : "is not");
+            continue;
+        }
+        int outcome = s->outcome;
+        RefKind ref = s->ref;
+        int declined = s->declined, staged = s->staged, retries = s->retries;
+        if (outcome == AB_SPLIT_KEPT && TCALLS[i].imag != 1.0) outcome = AB_SPLIT_KEPT_4M;
+        uint64_t want = ref == REF_WHOLE ? r->whole : ref == REF_PARTS ? r->parts : r->split;
+        check(l[i].outcome == outcome && l[i].h[0] == want &&
+              (declined == ANY || l[i].declined == declined) && (staged == ANY || l[i].staged == staged) &&
+              (retries == ANY || l[i].retries == retries) && (s->scales == ANY || l[i].scales == s->scales),
+              "scenario %s call %d: outcome %d declined %d staged %d retries %d scales %d path %s, C %s the "
+              "expected bits", s->name, i, l[i].outcome, l[i].declined, l[i].staged, l[i].retries, l[i].scales,
+              l[i].path, l[i].h[0] == want ? "has" : "does not have");
+        bool gpu = outcome == AB_SPLIT_KEPT || outcome == AB_SPLIT_KEPT_4M;
+        check(!strcmp(l[i].path, gpu ? "split" : "cpu"), "scenario %s call %d: path %s", s->name, i, l[i].path);
+        // Only the test hooks fail command buffers here: a retried part's code is theirs (-2).
+        check(l[i].retries ? l[i].mtl_error == -2 : !gpu || l[i].mtl_error == 0,
+              "scenario %s call %d: retries %d, Metal error code %d", s->name, i, l[i].retries, l[i].mtl_error);
+        check(l[i].err <= TOL, "scenario %s call %d: error %.2e against cblas", s->name, i, l[i].err);
+    }
+    if (!strcmp(s->name, "cpu")) check(gpu_gemms == 0, "AB_SPLIT=1 AB_MODE=cpu ran %llu GPU GEMMs",
+                                       (unsigned long long)gpu_gemms);
+    check(!strcmp(source, g_label), "scenario %s: ab_split_source() is %s", s->name, source);
+}
+
+// The extra settings of a scenario with the split on.
+static int split_env(const Scenario *s, const char **env, char *table_env) {
+    int n = 0;
+    snprintf(table_env, PATH_MAX + 64, "AB_SPLIT_TABLE=%s", g_table);
+    env[n++] = "AB_SPLIT=1";
+    env[n++] = table_env;
+    for (int k = 0; s && k < 8 && s->env[k]; k++) env[n++] = s->env[k];
+    env[n] = NULL;
+    return n;
+}
+
+// T3 and T8-T10: every scenario of SCENARIOS, and those whose failure hits
+// one call only.
+static void test_split_scenarios(void) {
+    char table_env[PATH_MAX + 64];
+    for (size_t k = 0; k < TEST_REGISTRY_SIZE(SCENARIOS); k++) {
+        const char *env[16];
+        split_env(&SCENARIOS[k], env, table_env);
+        int status;
+        char *out = run_child("calls", env, &status);
+        check_calls(&SCENARIOS[k], out, status);
+        free(out);
+    }
+    // One call is hit: kernel_once (the first: retried, kept), redo_4m (the 4M
+    // call: failed twice, the parts), split_scratch (the K axis: declined).
+    static const struct { const char *fail; int call_mask, outcome, ref, declined, retries; } ONE_HIT[] = {
+        {"AB_TEST_FAIL_STAGE=kernel_once", 1 << 0, AB_SPLIT_KEPT, REF_SPLIT, -1, 1},
+        {"AB_TEST_FAIL_STAGE=redo_4m", 1 << 7, AB_SPLIT_GPU_FAILED, REF_PARTS, -1, 1},
+        {"AB_TEST_FAIL_STAGE=split_scratch", 1 << 2 | 1 << 4 | 1 << 8, AB_SPLIT_DECLINED, REF_WHOLE, 5 /* scratch */, ANY},
+    };
+    for (size_t k = 0; k < TEST_REGISTRY_SIZE(ONE_HIT); k++) {
+        Scenario s = {ONE_HIT[k].fail, {ONE_HIT[k].fail}, 0, 0, 0, 0, 0, 0};
+        const char *env[16];
+        split_env(&s, env, table_env);
+        int status;
+        char *out = run_child("calls", env, &status);
+        CallLine l[N_TCALLS];
+        uint64_t gg;
+        char source[256];
+        WorkerLine w;
+        if (check(status == 0 && parse_calls(out, l, &gg, source, sizeof source, &w), "%s: child output %.300s",
+                  ONE_HIT[k].fail, out ? out : "")) {
+            check_worker(ONE_HIT[k].fail, &w, false);
+            for (int i = 0; i < N_TCALLS; i++) {
+                if (!cut_call(i)) continue;
+                const Refs *r = refs(i);
+                bool hit = ONE_HIT[k].call_mask >> i & 1;
+                int want = hit ? ONE_HIT[k].outcome : TCALLS[i].imag != 1.0 ? AB_SPLIT_KEPT_4M : AB_SPLIT_KEPT;
+                uint64_t ref = !hit ? r->split : ONE_HIT[k].ref == REF_WHOLE ? r->whole
+                             : ONE_HIT[k].ref == REF_PARTS ? r->parts : r->split;
+                check(l[i].outcome == want && l[i].h[0] == ref &&
+                      (!hit || ONE_HIT[k].declined == ANY || l[i].declined == ONE_HIT[k].declined) &&
+                      (!hit || ONE_HIT[k].retries == ANY || l[i].retries == ONE_HIT[k].retries) &&
+                      (!hit || k != 0 || l[i].retry_kept == 1),
+                      "%s call %d: outcome %d (want %d) declined %d retries %d retry_kept %d, C %s the expected bits",
+                      ONE_HIT[k].fail, i, l[i].outcome, want, l[i].declined, l[i].retries, l[i].retry_kept,
+                      l[i].h[0] == ref ? "has" : "does not have");
+            }
+        }
+        free(out);
+    }
+    finish();
+}
+
+// The first of fields that s holds, or NULL: AB_SPLIT's own fields, which
+// default reports must not have (a path may say "split").
+static const char *const REPORT_FIELDS[] = {"AB_SPLIT", "split_table", "split_calls", "split_row",
+                                            " split calls=", "  split row=", NULL};
+static const char *const JSON_FIELDS[] = {"\"split_rows\"", "\"split\"", "\"split_table\"",
+                                          "\"split_calls\"", NULL};
+static const char *split_field(const char *s, const char *const *fields) {
+    for (; *fields; fields++)
+        if (strstr(s, *fields)) return *fields;
+    return NULL;
+}
+
+// T3: AB_SPLIT unset, empty and 0 alike: every call on its own route (the
+// whole call on cblas under auto here), no record, no split worker started,
+// and no AB_SPLIT field in the reports or the trace.
+static void test_split_off(void) {
+    char trace[PATH_MAX + 16], trace_env[PATH_MAX + 32];
+    snprintf(trace, sizeof trace, "%s/off", g_dir);
+    snprintf(trace_env, sizeof trace_env, "AB_TRACE=%s", trace);
+    const char *tmp = getenv("TMPDIR");
+    char json[PATH_MAX], json_env[PATH_MAX + 32];
+    snprintf(json, sizeof json, "%s/ab_off_%d.json", tmp && *tmp ? tmp : "/tmp", (int)getpid());
+    snprintf(json_env, sizeof json_env, "AB_PROFILE_JSON=%s", json);
+    const char *settings[] = {NULL, "AB_SPLIT=", "AB_SPLIT=0"};
+    uint64_t first[N_TCALLS] = {0};
+    for (int k = 0; k < 3; k++) {
+        const char *env[8] = {"AB_REPORT=1", "AB_PROFILE=1", trace_env, json_env, settings[k], NULL};
+        int status;
+        char *out = run_child("calls", env, &status);
+        CallLine l[N_TCALLS];
+        uint64_t gg;
+        char source[256] = "";
+        WorkerLine w;
+        if (check(status == 0 && parse_calls(out, l, &gg, source, sizeof source, &w), "AB_SPLIT %s: output %.300s",
+                  settings[k] ? settings[k] : "unset", out ? out : "")) {
+            for (int i = 0; i < N_TCALLS; i++) {
+                check(l[i].outcome == -1 && l[i].h[0] == refs(i)->whole && strcmp(l[i].path, "split"),
+                      "AB_SPLIT %s call %d: outcome %d path %s", settings[k] ? settings[k] : "unset", i,
+                      l[i].outcome, l[i].path);
+                if (k == 0) first[i] = l[i].h[0];
+                else check(l[i].h[0] == first[i], "call %d: AB_SPLIT %s gives other bits", i, settings[k]);
+            }
+            check(!strcmp(source, "off"), "ab_split_source() is %s with AB_SPLIT %s", source,
+                  settings[k] ? settings[k] : "unset");
+            check_worker(settings[k] ? settings[k] : "AB_SPLIT unset", &w, false);
+            const char *field = split_field(out, REPORT_FIELDS);
+            check(!field, "AB_SPLIT %s: the reports carry %s", settings[k] ? settings[k] : "unset", field);
+        }
+        free(out);
+        FILE *jf = fopen(json, "r");
+        char *js = jf ? slurp(jf) : NULL;
+        check(js && strstr(js, "\"routines\"") && !split_field(js, JSON_FIELDS),
+              "AB_SPLIT %s: the JSON dump is missing or mentions the split", settings[k] ? settings[k] : "unset");
+        free(js);
+        unlink(json);
+        // the child's trace file: no split field
+        char cmd[PATH_MAX * 2];
+        snprintf(cmd, sizeof cmd,
+                 "/bin/cat %s.* 2>/dev/null | /usr/bin/grep -cE 'AB_SPLIT|split_table| path=split| row=| declined='",
+                 trace);
+        FILE *p = popen(cmd, "r");
+        int hits = -1;
+        if (p) { if (fscanf(p, "%d", &hits) != 1) hits = -1; pclose(p); }
+        check(hits == 0, "AB_SPLIT %s: the trace mentions the split (%d lines)", settings[k] ? settings[k] : "unset",
+              hits);
+        snprintf(cmd, sizeof cmd, "/bin/rm -f %s.*", trace);
+        if (system(cmd)) {}
+    }
+    finish();
+}
+
+// T7 (children): VECLIB_MAXIMUM_THREADS 1, 2 and 8, each twice: every call's
+// bits repeat within a child and across the two.
+static void test_split_veclib(void) {
+    char table_env[PATH_MAX + 64];
+    const char *settings[] = {"VECLIB_MAXIMUM_THREADS=1", "VECLIB_MAXIMUM_THREADS=2", "VECLIB_MAXIMUM_THREADS=8"};
+    for (int k = 0; k < 3; k++) {
+        uint64_t h[2][N_TCALLS];
+        for (int run = 0; run < 2; run++) {
+            Scenario s = {settings[k], {settings[k]}, 0, 0, 0, 0, 0, 0};
+            const char *env[16];
+            split_env(&s, env, table_env);
+            int status;
+            char *out = run_child("calls", env, &status);
+            CallLine l[N_TCALLS];
+            uint64_t gg;
+            char source[256];
+            if (check(status == 0 && parse_calls(out, l, &gg, source, sizeof source, NULL), "%s: output %.300s",
+                      settings[k], out ? out : ""))
+                for (int i = 0; i < N_TCALLS; i++) {
+                    h[run][i] = l[i].h[0];
+                    check(l[i].h[0] == l[i].h[1] && (!cut_call(i) || kept(l[i].outcome)),
+                          "%s call %d: outcome %d, runs alike %d", settings[k], i, l[i].outcome, l[i].h[0] == l[i].h[1]);
+                }
+            free(out);
+        }
+        for (int i = 0; i < N_TCALLS; i++)
+            check(h[0][i] == h[1][i], "%s call %d: two children differ", settings[k], i);
+    }
+    finish();
+}
+
+// T8: fork() after a split call: the forked child is declined (no Metal
+// context), gets cblas's bits, and ends with _exit and with exit; its
+// engine-1 split runs on a thread of its own (the child has no split worker)
+// with the bits of the parent's, which ran on the parent's worker.
+static void test_split_fork(void) {
+    char table_env[PATH_MAX + 64];
+    const char *env[16];
+    split_env(NULL, env, table_env);
+    const char *how[] = {"fork__exit", "fork_exit"};
+    for (int k = 0; k < 2; k++) {
+        int status;
+        char *out = run_child(how[k], env, &status);
+        int outcome = -1, declined = -1, same = 0, fstatus = -1;
+        char path[16] = "";
+        const char *f = out ? strstr(out, "forked outcome") : NULL;
+        if (f) sscanf(f, "forked outcome %d declined %d same %d path %15s", &outcome, &declined, &same, path);
+        const char *s = out ? strstr(out, "forked status") : NULL;
+        if (s) sscanf(s, "forked status %d", &fstatus);
+        int pp = -1, fp = -1, fs = -1;
+        unsigned long long fw = ULLONG_MAX;
+        const char *pl = out ? strstr(out, "parent pooled") : NULL;
+        if (pl) sscanf(pl, "parent pooled %d", &pp);
+        const char *fl = out ? strstr(out, "forked pooled") : NULL;
+        if (fl) sscanf(fl, "forked pooled %d same %d worker %llu", &fp, &fs, &fw);
+        check(status == 0 && out && strstr(out, "parent path split") && outcome == AB_SPLIT_DECLINED &&
+              declined == 0 /* no_device */ && same && !strcmp(path, "cpu") && fstatus == 0,
+              "%s: status %d, forked outcome %d declined %d same %d path %s status %d", how[k], status, outcome,
+              declined, same, path, fstatus);
+        check(pp == 1 && fp == 0 && fs == 1 && fw == 0,
+              "%s: parent pooled %d; forked pooled %d, same bits %d, worker %llu", how[k], pp, fp, fs, fw);
+        free(out);
+    }
+    finish();
+}
+
+// What follows " key=" in line, or NULL.
+static const char *after_key(const char *line, const char *key) {
+    char k[64];
+    snprintf(k, sizeof k, " %s=", key);
+    const char *p = strstr(line, k);
+    return p ? p + strlen(k) : NULL;
+}
+
+// The integer after "key=" in line, or -1.
+static long long field(const char *line, const char *key) {
+    const char *p = after_key(line, key);
+    return p ? atoll(p) : -1;
+}
+
+// The number after "key=" in line, or NAN.
+static double fieldf(const char *line, const char *key) {
+    const char *p = after_key(line, key);
+    return p ? strtod(p, NULL) : NAN;
+}
+
+// The number after "key": in row i of the JSON dump's split_rows, or NAN.
+static double json_row_field(const char *js, int i, const char *key) {
+    char k[64];
+    snprintf(k, sizeof k, "{\"i\": %d,", i);
+    const char *row = js ? strstr(js, k) : NULL;
+    if (!row) return NAN;
+    snprintf(k, sizeof k, "\"%s\": ", key);
+    const char *p = strstr(row, k), *end = strchr(row, '}');
+    return p && end && p < end ? strtod(p + strlen(k), NULL) : NAN;
+}
+
+// The GFLOP of call t's head (gpu false) or tail (gpu true), cut as planned.
+static double part_gf(const TableCall *t, bool gpu) {
+    double d[3] = {t->c.M, t->c.N, t->c.K};
+    int a = t->axis == 'M' ? 0 : t->axis == 'N' ? 1 : 2;
+    d[a] = gpu ? t->g : d[a] - t->g;
+    return (t->c.r == 'z' ? 8.0 : 2.0) * d[0] * d[1] * d[2] / 1e9;
+}
+
+// T9: the reports with AB_SPLIT on.
+static void test_split_reports(void) {
+    char table_env[PATH_MAX + 64], trace[PATH_MAX + 16], trace_env[PATH_MAX + 32], json[PATH_MAX + 16],
+         json_env[PATH_MAX + 32], ticks[PATH_MAX + 16];
+    snprintf(trace, sizeof trace, "%s/on", g_dir);
+    snprintf(ticks, sizeof ticks, "%s/ticks", g_dir);
+    snprintf(trace_env, sizeof trace_env, "AB_TRACE=%s", trace);
+    snprintf(json, sizeof json, "%s/profile.json", g_dir);
+    snprintf(json_env, sizeof json_env, "AB_PROFILE_JSON=%s", json);
+    Scenario s = {"report", {"AB_REPORT=1", "AB_PROFILE=1", trace_env, json_env}, 0, 0, 0, 0, 0, 0};
+    const char *env[16];
+    split_env(&s, env, table_env);
+    int status;
+    char *out = run_child("calls", env, &status);
+    check(status == 0 && out, "child status %d", status);
+    if (!out) { finish(); return; }
+    char want[sizeof g_label + 32];
+    snprintf(want, sizeof want, " AB_SPLIT=1 split_table=%s\n", g_label);
+    check(strstr(out, want) != NULL, "the report header lacks '%s'", want);
+    // routine lines: calls = gpu_calls + cpu_calls + split_calls; split lines; row lines
+    long long split_total = 0;
+    int routines = 0;
+    int rows_seen = 0;
+    for (char *line = out; line && *line; line = strchr(line, '\n') ? strchr(line, '\n') + 1 : NULL) {
+        char l[2048];
+        size_t n = strcspn(line, "\n");
+        snprintf(l, sizeof l, "%.*s", (int)(n < sizeof l ? n : sizeof l - 1), line);
+        if (!strncmp(l, "AB_REPORT[", 10) && strstr(l, " calls=") && strstr(l, " split_calls=") &&
+            !strstr(l, " split calls=")) {
+            routines++;
+            check(field(l, "calls") == field(l, "gpu_calls") + field(l, "cpu_calls") + field(l, "split_calls"),
+                  "calls != gpu + cpu + split: %s", l);
+        } else if (!strncmp(l, "AB_REPORT[", 10) && strstr(l, " split calls=")) {   // not AB_PROFILE's copy
+            long long calls = field(l, "calls"), sum = field(l, "kept") + field(l, "kept_4m") + field(l, "range") +
+                                                       field(l, "gpu_failed");
+            for (int d = 0; d < 7; d++) {
+                static const char *const D[] = {"no_device", "too_large", "host_pack", "fpcr", "scalar",
+                                                "scratch", "thread"};
+                char k[32];
+                snprintf(k, sizeof k, "declined_%s", D[d]);
+                sum += field(l, k);
+            }
+            check(calls == sum && calls > 0, "split line counts do not add up: %s", l);
+            split_total += field(l, "axis_N") + field(l, "axis_M") + field(l, "axis_K");
+        } else if (strstr(l, "] split_row i=")) {
+            long long i = field(l, "i");
+            rows_seen++;
+            if (i == 5) check(field(l, "calls") == 2 && field(l, "split") == 0, "the f = 0 row: %s", l);
+            if (i == 0) check(field(l, "calls") == 4 && field(l, "split") == 4 && field(l, "kept_4m") == 2,
+                              "row 0: %s", l);
+            // the row's first split call: its parts, within the row's sums, and none without one
+            static const char *const FIRST[][2] = {{"first_cpu_ms", "cpu_ms"}, {"first_gpu_ms", "gpu_ms"},
+                                                   {"first_gf_cpu", "gf_cpu"}, {"first_gf_gpu", "gf_gpu"}};
+            for (int k = 0; k < 4; k++) {
+                double first = fieldf(l, FIRST[k][0]), all = fieldf(l, FIRST[k][1]);
+                check(first <= all && (first > 0) == (field(l, "split") > 0), "row %lld: %s %g, %s %g: %s", i,
+                      FIRST[k][0], first, FIRST[k][1], all, l);
+            }
+        }
+    }
+    check(routines == 2, "%d routine lines with split_calls (want zgemm, dgemm)", routines);
+    check(split_total == 14 && rows_seen == N_ROWS, "split calls by axis %lld (want 14), %d row lines (want %d)",
+          split_total, rows_seen, N_ROWS);
+    check(strstr(out, "AB_PROFILE zgemm M=1200 N=128 K=64  split row=0 axis=N g=64") != NULL,
+          "no AB_PROFILE line for a split call");
+    check(strstr(out, "AB_SPLIT: calls whose GPU part stood") != NULL, "no AB_SPLIT section in AB_PROFILE");
+    free(out);
+    // JSON
+    FILE *f = fopen(json, "r");
+    char *js = f ? slurp(f) : NULL;
+    char want_js[sizeof g_label + 32];
+    snprintf(want_js, sizeof want_js, "\"split_table\": \"%s\"", g_label);
+    check(js && strstr(js, want_js) && strstr(js, "\"split_rows\"") && strstr(js, "\"split_calls\": "),
+          "the JSON dump lacks the split fields");
+    // the trace: a split line's stages sum to t1 - t0, its GPU part's to gpu_wall_ns
+    char cmd[PATH_MAX * 2];
+    snprintf(cmd, sizeof cmd, "/bin/cat %s.*", trace);
+    FILE *p = popen(cmd, "r");
+    int split_lines = 0, row_lines = 0;
+    long long first_cpu[N_ROWS], first_gpu[N_ROWS];   // each row's first split call, and first that ran a tail
+    for (int r = 0; r < N_ROWS; r++) first_cpu[r] = first_gpu[r] = -1;
+    char line[4096];
+    bool header = false;
+    while (p && fgets(line, sizeof line, p)) {
+        if (line[0] == '#') { header = header || strstr(line, want + 1); continue; }
+        if (strstr(line, " path=split") || (strstr(line, " retries=") && strstr(line, " path=fallback:"))) {
+            split_lines++;
+            long long row = field(line, "row");
+            if (row >= 0 && row < N_ROWS && first_cpu[row] < 0) first_cpu[row] = field(line, "cpu_part_ns");
+            if (row >= 0 && row < N_ROWS && first_gpu[row] < 0 && field(line, "gpu_wall_ns") > 0)
+                first_gpu[row] = field(line, "gpu_wall_ns");
+            long long t = field(line, "t1_ns") - field(line, "t0_ns");
+            long long st = field(line, "init_ns") + field(line, "cpu_part_ns") + field(line, "join_ns") +
+                           field(line, "redo_ns") + field(line, "sum_ns") + field(line, "other_ns");
+            long long gs = field(line, "gpu_other_ns");
+            static const char *const S[] = {"init", "alloc", "pack", "upload", "kernel", "download", "epilogue"};
+            for (int k = 0; k < 7; k++) {
+                char key[32];
+                snprintf(key, sizeof key, "gpu_%s_ns", S[k]);
+                gs += field(line, key);
+            }
+            check(st == t && gs == field(line, "gpu_wall_ns") && field(line, "row") >= 0,
+                  "trace stages %lld vs %lld, GPU %lld vs %lld: %.200s", st, t, gs, field(line, "gpu_wall_ns"), line);
+            // the timeline: its last field present (the line is whole), and on a
+            // kept split every step in order, within the call's t0_ns .. t1_ns
+            check(strstr(line, " gpu_mtl_error=") && strchr(line, '\n'), "trace line cut short: %.200s", line);
+            if (strstr(line, " path=split")) {
+                ab_split_times_t tm = {
+                    .cut_ns = field(line, "at_cut_ns"), .create_ns = field(line, "at_create_ns"),
+                    .cpu0_ns = field(line, "at_cpu0_ns"), .cpu1_ns = field(line, "at_cpu1_ns"),
+                    .gpu0_ns = field(line, "at_gpu0_ns"), .gpu1_ns = field(line, "at_gpu1_ns"),
+                    .join_ns = field(line, "at_join_ns"), .end_ns = field(line, "at_end_ns"),
+                    .gpu = {.commit_ns = field(line, "at_commit_ns"), .gpu_start_ns = field(line, "gpu_start_ns"),
+                            .gpu_end_ns = field(line, "gpu_end_ns"), .done_ns = field(line, "at_done_ns"),
+                            .groups = field(line, "gpu_groups"), .groups_max = field(line, "gpu_groups_max"),
+                            .dispatches = field(line, "gpu_dispatches"), .cmdbufs = field(line, "gpu_cmdbufs"),
+                            .kinds = field(line, "gpu_kinds"), .mtl_error = field(line, "gpu_mtl_error")}};
+                const char *fault = times_fault(&tm, 0);
+                long long t0 = field(line, "t0_ns"), t1 = field(line, "t1_ns");
+                const ab_prof_kernel_split_t *k = &tm.gpu;
+                check(!fault && t0 <= (long long)tm.cut_ns && (long long)tm.end_ns <= t1,
+                      "trace timeline: %s; row %lld M=%lld N=%lld K=%lld, ns after t0_ns %lld: cut %lld create %lld "
+                      "cpu0 %lld cpu1 %lld gpu0 %lld commit %lld gpu_start %lld gpu_end %lld done %lld gpu1 %lld "
+                      "join %lld end %lld t1 %lld", fault ? fault : "outside t0_ns .. t1_ns", field(line, "row"),
+                      field(line, "M"), field(line, "N"), field(line, "K"), t0, (long long)tm.cut_ns - t0,
+                      (long long)tm.create_ns - t0, (long long)tm.cpu0_ns - t0, (long long)tm.cpu1_ns - t0,
+                      (long long)tm.gpu0_ns - t0, (long long)k->commit_ns - t0, (long long)k->gpu_start_ns - t0,
+                      (long long)k->gpu_end_ns - t0, (long long)k->done_ns - t0, (long long)tm.gpu1_ns - t0,
+                      (long long)tm.join_ns - t0, (long long)tm.end_ns - t0, t1 - t0);
+            }
+        } else if (strstr(line, " row=5 axis=N g=0")) {
+            row_lines++;
+        }
+    }
+    if (p) pclose(p);
+    check(header && split_lines == 14 && row_lines == 2, "trace: header %d, %d split lines (want 14), %d f = 0 "
+          "lines (want 2)", header, split_lines, row_lines);
+    // A call's t0_ns and t1_ns are its ticks converted, as its steps' are, also from ticks whose difference
+    // converted loses a ns (lossy_ticks): an end made of the start plus the time would read before a last step.
+    snprintf(trace_env, sizeof trace_env, "AB_TRACE=%s", ticks);
+    const char *ticks_env[] = {trace_env, NULL};
+    free(run_child("trace_ticks", ticks_env, &status));
+    snprintf(cmd, sizeof cmd, "/bin/cat %s.*", ticks);
+    p = popen(cmd, "r");
+    long long t0 = -1, t1 = -1;
+    while (p && fgets(line, sizeof line, p))
+        if (line[0] != '#') t0 = field(line, "t0_ns"), t1 = field(line, "t1_ns");
+    if (p) pclose(p);
+    uint64_t a, b;
+    lossy_ticks(&a, &b);
+    check(status == 0 && t0 == (long long)ab_prof_ticks_to_ns(a) && t1 == (long long)ab_prof_ticks_to_ns(b),
+          "trace line of ticks %llu .. %llu: t0_ns %lld t1_ns %lld, want %llu %llu (the start's plus the "
+          "difference's conversion: %llu)", (unsigned long long)a, (unsigned long long)b, t0, t1,
+          (unsigned long long)ab_prof_ticks_to_ns(a), (unsigned long long)ab_prof_ticks_to_ns(b),
+          (unsigned long long)(ab_prof_ticks_to_ns(a) + ab_prof_ticks_to_ns(b - a)));
+    // A row whose first split call's tail was refused before it ran (range) and whose second's ran: the GPU's
+    // GFLOP and first-call parts are the second call's alone.
+    char range_table[PATH_MAX + 16], range_env[PATH_MAX + 32];
+    snprintf(range_table, sizeof range_table, "%s/range_table.txt", g_dir);
+    FILE *rt = fopen(range_table, "w");
+    if (rt) { fputs("zgemm N N N scalars=a f=0.5\n", rt); fclose(rt); }
+    snprintf(range_env, sizeof range_env, "AB_SPLIT_TABLE=%s", range_table);
+    const char *range_envs[] = {"AB_SPLIT=1", range_env, "AB_REPORT=1", NULL};
+    out = run_child("range_first", range_envs, &status);
+    const char *rl = out ? strstr(out, "] split_row i=0 ") : NULL;
+    check(status == 0 && rl && field(rl, "split") == 2 && field(rl, "range") == 1,
+          "a tail refused before it ran, then one that ran: status %d, %.300s", status, rl ? rl : out ? out : "");
+    check(rl && fieldf(rl, "gpu_ms") > 0 && fieldf(rl, "first_gpu_ms") == fieldf(rl, "gpu_ms") &&
+              fieldf(rl, "gf_gpu") > 0 && fieldf(rl, "first_gf_gpu") == fieldf(rl, "gf_gpu"),
+          "GPU parts not the second call's alone: %.400s", rl ? rl : "");
+    free(out);
+    unlink(range_table);
+    // The JSON's first-call parts per row are the trace's (here every tail ran: the GPU part's first call is
+    // the CPU part's), and their GFLOP the plan's for the row's first call.
+    bool seen[N_ROWS] = {false};
+    for (int i = 0; i < N_TCALLS; i++) {
+        const TableCall *t = &TCALLS[i];
+        int r = t->row;
+        if (!cut_call(i) || seen[r]) continue;
+        seen[r] = true;
+        double cpu = json_row_field(js, r, "first_cpu_ns"), gpu = json_row_field(js, r, "first_gpu_ns"),
+               gf_cpu = json_row_field(js, r, "first_gf_cpu"), gf_gpu = json_row_field(js, r, "first_gf_gpu");
+        check(cpu == first_cpu[r] && gpu == first_gpu[r] && fabs(gf_cpu - part_gf(t, false)) <= 1e-6 &&
+                  fabs(gf_gpu - part_gf(t, true)) <= 1e-6,
+              "row %d's first split call: cpu %.0f gpu %.0f ns (trace %lld, %lld), GFLOP %g + %g (plan %g + %g)", r,
+              cpu, gpu, first_cpu[r], first_gpu[r], gf_cpu, gf_gpu, part_gf(t, false), part_gf(t, true));
+    }
+    free(js);
+    snprintf(cmd, sizeof cmd, "/bin/rm -f %s.* %s.* %s", trace, ticks, json);
+    if (system(cmd)) {}
+    finish();
+}
+
+// T10: AB_PRECISION=fast keeps both tokens and stays within 4x the default
+// error; the other APIs give the same bits with AB_SPLIT on and off; the
+// benchmark drivers refuse to run under AB_SPLIT; memory does not grow (T11).
+static void test_split_interactions(void) {
+    char table_env[PATH_MAX + 64];
+    const char *env[16];
+    int status;
+    // fast
+    Scenario def = {"default", {NULL}, 0, 0, 0, 0, 0, 0}, fast = {"fast", {"AB_PRECISION=fast", "AB_REPORT=1"},
+                                                                  0, 0, 0, 0, 0, 0};
+    CallLine ld[N_TCALLS], lf[N_TCALLS];
+    uint64_t gg;
+    char source[256];
+    split_env(&def, env, table_env);
+    char *out = run_child("calls", env, &status);
+    bool ok_d = status == 0 && parse_calls(out, ld, &gg, source, sizeof source, NULL);
+    free(out);
+    split_env(&fast, env, table_env);
+    out = run_child("calls", env, &status);
+    bool ok_f = status == 0 && parse_calls(out, lf, &gg, source, sizeof source, NULL);
+    check(ok_d && ok_f && out && strstr(out, "AB_PRECISION=fast") && strstr(out, "AB_SPLIT=1 split_table="),
+          "fast: children failed or a token is missing");
+    free(out);
+    for (int i = 0; ok_d && ok_f && i < N_TCALLS; i++)
+        if (cut_call(i))
+            check(kept(lf[i].outcome) && lf[i].err <= 4.0 * fmax(ld[i].err, 1e-16),
+                  "fast call %d: outcome %d, error %.2e against the default's %.2e", i, lf[i].outcome, lf[i].err,
+                  ld[i].err);
+    // the other APIs
+    const char *off_env[] = {NULL};
+    char *off = run_child("other", off_env, &status);
+    int st_off = status;
+    const char *catch_all[] = {"AB_SPLIT=1", table_env, NULL};
+    char *on = run_child("other", catch_all, &status);
+    // every call made and AB_OK in the run without AB_SPLIT, and the same lines with it
+    static const char *const OK_LINES[] = {"setup 0\n", "\nab_dgemm 0 ", "\nab_zgemm 0 ", "\nab_batch_dgemm 0 ",
+                                           "\nab_dgemm_async 0 ", "\nab_dev_dgemm 0 ", "\ndgemv_ "};
+    bool all_ok = st_off == 0 && status == 0 && off && on;
+    for (size_t i = 0; all_ok && i < TEST_REGISTRY_SIZE(OK_LINES); i++) all_ok = strstr(off, OK_LINES[i]) != NULL;
+    check(all_ok && !strcmp(off, on), "the other APIs failed or differ with AB_SPLIT on:\n%.400s\nvs\n%.400s",
+          off ? off : "", on ? on : "");
+    free(off);
+    free(on);
+    // the drivers refuse
+    static const struct { const char *bin; const char *args[4]; } DRIVERS[] = {
+        {"calibrate", {"--out", "/nonexistent/calibrate", NULL}},
+        {"replay", {"--mode", "cpu", "/nonexistent/trace", NULL}},
+        {"bench_split", {"run", "sq1x8", "1", "/nonexistent"}},
+    };
+    for (size_t k = 0; k < TEST_REGISTRY_SIZE(DRIVERS); k++) {
+        char bin[PATH_MAX];
+        snprintf(bin, sizeof bin, "%s/%s", AB_BUILD_DIR, DRIVERS[k].bin);
+        char *argv[6] = {bin};
+        for (int a = 0; a < 4 && DRIVERS[k].args[a]; a++) argv[a + 1] = (char *)DRIVERS[k].args[a];
+        char *o = NULL;
+        int rc = spawn_capture(argv, catch_all, &o);
+        check(rc > 0 && o && strstr(o, "AB_SPLIT is set"), "%s ran under AB_SPLIT (status %d): %.200s",
+              DRIVERS[k].bin, rc, o ? o : "");
+        free(o);
+    }
+    // memory growth with MallocNanoZone pinned; not under AddressSanitizer,
+    // whose zone statistics count the bytes ever allocated
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define SPLIT_UNDER_ASAN 1
+#endif
+#endif
+#ifndef SPLIT_UNDER_ASAN
+    const char *mem_env[] = {"AB_SPLIT=1", table_env, "MallocNanoZone=0", NULL};
+    out = run_child("memory", mem_env, &status);
+    long long growth = LLONG_MAX;
+    const char *m = out ? strstr(out, "memory growth ") : NULL;
+    if (m) growth = atoll(m + 14);
+    check(status == 0 && growth <= (1 << 20), "memory grew %lld bytes over 50 split calls", growth);
+    free(out);
+#endif
+    finish();
+}
+
+// =============================================================================
+// Main
+// =============================================================================
+
+static const TestCase TESTS[] = {
+    {"test_split_composition", test_split_composition},
+    {"test_split_accuracy", test_split_accuracy},
+    {"test_split_exponent_range", test_split_exponent_range},
+    {"test_split_determinism", test_split_determinism},
+    {"test_split_worker", test_split_worker},
+    {"test_split_registered_c", test_split_registered_c},
+    {"test_split_caller_fpcr", test_split_caller_fpcr},
+    {"test_split_off", test_split_off},
+    {"test_split_scenarios", test_split_scenarios},
+    {"test_split_veclib", test_split_veclib},
+    {"test_split_fork", test_split_fork},
+    {"test_split_reports", test_split_reports},
+    {"test_split_interactions", test_split_interactions},
+};
+static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
+
+int main(int argc, char **argv) {
+    if (argc == 3 && !strcmp(argv[1], "--child")) {
+        alarm(CHILD_TIMEOUT_S);
+        return child_main(argv[2]);
+    }
+    uint32_t len = sizeof self_path;
+    if (_NSGetExecutablePath(self_path, &len) != 0) {
+        fprintf(stderr, "test_split: cannot resolve executable path\n");
+        return 1;
+    }
+    const char *tmp = getenv("TMPDIR");
+    snprintf(g_dir, sizeof g_dir, "%s/test_split.XXXXXX", tmp && *tmp ? tmp : "/tmp");
+    if (!mkdtemp(g_dir)) {
+        fprintf(stderr, "test_split: mkdtemp failed\n");
+        return 1;
+    }
+    snprintf(g_table, sizeof g_table, "%s/split_table.txt", g_dir);
+    FILE *t = fopen(g_table, "w");
+    if (!t || fputs(TABLE, t) < 0 || fclose(t)) {
+        fprintf(stderr, "test_split: cannot write %s\n", g_table);
+        return 1;
+    }
+    snprintf(g_label, sizeof g_label, "file:%s@" TABLE_SHA256, g_table);
+    clear_ab_env();   // AB_SPLIT and the rest only where a test sets them
+    if (ab_init() != AB_OK) {
+        fprintf(stderr, "test_split: no Metal device\n");
+        return 1;
+    }
+    printf("╔══════════════════════════════════════════════════════════════════╗\n");
+    printf("║  apple-bottom AB_SPLIT: one GEMM on Accelerate and the GPU       ║\n");
+    printf("╚══════════════════════════════════════════════════════════════════╝\n");
+    for (int i = 0; i < N_TESTS; i++) {
+        // test_split <name>...: those tests only (tests/split_defects.py)
+        bool wanted = argc < 2;
+        for (int a = 1; a < argc; a++) wanted = wanted || !strcmp(argv[a], TESTS[i].name);
+        if (!wanted) continue;
+        printf("[%d/%d] %-30s ... ", i + 1, N_TESTS, TESTS[i].name);
+        fflush(stdout);
+        int pre = tests_passed + tests_failed;
+        alarm(TEST_TIMEOUT_S);
+        TESTS[i].fn();
+        alarm(0);
+        if (tests_passed + tests_failed == pre) {
+            fprintf(stderr, "\nFATAL: ghost test — '%s' reported no result\n", TESTS[i].name);
+            abort();
+        }
+    }
+    ab_shutdown();
+
+    printf("\n═══════════════════════════════════════════════════════════════════\n");
+    printf("Results: %d passed, %d failed\n", tests_passed, tests_failed);
+    if (tests_failed == 0) {
+        printf("✓ All %d AB_SPLIT tests PASSED\n", tests_passed);
+        return 0;
+    }
+    printf("✗ Some tests FAILED\n");
+    return 1;
+}

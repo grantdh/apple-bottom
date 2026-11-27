@@ -11,18 +11,24 @@
 //   6. Stream create / sync / destroy doesn't crash
 // and the BLAS entry points: ab_dev_dgemm / ab_dev_zgemm against column-major
 // cblas, ab_dev_zgemm on imbalanced real and imaginary parts against Dot2,
-// plus the element-wise ops.
+// both on the staging pool's reused buffers and on registered, non-page-
+// aligned memory, plus the element-wise ops (results, bounds, BLAS increments).
 //
 // Pass criteria: all assertions hold. Exits non-zero on first failure.
 // =============================================================================
 
+#include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <pthread.h>
 
 #include "apple_bottom.h"
 #include "apple_bottom_device.h"
+#include "ab_internal.h"
+#include "gpu_stage.h"
 #include "test_registry.h"
 
 #define N_ELEMS 1024
@@ -202,6 +208,8 @@ static size_t operand_elems(Operand o) {
     return o.off + (size_t)o.ld * o.cols;
 }
 
+static size_t operand_bytes(Operand o) { return operand_elems(o) * o.w * sizeof(double); }
+
 static bool in_block(Operand o, size_t e) {
     if (e < o.off) return false;
     return (e - o.off) % o.ld < (size_t)o.rows && (e - o.off) / o.ld < (size_t)o.cols;
@@ -209,7 +217,7 @@ static bool in_block(Operand o, size_t e) {
 
 // NaN everywhere; uniform in [-1, 1) inside the block unless nan_block.
 static double* make_operand(Operand o, bool nan_block) {
-    double* X = (double*)malloc(operand_elems(o) * o.w * sizeof(double));
+    double* X = (double*)malloc(operand_bytes(o));
     assert(X);
     for (size_t e = 0; e < operand_elems(o); e++)
         for (int q = 0; q < o.w; q++)
@@ -251,61 +259,92 @@ static void gemm_operands(GemmCase c, int w, Operand* oA, Operand* oB, Operand* 
     *oC = (Operand){c.off, c.m + c.pad, c.m, c.n, w};
 }
 
+// A case's stored operands, from seed 42: NaN outside each block, and in
+// C's for beta = 0, which BLAS must not read.
+typedef struct {
+    bool cplx;
+    GemmCase c;
+    Operand oA, oB, oC;
+    double *A, *B, *C0;
+} GemmData;
+
+static void gemm_data_init(GemmData* g, bool cplx, GemmCase c) {
+    *g = (GemmData){.cplx = cplx, .c = c};
+    gemm_operands(c, cplx ? 2 : 1, &g->oA, &g->oB, &g->oC);
+    srand(42);
+    g->A  = make_operand(g->oA, false);
+    g->B  = make_operand(g->oB, false);
+    g->C0 = make_operand(g->oC, c.beta == 0.0);
+}
+
+static void gemm_data_free(GemmData* g) {
+    free(g->A); free(g->B); free(g->C0);
+}
+
+// g's call on buffers dA, dB and dC, by ab_dev_zgemm (complex) or
+// ab_dev_dgemm, their _offset forms for c.off != 0.
+static ABStatus gemm_data_call(const GemmData* g, ab_dev_buffer_t dA, ab_dev_buffer_t dB,
+                               ab_dev_buffer_t dC) {
+    const GemmCase c = g->c;
+    const int lda = g->oA.ld, ldb = g->oB.ld, ldc = g->oC.ld;
+    if (g->cplx) {
+        double alpha[2] = {creal(c.alpha), cimag(c.alpha)};
+        double beta[2]  = {creal(c.beta), cimag(c.beta)};
+        return c.off ? ab_dev_zgemm_offset(c.ta, c.tb, c.m, c.n, c.k, alpha,
+                                           dA, c.off, lda, dB, c.off, ldb, beta, dC, c.off, ldc)
+                     : ab_dev_zgemm(c.ta, c.tb, c.m, c.n, c.k, alpha,
+                                    dA, lda, dB, ldb, beta, dC, ldc);
+    }
+    return c.off ? ab_dev_dgemm_offset(c.ta, c.tb, c.m, c.n, c.k, creal(c.alpha),
+                                       dA, c.off, lda, dB, c.off, ldb,
+                                       creal(c.beta), dC, c.off, ldc)
+                 : ab_dev_dgemm(c.ta, c.tb, c.m, c.n, c.k, creal(c.alpha),
+                                dA, lda, dB, ldb, creal(c.beta), dC, ldc);
+}
+
+// g's call on device copies of A (every double a NaN if nan_a), B and C0; C,
+// A and B as the call leaves them go into C, A1 and B1 where not NULL.
+static ABStatus gemm_data_run(const GemmData* g, bool nan_a, double* C, double* A1, double* B1) {
+    size_t bA = operand_bytes(g->oA), bB = operand_bytes(g->oB), bC = operand_bytes(g->oC);
+    ab_dev_buffer_t dA = ab_dev_malloc(bA), dB = ab_dev_malloc(bB), dC = ab_dev_malloc(bC);
+    assert(dA && dB && dC);
+    ab_dev_memcpy_h2d(dA, 0, g->A, bA);
+    if (nan_a) ab_dev_memset(dA, 0, 0xFF, bA);
+    ab_dev_memcpy_h2d(dB, 0, g->B, bB);
+    ab_dev_memcpy_h2d(dC, 0, g->C0, bC);
+
+    ABStatus s = gemm_data_call(g, dA, dB, dC);
+    if (C)  ab_dev_memcpy_d2h(C, dC, 0, bC);
+    if (A1) ab_dev_memcpy_d2h(A1, dA, 0, bA);
+    if (B1) ab_dev_memcpy_d2h(B1, dB, 0, bB);
+    ab_dev_free(dA); ab_dev_free(dB); ab_dev_free(dC);
+    return s;
+}
+
 // One ab_dev_dgemm / ab_dev_zgemm call against cblas ColMajor (3 CHECKs).
 static void check_gemm(bool cplx, GemmCase c) {
-    int w = cplx ? 2 : 1;
-    Operand oA, oB, oC;
-    gemm_operands(c, w, &oA, &oB, &oC);
-    size_t bytesA = operand_elems(oA) * w * sizeof(double);
-    size_t bytesB = operand_elems(oB) * w * sizeof(double);
-    size_t bytesC = operand_elems(oC) * w * sizeof(double);
-
-    srand(42);
-    double* A    = make_operand(oA, false);
-    double* B    = make_operand(oB, false);
-    double* C0   = make_operand(oC, c.beta == 0.0);
+    GemmData g;
+    gemm_data_init(&g, cplx, c);
+    const Operand oA = g.oA, oB = g.oB, oC = g.oC;
+    size_t bytesA = operand_bytes(oA), bytesB = operand_bytes(oB), bytesC = operand_bytes(oC);
     double* Cref = (double*)malloc(bytesC);
     double* C    = (double*)malloc(bytesC);
     double* A1   = (double*)malloc(bytesA);
     double* B1   = (double*)malloc(bytesB);
     assert(Cref && C && A1 && B1);
-    memcpy(Cref, C0, bytesC);
+    memcpy(Cref, g.C0, bytesC);
 
-    ab_dev_buffer_t dA = ab_dev_malloc(bytesA);
-    ab_dev_buffer_t dB = ab_dev_malloc(bytesB);
-    ab_dev_buffer_t dC = ab_dev_malloc(bytesC);
-    assert(dA && dB && dC);
-    ab_dev_memcpy_h2d(dA, 0, A, bytesA);
-    ab_dev_memcpy_h2d(dB, 0, B, bytesB);
-    ab_dev_memcpy_h2d(dC, 0, C0, bytesC);
-
-    ABStatus s;
-    if (cplx) {
+    if (cplx)
         cblas_zgemm(CblasColMajor, ref_trans(c.ta, true), ref_trans(c.tb, true),
                     c.m, c.n, c.k, &c.alpha,
-                    (double complex*)A + c.off, oA.ld,
-                    (double complex*)B + c.off, oB.ld,
+                    (double complex*)g.A + c.off, oA.ld,
+                    (double complex*)g.B + c.off, oB.ld,
                     &c.beta, (double complex*)Cref + c.off, oC.ld);
-        double alpha[2] = {creal(c.alpha), cimag(c.alpha)};
-        double beta[2]  = {creal(c.beta), cimag(c.beta)};
-        s = c.off ? ab_dev_zgemm_offset(c.ta, c.tb, c.m, c.n, c.k, alpha,
-                                        dA, c.off, oA.ld, dB, c.off, oB.ld,
-                                        beta, dC, c.off, oC.ld)
-                  : ab_dev_zgemm(c.ta, c.tb, c.m, c.n, c.k, alpha,
-                                 dA, oA.ld, dB, oB.ld, beta, dC, oC.ld);
-    } else {
+    else
         cblas_dgemm(CblasColMajor, ref_trans(c.ta, false), ref_trans(c.tb, false),
-                    c.m, c.n, c.k, creal(c.alpha), A + c.off, oA.ld,
-                    B + c.off, oB.ld, creal(c.beta), Cref + c.off, oC.ld);
-        s = c.off ? ab_dev_dgemm_offset(c.ta, c.tb, c.m, c.n, c.k, creal(c.alpha),
-                                        dA, c.off, oA.ld, dB, c.off, oB.ld,
-                                        creal(c.beta), dC, c.off, oC.ld)
-                  : ab_dev_dgemm(c.ta, c.tb, c.m, c.n, c.k, creal(c.alpha),
-                                 dA, oA.ld, dB, oB.ld, creal(c.beta), dC, oC.ld);
-    }
-    ab_dev_memcpy_d2h(C, dC, 0, bytesC);
-    ab_dev_memcpy_d2h(A1, dA, 0, bytesA);
-    ab_dev_memcpy_d2h(B1, dB, 0, bytesB);
+                    c.m, c.n, c.k, creal(c.alpha), g.A + c.off, oA.ld,
+                    g.B + c.off, oB.ld, creal(c.beta), Cref + c.off, oC.ld);
+    ABStatus s = gemm_data_run(&g, false, C, A1, B1);
 
     char label[96], msg[192];
     snprintf(label, sizeof(label), "%s %s%s %dx%dx%d pad %d off %zu%s",
@@ -320,11 +359,11 @@ static void check_gemm(bool cplx, GemmCase c) {
     CHECK(err <= GEMM_TOL, msg);  // false for NaN
 
     snprintf(msg, sizeof(msg), "%s: A, B and C outside its block unchanged", label);
-    CHECK(!memcmp(A1, A, bytesA) && !memcmp(B1, B, bytesB) &&
-          outside_block_unchanged(oC, C, C0), msg);
+    CHECK(!memcmp(A1, g.A, bytesA) && !memcmp(B1, g.B, bytesB) &&
+          outside_block_unchanged(oC, C, g.C0), msg);
 
-    ab_dev_free(dA); ab_dev_free(dB); ab_dev_free(dC);
-    free(A); free(B); free(C0); free(Cref); free(C); free(A1); free(B1);
+    gemm_data_free(&g);
+    free(Cref); free(C); free(A1); free(B1);
 }
 
 static const ABTranspose ALL_TRANS[] = {AB_NO_TRANS, AB_TRANS, AB_CONJ_TRANS};
@@ -550,9 +589,7 @@ static void check_imbalance(GemmCase c, ImagData d) {
     const double alpha = creal(c.alpha);
     Operand oA, oB, oC;
     gemm_operands(c, 2, &oA, &oB, &oC);
-    size_t bytesA = operand_elems(oA) * 2 * sizeof(double);
-    size_t bytesB = operand_elems(oB) * 2 * sizeof(double);
-    size_t bytesC = operand_elems(oC) * 2 * sizeof(double);
+    size_t bytesA = operand_bytes(oA), bytesB = operand_bytes(oB), bytesC = operand_bytes(oC);
 
     srand(11);
     double* A = make_operand(oA, false);
@@ -633,6 +670,417 @@ static void test_zgemm_imbalance(void) {
                     IMAG_LINES);
 }
 
+// The GEMMs take their ABMatrix handles from the staged path's pool
+// (gpu_stage.h), whose buffers hold what their last call left. A call
+// repeated must leave the pool as it was, and each call must give the bits
+// of its first run again after the pool served NaN data (which a beta = 0
+// call must not read), larger and smaller shapes, and from threads calling
+// at once.
+enum { POOL_CALLS = 4, POOL_THREADS = 4 };
+
+typedef struct { GemmData g; double* first; } PoolCall;    // a call and its first C
+
+// p's call again: its first bits?
+static bool pool_call_same(const PoolCall* p) {
+    size_t bytes = operand_bytes(p->g.oC);
+    double* C = (double*)malloc(bytes);
+    assert(C);
+    bool same = gemm_data_run(&p->g, false, C, NULL, NULL) == AB_OK &&
+                !memcmp(C, p->first, bytes);
+    free(C);
+    return same;
+}
+
+typedef struct { const PoolCall* calls; int differ; } PoolThread;
+
+static void* pool_thread(void* arg) {
+    PoolThread* t = (PoolThread*)arg;
+    for (int r = 0; r < 2; r++)
+        for (int i = 0; i < POOL_CALLS; i++) t->differ += !pool_call_same(&t->calls[i]);
+    return NULL;
+}
+
+static void test_gemm_pool(void) {
+    printf("[GEMM-11] device GEMM handles from the staging pool\n");
+    // QE's patterns: zgemm 'C','N' and dgemm 'T','N' with beta = 0, and
+    // 'N','N' with general alpha and beta.
+    PoolCall p[POOL_CALLS];
+    gemm_data_init(&p[0].g, true, (GemmCase){AB_CONJ_TRANS, AB_NO_TRANS, 150, 150, 2000, 4, 0,
+                                             1.0, 0.0});
+    gemm_data_init(&p[1].g, true, (GemmCase){AB_NO_TRANS, AB_NO_TRANS, 2000, 150, 150, 3, 5,
+                                             CMPLX(1.25, -0.5), CMPLX(-0.75, 0.25)});
+    gemm_data_init(&p[2].g, false, (GemmCase){AB_TRANS, AB_NO_TRANS, 150, 150, 4000, 2, 0,
+                                              1.0, 0.0});
+    gemm_data_init(&p[3].g, false, (GemmCase){AB_NO_TRANS, AB_NO_TRANS, 4000, 150, 150, 1, 3,
+                                              1.25, -0.75});
+    for (int i = 0; i < POOL_CALLS; i++) {
+        p[i].first = (double*)malloc(operand_bytes(p[i].g.oC));
+        assert(p[i].first);
+    }
+
+    int bad = gemm_data_run(&p[0].g, false, p[0].first, NULL, NULL) != AB_OK;
+    size_t pool = ab_internal_stage_pool_bytes();
+    CHECK(!bad && pool > 0, "zgemm CN 150x150x2000: the pool holds buffers after it");
+    CHECK(pool_call_same(&p[0]) && ab_internal_stage_pool_bytes() == pool,
+          "zgemm CN repeated: its first bits, the pool as it was");
+
+    // A call repeated gets the same buffers in the same roles, so C^T's holds
+    // the NaN result of the call before.
+    bad = 0;
+    for (int i = 1; i < POOL_CALLS; i++)
+        bad += gemm_data_run(&p[i].g, false, p[i].first, NULL, NULL) != AB_OK;
+    for (int i = 0; i < POOL_CALLS; i += 2)
+        bad += gemm_data_run(&p[i].g, true, NULL, NULL, NULL) != AB_OK || !pool_call_same(&p[i]);
+    CHECK(!bad, "zgemm CN and dgemm TN (beta 0) right after NaN data: their first bits");
+
+    // A larger and a smaller shape, each against cblas
+    check_gemm(true, (GemmCase){AB_NO_TRANS, AB_CONJ_TRANS, 1024, 512, 768, 0, 0, 1.0, 0.0});
+    check_gemm(false, (GemmCase){AB_NO_TRANS, AB_TRANS, 40, 30, 50, 1, 0, 1.0, 1.0});
+    bad = 0;
+    for (int i = 0; i < POOL_CALLS; i++) bad += !pool_call_same(&p[i]);
+    CHECK(!bad, "zgemm CN, NN and dgemm TN, NN after larger and smaller shapes: "
+                "their first bits");
+
+    PoolThread t[POOL_THREADS];
+    pthread_t th[POOL_THREADS];
+    for (int i = 0; i < POOL_THREADS; i++) {
+        t[i] = (PoolThread){p, 0};
+        pthread_create(&th[i], NULL, pool_thread, &t[i]);
+    }
+    bad = 0;
+    for (int i = 0; i < POOL_THREADS; i++) {
+        pthread_join(th[i], NULL);
+        bad += t[i].differ;
+    }
+    CHECK(!bad, "4 threads at once, each call twice: their first bits");
+
+    for (int i = 0; i < POOL_CALLS; i++) {
+        gemm_data_free(&p[i].g);
+        free(p[i].first);
+    }
+}
+
+// ---- GEMM on registered memory ----------------------------------------------
+//
+// ab_dev_register() wraps the pages around the caller's memory and keeps the
+// distance to it as the buffer's base, which every host read or write of the
+// buffer must add (dev_data() in src/device_api.m). Each operand here starts
+// `misalign` bytes past a page, with whole pages of sentinels on both sides, so
+// that a pointer missing the base lands in a sentinel or leaves C wrong. The
+// result must be bitwise that of the same call on ab_dev_malloc() buffers,
+// which check_gemm holds to cblas.
+
+#define REG_PAD 4096                // sentinel doubles on each side: 2 pages of 16 KB
+#define REG_SENTINEL (-123.456)
+
+// bytes of x at `misalign` bytes past a page, between sentinels; *raw is to free().
+static double* reg_block(const double* x, size_t bytes, size_t misalign, void** raw) {
+    size_t n = bytes / sizeof(double);
+    int rc = posix_memalign(raw, 16384, (n + 2 * REG_PAD) * sizeof(double) + misalign);
+    assert(rc == 0);
+    (void)rc;
+    double* p = (double*)((char*)*raw + misalign);
+    for (size_t i = 0; i < n + 2 * REG_PAD; i++) p[i] = REG_SENTINEL;
+    memcpy(p + REG_PAD, x, bytes);
+    return p + REG_PAD;
+}
+
+static bool reg_sentinels_intact(const double* x, size_t bytes) {
+    size_t n = bytes / sizeof(double);
+    for (size_t i = 0; i < REG_PAD; i++)
+        if (x[n + i] != REG_SENTINEL || (x - REG_PAD)[i] != REG_SENTINEL) return false;
+    return true;
+}
+
+// Whether g's call on registered memory gives the bits of the call on allocated
+// buffers, with A, B and every sentinel left alone.
+static bool reg_call_same(const GemmData* g, size_t misalign) {
+    size_t bA = operand_bytes(g->oA), bB = operand_bytes(g->oB), bC = operand_bytes(g->oC);
+    double* ref = (double*)malloc(bC);
+    assert(ref);
+    bool ok = gemm_data_run(g, false, ref, NULL, NULL) == AB_OK;
+    void *ra, *rb, *rc;
+    double* A = reg_block(g->A, bA, misalign, &ra);
+    double* B = reg_block(g->B, bB, misalign, &rb);
+    double* C = reg_block(g->C0, bC, misalign, &rc);
+    ab_dev_buffer_t dA = ab_dev_register(A, bA), dB = ab_dev_register(B, bB),
+                    dC = ab_dev_register(C, bC);
+    ok = ok && dA && dB && dC && gemm_data_call(g, dA, dB, dC) == AB_OK;
+    ab_dev_free(dA); ab_dev_free(dB); ab_dev_free(dC);
+    ok = ok && !memcmp(C, ref, bC) && !memcmp(A, g->A, bA) && !memcmp(B, g->B, bB) &&
+         reg_sentinels_intact(A, bA) && reg_sentinels_intact(B, bB) && reg_sentinels_intact(C, bC);
+    free(ra); free(rb); free(rc); free(ref);
+    return ok;
+}
+
+static void test_gemm_registered(void) {
+    printf("[GEMM-12] device GEMM on registered, non-page-aligned memory\n");
+    static const size_t MISALIGN[] = {8, 24, 4088, 12344};
+    static const struct { const char* name; double complex alpha, beta; } SC[] = {
+        {"alpha 1, beta 0", 1.0, 0.0},
+        {"real alpha and beta", 0.75, -2.0},
+        {"complex alpha and beta", CMPLX(0.3, -1.1), CMPLX(0.25, 0.5)},
+    };
+    int calls = 0;
+    for (int z = 0; z < 2; z++)
+        for (int s = 0; s < 2 + z; s++) {           // a real GEMM has no complex scalars
+            int bad = 0, n = 0;
+            for (int i = 0; i < 3; i++)
+                for (int j = 0; j < 3; j++)
+                    for (size_t off = 0; off <= 13; off += 13) {
+                        GemmData g;
+                        gemm_data_init(&g, z, (GemmCase){ALL_TRANS[i], ALL_TRANS[j], 97, 65, 129, 7,
+                                                         off, SC[s].alpha, SC[s].beta});
+                        bad += !reg_call_same(&g, MISALIGN[calls++ % 4]);
+                        n++;
+                        gemm_data_free(&g);
+                    }
+            char msg[128];
+            snprintf(msg, sizeof msg, "%s, %s: %d calls, every trans pair, with and without offsets",
+                     z ? "zgemm" : "dgemm", SC[s].name, n);
+            CHECK(!bad, msg);
+        }
+    // A tall-skinny C, whose kernel and epilogue the shape above does not reach
+    for (int z = 0; z < 2; z++) {
+        GemmData g;
+        gemm_data_init(&g, z, (GemmCase){AB_NO_TRANS, AB_NO_TRANS, 1024, 40, 4608, 7, 13,
+                                         SC[1 + z].alpha, SC[1 + z].beta});
+        CHECK(reg_call_same(&g, MISALIGN[z]), z ? "zgemm 1024x40x4608" : "dgemm 1024x40x4608");
+        gemm_data_free(&g);
+    }
+}
+
+// The native scale of a matrix holding values below 2^-1042, whose FP64 high
+// word is 0. They count at their own exponents when the whole span, theirs
+// included, is within 2^78 (exponents at most 78 apart), so that the matrix
+// is centred; a wider span keeps the scale the other values give it. The
+// 2x2x2 data is the ULP Fiction counterexample (A = [[0, t], [2^-997, 0]],
+// for which C_00 came back 2.0e5 times the bound with AB_OK) and variants of
+// it; each C entry has at most one product, checked against ULP Fiction's
+// bound for native ab_dgemm, (3K + 19) u^2 |A||B| + 2^-53 |C| + 2^-1074,
+// by Dot2.
+
+enum { TS = 2 };                                    // M = N = K
+#define TINY_T (177571.0 * 0x1p-1074)               // 0x1.5ad18p-1057: high word 0
+#define TS_BOUND ((3 * TS + 19) * U2)
+static const double TS_B[TS * TS] = {0x1p1023, 0.0, 0x1p945 * 1.7382651127463331, 0.0};
+
+// max over C of |C - A B| / ((3K + 19) u^2 |A||B| + 2^-53 |C| + 2^-1074),
+// row-major TS x TS, A B by Dot2.
+static double tiny_span_ratio(const double* A, const double* B, const double* C) {
+    double worst = 0.0;
+    for (int i = 0; i < TS; i++)
+        for (int j = 0; j < TS; j++) {
+            double s = 0.0, e = 0.0, ab = 0.0;
+            for (int k = 0; k < TS; k++) {
+                dot2_step(&s, &e, A[i * TS + k], B[k * TS + j]);
+                ab += fabs(A[i * TS + k] * B[k * TS + j]);
+            }
+            const double c = C[i * TS + j];
+            worst = fmax(worst, fabs((c - s) - e) / (TS_BOUND * ab + 0x1p-53 * fabs(c) + 0x1p-1074));
+        }
+    return worst;
+}
+
+// Whether Re(C) and Im(C), interleaved column-major, are each within GEMM_TOL
+// of A B (split complex, row-major TS x TS), in their own scales.
+static bool tiny_span_complex_ok(const double* Ar, const double* Ai, const double* Br,
+                                 const double* Bi, const double* C) {
+    double err[2];
+    dot2_zgemm_parts_err(TS, TS, TS, Ar, Ai, Br, Bi, 1.0, C, TS, err);
+    return err[0] <= GEMM_TOL && err[1] <= GEMM_TOL;
+}
+
+// C = A B through handles (row-major A, B, C); *ea receives A's scale.
+static ABStatus tiny_span_dgemm(const double* A, const double* B, double* C, int* ea) {
+    ABMatrix mA = ab_matrix_create(TS, TS), mB = ab_matrix_create(TS, TS);
+    ABMatrix mC = ab_matrix_create(TS, TS);
+    assert(mA && mB && mC);
+    ABStatus s = ab_matrix_upload(mA, A, false);
+    if (s == AB_OK) s = ab_matrix_upload(mB, B, false);
+    if (s == AB_OK) s = ab_dgemm(mA, mB, mC);
+    if (s == AB_OK) s = ab_matrix_download(mC, C, false);
+    *ea = ab_internal_matrix_scale(mA);
+    ab_matrix_destroy(mA); ab_matrix_destroy(mB); ab_matrix_destroy(mC);
+    return s;
+}
+
+// TS x TS X transposed into Xt, w doubles per element: row-major to
+// column-major and back.
+static void tiny_span_transpose(const double* X, double* Xt, int w) {
+    for (int i = 0; i < TS; i++)
+        for (int j = 0; j < TS; j++)
+            for (int p = 0; p < w; p++) Xt[(j * TS + i) * w + p] = X[(i * TS + j) * w + p];
+}
+
+static void test_native_tiny_span(void) {
+    printf("[GEMM-13] native scale of values below 2^-1042, handles and device buffers\n");
+    const double t = TINY_T;
+    const double cex[TS * TS] = {0.0, t, 0x1p-997, 0.0};        // span 2^59.6: centred
+    const double under[TS * TS] = {0.0, t, 0x1.8p-979, 0.0};    // exponents 78 apart: centred
+    const double over[TS * TS] = {0.0, t, 0x1.8p-978, 0.0};     // 79 apart: the others' scale
+    double C[TS * TS], Cref[TS * TS];
+    int ea = 0;
+
+    ABStatus s = tiny_span_dgemm(cex, TS_B, C, &ea);
+    CHECK(s == AB_OK && ea == -1024 &&
+          tiny_span_ratio(cex, TS_B, C) <= 1.0,
+          "ab_dgemm on the counterexample: A centred (scale -1024), C within the bound");
+    s = tiny_span_dgemm(under, TS_B, C, &ea);
+    CHECK(s == AB_OK && ea == -1018 &&
+          tiny_span_ratio(under, TS_B, C) <= 1.0,
+          "ab_dgemm, A's exponents 78 apart: centred (scale -1018), C within the bound");
+
+    // 79 apart: the scale 2^-978 alone gives (-976), and the bits of A
+    // stored at it with scale 0 (ab_internal_upload_scaled), times 2^-976
+    s = tiny_span_dgemm(over, TS_B, C, &ea);
+    {
+        ABMatrix mA = ab_matrix_create(TS, TS), mB = ab_matrix_create(TS, TS);
+        ABMatrix mC = ab_matrix_create(TS, TS);
+        assert(mA && mB && mC);
+        ABStatus r = ab_internal_upload_scaled(mA, over, NULL, NULL, -976, NULL);
+        if (r == AB_OK) r = ab_matrix_upload(mB, TS_B, false);
+        if (r == AB_OK) r = ab_dgemm(mA, mB, mC);
+        if (r == AB_OK) r = ab_matrix_download(mC, Cref, false);
+        for (int i = 0; i < TS * TS; i++) Cref[i] = ldexp(Cref[i], -976);
+        ab_matrix_destroy(mA); ab_matrix_destroy(mB); ab_matrix_destroy(mC);
+        CHECK(s == AB_OK && r == AB_OK && ea == -976 && !memcmp(C, Cref, sizeof C),
+              "ab_dgemm, A's exponents 79 apart: the others' scale (-976) and its bits");
+    }
+
+    // Only values below 2^-1042: centred on their own exponents
+    {
+        const double only[TS * TS] = {5 * 0x1p-1074, 0.0, 0.0, 5 * 0x1p-1074};
+        const double B[TS * TS] = {0x1p1000, 0.0, 0.0, 0x1p1000};
+        s = tiny_span_dgemm(only, B, C, &ea);
+        CHECK(s == AB_OK && ea == -1072 &&
+              tiny_span_ratio(only, B, C) <= 1.0,
+              "ab_dgemm, A only of values below 2^-1042: their own centre (scale -1072)");
+    }
+
+    // Ordinary values with one stray value below 2^-1042: scale 0 and the
+    // bits of the same A with that value 0 (stored as 0 either way); B at
+    // 2^10, so that a scale taking A to FP32's top would overflow
+    {
+        enum { S = 8 };
+        double A[S * S], A0[S * S], B[S * S], Cs[S * S], C0[S * S];
+        srand(13);
+        for (int i = 0; i < S * S; i++) {
+            A[i] = A0[i] = rand_double();
+            B[i] = 0x1p10 * rand_double();
+        }
+        A[3] = t;
+        A0[3] = 0.0;
+        ABMatrix mA = ab_matrix_create(S, S), mA0 = ab_matrix_create(S, S);
+        ABMatrix mB = ab_matrix_create(S, S), mC = ab_matrix_create(S, S);
+        assert(mA && mA0 && mB && mC);
+        s = ab_matrix_upload(mA, A, false);
+        if (s == AB_OK) s = ab_matrix_upload(mA0, A0, false);
+        if (s == AB_OK) s = ab_matrix_upload(mB, B, false);
+        if (s == AB_OK) s = ab_dgemm(mA, mB, mC);
+        if (s == AB_OK) s = ab_matrix_download(mC, Cs, false);
+        if (s == AB_OK) s = ab_dgemm(mA0, mB, mC);
+        if (s == AB_OK) s = ab_matrix_download(mC, C0, false);
+        CHECK(s == AB_OK && ab_internal_matrix_scale(mA) == 0 && !memcmp(Cs, C0, sizeof Cs),
+              "ab_dgemm, ordinary A with one value below 2^-1042: scale 0, the bits without it");
+        ab_matrix_destroy(mA); ab_matrix_destroy(mA0); ab_matrix_destroy(mB); ab_matrix_destroy(mC);
+    }
+
+    // The device API's operands go through handles. A row-major array is the
+    // column-major transpose: NN on (B^T, A^T) gives C^T, row-major C, and
+    // converts A^T by rows; TT on (A^T, B^T) converts them by columns.
+    {
+        double Cc[TS * TS];
+        const size_t b = sizeof Cc;
+        ab_dev_buffer_t dA = ab_dev_malloc(b), dB = ab_dev_malloc(b), dC = ab_dev_malloc(b);
+        assert(dA && dB && dC);
+        ab_dev_memcpy_h2d(dA, 0, cex, b);
+        ab_dev_memcpy_h2d(dB, 0, TS_B, b);
+        s = ab_dev_dgemm(AB_NO_TRANS, AB_NO_TRANS, TS, TS, TS, 1.0, dB, TS, dA, TS, 0.0, dC, TS);
+        ab_dev_memcpy_d2h(C, dC, 0, b);
+        CHECK(s == AB_OK && tiny_span_ratio(cex, TS_B, C) <= 1.0,
+              "ab_dev_dgemm NN on the counterexample: C within the bound");
+        s = ab_dev_dgemm(AB_TRANS, AB_TRANS, TS, TS, TS, 1.0, dA, TS, dB, TS, 0.0, dC, TS);
+        ab_dev_memcpy_d2h(Cc, dC, 0, b);
+        tiny_span_transpose(Cc, C, 1);
+        CHECK(s == AB_OK && tiny_span_ratio(cex, TS_B, C) <= 1.0,
+              "ab_dev_dgemm TT on the counterexample: C within the bound");
+        ab_dev_free(dA); ab_dev_free(dB); ab_dev_free(dC);
+    }
+
+    // Complex: Ai = 3/4 Ar and Bi = 1/2 Br, each part the counterexample's
+    // pattern (both A parts centred at -1024); through handles, then device
+    // buffers with alpha = 1, beta = 0. Last, a regression check of the
+    // epilogue's alpha and beta on these operands (alpha = 2; beta = 1 on
+    // C = that result), which must give exactly twice it. It passes without
+    // the fix: no C can tell the epilogue's two scales apart (see
+    // ab_internal_zgemm_epilogue).
+    {
+        double Ai[TS * TS], Bi[TS * TS], Cr[TS * TS], Ci[TS * TS];
+        for (int i = 0; i < TS * TS; i++) {
+            Ai[i] = 0.75 * cex[i];
+            Bi[i] = 0.5 * TS_B[i];
+        }
+        ABMatrix h[6];
+        for (int i = 0; i < 6; i++) {
+            h[i] = ab_matrix_create(TS, TS);
+            assert(h[i]);
+        }
+        s = ab_matrix_upload(h[0], cex, false);
+        if (s == AB_OK) s = ab_matrix_upload(h[1], Ai, false);
+        if (s == AB_OK) s = ab_matrix_upload(h[2], TS_B, false);
+        if (s == AB_OK) s = ab_matrix_upload(h[3], Bi, false);
+        if (s == AB_OK) s = ab_zgemm(h[0], h[1], h[2], h[3], h[4], h[5]);
+        if (s == AB_OK) s = ab_matrix_download(h[4], Cr, false);
+        if (s == AB_OK) s = ab_matrix_download(h[5], Ci, false);
+        double Cz[2 * TS * TS];                                 // interleaved, column-major
+        for (int i = 0; i < TS; i++)
+            for (int j = 0; j < TS; j++) {
+                Cz[2 * (j * TS + i)] = Cr[i * TS + j];
+                Cz[2 * (j * TS + i) + 1] = Ci[i * TS + j];
+            }
+        CHECK(s == AB_OK && ab_internal_matrix_scale(h[0]) == -1024 &&
+              ab_internal_matrix_scale(h[1]) == -1024 &&
+              tiny_span_complex_ok(cex, Ai, TS_B, Bi, Cz),
+              "ab_zgemm on the complex counterexample: A's parts centred, C within tolerance");
+        for (int i = 0; i < 6; i++) ab_matrix_destroy(h[i]);
+
+        double A2[2 * TS * TS], B2[2 * TS * TS], Az[2 * TS * TS], Bz[2 * TS * TS];
+        double C1[2 * TS * TS], C2[2 * TS * TS];
+        for (int i = 0; i < TS * TS; i++) {
+            A2[2 * i] = cex[i];
+            A2[2 * i + 1] = Ai[i];
+            B2[2 * i] = TS_B[i];
+            B2[2 * i + 1] = Bi[i];
+        }
+        tiny_span_transpose(A2, Az, 2);
+        tiny_span_transpose(B2, Bz, 2);
+        const size_t b = sizeof Az;
+        ab_dev_buffer_t dA = ab_dev_malloc(b), dB = ab_dev_malloc(b), dC = ab_dev_malloc(b);
+        assert(dA && dB && dC);
+        ab_dev_memcpy_h2d(dA, 0, Az, b);
+        ab_dev_memcpy_h2d(dB, 0, Bz, b);
+        const double one[2] = {1.0, 0.0}, two[2] = {2.0, 0.0}, zero[2] = {0.0, 0.0};
+        s = ab_dev_zgemm(AB_NO_TRANS, AB_NO_TRANS, TS, TS, TS, one, dA, TS, dB, TS, zero, dC, TS);
+        ab_dev_memcpy_d2h(C1, dC, 0, b);
+        CHECK(s == AB_OK && tiny_span_complex_ok(cex, Ai, TS_B, Bi, C1),
+              "ab_dev_zgemm NN on the complex counterexample: C within tolerance");
+        ABStatus s2 =
+            ab_dev_zgemm(AB_NO_TRANS, AB_NO_TRANS, TS, TS, TS, two, dA, TS, dB, TS, zero, dC, TS);
+        ab_dev_memcpy_d2h(C2, dC, 0, b);
+        bool doubled = true;
+        for (int i = 0; i < 2 * TS * TS; i++) doubled = doubled && C2[i] == 2.0 * C1[i];
+        ab_dev_memcpy_h2d(dC, 0, C1, b);
+        ABStatus s3 =
+            ab_dev_zgemm(AB_NO_TRANS, AB_NO_TRANS, TS, TS, TS, one, dA, TS, dB, TS, one, dC, TS);
+        ab_dev_memcpy_d2h(C2, dC, 0, b);
+        for (int i = 0; i < 2 * TS * TS; i++) doubled = doubled && C2[i] == 2.0 * C1[i];
+        CHECK(s2 == AB_OK && s3 == AB_OK && doubled,
+              "ab_dev_zgemm through the epilogue (alpha = 2; beta = 1 on C = A B): exactly 2 A B");
+        ab_dev_free(dA); ab_dev_free(dB); ab_dev_free(dC);
+    }
+}
+
 // Test element-wise operations
 static void test_elementwise(void) {
     printf("[BLAS-3] element-wise ops\n");
@@ -675,6 +1123,98 @@ static void test_elementwise(void) {
     ab_dev_free(dx); ab_dev_free(dy);
 }
 
+#define EW_N 8   // complex elements in each element-wise test buffer
+
+// y0 + alpha x[jx[i]] at y[jy[i]] for i < n, in order: the hand reference.
+// The data are small integers, so every value is exact.
+static void axpy_hand(double* y, const double* x, const double alpha[2], int n,
+                      const size_t* jx, const size_t* jy) {
+    for (int i = 0; i < n; i++) {
+        const double xr = x[2 * jx[i]], xi = x[2 * jx[i] + 1];
+        y[2 * jy[i]] += alpha[0] * xr - alpha[1] * xi;
+        y[2 * jy[i] + 1] += alpha[0] * xi + alpha[1] * xr;
+    }
+}
+
+// The element-wise ops on registered memory between sentinels: a vector one
+// element past its buffer, or any way out of it, returns INVALID_ARG with the
+// buffers and the sentinels bitwise unchanged; negative and zero increments
+// follow BLAS (reference ZAXPY), checked against hand-written indices.
+static void test_elementwise_bounds(void) {
+    printf("[BLAS-3] element-wise ops: bounds, BLAS increments\n");
+    const size_t bytes = 2 * EW_N * sizeof(double);
+    double x0[2 * EW_N], y0[2 * EW_N];
+    for (int k = 0; k < EW_N; k++) {
+        x0[2 * k] = k + 1;   x0[2 * k + 1] = -(k + 1) * 4;
+        y0[2 * k] = 100 * k; y0[2 * k + 1] = 1000 + k;
+    }
+    void *rx, *ry;
+    double* x = reg_block(x0, bytes, 16, &rx);
+    double* y = reg_block(y0, bytes, 16, &ry);
+    ab_dev_buffer_t dx = ab_dev_register(x, bytes), dy = ab_dev_register(y, bytes);
+    CHECK(dx && dy, "registered two 8-element complex buffers");
+    if (!dx || !dy) { ab_dev_free(dx); ab_dev_free(dy); free(rx); free(ry); return; }
+    const double a[2] = {2.0, 1.0};
+    const ABStatus bad = AB_ERROR_INVALID_ARG;
+
+    CHECK(ab_dev_conjg_c(dx, 0, EW_N + 1) == bad && ab_dev_conjg_c(dx, 1, EW_N) == bad &&
+          ab_dev_conjg_c(dx, EW_N, 1) == bad && ab_dev_conjg_c(dx, SIZE_MAX, 2) == bad &&
+          ab_dev_conjg_c(dx, 2, SIZE_MAX) == bad,
+          "conjg_c: n or offset one past the end (or wrapping) is INVALID_ARG");
+    CHECK(ab_dev_scale_z(dx, 0, EW_N + 1, a) == bad && ab_dev_scale_z(dx, 1, EW_N, a) == bad &&
+          ab_dev_scale_z(dx, EW_N, 1, a) == bad && ab_dev_scale_z(dx, SIZE_MAX, 2, a) == bad,
+          "scale_z: n or offset one past the end (or wrapping) is INVALID_ARG");
+    CHECK(ab_dev_axpy_z(EW_N + 1, a, dx, 0, 1, dy, 0, 1) == bad &&
+          ab_dev_axpy_z(5, a, dx, 0, 2, dy, 0, 1) == bad &&
+          ab_dev_axpy_z(5, a, dx, 0, -2, dy, 0, 1) == bad &&
+          ab_dev_axpy_z(4, a, dx, 2, 2, dy, 0, 1) == bad &&
+          ab_dev_axpy_z(4, a, dx, 0, 1, dy, 5, 1) == bad &&
+          ab_dev_axpy_z(3, a, dx, 0, 1, dy, 0, -4) == bad &&
+          ab_dev_axpy_z(2, a, dx, 0, INT_MIN, dy, 0, 1) == bad &&
+          ab_dev_axpy_z(2, a, dx, 0, 1, dy, 0, INT_MAX) == bad &&
+          ab_dev_axpy_z(1, a, dx, EW_N, 0, dy, 0, 1) == bad,
+          "axpy_z: x or y one past the end (either sign of increment) is INVALID_ARG");
+    CHECK(!memcmp(x, x0, bytes) && !memcmp(y, y0, bytes) && reg_sentinels_intact(x, bytes) &&
+          reg_sentinels_intact(y, bytes),
+          "after the refused calls both buffers and their sentinels are bitwise unchanged");
+
+    // At the edges: the last element of x, and 4 steps of 2 (x[0], x[2], x[4], x[6]).
+    double xe[2 * EW_N], ye[2 * EW_N];
+    memcpy(xe, x0, bytes); memcpy(ye, y0, bytes);
+    xe[2 * (EW_N - 1) + 1] = -xe[2 * (EW_N - 1) + 1];
+    static const size_t jx_edge[4] = {0, 2, 4, 6}, jy_edge[4] = {4, 5, 6, 7};
+    axpy_hand(ye, x0, a, 4, jx_edge, jy_edge);
+    CHECK(ab_dev_conjg_c(dx, EW_N - 1, 1) == AB_OK &&
+          ab_dev_axpy_z(4, a, dx, 0, 2, dy, EW_N - 4, 1) == AB_OK && !memcmp(x, xe, bytes) &&
+          !memcmp(y, ye, bytes),
+          "conjg_c and axpy_z ending on the last element run, and touch only their elements");
+    memcpy(x, x0, bytes);
+
+    // Three steps each, against hand-written element lists.
+    static const struct {
+        size_t x_off; int incx; size_t y_off; int incy;
+        size_t jx[3], jy[3];
+        const char* msg;
+    } INC[] = {
+        {1, -2, 0, 3, {5, 3, 1}, {0, 3, 6}, "axpy_z incx = -2: starts at the far end of x, as BLAS does"},
+        {0, 1, 1, -3, {0, 1, 2}, {7, 4, 1}, "axpy_z incy = -3: starts at the far end of y, as BLAS does"},
+        {3, 1, 2, 0, {3, 4, 5}, {2, 2, 2}, "axpy_z incy = 0: every step updates the same element"},
+    };
+    for (size_t t = 0; t < sizeof INC / sizeof INC[0]; t++) {
+        memcpy(y, y0, bytes);
+        memcpy(ye, y0, bytes);
+        axpy_hand(ye, x0, a, 3, INC[t].jx, INC[t].jy);
+        CHECK(ab_dev_axpy_z(3, a, dx, INC[t].x_off, INC[t].incx, dy, INC[t].y_off, INC[t].incy) ==
+                  AB_OK && !memcmp(y, ye, bytes),
+              INC[t].msg);
+    }
+    CHECK(!memcmp(x, x0, bytes) && reg_sentinels_intact(x, bytes) && reg_sentinels_intact(y, bytes),
+          "axpy_z leaves x and every sentinel unchanged");
+
+    ab_dev_free(dx); ab_dev_free(dy);
+    free(rx); free(ry);
+}
+
 static const TestCase TESTS[] = {
     {"test_lifecycle",                test_lifecycle},
     {"test_roundtrip",                test_roundtrip},
@@ -692,7 +1232,11 @@ static const TestCase TESTS[] = {
     {"test_gemm_arg_errors",          test_gemm_arg_errors},
     {"test_gemm_matches_host_api",    test_gemm_matches_host_api},
     {"test_zgemm_imbalance",          test_zgemm_imbalance},
+    {"test_gemm_pool",                test_gemm_pool},
+    {"test_gemm_registered",          test_gemm_registered},
+    {"test_native_tiny_span",         test_native_tiny_span},
     {"test_elementwise",              test_elementwise},
+    {"test_elementwise_bounds",       test_elementwise_bounds},
 };
 static const int N_TESTS = (int)TEST_REGISTRY_SIZE(TESTS);
 

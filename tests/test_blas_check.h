@@ -33,6 +33,18 @@ void fortran_zgemm(const char *transA, const char *transB,
                    const double complex *B, const int *ldB,
                    const double complex *beta, double complex *C, const int *ldC) __asm__("_zgemm_");
 
+void fortran_dgemv(const char *trans, const int *m, const int *n, const double *alpha,
+                   const double *A, const int *lda, const double *x, const int *incx,
+                   const double *beta, double *y, const int *incy) __asm__("_dgemv_");
+void fortran_zgemv(const char *trans, const int *m, const int *n, const double complex *alpha,
+                   const double complex *A, const int *lda, const double complex *x,
+                   const int *incx, const double complex *beta, double complex *y,
+                   const int *incy) __asm__("_zgemv_");
+void fortran_zhemv(const char *uplo, const int *n, const double complex *alpha,
+                   const double complex *A, const int *lda, const double complex *x,
+                   const int *incx, const double complex *beta, double complex *y,
+                   const int *incy) __asm__("_zhemv_");
+
 // Exported by fortran_bridge.c but not declared in apple_bottom.h.
 void ab_dgemm_(const char *transA, const char *transB,
                const int *M, const int *N, const int *K,
@@ -126,7 +138,8 @@ static inline void blas_reference(bool cplx, char ta, char tb, int M, int N, int
         alpha = creal(alpha);
         beta = creal(beta);
     }
-    for (int j = 0; j < N; j++)
+    // For beta = 1 BLAS leaves C as it is, and complex 1 * (Inf, y) has a NaN.
+    for (int j = 0; beta != 1.0 && j < N; j++)
         for (int i = 0; i < M; i++) {
             size_t k = (size_t)j * ldc + i;
             if (cplx)

@@ -4,7 +4,7 @@
  *
  * Exports the *standard* Fortran BLAS symbols (dgemm_, zgemm_) so any
  * Fortran code linked against -lapplebottom picks us up without call-site
- * edits. On macOS two-level namespace, these symbols shadow Accelerate's
+ * edits; the BLAS-2 ones (dgemv_, zgemv_, zhemv_) are in blas2_abi.c. On macOS two-level namespace, these symbols shadow Accelerate's
  * when -lapplebottom appears before -framework Accelerate.
  *
  * In C the entry points are named fortran_dgemm/fortran_zgemm and bound to

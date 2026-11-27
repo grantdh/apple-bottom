@@ -1,0 +1,21 @@
+# Apple M2 Max, library compiled in 1 ms
+# dd_dgemm               maxThreads  832  staticTG 16384  pipeline 1.6 ms
+# dd_dgemm_pf            maxThreads  512  staticTG 16384  pipeline 0.1 ms  (not run)
+# dd_dgemm_narrow        maxThreads 1024  staticTG  8192  pipeline 0.0 ms  (not run)
+# dd_dgemm_narrow_pf     maxThreads  896  staticTG  8192  pipeline 0.0 ms
+# dd_dgemm_ab            maxThreads  832  staticTG 16384  pipeline 0.0 ms  (not run)
+# dd_dgemm_ab_pf         maxThreads  512  staticTG 16384  pipeline 0.0 ms  (not run)
+# dd_dgemm_ab_narrow     maxThreads 1024  staticTG  8192  pipeline 0.0 ms  (not run)
+# dd_dgemm_ab_narrow_pf  maxThreads  896  staticTG  8192  pipeline 0.0 ms
+# dd_dgemm_ab_ts         maxThreads  896  staticTG 18432  pipeline 0.1 ms
+# dd_dgemm_ab_ts_pf      maxThreads  576  staticTG 18432  pipeline 0.0 ms
+# dd_dsyrk               maxThreads  768  staticTG 16384  pipeline 0.0 ms  (not run)
+# dd_dsyrk_pf            maxThreads  512  staticTG 16384  pipeline 0.0 ms  (not run)
+    M     N      K  np   t64   t32   tts       sq      nwp     nwsp       ts      tsp  |      ts/tsp      sq/nwp    tsp/nwsp   MHz
+  600   600   4608  4x   100   361   190   24.511   22.764   22.919   24.743   24.333  | 1.017/1.016 1.077/1.079 1.062/1.062   1386
+  650   650   4608  4x   121   441   246   28.324   28.051   28.118   31.511   30.978  | 1.017/1.016 1.010/1.014 1.102/1.105   1376
+  700   700   4608  4x   121   484   264   29.686   31.530   31.735   35.038   34.778  | 1.007/1.006 0.942/0.944 1.096/1.097   1331
+  750   750   4608  4x   144   576   282   34.418   38.346   38.399   38.564   38.068  | 1.013/1.011 0.898/0.898 0.991/0.992   1305
+ 3000    64   4608  4x    47   188    96   12.912   12.273   12.376   14.403   14.200  | 1.014/1.044 1.052/1.032 1.147/1.147   1390
+ 1024    48   4608  4x    16    64    24    6.537    5.181    5.311    5.684    4.881  | 1.165/1.167 1.262/1.227 0.919/0.913   1398
+ 2000    72   4608  4x    64   189    80   18.194   12.278   12.365   12.907   12.009  | 1.075/1.064 1.482/1.501 0.971/0.961   1390

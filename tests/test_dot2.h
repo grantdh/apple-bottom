@@ -2,10 +2,11 @@
 #define AB_TEST_DOT2_H
 
 // Compensated FP64 GEMM reference for test_precision.c, test_blas_abi.c and
-// test_device_api.c: Dot2 (Ogita, Rump & Oishi, SIAM J. Sci. Comput. 26(6),
-// 2005), as accurate as accumulating in twice FP64 precision and rounding
-// once; the componentwise scales errors are measured against; and the ZGEMM
-// tests' real/imaginary imbalance check.
+// test_device_api.c, and its step for the BLAS-2 reference (test_blas2_ref.h):
+// Dot2 (Ogita, Rump & Oishi, SIAM J. Sci. Comput. 26(6), 2005), as accurate as
+// accumulating in twice FP64 precision and rounding once; the componentwise
+// scales errors are measured against; and the ZGEMM tests' real/imaginary
+// imbalance check.
 
 #include <Accelerate/Accelerate.h>
 #include <dispatch/dispatch.h>
@@ -24,10 +25,20 @@ typedef struct {
     double *S, *E;
 } Dot2Job;
 
-// Row i of S + E += sign·A·B with Dot2: TwoProduct via fma, TwoSum on S, and
-// the rounding errors summed into E.
-static inline void dot2_row(void *ctx, size_t i) {
+// *s + *e += a·b: TwoProduct via fma, TwoSum on *s, and the rounding errors
+// summed into *e (also the BLAS-2 reference, test_blas2_ref.h).
+static inline void dot2_step(double *s, double *e, double a, double b) {
 #pragma STDC FP_CONTRACT OFF    // the error-free transformations need every rounding
+    double p = a * b;
+    double pe = fma(a, b, -p);
+    double t = *s + p;
+    double z = t - *s;
+    *e += ((*s - (t - z)) + (p - z)) + pe;
+    *s = t;
+}
+
+// Row i of S + E += sign·A·B with Dot2.
+static inline void dot2_row(void *ctx, size_t i) {
     const Dot2Job *job = ctx;
     const int N = job->N, K = job->K;
     double *restrict s = job->S + i * N;
@@ -35,14 +46,7 @@ static inline void dot2_row(void *ctx, size_t i) {
     for (int k = 0; k < K; k++) {
         const double a = job->sign * job->A[i * K + k];
         const double *restrict b = job->B + (size_t)k * N;
-        for (int j = 0; j < N; j++) {
-            double p = a * b[j];
-            double pe = fma(a, b[j], -p);
-            double t = s[j] + p;
-            double z = t - s[j];
-            e[j] += ((s[j] - (t - z)) + (p - z)) + pe;
-            s[j] = t;
-        }
+        for (int j = 0; j < N; j++) dot2_step(&s[j], &e[j], a, b[j]);
     }
 }
 
@@ -90,22 +94,44 @@ static inline void abs_gemm_acc(int M, int N, int K, const double *X1, const dou
 // 3M misses Im(C) by about 1/(2 IMAG_RATIO) of its scale there.
 #define IMAG_BOUND 8.0          // units of u²
 #define IMAG_RATIO 1e-6         // the smaller part's magnitude, relative
+// A value whose FP32 low word, 2^-127, is subnormal, which the GPU reads as
+// zero: the exponent-range guard's probes put it in C and in complex parts.
+#define C_LOW (0x1p-98 * (1.0 + 0x1p-29))
+// A factor that takes magnitudes in [0.5, 1) below 2^-1042, where an FP64
+// value's high word is 0: the guard's statistics must still count them.
+#define F_SUBNORMAL 0x1p-1050
 
 typedef enum {
     IMAG_SMALL,         // Im x IMAG_RATIO: nearly real A and B
     IMAG_LARGE,         // Re x IMAG_RATIO: nearly imaginary
     IMAG_LINES,         // even rows of op(A) and columns of op(B) nearly real, odd ones nearly
                         // imaginary: every row and column imbalanced, A and B as a whole not
+    IMAG_PART_LOW,      // Im = +-C_LOW, below the guard's entry floor (the BLAS ABI must use
+                        // Accelerate)
+    IMAG_PART_OK,       // Im x 2^-60: Ai Bi lies below 2^-78, but in Re(C) beside Ar Br
+    IMAG_PART_SUBNORMAL, // Im x F_SUBNORMAL (the BLAS ABI must use Accelerate)
 } ImagData;
 
 static inline const char *imag_tag(ImagData d) {
-    return d == IMAG_SMALL ? "small-im" : d == IMAG_LARGE ? "small-re" : "lines";
+    static const char *const TAG[] = {
+        [IMAG_SMALL] = "small-im", [IMAG_LARGE] = "small-re", [IMAG_LINES] = "lines",
+        [IMAG_PART_LOW] = "part-low", [IMAG_PART_OK] = "part-ok",
+        [IMAG_PART_SUBNORMAL] = "part-subnormal",
+    };
+    return TAG[d];
 }
 
 // Whether line l of op(A) (a row) or op(B) (a column) gets its real part
-// (else its imaginary part) multiplied by IMAG_RATIO.
+// (else its imaginary part) made small.
 static inline bool imag_small_re(ImagData d, int l) {
     return d == IMAG_LARGE || (d == IMAG_LINES && l % 2);
+}
+
+// x, a part made small: times IMAG_RATIO, or as the IMAG_PART_* data say.
+static inline double imag_small(ImagData d, double x) {
+    return d == IMAG_PART_LOW ? copysign(C_LOW, x)
+         : d == IMAG_PART_OK ? x * 0x1p-60
+         : d == IMAG_PART_SUBNORMAL ? x * F_SUBNORMAL : x * IMAG_RATIO;
 }
 
 // x's sign, with a magnitude in [0.5, 1).

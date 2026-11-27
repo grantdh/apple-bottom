@@ -1,0 +1,16 @@
+mode,routine,M,K,N,method,reps,wall_med_ms,wall_min_ms,gpu_med_ms,temps_med_ms,submit_med_ms,wake_med_ms,gflops
+abi,dgemm,4096,4096,4096,gpu,3,490.683,484.210,0.000,0.000,0.000,0.000,280.1
+abi,dgemm,6144,6144,6144,gpu,3,1344.087,1326.197,0.000,0.000,0.000,0.000,345.1
+abi,dgemm,8192,8192,8192,gpu,3,2749.824,2738.069,0.000,0.000,0.000,0.000,399.8
+mode,routine,M,K,N,method,reps,wall_med_ms,wall_min_ms,gpu_med_ms,temps_med_ms,submit_med_ms,wake_med_ms,gflops
+abi,zgemm,4096,4096,4096,gpu,3,1193.325,1192.579,0.000,0.000,0.000,0.000,460.7
+abi,zgemm,6144,6144,6144,gpu,3,3363.723,3358.432,0.000,0.000,0.000,0.000,551.6
+mode,routine,M,K,N,method,reps,wall_med_ms,wall_min_ms,gpu_med_ms,temps_med_ms,submit_med_ms,wake_med_ms,gflops
+abi,dgemm,4096,4096,4096,gpu+strassen,3,476.248,466.328,0.000,0.000,0.000,0.000,288.6
+abi,dgemm,6144,6144,6144,gpu+strassen,3,1259.368,1254.661,0.000,0.000,0.000,0.000,368.3
+abi,dgemm,8192,8192,8192,gpu+strassen,3,2600.268,2572.647,0.000,0.000,0.000,0.000,422.8
+mode,routine,M,K,N,method,reps,wall_med_ms,wall_min_ms,gpu_med_ms,temps_med_ms,submit_med_ms,wake_med_ms,gflops
+abi,zgemm,4096,4096,4096,gpu+strassen,3,1139.676,1137.129,0.000,0.000,0.000,0.000,482.4
+abi,zgemm,6144,6144,6144,gpu+strassen,3,3169.840,3150.877,0.000,0.000,0.000,0.000,585.3
+mode,routine,M,K,N,method,reps,wall_med_ms,wall_min_ms,gpu_med_ms,temps_med_ms,submit_med_ms,wake_med_ms,gflops
+abi,dgemm,4096,4096,4096,cpu,3,230.015,226.800,0.000,0.000,0.000,0.000,597.5
