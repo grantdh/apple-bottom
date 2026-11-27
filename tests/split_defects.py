@@ -7,15 +7,20 @@ Copies the source tree (without build/ and .git) into a scratch directory, build
 build/test_dispatch and build/test_split there, and checks that the catching tests pass on the clean
 copy. Then for each defect (or those named) it applies the defect's edits, rebuilds, runs the tests
 that should catch it, and restores the files: the defect counts as caught if one of those tests
-fails. Prints a line per defect and exits 1 if any defect went uncaught, or is stale: its edit no longer
-matches the source, or the source no longer builds with it. Needs the GPU; about half an hour.
+fails. A build or test still running after RUN_LIMIT_S seconds is ended, with every process it
+started, and counts as failing (a TIMEOUT line says so), so a defect that hangs a test is caught,
+not waited on. Prints a line per defect and exits 1 if any defect went uncaught, or is stale: its
+edit no longer matches the source, or the source no longer builds with it. Needs the GPU; about 3
+minutes.
 `make test-split-defects` runs it. Python 3.9, standard library only.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -25,6 +30,9 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BW, SL, DC, BP = "src/blas_wrapper.c", "src/split_slice.h", "src/dispatch.c", "src/profiling/blas_profiler.c"
 DISPATCH = ["build/test_dispatch"]
 SPLIT = lambda *names: ["build/test_split", *names]   # noqa: E731
+# A clean build or test takes under a minute, and test_split ends a test of its own after 180 s
+# (TEST_TIMEOUT_S): this bound is the backstop.
+RUN_LIMIT_S = 300
 
 # name, the edits (file, old text, new text; old must occur once), the tests that must catch it.
 DEFECTS = [
@@ -45,12 +53,12 @@ DEFECTS = [
     ("K sum skipped", [(BW, "c[col * w->ldC + i] += pz[col * w->M + i];", "(void)pz[col * w->M + i];")],
      [DISPATCH, SPLIT("test_split_composition")]),
     ("K add before join", [
-        (BW, "    if (!joined) {\n        pthread_join(worker, NULL);",
+        (BW, "    if (!joined) {\n        split_join(&j, own);",
          "    if (P && !joined && w->routine == 'd') {\n"
          "        const double *pd0 = P;\n        double *c0 = w->C;\n"
          "        for (size_t col = 0; col < (size_t)w->N; col++)\n"
          "            for (size_t i = 0; i < (size_t)w->M; i++) c0[col * w->ldC + i] += pd0[col * w->M + i];\n"
-         "    }\n    if (!joined) {\n        pthread_join(worker, NULL);"),
+         "    }\n    if (!joined) {\n        split_join(&j, own);"),
         (BW, "c[col * w->ldC + i] += pd[col * w->M + i];", "(void)pd[col * w->M + i];")],
      [DISPATCH, SPLIT("test_split_composition")]),
     ("K redo with beta 0", [(BW, "        tail->ldC = w->ldC;\n        tail->beta = 1.0;", "        tail->ldC = w->ldC;\n        tail->beta = 0.0;")],
@@ -118,6 +126,62 @@ DEFECTS = [
      [SPLIT("test_split_reports")]),
     ("first split call's GPU part from the call's wall time",
      [(BP, "r->first_gpu_ns = s->gpu_wall_ns;", "r->first_gpu_ns = elapsed_ns;")], [SPLIT("test_split_reports")]),
+    # the split worker
+    ("worker kept after the join", [(BW, "    atomic_store_explicit(&g_pool.state, POOL_IDLE, memory_order_release);\n", "")],
+     [SPLIT("test_split_worker")]),
+    ("worker used in a forked child", [(BW, "    if (!forks) forks = pthread_atfork(NULL, NULL, split_pool_child) == 0;\n",
+                                        "    forks = true;\n")],
+     [SPLIT("test_split_fork")]),
+    ("worker started without a split", [(BW, "uint64_t ab_internal_split_worker(void) {",
+                                         "__attribute__((constructor)) static void split_pool_eager(void) {\n"
+                                         "    if (split_pool_take()) atomic_store(&g_pool.state, POOL_IDLE);\n}\n\n"
+                                         "uint64_t ab_internal_split_worker(void) {")],
+     [SPLIT("test_split_off")]),
+    ("the join cancellable", [(BW, "    if (run_tail) pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancel_state);\n", "")],
+     [SPLIT("test_split_worker")]),
+    ("callers wait for the worker",
+     [(BW, "    if ((s != POOL_IDLE && s != POOL_NONE) ||\n"
+           "        !atomic_compare_exchange_strong_explicit(&g_pool.state, &s, POOL_BUSY, memory_order_acquire,\n"
+           "                                                 memory_order_relaxed))\n"
+           "        return false;\n",
+           "    for (;;) {\n"
+           "        while (s == POOL_BUSY) {\n"
+           "            pthread_yield_np();\n"
+           "            s = atomic_load_explicit(&g_pool.state, memory_order_relaxed);\n"
+           "        }\n"
+           "        if (s != POOL_IDLE && s != POOL_NONE) return false;\n"
+           "        if (atomic_compare_exchange_strong_explicit(&g_pool.state, &s, POOL_BUSY, memory_order_acquire,\n"
+           "                                                    memory_order_relaxed))\n"
+           "            break;\n"
+           "    }\n")],
+     [SPLIT("test_split_worker")]),
+    ("worker takes the caller's signals", [(BW, "    sigfillset(&all);\n", "    sigemptyset(&all);\n")],
+     [SPLIT("test_split_worker")]),
+    ("worker blocks its own faults", [(BW, "    pthread_sigmask(SIG_UNBLOCK, &s, NULL);\n", "")],
+     [SPLIT("test_split_worker")]),
+    ("worker takes SIGPIPE", [(BW, "SIGSYS, SIGPROF};", "SIGSYS, SIGPROF, SIGPIPE};")],
+     [SPLIT("test_split_worker")]),
+    ("worker blocks SIGPROF", [(BW, "SIGSYS, SIGPROF};", "SIGSYS};")],
+     [SPLIT("test_split_worker")]),
+    ("no QoS loan in the join", [(BW, "q > QOS_CLASS_DEFAULT ?", "q > QOS_CLASS_USER_INTERACTIVE ?")],
+     [SPLIT("test_split_worker")]),
+    ("QoS loan to the caller", [(BW, "pthread_override_qos_class_start_np(g_pool.thread, q, 0)",
+                                 "pthread_override_qos_class_start_np(pthread_self(), q, 0)")],
+     [SPLIT("test_split_worker")]),
+    ("QoS loan at the worker's class", [(BW, "pthread_override_qos_class_start_np(g_pool.thread, q, 0)",
+                                         "pthread_override_qos_class_start_np(g_pool.thread, QOS_CLASS_DEFAULT, 0)")],
+     [SPLIT("test_split_worker")]),
+    ("QoS loan ended before the wait",
+     [(BW, "    dispatch_semaphore_wait(g_pool.done, DISPATCH_TIME_FOREVER);\n    j->lent = o != NULL;\n"
+           "    if (o) pthread_override_qos_class_end_np(o);\n",
+       "    j->lent = o != NULL;\n    if (o) pthread_override_qos_class_end_np(o);\n"
+       "    dispatch_semaphore_wait(g_pool.done, DISPATCH_TIME_FOREVER);\n")],
+     [SPLIT("test_split_worker")]),
+    ("QoS loan never ended", [(BW, "    if (o) pthread_override_qos_class_end_np(o);\n", "")],
+     [SPLIT("test_split_worker")]),
+    ("worker spins", [(BW, "        dispatch_semaphore_wait(g_pool.go, DISPATCH_TIME_FOREVER);\n",
+                       "        while (dispatch_semaphore_wait(g_pool.go, DISPATCH_TIME_NOW)) {}\n")],
+     [SPLIT("test_split_worker")]),
 ]
 
 BUILD = ["make", "-j8", "lib", "build/test_dispatch", "build/test_split"]
@@ -127,10 +191,26 @@ def run(cmd, cwd, log):
     with open(log, "a") as f:
         f.write(f"$ {' '.join(cmd)}\n")
         f.flush()
-        return subprocess.run(cmd, cwd=cwd, stdout=f, stderr=subprocess.STDOUT).returncode
+        # a process group of its own, for one kill to end all it started
+        p = subprocess.Popen(cmd, cwd=cwd, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            return p.wait(timeout=RUN_LIMIT_S)
+        except BaseException as e:
+            # the time limit, or this script ended (the group misses the terminal's Ctrl-C)
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(p.pid, signal.SIGKILL)
+            p.wait()
+            if not isinstance(e, subprocess.TimeoutExpired):
+                raise
+            f.write(f"split_defects: ended after {RUN_LIMIT_S} s\n")
+            print(f"  TIMEOUT {' '.join(cmd)}: ended after {RUN_LIMIT_S} s")
+            return 1
 
 
 def main():
+    sys.stdout.reconfigure(line_buffering=True)   # each defect's line reaches a log as it is made
+    for sig in (signal.SIGTERM, signal.SIGHUP):    # as SystemExit, so run() ends its group
+        signal.signal(sig, lambda n, _: sys.exit(128 + n))
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("names", nargs="*", help="defects to plant (default: all)")
     ap.add_argument("--keep", help="build in this directory and keep it (default: a temporary one)")

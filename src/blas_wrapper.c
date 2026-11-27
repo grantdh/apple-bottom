@@ -9,9 +9,11 @@
 #include <math.h>
 #include <dispatch/dispatch.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <sys/param.h>
 #include <Accelerate/Accelerate.h>
 #include <stdio.h>
@@ -1141,6 +1143,26 @@ bool ab_internal_last_staged(int *in_place) {
     return t_last_stage.staged;
 }
 
+// This thread's floating-point control register (FPCR). Off AArch64 it
+// reads as 0 and is not set.
+static inline uint64_t fpcr_get(void) {
+#if defined(__aarch64__)
+    uint64_t fpcr;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+    return fpcr;
+#else
+    return 0;
+#endif
+}
+
+static inline void fpcr_set(uint64_t fpcr) {
+#if defined(__aarch64__)
+    __asm__ volatile("msr fpcr, %0" : : "r"(fpcr));
+#else
+    (void)fpcr;
+#endif
+}
+
 // The staged path converts on the GPU what the host path converts on the
 // CPU, so the bits agree only under the CPU's default floating-point
 // control: round to nearest, no flush to zero, no default NaN (FPCR RMode,
@@ -1149,12 +1171,8 @@ bool ab_internal_last_staged(int *in_place) {
 // thread may take the staged path, else why not.
 static ab_prof_staged_t staged_why(void) {
     ab_prof_staged_t why = ab_host_pack() ? AB_PROF_STAGED_HOST_PACK : AB_PROF_STAGED_NONE;
-#if defined(__aarch64__)
-    uint64_t fpcr;
-    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
-    if (why == AB_PROF_STAGED_NONE && (fpcr & ((3ULL << 22) | (1ULL << 24) | (1ULL << 25) | 3ULL)))
+    if (why == AB_PROF_STAGED_NONE && (fpcr_get() & ((3ULL << 22) | (1ULL << 24) | (1ULL << 25) | 3ULL)))
         why = AB_PROF_STAGED_FPCR;
-#endif
     return why;
 }
 
@@ -1445,12 +1463,14 @@ static bool dgemm_staged(CallProf *p, enum CBLAS_TRANSPOSE ta, enum CBLAS_TRANSP
 // =============================================================================
 // AB_SPLIT: one call cut between Accelerate and the GPU (split_slice.h)
 // =============================================================================
-// The calling thread runs the head on Accelerate while a thread made for the
-// call, and joined before it returns, runs the tail on the staged path. A
-// tail the staged path does not keep is made again on Accelerate here, after
-// the join, so that the two Accelerate calls of one split never overlap
-// (Accelerate's bits depend on its thread count). The tail takes classical
-// products: Strassen's bound is normwise only. Nothing outlives the call.
+// The calling thread runs the head on Accelerate while another thread runs
+// the tail on the staged path: the process's split worker (split_pool_take)
+// or, when another call holds it, a thread made for the call; the caller
+// waits for the tail before it returns (the join). A tail the staged path
+// does not keep is made again on Accelerate here, after the join, so that
+// the two Accelerate calls of one split never overlap (Accelerate's bits
+// depend on its thread count). The tail takes classical products: Strassen's
+// bound is normwise only. Nothing of a call outlives it.
 
 // One part of a call, as cblas takes it.
 typedef struct {
@@ -1524,25 +1544,24 @@ typedef struct {
     bool prof_on;                       // the call is profiled: so is the tail's staged run
     CallProf prof;                      // ... its stages, on this thread's GPU time
     ab_prof_kernel_split_t kernel;      // the tail's command buffers (the timeline), profiled or not
+    uint64_t thread;                    // the thread that ran the tail (pthread_threadid_np)
+    bool pooled;                        // run by the process's split worker (split_start)
+    bool lent;                          // the caller lent the worker its QoS class in the join
 } split_job_t;
-
-// AB_TEST_FAIL_STAGE=split_fpcr (test-only): this thread flushes subnormals
-// to zero (FPCR.FZ), as a caller's setting would if the thread inherited it.
-static void split_test_fpcr(void) {
-#if defined(__aarch64__)
-    if (ab_test_fail_stage() != AB_PROF_FAIL_SPLIT_FPCR) return;
-    uint64_t fpcr;
-    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
-    fpcr |= 1ULL << 24;
-    __asm__ volatile("msr fpcr, %0" : : "r"(fpcr));
-#endif
-}
 
 // The tail on the staged path, again once if a command buffer failed (a
 // second attempt usually works; the line scales' verdict does not change).
 static void split_run_gpu(split_job_t *j) {
-    split_test_fpcr();
+    (void)ab_internal_take_gpu_seconds(NULL);   // the thread's earlier GPU time is not this tail's
+    // AB_TEST_FAIL_STAGE=split_fpcr (test-only): the check below finds this
+    // thread flushing subnormals to zero (FPCR.FZ), as a caller's setting
+    // would if the thread inherited it. FZ is set for the check alone, so
+    // the thread keeps nothing of it; the tail stops there.
+    const bool fz = ab_test_fail_stage() == AB_PROF_FAIL_SPLIT_FPCR;
+    const uint64_t fpcr = fpcr_get();
+    if (fz) fpcr_set(fpcr | 1ULL << 24);
     j->why = staged_why();              // this thread's own floating-point control
+    if (fz) fpcr_set(fpcr);
     if (j->why != AB_PROF_STAGED_NONE) return;
     CallProf *p = j->prof_on ? prof_begin(&j->prof) : NULL;
     if (p) p->trace = false;            // the caller writes the call's one line
@@ -1556,19 +1575,186 @@ static void split_run_gpu(split_job_t *j) {
     j->scales = j->why == AB_PROF_STAGED_GPU_FAILED && !t_stage_cb_failed;
     j->in_place = t_last_stage.in_place;
     // The kernel steps took a profiled run's command buffers into its record;
-    // an unprofiled run's are this new thread's only ones.
+    // an unprofiled run's are those since the take above.
     if (p) j->kernel = p->call.split;
     else (void)ab_internal_take_gpu_seconds(&j->kernel);
 }
 
-static void *split_worker(void *arg) {
+// A tail, on the split worker or on a thread made for it.
+static void *split_tail(void *arg) {
     split_job_t *j = arg;
+    pthread_threadid_np(NULL, &j->thread);
     if (j->head_done) dispatch_semaphore_wait(j->head_done, DISPATCH_TIME_FOREVER);
     j->t0 = ab_prof_now_ticks();
     if (j->engine == 1) part_cblas(&j->tail);
     else split_run_gpu(j);
     j->t1 = ab_prof_now_ticks();
     return NULL;
+}
+
+// Makes a thread for tails (attr NULL: the default attributes) with every
+// signal blocked from the moment it exists; pthread_create's result. Signals
+// are the application's: a library thread must not take one the application
+// has blocked on its own threads. The caller's thread holds the full mask
+// only while the new one inherits it, so nothing is opened on the caller; the
+// new thread opens its own signals first (split_open_own_signals).
+static int split_thread_create(pthread_t *t, const pthread_attr_t *attr, void *(*fn)(void *), void *arg) {
+    sigset_t all, old;
+    sigfillset(&all);
+    pthread_sigmask(SIG_SETMASK, &all, &old);
+    int rc = pthread_create(t, attr, fn, arg);
+    pthread_sigmask(SIG_SETMASK, &old, NULL);
+    return rc;
+}
+
+// Opens, on a tail's thread and as its first step, the signals macOS raises
+// on a thread for what that thread does: a fault's or trap's, and the
+// profiling timer's tick (SIGPROF, sent to the thread that was running).
+// Blocked, a fault on a bad operand is retried forever at full CPU instead of
+// ending the process (macOS 27), and a profiler's samples of this thread go
+// to another. libdispatch opens the same set on its threads, and SIGPIPE too;
+// SIGPIPE stays blocked here, since macOS sends a write's SIGPIPE to the
+// process, not to the writer, and open here it would only let this thread
+// take the application's. A kill() of one of these may now reach this thread.
+static void split_open_own_signals(void) {
+    static const int OWN[] = {SIGILL, SIGTRAP, SIGEMT, SIGFPE, SIGBUS, SIGSEGV, SIGSYS, SIGPROF};
+    sigset_t s;
+    sigemptyset(&s);
+    for (size_t i = 0; i < sizeof OWN / sizeof *OWN; i++) sigaddset(&s, OWN[i]);
+    pthread_sigmask(SIG_UNBLOCK, &s, NULL);
+}
+
+// A tail on a thread of its own (split_start).
+static void *split_own_tail(void *arg) {
+    split_open_own_signals();
+    return split_tail(arg);
+}
+
+// The process's split worker: one thread, started by the first call whose
+// tail runs and parked between calls, that runs one tail at a time. A thread
+// made for each call cost the seam's GPU part 0.6 ms (UM1000) and 1.1 ms
+// (UN1000) more than a parked thread's, 2.4% and 1.3% of the calls (M2 Max
+// 1x8, 2026-11-26), with GPU execution equal. A call that finds the worker
+// held by another, or cannot start it, makes a thread of its own as before;
+// none waits for the worker. Both kinds of thread are made by
+// split_thread_create and run split_tail after split_open_own_signals. The
+// worker also lives for the process, names itself, and is joined by
+// semaphore, with a caller above its class lending it that class
+// (split_join); a thread of its own is joined by pthread_join. The worker's
+// class is set to QOS_CLASS_DEFAULT, the class a thread made with default
+// attributes has (sys/qos.h), whichever call starts it. Nothing of a call
+// stays on it: split_run_gpu takes the thread's earlier GPU time before a
+// tail, and the split_fpcr hook sets FZ for its check alone. A child forked
+// after the worker started has none, and no Metal context (gpu_ready), so
+// its staged tails are declined; only the tests' cblas engine runs a tail
+// there, on a thread of its own. A child forked before the first split
+// starts its own.
+enum { POOL_NONE, POOL_IDLE, POOL_BUSY, POOL_OFF };
+static struct {
+    atomic_int state;                   // POOL_*: BUSY from a call's take to its join
+    _Atomic uint64_t tid;               // the worker's thread id, once started; 0 if none
+    pthread_t thread;                   // the worker
+    dispatch_semaphore_t go, done;      // a tail handed to it; that tail done
+    split_job_t *job;                   // the tail, set by the call that holds the worker
+} g_pool;
+
+// fork() after the worker started: only the forking thread survives, so the
+// child has no worker. Runs in the single-threaded child before anything else.
+static void split_pool_child(void) {
+    atomic_store(&g_pool.state, POOL_OFF);
+    atomic_store(&g_pool.tid, 0);
+}
+
+static void *split_pool_main(void *arg) {
+    (void)arg;
+    split_open_own_signals();
+    pthread_setname_np("apple-bottom split");
+    for (;;) {
+        dispatch_semaphore_wait(g_pool.go, DISPATCH_TIME_FOREVER);
+        (void)split_tail(g_pool.job);
+        dispatch_semaphore_signal(g_pool.done);   // after this the tail is its caller's alone
+    }
+    return NULL;
+}
+
+// Starts the worker for the call that holds it (POOL_BUSY, taken from
+// POOL_NONE): the fork handler first, so that no child inherits a worker
+// without it. On failure the state goes back to POOL_NONE, for the next call
+// to try again. AB_TEST_FAIL_STAGE=split_pool (test-only): the worker never
+// starts, the state POOL_OFF, as in a child forked after it started.
+static bool split_pool_start(void) {
+    if (ab_test_fail_stage() == AB_PROF_FAIL_SPLIT_POOL) {
+        atomic_store_explicit(&g_pool.state, POOL_OFF, memory_order_release);
+        return false;
+    }
+    static bool forks;                  // split_pool_child registered
+    if (!forks) forks = pthread_atfork(NULL, NULL, split_pool_child) == 0;
+    if (!g_pool.go) g_pool.go = dispatch_semaphore_create(0);
+    if (!g_pool.done) g_pool.done = dispatch_semaphore_create(0);
+    pthread_attr_t attr;
+    int rc = forks && g_pool.go && g_pool.done ? pthread_attr_init(&attr) : -1;
+    if (rc == 0) {
+        pthread_attr_set_qos_class_np(&attr, QOS_CLASS_DEFAULT, 0);   // the class split_join compares with
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        rc = split_thread_create(&g_pool.thread, &attr, split_pool_main, NULL);
+        pthread_attr_destroy(&attr);
+    }
+    if (rc != 0) {
+        atomic_store_explicit(&g_pool.state, POOL_NONE, memory_order_release);
+        return false;
+    }
+    uint64_t tid = 0;
+    pthread_threadid_np(g_pool.thread, &tid);
+    atomic_store(&g_pool.tid, tid);
+    return true;
+}
+
+// The worker for one tail, started on first use; false if another call
+// holds it, it could not start, or it is off (a child forked after it
+// started, or AB_TEST_FAIL_STAGE=split_pool).
+static bool split_pool_take(void) {
+    int s = atomic_load_explicit(&g_pool.state, memory_order_relaxed);
+    if ((s != POOL_IDLE && s != POOL_NONE) ||
+        !atomic_compare_exchange_strong_explicit(&g_pool.state, &s, POOL_BUSY, memory_order_acquire,
+                                                 memory_order_relaxed))
+        return false;
+    return s == POOL_IDLE || split_pool_start();
+}
+
+uint64_t ab_internal_split_worker(void) { return atomic_load(&g_pool.tid); }
+
+// Hands the tail to the worker, or to a thread made for it (*own); false if
+// no thread can run it. AB_TEST_FAIL_STAGE=split_thread (test-only): as if
+// none could (the worker held, pthread_create failing).
+static bool split_start(split_job_t *j, pthread_t *own) {
+    if (ab_test_fail_stage() == AB_PROF_FAIL_SPLIT_THREAD) return false;
+    if (!split_pool_take()) return split_thread_create(own, NULL, split_own_tail, j) == 0;
+    j->pooled = true;
+    g_pool.job = j;
+    dispatch_semaphore_signal(g_pool.go);
+    return true;
+}
+
+// The join: the tail is done and its thread no longer touches j. A caller in
+// pthread_join may lend its priority to the thread it waits for; a semaphore
+// does not, so a caller above the worker's class (QOS_CLASS_DEFAULT,
+// split_pool_start) lends it its own class while it waits. macOS caps both at
+// DEFAULT in a process without an application role, such as a command-line
+// program (xnu task_policy.c squashes USER_INITIATED and USER_INTERACTIVE to
+// LEGACY there), so the loan changes nothing in one; it matters in an app or
+// a daemon. The worker is given back here, before the caller's NaN scan, redo
+// or K sum.
+static void split_join(split_job_t *j, pthread_t own) {
+    if (!j->pooled) {
+        pthread_join(own, NULL);
+        return;
+    }
+    qos_class_t q = qos_class_self();
+    pthread_override_t o = q > QOS_CLASS_DEFAULT ? pthread_override_qos_class_start_np(g_pool.thread, q, 0) : NULL;
+    dispatch_semaphore_wait(g_pool.done, DISPATCH_TIME_FOREVER);
+    j->lent = o != NULL;
+    if (o) pthread_override_qos_class_end_np(o);
+    atomic_store_explicit(&g_pool.state, POOL_IDLE, memory_order_release);
 }
 
 static __thread ab_split_record_t t_last_split;
@@ -1602,9 +1788,10 @@ static double part_gflop(const gemm_part_t *q) {
 }
 
 // The call w cut at g (0 < g <= L) on axis: the head on Accelerate here, the
-// tail on a thread of its own by the staged path (engine 0) or by cblas
-// (engine 1), in the order asked for (split_slice.h). A declined call is not
-// touched. Fills *rec, and for a profiled call (p) the stages of p->split.
+// tail on the split worker (or a thread of its own while another call holds
+// it) by the staged path (engine 0) or by cblas (engine 1), in the order
+// asked for (split_slice.h). A declined call is not touched. Fills *rec, and
+// for a profiled call (p) the stages of p->split.
 static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis, int g, int order,
                                     int engine, ab_split_record_t *rec) {
     *rec = (ab_split_record_t){.outcome = AB_SPLIT_DECLINED, .declined = AB_PROF_SPLIT_DECLINE_NONE,
@@ -1670,16 +1857,15 @@ static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis
         tail->C = P;
         j.g.x[AB_STAGE_C].ptr = P;
     }
-    pthread_t worker = NULL;
+    pthread_t own = NULL;                // the tail's thread when it is not the worker
     j.head_done = run_tail && order == 1 ? dispatch_semaphore_create(0) : NULL;
-    // The worker uses this frame until the join: no cancellation of the caller
-    // (pthread_join is a cancellation point) may unwind it before then.
+    // The tail's thread uses this frame until the join: no cancellation of the
+    // caller (pthread_join and Accelerate's waits may be cancellation points)
+    // may unwind it before then.
     int cancel_state = 0;
     if (run_tail) pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancel_state);
     if (run_tail) tm->create_ns = now_ns();
-    // AB_TEST_FAIL_STAGE=split_thread (test-only): as if pthread_create failed.
-    if (run_tail && (ab_test_fail_stage() == AB_PROF_FAIL_SPLIT_THREAD ||
-                     pthread_create(&worker, NULL, split_worker, &j) != 0)) {
+    if (run_tail && !split_start(&j, &own)) {
         pthread_setcancelstate(cancel_state, NULL);
         if (j.head_done) dispatch_release(j.head_done);
         free(P);
@@ -1691,7 +1877,7 @@ static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis
     // The head, before or after the tail as asked; the join.
     bool joined = !run_tail;
     if (order == 2 && !joined) {
-        pthread_join(worker, NULL);
+        split_join(&j, own);
         joined = true;
         SPLIT_AT(p, join_ns, tm->join_ns);
         tm->cpu0_ns = tm->join_ns;
@@ -1700,7 +1886,7 @@ static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis
     SPLIT_AT(p, cpu_part_ns, tm->cpu1_ns);
     if (j.head_done) dispatch_semaphore_signal(j.head_done);
     if (!joined) {
-        pthread_join(worker, NULL);
+        split_join(&j, own);
         uint64_t before = p ? p->split.join_ns : 0;
         SPLIT_AT(p, join_ns, tm->join_ns);
         if (p) p->split.wait_cpu_ns = p->split.join_ns - before;
@@ -1759,6 +1945,9 @@ static ab_split_outcome_t split_run(CallProf *p, const gemm_part_t *w, char axis
     rec->retry_kept = j.retry_kept;
     rec->scales = j.scales;
     rec->in_place = kept ? j.in_place : 0;
+    rec->pooled = j.pooled;
+    rec->lent = j.lent;
+    rec->thread = j.thread;
     rec->outcome = engine == 1                         ? AB_SPLIT_CPU
                  : j.why == AB_PROF_STAGED_KEPT        ? AB_SPLIT_KEPT
                  : j.why == AB_PROF_STAGED_KEPT_4M     ? AB_SPLIT_KEPT_4M

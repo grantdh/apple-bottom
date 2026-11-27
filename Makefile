@@ -732,7 +732,7 @@ $(BUILD)/replay: benchmarks/replay.c $(SRC)/blas_trans.h $(SRC)/dispatch.h $(PRO
 
 # Plants each defect AB_SPLIT's tests must catch (tests/split_defects.py), one
 # at a time in a copy of the tree, and checks that they do; not in `make test`
-# (about half an hour, GPU).
+# (about 3 minutes, GPU).
 .PHONY: test-split-defects
 test-split-defects:
 	python3 tests/split_defects.py

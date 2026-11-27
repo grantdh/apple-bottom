@@ -15,6 +15,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+// A test's fork()ed child arms alarm(FORK_WAIT_S), as fork() cleared its
+// parent's alarm: one still running then is ended by SIGALRM.
+#define FORK_WAIT_S 30
+
 // The caller's environment minus every entry is_ab_env() matches and its
 // MallocNanoZone (test_blas_abi's memory suite sets one), so a child sees
 // only the settings a test gives it, with room for `extra` more entries and

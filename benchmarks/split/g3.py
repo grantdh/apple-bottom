@@ -14,8 +14,8 @@ the start and end lines, and at the start a battery of 95% or more, neither char
 its charge, when printed; a G3 row's report left out for power counts as a withheld run of that row).
 Only rows under G3's conditions get a verdict: copied operands, uniform
 data, 1x8 or 4x2, AB_STAGING_MB 2048 or 8192 (else "not G3"), and G3's protocol, AB_TRACE and
-AB_REPORT off and a positive multiple of 6 rounds (else "not G3 (protocol)"). For each case and
-layout:
+AB_REPORT off, a positive multiple of 6 rounds and the user split's GPU slice on its process's GPU
+thread (gpu_fresh=0, not SPLIT_GPU_FRESH=1) (else "not G3 (protocol)"). For each case and layout:
 
 - Pairs by (round, rep) of the fixed block's lockstep times (the slowest process per repeat):
   SEAM with the user split S<g>, and the twin S<g>b with S<g> (the null run: the user split against
@@ -76,7 +76,8 @@ layout:
   than that count (unknown, not 0), is flagged. The GPU limit, 0.05, is set on this measure: 0.000-0.005 per round in
   the quiet round-2 smoke runs, 0.12-0.17 with another session's GPU work.
 - The seam's timeline per call, summarised over every process's SEAM calls, median [min-max] in ms:
-  init (thread created - cut) and start (GPU part's start - thread created), beside the user split's
+  init (GPU part handed over - cut) and start (GPU part's start - handed over: the split worker's
+  wake-up, a thread's start in runs before the worker), beside the user split's
   GPU start (its GPU thread's start after the call's); the CPU part and the GPU part, each beside the
   user split's; the wait for the GPU (join - CPU part's end) beside the user split's; after the join
   (the K axis's sum or a redo); and the GPU part's submit (commit to GPUStartTime), GPU execution
@@ -92,7 +93,7 @@ import argparse, functools, glob, math, os, re, statistics, sys
 from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # rawtsv.py, also under python3 -I
-from rawtsv import env, fixed_pairs, parse, power_problem, read  # noqa: E402
+from rawtsv import env, fixed_pairs, gpu_fresh, parse, power_problem, read  # noqa: E402
 
 try:
     import numpy as np
@@ -430,10 +431,10 @@ def not_g3(v, txt, layout, staging, rounds):
     """why the row is not a G3 row, or "" if it is: G3's conditions (design section 12: copied operands,
     uniform data, 1x8 or 4x2, staging 2048 or 8192 MB), then the G3 suites' protocol (AB_TRACE and
     AB_REPORT off, which would profile only the user split; a positive multiple of 6 rounds, over which
-    the trio's order is balanced)"""
+    the trio's order is balanced; the user split's own GPU thread, not SPLIT_GPU_FRESH's thread per call)"""
     if not (v.get("reg") == "0" and v.get("data") == "0" and layout in G3_CASES and staging in G3_STAGING):
         return "not G3"
-    if env(txt, "AB_TRACE") != "off" or env(txt, "AB_REPORT") != "off" or rounds <= 0 or rounds % 6:
+    if env(txt, "AB_TRACE") != "off" or env(txt, "AB_REPORT") != "off" or rounds <= 0 or rounds % 6 or gpu_fresh(v):
         return "not G3 (protocol)"
     return ""
 

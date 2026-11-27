@@ -45,8 +45,8 @@ The test counts live here only (the README, `docs/RELEASING.md` and
 `docs/REPRODUCIBILITY.md` point here): update them with any change of
 count. Counting rule (as `make ci-local` counts): a *test* is one
 `test_precision` case, one `TESTS[]` entry, or one BLAS-ABI suite; the
-count of each file is listed below. `make test` runs 252, every test but
-the chaos ones, and `make ci-local` all 270 (`TEST_TOTAL` in
+count of each file is listed below. `make test` runs 253, every test but
+the chaos ones, and `make ci-local` all 271 (`TEST_TOTAL` in
 `build/CI_REPORT.txt`). Device-API `CHECK`s and BLAS-ABI cases are
 reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 `BLAS_ABI_CASES`) and are not part of the total, nor is `test_qe_golden`
@@ -130,7 +130,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     classical componentwise bound on both paths, and that ZHERK, a
     one-element ZGEMM batch, DTRSM and `ab_dgesv_mpir` give the same bits
     with `AB_STRASSEN=1` and every size routed as without it
-  - `tests/test_split.c` — 12 tests of `AB_SPLIT`. Through the executor's
+  - `tests/test_split.c` — 13 tests of `AB_SPLIT`. Through the executor's
     seam (`ab_internal_dgemm_split`, `ab_internal_zgemm_split`), on the GPU:
     a call cut at g is, bit for bit, cblas on the head slice and the staged
     path on the tail slice alone, in every completion order, over every
@@ -145,20 +145,46 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     refuse, and the same data in the head only, whose tail stands (a refused
     tail is the cblas parts, with nothing added on K); repeats after other shapes, on registered and misaligned memory,
     under background load and from 8 threads at once; registered memory in
-    place except C on the M axis; a caller with flush to zero declined. In
+    place except C on the M axis; a caller with flush to zero declined; one
+    split worker per process runs every GPU part, in every order and on both
+    engines, its timeline whole on the staged path; callers that find it held
+    run theirs on threads of their own with the same bits (at least one of 8
+    at once does) and it is given back; a caller above `QOS_CLASS_DEFAULT`
+    (the worker's class) lends the worker its class while it waits, and one
+    below does not; in a child that takes an application role (macOS
+    squashes USER_INITIATED to DEFAULT in a process without one, such as
+    any command-line program), the loan is seen on the worker as a raised
+    base priority for at least half its GPU parts' time and one more
+    reference on its thread port; 20 loans leave the worker's thread port
+    with the references it had;
+    parked, it uses under 1 ms of CPU in 50 ms. In children, both on the
+    worker and (`split_pool`) on a thread of its own: a cancellation pending
+    through a split acts only after it; SIGTERM, blocked on the
+    application's threads after a split, goes to its `sigwait`, and on the
+    worker SIGUSR1 and SIGPIPE sent to it alone (`pthread_kill`) stay
+    pending while SIGSEGV and SIGPROF sent the same way run their handlers
+    there; and a read of B's columns in the GPU's part from pages with no
+    access, that part run first, raises SIGBUS or SIGSEGV on the tail's
+    thread, not the caller's (a 5 s alarm ends a child whose fault never
+    arrives). In
     child processes through `dgemm_` / `zgemm_`, with a split table covering
     their calls: `AB_SPLIT` unset, empty and 0 alike with no split field in
     any report or trace; `AB_MODE=cpu` bitwise cblas with no GPU GEMM; each
     `AB_TEST_FAIL_STAGE` failure (`alloc`, `kernel`, `kernel_once`,
     `redo_4m`, `scales`, `split_thread`, `split_scratch`, `split_fpcr`,
+    `split_pool` (each GPU part on a thread of its own: the worker's
+    outcomes and bits),
     `nonfinite` for a NaN the GPU made, and `split_poison` for a refused K
     tail) and
     `AB_HOST_PACK` with the outcome, retries, Metal error code (a test
     hook's -2) and bits it calls for (the
     cblas parts, the GPU's bits, or the whole call's as with `AB_SPLIT`
     unset); `AB_STRASSEN`, `AB_STAGING_MB=0` and `AB_MIN_GPU_DIM=0` keeping
-    the bits; `VECLIB_MAXIMUM_THREADS` 1, 2 and 8 repeating; `fork()` with
-    `_exit` and `exit`; the reports (the table's path and digest in the
+    the bits; every GPU part of a child's calls on its one worker (thread
+    ids), none started with `AB_SPLIT` unset, empty or 0 or under
+    `split_thread`; `VECLIB_MAXIMUM_THREADS` 1, 2 and 8 repeating; `fork()`
+    with `_exit` and `exit`, after which the child's engine-1 split runs off
+    the worker with the parent's bits, and the child has no worker; the reports (the table's path and digest in the
     headers, counts that add up, a line per row, each row's first-call CPU
     part the trace's first split call for that row and its GPU part the
     first whose tail ran, a ZGEMM tail refused before it ran adding no GPU
@@ -171,7 +197,9 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     within 4x the default error; the native, batched, asynchronous and
     device GEMMs unchanged at shapes the table covers, each returning AB_OK,
     and `dgemv_` unchanged (it returns no status, and no row covers BLAS-2);
-    no memory growth; and calibrate, replay and bench_split refusing to run
+    no memory growth; and calibrate, replay and bench_split refusing to run.
+    A test still running after 180 s, or a child after 120 s, is ended by
+    SIGALRM, and the run fails (the slowest test takes 7 s on an M2 Max).
 
 - **Not yet registry-based (one `main`, no ghost guard):**
   - `tests/test_precision.c` — 17 tests (the last compares
@@ -190,7 +218,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 |---|---|
 | `make ci-local` | `make version-check`, `make dispatch-table-check` (the built-in routing tables against `benchmarks/calibration/`), `make split-table-check` (the filing rules' self-test, and the built-in split tables against `benchmarks/split/tables/`), `make split-tools-check` (the self-tests of `benchmarks/split/fit_shares.py` and `g3.py`), every suite of `make test`, the chaos tests and the V-2 convergence study (the DGEMM error-versus-N study of `docs/vv/VV_REPORT.md`, `tests/verification/test_convergence.c`); writes `build/CI_REPORT.txt` |
 | `make split-table` | `scripts/ingest_split.py --regenerate`: rebuilds `src/split_table.h` from the tables filed under `benchmarks/split/tables/` (no GPU) |
-| `make test-split-defects` | `tests/split_defects.py`: plants each defect it lists in a copy of the tree, one at a time, rebuilds, and requires one of the suites named for it to fail; a defect whose edit no longer applies or does not build counts as stale (GPU, about 30 min) |
+| `make test-split-defects` | `tests/split_defects.py`: plants each defect it lists in a copy of the tree, one at a time, rebuilds, and requires one of the suites named for it to fail; a defect whose edit no longer applies or does not build counts as stale, and a build or test still running after 300 s is ended, with every process it started, and counts as failing (41 defects; GPU, about 3 min) |
 | `make test-chaos` | pathological inputs, IEEE edge cases, concurrent threads |
 | `make test-verification` | the V-2 convergence study alone |
 | `make test-rectangular` | `test_rectangular.c`: tall, wide, thin-K and conjugate-transposed shapes up to 18277 × 150 × 18277, componentwise against cblas, then timings (peaks at ~21 GB) |
@@ -582,7 +610,7 @@ chip, the slices of each axis, and every built-in split table
 (`src/split_table.h`) against its filed `split_evidence.csv` by the rules
 of `scripts/ingest_split.py`, which it also checks on tables made to break
 each rule. `test_split_slices_cblas` runs the executor with both parts on
-Accelerate (the seam's engine 1, the tail on its own thread) in each
+Accelerate (the seam's engine 1, the tail on the split worker) in each
 completion order: C, padding included, must be bitwise the two parts made
 one after the other by cblas on slices the test works out itself (the K
 axis: the head into C, the tail's product added in FP64), A and B

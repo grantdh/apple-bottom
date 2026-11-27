@@ -125,6 +125,10 @@ static const char *on_off(const char *name, bool any_value) {
     return v && *v && (any_value || *v != '0') ? "on" : "off";
 }
 static bool noreg(void) { return envd("SPLIT_NOREG", 0) != 0; }   // SPLIT_NOREG=1: the operands are not registered
+// SPLIT_GPU_FRESH=1 (attribution): the user split's GPU slice runs on a thread made for each call, as the seam's
+// did before its split worker (library 98e8db4 and earlier), instead of on the GPU thread made once per process;
+// free order only (the completion-order checks keep it)
+static bool fresh(void) { static int f = -1; if (f < 0) f = envd("SPLIT_GPU_FRESH", 0) != 0; return f; }
 static void sh_line(const char *cmd, char *out, size_t n) {
     FILE *f = popen(cmd, "r"); out[0] = 0;
     if (f) { if (!fgets(out, (int)n, f)) out[0] = 0; pclose(f); }
@@ -199,6 +203,7 @@ typedef struct {
                                        // idle gap, PREV_NONE if none; untimed calls count
     bool prev_untimed;                 // ... and that call was untimed (a warm-up or a group's opener)
     int outcome, retries, in_place;    // ab_split_outcome_t, -1 if not a SEAM call
+    int pooled;                        // a SEAM call's GPU part ran on the library's split worker
     ab_split_times_t tm;               // the seam's timeline (ns, mach_absolute_time); zero otherwise
 } Call;
 typedef struct { int phase, round, cfg, rep; float load1; Call k; } Rec;   // load1: the load average after the call
@@ -215,6 +220,7 @@ typedef struct {
     double rt0[MAXROUND], idle_t1[MAXROUND], rt1[MAXROUND];
     double fcpu_idle[MAXROUND], fcpu_round[MAXROUND], gpu_idle[MAXROUND];
     pid_t pid[NPMAX];
+    int caller_qos;      // process 0's calling thread's QoS class (qos_class_self)
     int narm, k_seam, k_split2, k_head, k_tail;    // the arms (0 or NARM), at indices ncfg..ncfg+narm-1
     int nrec[NPMAX]; Rec rec[NPMAX][MAXREC];
     int reg_ok[NPMAX], notgpu[NPMAX], gpucalls[NPMAX];
@@ -302,6 +308,15 @@ static void *gpu_thread(void *arg) {
     }
     return NULL;
 }
+static void *gpu_once(void *arg) {   // one GPU slice on its own thread (SPLIT_GPU_FRESH=1)
+    (void)arg;
+    g_tg0 = now();
+    gpu_slice(&X);
+    g_tg1 = now();
+    shm->gpucalls[myid]++;
+    if (strcmp(ab_get_last_dispatch_path(), "gpu")) shm->notgpu[myid]++;
+    return NULL;
+}
 static void kadd(Ctx *x) {  // C = fl(C_cpu + P_gpu)
     const Case *c = x->c; zc *C = x->C; const zc *P = x->P;
     for (int j = 0; j < c->N; j++) for (int i = 0; i < c->M; i++) C[(size_t)j * c->ldc + i] += P[(size_t)j * c->M + i];
@@ -330,18 +345,23 @@ static void one_call(Ctx *x, int k, Call *o) {
         ab_split_record_t r;
         if (ab_internal_last_split(&r)) {
             const ab_split_times_t *m = &r.times; o->tm = *m; o->retries = r.retries; o->in_place = r.in_place;
+            o->pooled = r.pooled;
             if (m->cpu1_ns) v[V_CPU] = ns_s(m->cpu1_ns - m->cpu0_ns);
             if (m->gpu1_ns) { v[V_GPU] = ns_s(m->gpu1_ns - m->gpu0_ns); v[V_WAKE] = ns_s(m->gpu0_ns) - t0; }
             if (m->join_ns) { v[V_JOIN] = ns_s(m->join_ns - m->cpu1_ns); v[V_KADD] = ns_s(m->end_ns - m->join_ns); }
         }
     } else {   // a user-code split (KD_SPLIT, KD_SPLIT2), or its GPU slice alone (KD_TAIL)
-        dispatch_semaphore_signal(sem_go);
-        if (g_delay == 2) dispatch_semaphore_wait(sem_done, DISPATCH_TIME_FOREVER);
+        pthread_t th = NULL;
+        bool own = fresh() && g_delay == 0;
+        if (own) { if (pthread_create(&th, NULL, gpu_once, NULL)) { perror("pthread_create"); exit(1); } }
+        else dispatch_semaphore_signal(sem_go);
+        if (!own && g_delay == 2) dispatch_semaphore_wait(sem_done, DISPATCH_TIME_FOREVER);
         tc0 = now();
         if (kd != KD_TAIL) cpu_slice(x);
         tc1 = now();
-        if (g_delay == 1) dispatch_semaphore_signal(sem_cpu_done);
-        if (g_delay != 2) dispatch_semaphore_wait(sem_done, DISPATCH_TIME_FOREVER);
+        if (!own && g_delay == 1) dispatch_semaphore_signal(sem_cpu_done);
+        if (own) pthread_join(th, NULL);
+        else if (g_delay != 2) dispatch_semaphore_wait(sem_done, DISPATCH_TIME_FOREVER);
         tj = now();
         if (x->c->axis == 'K' && kd != KD_TAIL) kadd(x);
         tk = now();
@@ -552,6 +572,7 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
     void *Cs0 = palloc(x->nC * es), *Cg0 = palloc(x->nC * es), *Ca0 = palloc(x->nC * es), *Cm0 = shm->narm ? palloc(x->nC * es) : NULL;
     shm->reg_ok[id] = ok;
     shm->pid[id] = getpid();
+    if (id == 0) shm->caller_qos = (int)qos_class_self();
     sem_go = dispatch_semaphore_create(0); sem_done = dispatch_semaphore_create(0); sem_cpu_done = dispatch_semaphore_create(0);
     pthread_t th; pthread_create(&th, NULL, gpu_thread, NULL);
     Call v;
@@ -584,7 +605,8 @@ static int child(const Case *c, int id, const char *shmpath, int data) {   // np
     }
     barrier();
     int bk = shm->best;
-    // warm-up of the arms (untimed): the seam's thread and pool slots, the slices alone
+    // warm-up of the arms (untimed): the seam's split worker (its first split starts it) and pool slots,
+    // the slices alone
     for (int k = shm->ncfg; k < shm->ncfg + shm->narm; k++) { set_cfg(x, k); barrier(); one_call(x, k, &v); }
     // the groups' openers (fixed_plan): untimed calls of HEAD, TAIL and the user split lasting about
     // SPLIT_OPEN_S (default 0.05 s), 1 to NOPEN_MAX calls, sized by process 0's call times
@@ -981,8 +1003,8 @@ static double seam_med(int what) {
         const ab_split_times_t *m = &r->k.tm; const ab_prof_kernel_split_t *k = &m->gpu;
         uint64_t a = 0, b = 0; double cnt = NAN;
         switch (what) {
-        case SM_INIT: a = m->cut_ns; b = m->create_ns; break;          // cut to the GPU thread's creation
-        case SM_START: a = m->create_ns; b = m->gpu0_ns; break;        // creation to the GPU part's start
+        case SM_INIT: a = m->cut_ns; b = m->create_ns; break;          // cut to the GPU part's hand-off
+        case SM_START: a = m->create_ns; b = m->gpu0_ns; break;        // hand-off to the GPU part's start (the split worker's wake-up)
         case SM_CPU: a = m->cpu0_ns; b = m->cpu1_ns; break;
         case SM_GPU: a = m->gpu0_ns; b = m->gpu1_ns; break;
         case SM_WAIT: a = m->cpu1_ns; b = m->join_ns; break;           // the caller's wait for the GPU part
@@ -1061,14 +1083,16 @@ static void report(const Case *c, int np, int data, bool smc, double idle_w) {
     double best1 = fmin(La, Lg);
     printf("   speedup of the split: vs Accelerate %.3fx, vs GPU %.3fx, vs the faster engine (%s) %.3fx\n", La / Ls, Lg / Ls, La <= Lg ? "ACC" : "GPU", best1 / Ls);
     // the arms
-    double Lm = NAN, Ls2 = NAN, Lh = NAN, Lt = NAN, rseam = NAN, rnull = NAN; int nseam = 0, nnull = 0, outs[NOUT] = {0}, nout = 0;
+    double Lm = NAN, Ls2 = NAN, Lh = NAN, Lt = NAN, rseam = NAN, rnull = NAN; int nseam = 0, nnull = 0, outs[NOUT] = {0}, nout = 0, npooled = 0;
     if (shm->narm) {
         Lm = rstat(PH_FIXED, shm->k_seam, -1, V_TOTAL, true, NULL); Ls2 = rstat(PH_FIXED, shm->k_split2, -1, V_TOTAL, true, NULL);
         Lh = rstat(PH_FIXED, shm->k_head, -1, V_TOTAL, true, NULL); Lt = rstat(PH_FIXED, shm->k_tail, -1, V_TOTAL, true, NULL);
         rseam = paired_median(shm->k_seam, bk, &nseam); rnull = paired_median(shm->k_split2, bk, &nnull);
         for (int p = 0; p < np; p++) for (int i = 0; i < shm->nrec[p]; i++) {
             const Rec *r = &shm->rec[p][i];
-            if (r->phase == PH_FIXED && r->cfg == shm->k_seam && r->k.outcome >= 0 && r->k.outcome < NOUT) { outs[r->k.outcome]++; nout++; }
+            if (r->phase == PH_FIXED && r->cfg == shm->k_seam && r->k.outcome >= 0 && r->k.outcome < NOUT) {
+                outs[r->k.outcome]++; nout++; npooled += r->k.pooled;   // npooled: their GPU part on the split worker
+            }
         }
         printf("-- library seam and alone arms at g=%d (lockstep medians; ratios: median over (round, rep) pairs)\n", shm->g[bk]);
         printf("   SEAM / %s %.3f (%d pairs), %s / %s %.3f (%d pairs, the user split against itself)\n", cfg_name(bk, b1), rseam, nseam,
@@ -1174,18 +1198,19 @@ static void report(const Case *c, int np, int data, bool smc, double idle_w) {
     bool bits = sd == 0 && od == 0 && hs;
     printf("SUMMARY case=%s np=%d data=%d acc_ms=%.3f gpu_ms=%.3f split_ms=%.3f g=%d f=%.3f sp_acc=%.3f sp_gpu=%.3f sp_best=%.3f acc_gfs=%.1f gpu_gfs=%.1f split_gfs=%.1f "
            "bits_repeat=%s split_reps=%d gpu_rep_diff=%d acc_rep_diff=%d err_u2=%.3f err_gpu_u2=%.3f err_acc_u2=%.4f notgpu=%d pdtr_acc=%.1f pdtr_gpu=%.1f pdtr_split=%.1f idle=%.1f n=%d/%d/%d "
-           "reg=%d sus_w=%.1f/%.1f/%.1f sus_j=%.3f/%.3f/%.3f h_split=%016llx h_gpu=%016llx h_acc=%016llx share=%s rounds=%d reps=%d/%d/%d arms=%d fcpu_max=%.2f gpu_idle_busy_max=%.3f fcpu_round_max=%.2f load_unmeasured=%d",
+           "reg=%d sus_w=%.1f/%.1f/%.1f sus_j=%.3f/%.3f/%.3f h_split=%016llx h_gpu=%016llx h_acc=%016llx share=%s rounds=%d reps=%d/%d/%d arms=%d fcpu_max=%.2f gpu_idle_busy_max=%.3f fcpu_round_max=%.2f load_unmeasured=%d gpu_fresh=%d caller_qos=0x%x",
            c->name, np, data, La * 1e3, Lg * 1e3, Ls * 1e3, shm->g[bk], fb, La / Ls, Lg / Ls, best1 / Ls, F / La / 1e9, F / Lg / 1e9, F / Ls / 1e9,
            bits ? "yes" : "NO", sr, gd, ad, emax / U2, shm->err_gpu / U2, shm->err_acc / U2, notgpu, pw[0], pw[1], pw[2], idle_w, na, ng, ns,
            shm->reg_ok[0], sw[0], sw[1], sw[2], sj[0], sj[1], sj[2],
            (unsigned long long)shm->hash_split[0], (unsigned long long)shm->hash_gpu[0], (unsigned long long)shm->hash_acc[0],
-           shm->fixed ? "fixed" : "sweep", shm->rounds, c->fx_acc, c->fx_gpu, c->fx_split, shm->narm, fcpu_max, bmax, fround_max, unmeasured);
+           shm->fixed ? "fixed" : "sweep", shm->rounds, c->fx_acc, c->fx_gpu, c->fx_split, shm->narm, fcpu_max, bmax, fround_max, unmeasured, fresh(), shm->caller_qos);
     if (shm->narm) {
         printf(" seam_ms=%.3f split2_ms=%.3f head_ms=%.3f tail_ms=%.3f seam_ratio=%.4f null_ratio=%.4f pairs=%d seam_out=", Lm * 1e3, Ls2 * 1e3, Lh * 1e3, Lt * 1e3, rseam, rnull, nseam);
         bool first = true;
         for (int o = 0; o < NOUT; o++) if (outs[o]) { printf("%s%s:%d", first ? "" : ",", OUTCOME[o], outs[o]); first = false; }
         if (first) printf("-");
-        printf(" seam_rep_diff=%d/%d seam_vs_split=%ld split2_rep_diff=%d/%d head_vs_split=%ld tail_vs_split=%ld", md, mr, mvs, s2d, s2r, hvs, tvs);
+        printf(" seam_rep_diff=%d/%d seam_vs_split=%ld split2_rep_diff=%d/%d head_vs_split=%ld tail_vs_split=%ld seam_pooled=%d/%d", md, mr, mvs, s2d, s2r, hvs, tvs,
+               npooled, nout);
     }
     printf("\n");
 }
@@ -1340,11 +1365,11 @@ static int sustain(const Case *c, const char *outdir, int g, double secs, double
     printf("SUSTAIN case=%s g=%d g_bal=%d steady_gfs=%.1f/%.1f/%.1f/%.1f burst_gfs=%.1f/%.1f/%.1f/%.1f sp_gpu=%.3f sp_acc=%.3f sp_gpu_bal=%.3f sp_acc_bal=%.3f "
            "wall_w=%.1f/%.1f/%.1f/%.1f sys_w=%.1f/%.1f/%.1f/%.1f batt_w=%.1f/%.1f/%.1f/%.1f mhz=%.0f/%.0f/%.0f/%.0f burst_mhz=%.0f/%.0f/%.0f/%.0f bits_diff=%d/%d/%d/%d "
            "acc_end_gfs=%.1f acc_end_w=%.1f head_ms=%.3f tail_ms=%.3f split_steady_ms=%.3f split_cpu_ms=%.3f split_gpu_ms=%.3f overlap=%.3f cpu_x=%.3f gpu_x=%.3f "
-           "head_w=%.1f tail_w=%.1f head_mhz=%.0f tail_mhz=%.0f bits_checked=%s noreg=%d data=%d seed=%llu order=",
+           "head_w=%.1f tail_w=%.1f head_mhz=%.0f tail_mhz=%.0f bits_checked=%s noreg=%d data=%d gpu_fresh=%d seed=%llu order=",
            c->name, g, shm->g[bcfg[SB_BAL]], F4(sg), F4(bg), sg[SB_SPLIT] / sg[SB_GPU], sg[SB_SPLIT] / sg[SB_ACC], sg[SB_BAL] / sg[SB_GPU], sg[SB_BAL] / sg[SB_ACC],
            F4(sw), F4(ss), F4(sb), F4(smhz), F4(bmhz), F4(bdiff),
            sg[SB_ACC_END], sw[SB_ACC_END], sms[SB_HEAD], sms[SB_TAIL], sms[SB_SPLIT], scpu, sgpu, (sms[SB_HEAD] + sms[SB_TAIL]) / sms[SB_SPLIT],
-           scpu / sms[SB_HEAD], sgpu / sms[SB_TAIL], sw[SB_HEAD], sw[SB_TAIL], smhz[SB_HEAD], smhz[SB_TAIL], check ? "yes" : "no", noreg(), data, (unsigned long long)seed);
+           scpu / sms[SB_HEAD], sgpu / sms[SB_TAIL], sw[SB_HEAD], sw[SB_TAIL], smhz[SB_HEAD], smhz[SB_TAIL], check ? "yes" : "no", noreg(), data, fresh(), (unsigned long long)seed);
 #undef F4
     static const char *const SB_TAG[NSB] = {"split", "GPU", "ACC", "bal", "HEAD", "TAIL", "ACC2"};
     for (int s = 0; s < NSB; s++) printf("%s%s", s ? "," : "", SB_TAG[order[s]]);
@@ -1456,7 +1481,7 @@ int main(int argc, char **argv) {
             fprintf(f, "proc\tphase\tround\tcfg\tname\tg\trep\tprev\ttotal\tcpu\tgpu\tjoin\twake\tkadd\tt0\tt1\toutcome\tretries\tin_place"
                        "\tat_cut_ns\tat_create_ns\tat_cpu0_ns\tat_cpu1_ns\tat_gpu0_ns\tat_gpu1_ns\tat_join_ns\tat_end_ns"
                        "\tgpu_commit_ns\tgpu_start_ns\tgpu_end_ns\tgpu_done_ns\tgpu_encode_ns\tgpu_submit_ns\tgpu_wake_ns\tgpu_temps_ns"
-                       "\tgpu_groups\tgpu_groups_max\tgpu_dispatches\tgpu_cmdbufs\tgpu_kinds\tgpu_mtl_error\tload1\n");
+                       "\tgpu_groups\tgpu_groups_max\tgpu_dispatches\tgpu_cmdbufs\tgpu_kinds\tgpu_mtl_error\tload1\tpooled\n");
             char nb[24];
             for (int p = 0; p < np; p++) for (int i = 0; i < shm->nrec[p]; i++) {
                 const Rec *r = &shm->rec[p][i]; const ab_split_times_t *m = &r->k.tm; const ab_prof_kernel_split_t *q = &m->gpu;
@@ -1469,10 +1494,10 @@ int main(int argc, char **argv) {
                 fprintf(f, "\t%s\t%d\t%d\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu", outcome_name(r->k.outcome), r->k.retries, r->k.in_place,
                         (unsigned long long)m->cut_ns, (unsigned long long)m->create_ns, (unsigned long long)m->cpu0_ns, (unsigned long long)m->cpu1_ns,
                         (unsigned long long)m->gpu0_ns, (unsigned long long)m->gpu1_ns, (unsigned long long)m->join_ns, (unsigned long long)m->end_ns);
-                fprintf(f, "\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%u\t%u\t%u\t%u\t%d\t%.2f\n",
+                fprintf(f, "\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%u\t%u\t%u\t%u\t%d\t%.2f\t%d\n",
                         (unsigned long long)q->commit_ns, (unsigned long long)q->gpu_start_ns, (unsigned long long)q->gpu_end_ns, (unsigned long long)q->done_ns,
                         (unsigned long long)q->encode_ns, (unsigned long long)q->submit_ns, (unsigned long long)q->wake_ns, (unsigned long long)q->temps_ns,
-                        (unsigned long long)q->groups, q->groups_max, q->dispatches, q->cmdbufs, q->kinds, q->mtl_error, r->load1);
+                        (unsigned long long)q->groups, q->groups_max, q->dispatches, q->cmdbufs, q->kinds, q->mtl_error, r->load1, r->k.pooled);
             }
             fclose(f);
         }
