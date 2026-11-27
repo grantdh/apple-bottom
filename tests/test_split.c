@@ -47,6 +47,7 @@
 #include <mach-o/dyld.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
+#include <mach/task_policy.h>
 #include <malloc/malloc.h>
 #include <math.h>
 #include <pthread.h>
@@ -667,7 +668,8 @@ static uint64_t self_tid(void) {
 // n splits (one if n < 2) of c cut at g on axis in `order` (seam, engine 0)
 // on a thread of its own, at QoS class qos (QOS_CLASS_UNSPECIFIED: as made),
 // once *go is set (NULL: at once): the thread's id, the last split's hash
-// and record, and how many splits lent the split worker the thread's class.
+// and record, how many splits lent the split worker the thread's class, the
+// GPU parts' summed time on their thread (gpu0 to gpu1), and done once all ran.
 typedef struct {
     const Call *c;
     const Operands *o;
@@ -675,9 +677,10 @@ typedef struct {
     int g, order, n;
     qos_class_t qos;
     atomic_int *go;
-    uint64_t tid, hash;
+    uint64_t tid, hash, gpu_ns;
     ab_split_record_t rec;
     int lent;
+    atomic_int done;
 } SplitThread;
 
 static void *split_thread(void *arg) {
@@ -691,8 +694,10 @@ static void *split_thread(void *arg) {
         t->hash = split_hash(t->c, t->axis, t->g, t->o, C, t->order, 0);
         ab_internal_last_split(&t->rec);
         t->lent += t->rec.lent;
+        t->gpu_ns += t->rec.times.gpu1_ns - t->rec.times.gpu0_ns;
     } while (++k < t->n);
     free(C);
+    atomic_store(&t->done, 1);
     return NULL;
 }
 
@@ -706,11 +711,22 @@ static void *busy_thread(void *arg) {
 }
 
 // The CPU time thread tid of this process has used, in ns; UINT64_MAX if unknown.
+// The kernel's information on this process's thread tid; false if no thread
+// has that id.
+static bool thread_info64(uint64_t tid, struct proc_threadinfo *ti) {
+    return proc_pidinfo(getpid(), PROC_PIDTHREADID64INFO, tid, ti, sizeof *ti) == (int)sizeof *ti;
+}
+
 static uint64_t thread_cpu_ns(uint64_t tid) {
     struct proc_threadinfo ti;
-    return proc_pidinfo(getpid(), PROC_PIDTHREADID64INFO, tid, &ti, sizeof ti) == (int)sizeof ti
-               ? ti.pth_user_time + ti.pth_system_time
-               : UINT64_MAX;
+    return thread_info64(tid, &ti) ? ti.pth_user_time + ti.pth_system_time : UINT64_MAX;
+}
+
+// Thread tid's base priority, which its QoS class sets and a QoS override
+// raises (pth_priority; pth_curpri decays); -1 if no thread has that id.
+static int thread_base_pri(uint64_t tid) {
+    struct proc_threadinfo ti;
+    return thread_info64(tid, &ti) ? ti.pth_priority : -1;
 }
 
 // The send right this task holds on thread tid, with one user reference of
@@ -816,16 +832,19 @@ static void test_split_determinism(void) {
 }
 
 // T13 (in this process): one split worker runs every GPU part this process
-// splits, in every order and on both engines, its timeline whole; callers
-// that find it held run theirs on threads of their own with the same bits,
-// and it is given back; a caller above its class lends it its own while it
-// waits and ends the loan, one below does not; parked, it uses no CPU. In
-// children, on the worker and (split_pool) on a thread of its own: a
-// cancellation pending through a split acts only after it, the worker blocks
-// a signal sent to it alone but not one raised on it, a signal the
-// application has blocked on its threads after a split goes to its sigwait,
-// not to the library's thread, and a bad read on the GPU's part faults on the
-// tail's thread.
+// splits, in every order and on both engines, its timeline whole on the
+// staged path; callers that find it held run theirs on threads of their own
+// with the same bits, and it is given back; a caller above its class lends it
+// its own while it waits and ends the loan, one below does not (child_loan:
+// in a process with an application role, the worker's base priority raised
+// for at least half its GPU parts' time and one more reference on its port);
+// parked, it uses under 1 ms of CPU in 50 ms. In children, on the worker and
+// (split_pool) on a thread of its own: a cancellation pending through a split
+// acts only after it; on the worker, the application's signals sent to it
+// alone (SIGUSR1, SIGPIPE) stay pending while its own (SIGSEGV, SIGPROF) run
+// their handlers there; a signal the application has blocked on its threads
+// after a split goes to its sigwait, not to the library's thread; and a bad
+// read on the GPU's part faults on the tail's thread.
 static void test_split_worker(void) {
     const Call *c = &WORKER_CALL;
     Operands o = operands(c);
@@ -872,9 +891,9 @@ static void test_split_worker(void) {
     ab_internal_last_split(&rec);
     check(rec.thread == W, "after 8 callers: the worker not given back");
     // a caller above the worker's class (QOS_CLASS_DEFAULT) lends it its own
-    // while it waits, one below does not
+    // while it waits, one below does not (what the loan does: child_loan)
     const qos_class_t Q[] = {QOS_CLASS_UTILITY, QOS_CLASS_USER_INITIATED};
-    for (int k = 0; k < 2; k++) {
+    for (size_t k = 0; k < TEST_REGISTRY_SIZE(Q); k++) {
         SplitThread q = {.c = c, .o = &o, .axis = 'N', .g = 128, .order = 2, .qos = Q[k]};
         pthread_t th;
         pthread_create(&th, NULL, split_thread, &q);
@@ -884,7 +903,7 @@ static void test_split_worker(void) {
     }
     // every loan ends: each one open holds a reference to the worker's thread port
     mach_port_t wp = thread_port(W);
-    mach_port_urefs_t refs0 = send_refs(wp);
+    const mach_port_urefs_t refs0 = send_refs(wp);
     SplitThread lr = {.c = c, .o = &o, .axis = 'N', .g = 128, .qos = QOS_CLASS_USER_INITIATED, .n = 20};
     pthread_t lt;
     pthread_create(&lt, NULL, split_thread, &lr);
@@ -912,6 +931,30 @@ static void test_split_worker(void) {
               off ? " (split_pool)" : "", status, out ? out : "");
         free(out);
     }
+    // what the loan does, on the worker itself (child_loan)
+    int status;
+    char *lo = run_child("loan", plain, &status);
+    const char *l = lo ? strstr(lo, "loan_child role set ") : NULL;
+    int kr = -1, ui = -1, rest = -1;
+    if (l)
+        sscanf(l, "loan_child role set rc %d, a USER_INITIATED thread at %d, the worker at rest %d", &kr, &ui,
+               &rest);
+    check(status == 0 && kr == 0 && ui > rest && rest > 0, "loan child: status %d, the QoS ceiling not lifted: %.300s",
+          status, lo ? lo : "");
+    for (size_t k = 0; k < TEST_REGISTRY_SIZE(Q) && l; k++) {
+        const bool loan = Q[k] > QOS_CLASS_DEFAULT;
+        unsigned qos = 0, r0 = 0, rmax = 0;
+        int same = 0, on = 0, lent = -1, n = 0, p0 = -1, pmax = -1;
+        double raised = -1, gpu = 0;
+        l = strstr(l + 1, "loan_child qos ");
+        if (l)
+            sscanf(l, "loan_child qos %x same %d worker %d lent %d of %d pri %d %d raised %lf of %lf refs %u %u",
+                   &qos, &same, &on, &lent, &n, &p0, &pmax, &raised, &gpu, &r0, &rmax);
+        check(l && qos == (unsigned)Q[k] && same && on && lent == loan * n && (pmax > p0) == loan &&
+                  rmax == r0 + loan && (!loan || 2 * raised >= gpu),
+              "loan child, caller at QoS %#x: %.200s", (unsigned)Q[k], l ? l : "no line");
+    }
+    free(lo);
     free(C);
     free_operands(&o);
     finish();
@@ -1394,6 +1437,57 @@ static void child_fault(void) {
     printf("worker_child ok 0 pooled 0 (no fault: outcome %d)\n", got);
 }
 
+// Child: the QoS loan seen on the worker itself. macOS squashes
+// USER_INITIATED and USER_INTERACTIVE to DEFAULT in a process without an
+// application role, such as this one (xnu task_policy.c, TASK_UNSPECIFIED),
+// the loan with them; the child takes TASK_DEFAULT_APPLICATION, as a task may
+// for itself, and reports whether a USER_INITIATED thread then runs above the
+// worker at rest. Then for a UTILITY and a USER_INITIATED caller, 5 order-2
+// splits each (the caller waits through each GPU part), sampled here while
+// they run: the worker's base priority, the time it stays raised against the
+// GPU parts' time, and its port's send references. One line per caller.
+static void child_loan(void) {
+    const struct task_category_policy role = {.role = TASK_DEFAULT_APPLICATION};
+    const kern_return_t kr = task_policy_set(mach_task_self(), TASK_CATEGORY_POLICY, (task_policy_t)&role,
+                                             TASK_CATEGORY_POLICY_COUNT);
+    const Call *c = &WORKER_CALL;
+    Operands o = operands(c);
+    double *C = malloc(o.nC * sizeof *C);
+    const uint64_t h0 = split_hash(c, 'N', 128, &o, C, 2, 0);
+    const uint64_t W = ab_internal_split_worker();
+    mach_port_t wp = thread_port(W);
+    const mach_port_urefs_t refs0 = send_refs(wp);
+    const int pri0 = thread_base_pri(W);
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+    printf("loan_child role set rc %d, a USER_INITIATED thread at %d, the worker at rest %d\n", kr,
+           thread_base_pri(self_tid()), pri0);
+    const qos_class_t Q[] = {QOS_CLASS_UTILITY, QOS_CLASS_USER_INITIATED};
+    for (size_t k = 0; k < TEST_REGISTRY_SIZE(Q); k++) {
+        SplitThread q = {.c = c, .o = &o, .axis = 'N', .g = 128, .order = 2, .qos = Q[k], .n = 5};
+        int pri = pri0;
+        mach_port_urefs_t refs = refs0;
+        uint64_t raised_ns = 0, last = 0;   // last: when the previous sample was raised, else 0
+        pthread_t th;
+        pthread_create(&th, NULL, split_thread, &q);
+        while (!atomic_load(&q.done)) {
+            const int p = thread_base_pri(W);
+            const mach_port_urefs_t r = send_refs(wp);
+            const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+            if (p > pri0 && last) raised_ns += now - last;
+            last = p > pri0 ? now : 0;
+            if (p > pri) pri = p;
+            if (r > refs) refs = r;
+        }
+        pthread_join(th, NULL);
+        printf("loan_child qos %#x same %d worker %d lent %d of %d pri %d %d raised %.3f of %.3f refs %u %u\n",
+               (unsigned)Q[k], q.hash == h0, q.rec.thread == W, q.lent, q.n, pri0, pri, raised_ns / 1e6, q.gpu_ns / 1e6,
+               refs0, refs);
+    }
+    if (wp != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), wp);
+    free(C);
+    free_operands(&o);
+}
+
 // Child: the bytes in use after 50 more split calls (10 rounds of TCALLS'
 // first 5, every axis), once 10 have grown the pool (MallocNanoZone pinned by
 // the parent).
@@ -1467,6 +1561,7 @@ static int child_main(const char *scenario) {
     else if (!strcmp(scenario, "cancel")) child_cancel();
     else if (!strcmp(scenario, "sigwait")) child_sigwait();
     else if (!strcmp(scenario, "fault")) child_fault();
+    else if (!strcmp(scenario, "loan")) child_loan();
     else printf("unknown scenario %s\n", scenario);
     fflush(stdout);
     return 0;

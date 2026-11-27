@@ -165,6 +165,18 @@ DEFECTS = [
      [SPLIT("test_split_worker")]),
     ("no QoS loan in the join", [(BW, "q > QOS_CLASS_DEFAULT ?", "q > QOS_CLASS_USER_INTERACTIVE ?")],
      [SPLIT("test_split_worker")]),
+    ("QoS loan to the caller", [(BW, "pthread_override_qos_class_start_np(g_pool.thread, q, 0)",
+                                 "pthread_override_qos_class_start_np(pthread_self(), q, 0)")],
+     [SPLIT("test_split_worker")]),
+    ("QoS loan at the worker's class", [(BW, "pthread_override_qos_class_start_np(g_pool.thread, q, 0)",
+                                         "pthread_override_qos_class_start_np(g_pool.thread, QOS_CLASS_DEFAULT, 0)")],
+     [SPLIT("test_split_worker")]),
+    ("QoS loan ended before the wait",
+     [(BW, "    dispatch_semaphore_wait(g_pool.done, DISPATCH_TIME_FOREVER);\n    j->lent = o != NULL;\n"
+           "    if (o) pthread_override_qos_class_end_np(o);\n",
+       "    j->lent = o != NULL;\n    if (o) pthread_override_qos_class_end_np(o);\n"
+       "    dispatch_semaphore_wait(g_pool.done, DISPATCH_TIME_FOREVER);\n")],
+     [SPLIT("test_split_worker")]),
     ("QoS loan never ended", [(BW, "    if (o) pthread_override_qos_class_end_np(o);\n", "")],
      [SPLIT("test_split_worker")]),
     ("worker spins", [(BW, "        dispatch_semaphore_wait(g_pool.go, DISPATCH_TIME_FOREVER);\n",

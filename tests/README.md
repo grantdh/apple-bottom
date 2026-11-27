@@ -147,11 +147,16 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
     under background load and from 8 threads at once; registered memory in
     place except C on the M axis; a caller with flush to zero declined; one
     split worker per process runs every GPU part, in every order and on both
-    engines, its timeline whole; callers that find it held run theirs on
-    threads of their own with the same bits (at least one of 8 at once does)
-    and it is given back; a caller above `QOS_CLASS_DEFAULT` (the worker's
-    class) lends the worker its class while it waits and one below does not,
-    and 20 loans leave the worker's thread port with the references it had;
+    engines, its timeline whole on the staged path; callers that find it held
+    run theirs on threads of their own with the same bits (at least one of 8
+    at once does) and it is given back; a caller above `QOS_CLASS_DEFAULT`
+    (the worker's class) lends the worker its class while it waits, and one
+    below does not; in a child that takes an application role (macOS
+    squashes USER_INITIATED to DEFAULT in a process without one, such as
+    any command-line program), the loan is seen on the worker as a raised
+    base priority for at least half its GPU parts' time and one more
+    reference on its thread port; 20 loans leave the worker's thread port
+    with the references it had;
     parked, it uses under 1 ms of CPU in 50 ms. In children, both on the
     worker and (`split_pool`) on a thread of its own: a cancellation pending
     through a split acts only after it; SIGTERM, blocked on the
@@ -213,7 +218,7 @@ reported on their own `CI_REPORT.txt` lines (`DEVICE_API_CHECKS`,
 |---|---|
 | `make ci-local` | `make version-check`, `make dispatch-table-check` (the built-in routing tables against `benchmarks/calibration/`), `make split-table-check` (the filing rules' self-test, and the built-in split tables against `benchmarks/split/tables/`), `make split-tools-check` (the self-tests of `benchmarks/split/fit_shares.py` and `g3.py`), every suite of `make test`, the chaos tests and the V-2 convergence study (the DGEMM error-versus-N study of `docs/vv/VV_REPORT.md`, `tests/verification/test_convergence.c`); writes `build/CI_REPORT.txt` |
 | `make split-table` | `scripts/ingest_split.py --regenerate`: rebuilds `src/split_table.h` from the tables filed under `benchmarks/split/tables/` (no GPU) |
-| `make test-split-defects` | `tests/split_defects.py`: plants each defect it lists in a copy of the tree, one at a time, rebuilds, and requires one of the suites named for it to fail; a defect whose edit no longer applies or does not build counts as stale, and a build or test still running after 300 s is ended, with every process it started, and counts as failing (38 defects; GPU, about 3 min) |
+| `make test-split-defects` | `tests/split_defects.py`: plants each defect it lists in a copy of the tree, one at a time, rebuilds, and requires one of the suites named for it to fail; a defect whose edit no longer applies or does not build counts as stale, and a build or test still running after 300 s is ended, with every process it started, and counts as failing (41 defects; GPU, about 3 min) |
 | `make test-chaos` | pathological inputs, IEEE edge cases, concurrent threads |
 | `make test-verification` | the V-2 convergence study alone |
 | `make test-rectangular` | `test_rectangular.c`: tall, wide, thin-K and conjugate-transposed shapes up to 18277 × 150 × 18277, componentwise against cblas, then timings (peaks at ~21 GB) |
